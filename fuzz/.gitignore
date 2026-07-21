@@ -1,0 +1,8 @@
+# fuzzer build + discovered corpus/artifacts: regenerate locally, don't commit
+# (corpus/ grows unbounded from fuzzing runs — tens of thousands of files, not a seed set)
+target/
+corpus/
+artifacts/
+coverage/
+# dev-only crate (publish = false); its lockfile isn't a release artifact
+Cargo.lock

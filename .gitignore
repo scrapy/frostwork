@@ -1,0 +1,15 @@
+/target
+__pycache__/
+*.pyc
+.venv/
+/fixtures/
+# Python / maturin build artifacts
+*.so
+/dist
+/build
+*.egg-info/
+.pytest_cache/
+# Generated benchmark results (machine-specific paths; docs/BENCHMARKS.md is canonical)
+/tools/results/
+# Fuzzer run logs (fuzz.sh output, one per worker)
+/fuzz-*.log

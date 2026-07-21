@@ -1,0 +1,447 @@
+"""
+tools/sel_fuzz.py — SELECTOR fuzzer: fuzz the query, not the HTML (complements diff_fuzz.py, which
+fuzzes the HTML against a fixed selector basket).
+
+The engine's contract has no fallback: an unsupported OR invalid query must return an EMPTY column —
+never an error, never a wrong value (README / CLAUDE.md). So over a stream of random selectors — valid,
+exotic-but-unsupported, malformed, and budget-bombs — the invariant is:
+
+    Frostwork's column is EMPTY, or value-equal to lxml. It is NEVER non-empty-and-wrong, NEVER a crash.
+
+Selectors are drawn from the vocabulary that actually appears in conformant.py / foreign.py pages (tags,
+`c<N>`/`shared` classes, `i<N>` ids, href/src/data-k/title attrs) so supported queries genuinely match
+content — otherwise every column is trivially empty and nothing is tested. Categories mixed per run:
+valid CSS, valid XPath, deep `:not()`, exotic (likely-unsupported) forms, malformed strings, and budget
+bombs (>128 comma members / >64 sibling chains) that exercise the DEAD-clamp for crash-safety.
+
+Verdicts per (page, selector):
+  AGREE       mine == lxml (or empty and lxml empty)
+  UNSUPPORTED mine empty, lxml non-empty — ALLOWED (no-fallback coverage gap, not a bug)
+  BUDGET      over-budget selector returned non-empty (DEAD-clamp partial) — ALLOWED, reported
+  OVERMATCH   parsel rejects the selector as invalid, yet Frostwork returned data — candidate bug
+  WRONG       parsel has a value and Frostwork's non-empty column disagrees — candidate bug
+  CRASH       engine panic — always a bug
+
+--gate exits nonzero on WRONG + OVERMATCH + CRASH (the hard invariant).
+
+Usage:  .venv/bin/python tools/sel_fuzz.py [--iters N] [--per K] [--seed S] [--gate] [--show M]
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import random
+import sys
+from collections import defaultdict
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import conformant
+import foreign
+from diff_lxml import run_engine, run_support, parsel_vals, verdict
+
+TAGS = ["div", "p", "span", "a", "li", "td", "th", "ul", "ol", "dl", "dt", "dd", "option", "select",
+        "table", "tr", "b", "em", "strong", "i", "small", "label", "img", "input", "section",
+        "article", "header", "footer", "h1", "h2", "h3", "svg", "g", "rect", "circle", "math", "template"]
+CLASSES = [f"c{i}" for i in range(12)] + ["shared", "chart", "box", "lnk", "tpl", "row", "price"]
+IDS = [f"i{i}" for i in range(12)] + ["tpl1", "s1"]
+ATTRS = ["class", "id", "data-k", "href", "src", "value", "title", "alt"]
+ATTR_VALS = ["v1", "c1", "shared", "/p1", "/a1", "s1.png", "x", "日本", "café", ""]
+ATTR_OPS = ["=", "^=", "$=", "*=", "~=", "|="]
+COMBS = [" ", " > ", " + ", " ~ "]
+TERMS = ["", "::text", "::attr(href)", "::attr(class)", "::attr(data-k)", " ::text"]
+# text-content-predicate needles: decoded forms of conformant.py TEXTBITS (full matches), substrings
+# (for `contains`), and misses. `g&h`/`x<y` exercise entity-decoded comparison (page has g&amp;h/x&lt;y).
+TEXT_NEEDLES = ["alpha", "café", " beta ", "1 2 3", "g&h", "x<y", "al", "et", "2", "zzz", ""]
+
+
+def g_attr_pred(rng):
+    name = rng.choice(ATTRS)
+    if rng.random() < 0.35:
+        return f"[{name}]"
+    return f'[{name}{rng.choice(ATTR_OPS)}"{rng.choice(ATTR_VALS)}"]'
+
+
+# positional pseudo-classes: supported forward forms + unsupported (last/only/nth-last) for negative
+# coverage. `nth-*` args span the An+B microsyntax. Parsel is the oracle for all of them.
+_NTH_ARGS = ["odd", "even", "1", "2", "3", "2n", "2n+1", "2n-1", "-n+3", "n", "n+2"]
+
+
+def g_positional(rng):
+    kind = rng.choice([
+        "first-child", "first-of-type", "last-child", "only-child",
+        "last-of-type", "only-of-type",
+        f"nth-child({rng.choice(_NTH_ARGS)})", f"nth-of-type({rng.choice(_NTH_ARGS)})",
+        f"nth-last-child({rng.choice(_NTH_ARGS)})", f"nth-last-of-type({rng.choice(_NTH_ARGS)})",
+    ])
+    return ":" + kind
+
+
+def g_compound(rng, depth=1):
+    parts = []
+    if rng.random() < 0.7:
+        parts.append(rng.choice(TAGS) if rng.random() < 0.85 else "*")
+    for _ in range(rng.randint(0, 3)):
+        r = rng.random()
+        if r < 0.4:
+            parts.append("." + rng.choice(CLASSES))
+        elif r < 0.55:
+            parts.append("#" + rng.choice(IDS))
+        elif r < 0.72:
+            parts.append(g_attr_pred(rng))
+        elif r < 0.85:
+            parts.append(g_positional(rng))
+        elif depth > 0:
+            parts.append(f":not({g_compound(rng, depth - 1)})")
+    return "".join(parts) or rng.choice(TAGS)
+
+
+def g_has_inner(rng):
+    """A single inner compound for `:has(...)`, restricted to a TYPE/`*` + class — the only inner
+    cssselect 1.4.0 translates (it RAISES on id/attribute/`:not` inners), so this keeps parsel a valid
+    oracle for the random fuzzer. The id/attribute/`:not` inners (which Frostwork supports as a
+    documented divergence-in-our-favor) are covered by a dedicated parity test in tests/test_python.py."""
+    p = rng.choice(TAGS) if rng.random() < 0.7 else ""
+    if rng.random() < 0.5:
+        p += "." + rng.choice(CLASSES)
+    return p or rng.choice(TAGS)
+
+
+def g_has(rng):
+    # Mostly the supported MVP shape (a single, optionally child-scoped, compound); ~15% a descendant
+    # chain inside — unsupported, so the whole selector must yield EMPTY (never WRONG). Parsel is oracle.
+    inner = g_has_inner(rng)
+    if rng.random() < 0.15:
+        inner += " " + g_has_inner(rng)  # chain: unsupported (negative coverage)
+    rel = "> " if rng.random() < 0.25 else ""
+    return f":has({rel}{inner})"
+
+
+def g_is_alt(rng):
+    """One simple compound alternative for `:is(...)` (no combinators)."""
+    p = rng.choice(TAGS) if rng.random() < 0.5 else ""
+    r = rng.random()
+    if r < 0.5:
+        p += "." + rng.choice(CLASSES)
+    elif r < 0.7:
+        p += g_attr_pred(rng)
+    elif r < 0.85:
+        p += "#" + rng.choice(IDS)
+    return p or rng.choice(TAGS)
+
+
+def g_is(rng):
+    # SUPPORTED shape only: `[tag|*]:is(alt, ...)` — a lone `:is`/`:where` on a bare tag/universal
+    # (cssselect translates only this shape correctly). Parsel is the oracle.
+    tag = rng.choice(TAGS) if rng.random() < 0.6 else "*"
+    kw = ":is" if rng.random() < 0.7 else ":where"
+    alts = ", ".join(g_is_alt(rng) for _ in range(rng.randint(1, 3)))
+    return f"{tag}{kw}({alts})"
+
+
+def g_css(rng):
+    n = rng.randint(1, 4)
+    s = g_compound(rng)
+    for _ in range(n - 1):
+        s += rng.choice(COMBS) + g_compound(rng)
+    if rng.random() < 0.18:
+        s += g_has(rng)  # attach `:has(...)` to the SUBJECT compound (before the value terminal)
+    if rng.random() < 0.12:
+        # a clean `[tag|*]:is(...)` subject — the shape cssselect translates CORRECTLY, so parsel is a
+        # valid oracle. Combined shapes (`div.a:is(...)`, chained `:is`) diverge from cssselect's bug and
+        # are covered by a dedicated parity test (tests/test_python.py), not this random oracle.
+        s = g_is(rng)
+    elif rng.random() < 0.1:
+        # Case B (CSS): `C:has(<type+class>) ~/+ S` — a deferred `:has` on a PRECEDING sibling, value from
+        # the later sibling. cssselect handles `:has(type+class)` and `~`/`+` correctly, so parsel is a
+        # valid oracle. (id/attr/:not `:has` inners are cssselect-invalid, so keep the inner type+class.)
+        c = rng.choice(TAGS) + (("." + rng.choice(CLASSES)) if rng.random() < 0.4 else "")
+        comb = rng.choice([" ~ ", " + "])
+        return f"{c}:has({g_has_inner(rng)}){comb}{g_compound(rng)}" + rng.choice(TERMS)
+    return s + rng.choice(TERMS)
+
+
+def g_comma(rng):
+    return ", ".join(g_css(rng) for _ in range(rng.randint(2, 5)))
+
+
+def _g_xpath_one(rng):
+    steps = rng.randint(1, 3)
+    # Sometimes a `.`-relative (context) path: `.//step` (descendant of context) or `./step` (child of
+    # context). At the flat top level the context is the document node, so `./step` matches nothing and
+    # `.//step` matches descendants — Parsel is the oracle. This exercises the leading-anchor handling
+    # that once let `./step` over-match like `.//step` (see xpath.rs relative-anchor rejection).
+    s = "." if rng.random() < 0.25 else ""
+    for i in range(steps):
+        # ~25% of non-anchor steps use the `following-sibling::` axis — same tree relation as CSS `~`,
+        # lowered by xpath.rs to a general-sibling combinator. It must follow a single `/` (a `//` before
+        # it means descendant-or-self THEN sibling, which is unsupported), and takes no positional
+        # predicate (`following-sibling::td[1]` is unsupported). Parsel is the oracle either way.
+        sib = i > 0 and rng.random() < 0.25
+        if sib:
+            s += "/following-sibling::" + (rng.choice(TAGS) if rng.random() < 0.85 else "*")
+        else:
+            s += rng.choice(["//", "/"]) + (rng.choice(TAGS) if rng.random() < 0.85 else "*")
+        if rng.random() < 0.4:
+            # a SOLE `[N]` position: `tag[N]` (of-type) / `*[N]` (nth-child). Parsel is the oracle.
+            # Skipped on a sibling-axis step (position among following siblings has no `~` lowering).
+            if not sib and rng.random() < 0.2:
+                s += f"[{rng.randint(1, 4)}]"
+                continue
+            # a SOLE reverse position `[last()]` / `[last()-k]` (of-type for a tag, nth-last-child for `*`)
+            if not sib and rng.random() < 0.15:
+                s += rng.choice(["[last()]", "[last()-1]", "[last()-2]", "[position()=last()]"])
+                continue
+            # a SOLE text-content predicate: `[.="v"]` / `[contains(.,"v")]` / `[text()="v"]` /
+            # `[contains(text(),"v")]`. Needles are drawn from the pages' decoded text (TEXTBITS) plus
+            # misses/substrings, so both match and no-match paths get coverage. On a non-subject step it's
+            # unsupported (empty) — negative coverage. Parsel is the oracle.
+            if not sib and rng.random() < 0.22:
+                axis = rng.choice([".", "text()"])
+                needle = rng.choice(TEXT_NEEDLES)
+                op = f'{axis}="{needle}"' if rng.random() < 0.5 else f'contains({axis},"{needle}")'
+                s += f"[{op}]"
+                continue
+            a = rng.choice(ATTRS)
+            r = rng.random()
+            if r < 0.3:
+                s += f"[@{a}]"
+            elif r < 0.55:
+                s += f'[@{a}="{rng.choice(ATTR_VALS)}"]'
+            elif r < 0.7:
+                # non-empty operand only: `contains(@a,"")` is a DOCUMENTED divergence (empty needle =
+                # match-nothing here vs always-true in XPath-proper), separately covered — not a bug.
+                s += f'[contains(@{a},"{rng.choice([x for x in ATTR_VALS if x])}")]'
+            else:
+                # predicate `or`/`and` (distributed into union members by the compiler)
+                b = rng.choice(ATTRS)
+                op = rng.choice([" or ", " and "])
+                s += f'[@{a}{op}@{b}]'
+    # terminal: value, self/descendant text, child `/@a`, or descendant-or-self `//@a` attribute harvest
+    tail = rng.choice(["", "/text()", "//text()", f"/@{rng.choice(ATTRS)}", f"//@{rng.choice(ATTRS)}"])
+    return s + tail
+
+
+def _g_upward(rng):
+    # `//INNER/ancestor::E` / `//INNER/parent::E` -> `E:has(INNER)` / `E:has(> INNER)`. INNER and E each
+    # a compound with an optional attribute predicate. Parsel is the oracle for the reframed node set.
+    inner = rng.choice(TAGS)
+    if rng.random() < 0.4:
+        inner += f'[@{rng.choice(ATTRS)}="{rng.choice([x for x in ATTR_VALS if x])}"]'
+    e = rng.choice(TAGS)
+    if rng.random() < 0.3:
+        e += f"[@{rng.choice(ATTRS)}]"
+    axis = rng.choice(["ancestor", "parent"])
+    tail = rng.choice(["", "/text()", f"/@{rng.choice(ATTRS)}"])
+    return f"//{inner}/{axis}::{e}{tail}"
+
+
+def _g_caseb_xpath(rng):
+    # Case B: `//C[textpred]/following-sibling::S` — a deferred text predicate on a PRECEDING sibling,
+    # value from the later sibling (the label->value + text-filter pattern). lxml XPath evaluates this
+    # correctly, so parsel is a valid oracle.
+    c = rng.choice(TAGS)
+    axis = rng.choice([".", "text()"])
+    needle = rng.choice(TEXT_NEEDLES)
+    pred = f'{axis}="{needle}"' if rng.random() < 0.5 else f'contains({axis},"{needle}")'
+    sub = rng.choice(TAGS) if rng.random() < 0.85 else "*"
+    tail = rng.choice(["", "/text()", f"/@{rng.choice(ATTRS)}"])
+    return f'//{c}[{pred}]/following-sibling::{sub}{tail}'
+
+
+def g_xpath(rng):
+    # ~10% Case B: text-predicate on a preceding sibling (label->value). Parsel is the oracle.
+    if rng.random() < 0.1:
+        return _g_caseb_xpath(rng)
+    # ~12% an upward-axis path (ancestor::/parent:: reframed as :has). Parsel is the oracle.
+    if rng.random() < 0.12:
+        return _g_upward(rng)
+    # ~12% normalize-space(<path>): scalar (first node's string-value, ws-collapsed). Parsel is the
+    # oracle; an `or`-expanding inner is an allowed UNSUPPORTED gap (empty), never WRONG.
+    if rng.random() < 0.12:
+        return f"normalize-space({_g_xpath_one(rng)})"
+    # ~20% of the time, a union of 2-3 independent paths (`//a | //b`) — one document-ordered,
+    # node-deduped column, same as a CSS comma group. Parsel is the oracle for the merged result.
+    if rng.random() < 0.2:
+        return " | ".join(_g_xpath_one(rng) for _ in range(rng.randint(2, 3)))
+    return _g_xpath_one(rng)
+
+
+def g_exotic(rng):
+    # valid CSS syntax that is probably OUTSIDE the supported subset (must still be empty, never wrong)
+    return rng.choice([
+        f"{rng.choice(TAGS)}:nth-child({rng.randint(1,3)})::text",
+        f"{rng.choice(TAGS)}:first-child::text",
+        f"{rng.choice(TAGS)}:hover::text",
+        f"{rng.choice(TAGS)}::before",
+        f"{rng.choice(TAGS)} {rng.choice(TAGS)}:not({g_compound(rng)}):not({g_compound(rng)})::text",
+        f'{rng.choice(TAGS)}[{rng.choice(ATTRS)}="{rng.choice(ATTR_VALS)}" i]::text',
+        f"{rng.choice(TAGS)} >> {rng.choice(TAGS)}::text",
+        f":is({rng.choice(TAGS)}, {rng.choice(TAGS)})::text",
+    ])
+
+
+def g_malformed(rng):
+    base = g_css(rng)
+    op = rng.choice(["trunc", "brack", "paren", "trailcomb", "emptymember", "badpseudo", "stray",
+                     "dblcolon", "unicode"])
+    if op == "trunc" and len(base) > 3:
+        return base[: rng.randint(1, len(base) - 1)]
+    if op == "brack":
+        return base + "["
+    if op == "paren":
+        return base.replace("::text", ":not(") or base + ":not("
+    if op == "trailcomb":
+        return base + rng.choice([" >", " +", " ~", " "])
+    if op == "emptymember":
+        return base + ", , " + g_compound(rng) + "::text"
+    if op == "badpseudo":
+        return base + "::" + rng.choice(["bogus", "attr(", "text(", "attr()"])
+    if op == "stray":
+        return rng.choice(["!@#", "()", "[]", "><", base + "@#$", "{}" + base])
+    if op == "dblcolon":
+        return base.replace("::", ":::")
+    return base + "·λ→"  # non-ASCII junk
+
+
+def gen_selector(rng):
+    r = rng.random()
+    if r < 0.34:
+        return g_css(rng), False
+    if r < 0.50:
+        return g_xpath(rng), False
+    if r < 0.62:
+        return g_comma(rng), False
+    if r < 0.74:
+        return g_exotic(rng), False
+    if r < 0.88:
+        return g_malformed(rng), False
+    # budget bombs: clearly over the DEAD-clamp thresholds; must be crash-safe (empty or partial)
+    if rng.random() < 0.5:
+        return ", ".join(f".c{i % 12}::text" for i in range(rng.randint(130, 200))), True
+    base = "li" + " ~ li" * rng.randint(66, 90) + "::text"
+    return base, True
+
+
+def over_budget(sel):
+    """Loose upper bound on the two DEAD-clamp thresholds (matcher.rs MAX_MEMBERS/MAX_SIB_BITS): a
+    comma group past 128 members, or a chain past 64 sibling combinators, may legitimately return a
+    DEAD-clamped partial. Over-count is safe here (only suppresses false WRONG flags)."""
+    members = sel.count(",") + 1
+    sib = sel.count("+") + (sel.count("~") - sel.count("~="))
+    return members > 128 or sib > 64
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--iters", type=int, default=6000, help="random selectors to test")
+    ap.add_argument("--per", type=int, default=4, help="random pages each selector is tested against")
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--gate", action="store_true", help="exit nonzero on WRONG/OVERMATCH/CRASH")
+    ap.add_argument("--show", type=int, default=12)
+    args = ap.parse_args()
+    rng = random.Random(args.seed)
+
+    pool = [conformant.generate(rng) for _ in range(60)] + [foreign.generate(rng) for _ in range(20)]
+    trials = [gen_selector(rng) for _ in range(args.iters)]
+    supported = run_support([sel for sel, _bomb in trials])
+    cases = []  # (html, [sel], sel, is_bomb)
+    for (sel, bomb), is_supported in zip(trials, supported):
+        for _ in range(args.per):
+            cases.append((rng.choice(pool), [sel], sel, bomb, is_supported))
+
+    stat = defaultdict(int)
+    cat = defaultdict(lambda: defaultdict(int))
+    examples, seen = [], set()
+    crash_diags = []
+
+    CHUNK = 500
+    for base in range(0, len(cases), CHUNK):
+        chunk = cases[base: base + CHUNK]
+        results, crashed, diag = run_engine([(h, s) for h, s, _sel, _b, _sup in chunk])
+        stat["CRASH"] += crashed
+        if diag:
+            crash_diags.append((base, diag))
+        for k, (html, _sels, sel, bomb, is_supported) in enumerate(chunk):
+            cols = results[k] if k < len(results) else None
+            if cols is None:
+                continue
+            mine = cols[0] if cols else []
+            theirs = parsel_vals(html, sel)  # None == parsel rejected the selector
+            if bomb or over_budget(sel):
+                v = "BUDGET" if mine else ("AGREE" if not theirs else "UNSUPPORTED")
+            elif not mine:
+                # The old gate called every empty-vs-nonempty result UNSUPPORTED, even when the compiler
+                # promised support. That allowed a supported feature to regress to always-empty. Support
+                # is now authoritative: a promised selector dropping oracle values is WRONG.
+                v = "AGREE" if not theirs else ("WRONG" if is_supported else "UNSUPPORTED")
+            elif not is_supported:
+                # Unsupported must be empty. Non-empty output is a no-fallback contract violation even
+                # when it happens to equal lxml for this page.
+                v = "OVERMATCH"
+            elif theirs is None:
+                v = "OVERMATCH"
+            else:
+                v = "AGREE" if verdict(mine, theirs, "CONTROL", sel) in ("AGREE", "WS") else "WRONG"
+            stat[v] += 1
+            stat["pairs"] += 1
+            cat[_category(sel)][v] += 1
+            if v in ("WRONG", "OVERMATCH") and sel not in seen and len(examples) < args.show:
+                seen.add(sel)
+                examples.append((v, sel, mine[:4], (theirs or [])[:4], html.decode("utf-8", "replace")[:120]))
+
+    pairs = stat["pairs"] or 1
+    print(f"SELECTOR FUZZ vs lxml   seed={args.seed}  iters={args.iters}  per={args.per}  pairs={stat['pairs']}\n")
+    for k in ("AGREE", "UNSUPPORTED", "BUDGET"):
+        print(f"  {k:<12} {stat[k]:>8}  ({100.0 * stat[k] / pairs:.2f}%)")
+    print(f"  {'OVERMATCH':<12} {stat['OVERMATCH']:>8}  <-- gate: non-empty on a parsel-invalid selector")
+    print(f"  {'WRONG':<12} {stat['WRONG']:>8}  <-- gate: non-empty AND disagrees with lxml")
+    print(f"  {'CRASH':<12} {stat['CRASH']:>8}  <-- gate: engine panic\n")
+
+    print("  by category:  category      pairs  AGREE  UNSUP  BUDGET  OVERMATCH  WRONG")
+    for c in ("css", "xpath", "comma", "exotic", "malformed", "bomb"):
+        d = cat[c]
+        p = sum(d.values())
+        print(f"    {c:<12}{p:>8}{d['AGREE']:>7}{d['UNSUPPORTED']:>7}{d['BUDGET']:>8}"
+              f"{d['OVERMATCH']:>10}{d['WRONG']:>7}")
+
+    if examples:
+        print("\n  candidate bugs (non-empty where lxml has a different value or rejects the selector):")
+        for v, sel, mine, theirs, snip in examples:
+            print(f"    [{v}] {sel!r}\n        mine ={mine}\n        lxml ={theirs}\n        html: {snip!r}")
+
+    if crash_diags:
+        print("\n  ENGINE CRASHES:")
+        for where, diag in crash_diags:
+            print(f"    [chunk@{where}] {diag}")
+
+    gate = stat["WRONG"] + stat["OVERMATCH"] + stat["CRASH"]
+    if args.gate:
+        print(f"\n  GATE: WRONG+OVERMATCH+CRASH = {gate}  ->  {'PASS' if gate == 0 else 'FAIL'}")
+        sys.exit(1 if gate else 0)
+
+
+def _category(sel):
+    s = sel.strip()
+    if s.count(",") > 3:
+        return "bomb" if over_budget(s) else "comma"
+    if "~ li ~ li ~ li" in s:
+        return "bomb"
+    if s.startswith(("/", ".//")):
+        return "xpath"
+    if any(x in s for x in (":nth", ":first", ":hover", "::before", ">>", ":is(", " i]", ":::")):
+        return "exotic"
+    if any(x in s for x in ("[", "]", "(", ")")) and not _balanced(s):
+        return "malformed"
+    if "," in s:
+        return "comma"
+    if not s or any(ord(c) > 127 for c in s) or "@#" in s or "{}" in s:
+        return "malformed"
+    return "css"
+
+
+def _balanced(s):
+    return s.count("[") == s.count("]") and s.count("(") == s.count(")")
+
+
+if __name__ == "__main__":
+    main()

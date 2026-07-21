@@ -1,0 +1,43 @@
+[package]
+name = "frostwork"
+version = "0.1.0"
+edition = "2021"
+description = "Treeless, one-pass HTML extraction — CSS/XPath selectors matched on a streaming scan, no DOM."
+license = "BSD-3-Clause"
+repository = "https://github.com/zytedata/frostwork"
+keywords = ["html", "scraping", "css-selectors", "xpath", "streaming"]
+categories = ["parsing", "web-programming"]
+readme = "README.md"
+
+# `cdylib` is the Python extension module (built by maturin with `--features python`); `rlib` keeps
+# the crate usable as a normal Rust library and by the `differ`/`bench` bins.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+memchr = "2"
+html-escape = "0.2"
+encoding_rs = "0.8"
+# Only compiled when the `python` feature is on (i.e. maturin builds the extension). Plain
+# `cargo build`/`cargo test` and the differ/bench bins never pull it in.
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py39"], optional = true }
+
+[features]
+python = ["dep:pyo3"]
+
+[[bin]]
+name = "differ"
+path = "src/bin/differ.rs"
+
+[[bin]]
+name = "bench"
+path = "src/bin/bench.rs"
+
+[profile.release]
+opt-level = 3
+lto = true
+
+# docs.rs builds the library only (default features → `python` OFF), so it never tries to link
+# libpython. Pin that explicitly rather than relying on the default.
+[package.metadata.docs.rs]
+no-default-features = true

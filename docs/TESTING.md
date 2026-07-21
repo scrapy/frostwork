@@ -1,0 +1,76 @@
+# Testing: how Frostwork's correctness is proven
+
+Frostwork is a "close to lxml, no fallback" engine, so **the test harness is the spec**: there is no
+fallback to hide behind, and every shipped divergence must be one we chose and can name. The suite
+answers one question at scale — *on which inputs and selectors does the engine's value differ from
+lxml, and is that difference a documented divergence or a bug?*
+
+## Oracle and verdict
+
+- **Oracle:** Parsel/lxml (`parsel.Selector(...).css(q).getall()`), the exact engine Scrapy ships,
+  pinned to `parsel==1.11.0`.
+- **Bar:** non-whitespace byte-identity per emitted value.
+- **Verdict per (input, selector):** `AGREE` · `WS` (equal after `.strip()`) · `SKIP-EXPECTED`
+  (diverges on a documented tree-construction construct — foster-parenting, adoption agency, deep-`<p>`)
+  · `DIVERGE` (any other difference — a bug) · `CRASH` (engine panics — a bug).
+
+The gate is **`DIVERGE + CRASH == 0`**, with `SKIP-EXPECTED` reported as the measured distance from lxml.
+
+## Layers
+
+**Unit vectors — `cargo test`** (109 vectors, milliseconds). One per rule and edge: every implied-close
+family (`li`/`p`/`td`/`tr`/`dt`/`dd`/`option`) × {closed, omitted}; void/self-closing; rawtext with
+`<`/`&` inside; comments/CDATA/DOCTYPE; entity edges; attribute quoting/case; selector compounds,
+combinators, `:not()`, comma groups; encoding resolution; XPath compilation; the `Page` layer; budget
+safety; and a regression vector for every bug the fuzzers have found.
+
+**Tokenizer conformance** (`src/tokenizer.rs`, `cargo test tokenizer`). The states that would cause a
+*global* offset desync must be exact. A recording `TokenSink` pins the event stream for each: RAWTEXT
+(`<script>` keeping `</b>` as text), RCDATA (`<title>`), comment close boundaries (incl. `<!-->` /
+`--!>`), CDATA emitting nothing, character references left raw for the matcher, attribute forms, and
+`<`-not-a-tag staying literal.
+
+**Differential vs lxml — `tools/diff_lxml.py`** (the core gate). Generators emit structurally diverse
+HTML; every page runs a selector basket through the engine (via the `differ` binary) and Parsel, and
+each pair gets a verdict:
+- **conformant** (`tools/conformant.py`) — random *content-model-valid* trees. On such input the
+  corrected stack equals lxml's tree, so this must be byte-identical (the safety invariant).
+- **families** (`tools/families.py`) — optional-end-tag constructs tagged SHOULD/SKIP/CONTROL, so a
+  divergence auto-classifies as bug vs documented SKIP.
+- **foreign** (`tools/foreign.py`) — `<svg>`/`<math>`/`<template>` subtrees (self-closing leaves,
+  camelCase names, rawtext in foreign content).
+- **grouped** — single-pass `Many`/`One` vs Parsel's per-container loop.
+
+**Encoding parity — `tools/enc_check.py`.** 35 (encoding × selector) cases across windows-1252,
+shift_jis, euc-jp, gbk, big5, koi8-r, utf-8, plus UTF-16 sniffing, vs Parsel given the same label.
+
+**Differential fuzzing** (the malformed-input surface):
+- `tools/diff_fuzz.py` — mutates conformant/foreign pages and the fuzz corpus into *malformed* HTML,
+  then diffs against lxml. `DIVERGE` is expected here (documented SKIP set) and reported/clustered;
+  `CRASH` is gated. Catches tokenizer desync the well-formed gate can't reach.
+- `tools/sel_fuzz.py` — fuzzes the *query* (valid / exotic / malformed / budget-bomb) against real
+  pages and asks the real compiler whether each selector is supported. A promised-supported selector
+  may not lose oracle values, and an unsupported selector may not emit anything. Gates `WRONG` +
+  `OVERMATCH` + `CRASH`.
+
+**Multi-million soak — `make soak`.** Runs the clean differential and support-aware selector fuzzer
+over five independent seeds, followed by a larger malformed-input crash run. The default workload is
+over four million page/query pairs and reports the exact aggregate before returning success.
+
+**Coverage-guided fuzzing — `fuzz/`.** A `cargo-fuzz`/libfuzzer target feeds arbitrary bytes to
+`extract` (flat, grouped, sniffed + explicit encoding) and asserts no panic/hang/OOB. Run:
+`cargo +nightly fuzz run extract`. The corpus (`fuzz/corpus/`) and artifacts are git-ignored and
+regenerated locally.
+
+## Wiring
+
+The engine builds a `differ` binary that reads hex-framed cases and emits NDJSON, so the Python
+generators/oracle (which own lxml) drive it without a PyO3 build. CI runs the unit tests, clippy, the
+differential gate, encoding parity, both differential fuzzers (crash-gated), and the Python suite on
+every change; the coverage-guided `cargo-fuzz` target is run locally/nightly.
+
+## Python
+
+`tests/test_python.py` (`.venv/bin/python -m pytest tests/test_python.py`) covers the primitive,
+`Page`/`Item`, the web-poet wiring (including that a multi-field page object triggers exactly **one**
+`extract` call), `Many`/`One`, and a Parsel cross-check.

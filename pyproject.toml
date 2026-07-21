@@ -1,0 +1,50 @@
+# >=1.9 for PEP 639 license metadata (SPDX `license` string + `license-files`).
+[build-system]
+requires = ["maturin>=1.9,<2"]
+build-backend = "maturin"
+
+[project]
+name = "frostwork"
+version = "0.1.0"
+description = "Treeless, one-pass HTML extraction — CSS/XPath selectors matched on a streaming scan, no DOM."
+readme = "README.md"
+license = "BSD-3-Clause"
+license-files = ["LICENSE"]
+requires-python = ">=3.9"
+authors = [{ name = "Zyte" }]
+keywords = ["html", "scraping", "css-selectors", "xpath", "streaming", "web-poet", "scrapy"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Text Processing :: Markup :: HTML",
+    "Topic :: Internet :: WWW/HTTP :: Indexing/Search",
+]
+
+# The web-poet page-object integration (`frostwork.webpoet`) is optional; the core
+# (`frostwork.extract`, `frostwork.Page`) needs nothing but the compiled extension.
+[project.optional-dependencies]
+webpoet = ["web-poet>=0.8"]
+
+# Static schema-audit CLI: `frostwork-audit path/to/pageobjects.py` (or `python -m frostwork.audit`).
+[project.scripts]
+frostwork-audit = "frostwork.audit:main"
+
+[project.urls]
+Homepage = "https://github.com/zytedata/frostwork"
+Repository = "https://github.com/zytedata/frostwork"
+Documentation = "https://github.com/zytedata/frostwork#readme"
+Issues = "https://github.com/zytedata/frostwork/issues"
+
+[tool.maturin]
+# Mixed Rust/Python project: pure-Python package lives under python/, the compiled core is dropped
+# in as frostwork._frostwork. `--features python` turns on the pyo3 bindings (off for cargo test).
+features = ["python"]
+module-name = "frostwork._frostwork"
+python-source = "python"

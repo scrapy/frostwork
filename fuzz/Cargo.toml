@@ -1,0 +1,26 @@
+[package]
+name = "frostwork-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# NOTE: depends on frostwork WITHOUT the `python` feature (default features), so the fuzz binary does
+# not link libpython. Run: `cargo +nightly fuzz run extract` (see docs/TESTING.md).
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.frostwork]
+path = ".."
+
+[[bin]]
+name = "extract"
+path = "fuzz_targets/extract.rs"
+test = false
+doc = false
+bench = false
+
+[profile.release]
+debug = 1

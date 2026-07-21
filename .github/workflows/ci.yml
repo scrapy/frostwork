@@ -1,0 +1,95 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  version-sync:
+    name: Cargo/pyproject version match
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # the version is double-sourced (Cargo.toml + pyproject.toml); assert they agree so a release
+      # tag can't ship a mismatch between the wheel metadata and the crate.
+      - name: assert versions match
+        run: |
+          cargo_v=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')
+          py_v=$(grep -m1 '^version' pyproject.toml | sed -E 's/.*"(.*)".*/\1/')
+          echo "Cargo.toml=$cargo_v  pyproject.toml=$py_v"
+          test "$cargo_v" = "$py_v" || { echo "::error::version mismatch: $cargo_v != $py_v"; exit 1; }
+
+  rust:
+    name: cargo test + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # the `python` feature is OFF here (it links libpython only under maturin); lib + differ/bench bins
+      - run: cargo test
+      - run: cargo clippy --all-targets -- -D warnings
+
+  differential:
+    name: differential gate + python
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # the differ/bench bins the harness drives (built without the `python` feature)
+      - run: cargo build --release --bin differ --bin bench
+      - run: python -m venv .venv
+      # pin the oracle exactly: an lxml/parsel upgrade silently moving the reference must be a
+      # deliberate bump, not an incidental one that quietly changes what "parity" means.
+      - run: .venv/bin/pip install -r requirements-test.txt
+      # correctness gate: 0 non-whitespace DIVERGE + 0 CRASH vs lxml (flat AND grouped One/Many)
+      - run: .venv/bin/python tools/diff_lxml.py
+      - run: .venv/bin/python tools/enc_check.py
+      # differential fuzz: mutate well-formed pages into MALFORMED HTML and diff vs lxml. DIVERGE is
+      # expected here (documented foster-parenting / adoption-agency SKIP set), so only CRASH is gated
+      # (--gate): any panic on any input is a real bug. Catches tokenizer desync (e.g. comment-close)
+      # that the well-formed gate can't reach.
+      - run: .venv/bin/python tools/diff_fuzz.py --iters 6000 --gate
+      # selector fuzz: fuzz the QUERY (valid/exotic/malformed/budget-bomb) against real pages. Enforces
+      # the no-fallback contract — a column is empty OR equals lxml, never non-empty-and-wrong, never a
+      # crash. Gates WRONG (disagree) + OVERMATCH (data on a parsel-invalid selector) + CRASH.
+      - run: .venv/bin/python tools/sel_fuzz.py --iters 6000 --gate
+      # build the extension into the venv, then exercise the Python surface (extract, Page, FrostPage, Many/One)
+      - run: .venv/bin/maturin develop --release
+      - run: .venv/bin/python -m pytest tests/test_python.py -q
+      - run: .venv/bin/python tools/support_snapshot.py --check
+
+  bindings:
+    name: bindings (py${{ matrix.python }} / ${{ matrix.os }})
+    # The heavy differential runs once (above) on 3.12/linux. This matrix only builds the extension
+    # and runs the Python suite, cheaply covering the abi3 floor (3.9), the newest CPython, and macOS.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, python: "3.9" }
+          - { os: ubuntu-latest, python: "3.14" }
+          - { os: macos-latest, python: "3.12" }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m venv .venv
+      - run: .venv/bin/pip install -r requirements-test.txt
+      - run: .venv/bin/maturin develop --release
+      - run: .venv/bin/python -m pytest tests/test_python.py -q
+      - run: .venv/bin/python examples/basic.py  # keep the documented example runnable
