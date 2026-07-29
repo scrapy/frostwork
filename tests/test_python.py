@@ -20,6 +20,23 @@ PRODUCT = (
 )
 
 
+def _oracle():
+    """The Parsel/lxml oracle for a cross-check, or skip the test.
+
+    Value parity is only defined against **libxml2 >= 2.14** (docs/TESTING.md, tools/oracle.py): an
+    older vendored libxml2 parses CR-in-attribute-values and a raw `<` in text differently, so a
+    mismatch there is the oracle's behaviour, not Frostwork's. A pinned lxml does not pin the libxml2 it
+    carries — the lxml 6.1.1 Windows wheel ships 2.11.9 — so this has to be checked at run time rather
+    than assumed from requirements-test.txt.
+    """
+    parsel = pytest.importorskip("parsel")
+    etree = pytest.importorskip("lxml.etree")
+    if etree.LIBXML_VERSION < (2, 14):
+        got = ".".join(map(str, etree.LIBXML_VERSION))
+        pytest.skip(f"oracle libxml2 is {got}; value parity is defined against >= 2.14")
+    return parsel
+
+
 def _count_scans(monkeypatch, cls, calls):
     """Wrap a FrostPage class's pre-compiled native Plan with a proxy that counts each scan, so a test
     can assert every field is answered by ONE pass (the plan is compiled once, at class creation)."""
@@ -127,29 +144,44 @@ def test_extract_deeply_nested_is_declines_without_crashing():
 
 def test_extract_releases_gil_for_parallel_scans():
     # the scan runs without the GIL, so threads scale; this asserts real (not serialized) parallelism.
+    import os
     import threading
     import time
+
+    if (os.cpu_count() or 1) < 2:
+        pytest.skip("needs >= 2 cores to observe parallelism")
 
     html = b"<html><body>" + b"<div class=x><span class=p>v</span></div>" * 20000 + b"</body></html>"
     plan = frostwork.Page().field_all("p", ".p::text")
     plan.extract(html)  # compile once
 
-    def work():
-        for _ in range(4):
+    ROUNDS, THREADS, REPS = 8, 2, 3
+
+    def work(rounds):
+        for _ in range(rounds):
             plan.extract(html)
 
-    t0 = time.perf_counter()
-    work()
-    work()
-    serial = time.perf_counter() - t0
+    def best_of(fn):
+        # Take the MINIMUM of a few runs. Scheduler interference on a shared CI runner only ever makes
+        # a measurement slower, so the min is the cleanest estimate of each mode's real cost — a single
+        # sample of a ~10ms workload is what made this assertion flaky (macos runner: ratio 1.24).
+        return min((fn() for _ in range(REPS)), default=0.0)
 
-    threads = [threading.Thread(target=work) for _ in range(2)]
-    t0 = time.perf_counter()
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-    parallel = time.perf_counter() - t0
+    def timed_serial():
+        t0 = time.perf_counter()
+        work(ROUNDS * THREADS)  # same total work as the threaded run below
+        return time.perf_counter() - t0
+
+    def timed_parallel():
+        threads = [threading.Thread(target=work, args=(ROUNDS,)) for _ in range(THREADS)]
+        t0 = time.perf_counter()
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        return time.perf_counter() - t0
+
+    serial, parallel = best_of(timed_serial), best_of(timed_parallel)
 
     # Fully serialized would give ~1.0x; require a clear win while tolerating loaded CI machines.
     assert serial / parallel > 1.3, f"no parallel speedup (serial={serial:.3f}s parallel={parallel:.3f}s)"
@@ -571,7 +603,7 @@ def test_flat_and_grouped_one_pass(monkeypatch):
 
 
 def test_many_matches_parsel_per_container():
-    parsel = pytest.importorskip("parsel")
+    parsel = _oracle()
     import frostwork
 
     body = GRID
@@ -588,7 +620,7 @@ def test_many_matches_parsel_per_container():
 def test_matches_parsel_across_selectors():
     """Values crossing the FFI boundary equal Parsel's on a normal page (spot cross-check;
     the exhaustive gate is the Rust differential)."""
-    parsel = pytest.importorskip("parsel")
+    parsel = _oracle()
     html = (
         "<html><body><div class='product'><h1>Nice Widget</h1>"
         "<span class='price'>$9.99</span>"
@@ -627,6 +659,60 @@ def test_check_reports_supported_and_unsupported():
     assert "sibling combinator" in unsup["sib"]
     assert "descendant" in unsup["kid"]  # ./ child anchor -> use .//
     assert r.groups[0].container.supported  # .offer is fine
+
+
+def test_check_rejects_xpath_variable_and_unquoted_operands():
+    # Reported by Jan Seidler: `//*[@id=$pid]` (a parsel XPath-variable query, used in a production PO)
+    # passed the audit, then matched an element whose id literally was `$pid` — a WRONG value under a
+    # "supported" verdict. Frostwork takes no variable bindings, so the query must be unsupported. Same
+    # for other non-literal operands: XPath compares `[@a=2]` numerically and `[@a=b]` against child
+    # `<b>` elements, neither of which is a byte compare.
+    html = b'<html><body><div id="$pid">LITERAL</div><span x="2">two</span>'
+    html += b'<span x="02">oh-two</span><em id="foo">byname</em></body></html>'
+    for q in ('//*[@id=$pid]', '//span[contains(@x,$v)]/text()', '//em[@id=foo]/text()',
+              '//span[@x=2]/text()'):
+        field = frostwork.check([q]).fields[0]
+        assert not field.supported, q
+        assert frostwork.extract(html, [q], strict=False)[0] == []  # no fallback, no wrong value
+        with pytest.raises(frostwork.UnsupportedSelector):
+            frostwork.extract(html, [q])
+    assert "variable" in frostwork.check(['//*[@id=$pid]']).fields[0].reason
+    assert "unquoted" in frostwork.check(['//span[@x=2]/text()']).fields[0].reason
+    # a `$` INSIDE a string literal is data, not a variable — still supported, still correct
+    r = frostwork.check(['//div[@id="$pid"]/text()', '//div[contains(@id,"$p")]/text()'])
+    assert r.ok
+    assert frostwork.extract(html, ['//div[@id="$pid"]/text()'])[0] == ["LITERAL"]
+
+
+def test_check_rejects_non_ident_unquoted_css_attr_values():
+    # Found while fixing the XPath case above: cssselect raises SelectorSyntaxError for these, so a
+    # non-empty column would be data for a selector Parsel refuses to run. Unsupported (empty) instead;
+    # the quoted spelling stays supported and matches.
+    html = b'<html><body><a href="/p/1" id="2">A</a></body></html>'
+    for q in ("a[href^=/p]::text", "a[id=2]::text", "a[id=$v]::text", "a[id=--v]::text"):
+        assert not frostwork.check([q]).fields[0].supported, q
+        assert frostwork.extract(html, [q], strict=False)[0] == []
+    r = frostwork.check(['a[href^="/p"]::text', 'a[id="2"]::text', "a[href*=p]::text"])
+    assert r.ok  # quoted values are unrestricted; an ident-shaped unquoted value is fine
+    assert frostwork.extract(html, ['a[id="2"]::text'])[0] == ["A"]
+
+
+def test_empty_fields_separates_dead_selectors_from_gaps():
+    # The runtime half of dead-selector detection: support is static (check), emptiness is per page.
+    page = (
+        frostwork.Page()
+        .field("title", "h1::text")
+        .field("gone", ".price::text")
+        .many("rows", ".card", {"h": ".//h3/text()"})
+        .many("absent", ".nope", {"h": ".//h3/text()"})
+    )
+    assert page.check().ok  # every selector supported -> emptiness below can only mean "no match"
+    item = page.extract(b"<html><body><h1>T</h1><div class='card'><h3>H</h3></div></body></html>")
+    assert item.empty_fields() == ["gone", "absent"]
+    assert item.get("title") == "T"
+    # a matched-but-EMPTY value counts as matched, not empty (an empty attribute value did match)
+    attrs = frostwork.Page().field("alt", "img::attr(alt)")
+    assert attrs.extract(b'<html><body><img alt="" src="x"></body></html>').empty_fields() == []
 
 
 def test_check_ok_schema():
@@ -739,7 +825,7 @@ def test_frostpage_check_schema_and_strict_class_def():
 
 
 def test_xpath_union_or_descendant_attr_match_parsel():
-    parsel = pytest.importorskip("parsel")
+    parsel = _oracle()
     body = (
         b"<html><body><a href=/1>A</a><b>B</b><a href=/2 x=1>C</a>"
         b"<div id=d href=/self><p><a href=/3>x</a><img src=/i href=/4></p></div></body></html>"
@@ -759,7 +845,7 @@ def test_xpath_union_or_descendant_attr_match_parsel():
 
 
 def test_positional_matches_parsel():
-    parsel = pytest.importorskip("parsel")
+    parsel = _oracle()
     body = b"<ul><li>a</li>t<li>b</li><span>s</span><li>c</li></ul><ol><li>x</li><li>y</li></ol>"
     css = [
         "li:first-child::text", "li:nth-child(2)::text", "li:nth-of-type(3)::text",
@@ -790,7 +876,7 @@ def test_positional_matches_parsel():
 
 
 def test_normalize_space_matches_parsel():
-    parsel = pytest.importorskip("parsel")
+    parsel = _oracle()
     body = (
         b"<html><body><h1>  Hello   <b>big</b>  world </h1><h1> second </h1>"
         b"<a href='  /x '>k</a><p>a\tb\n c</p><ul><li>  </li><li>i2</li></ul></body></html>"
@@ -813,7 +899,7 @@ def test_normalize_space_matches_parsel():
 def test_check_reason_matches_parsel_supported_boundary():
     # The DECISION must agree with the engine: a query parsel accepts but Frostwork doesn't support
     # is reported unsupported; a supported one is reported supported and yields the same column.
-    parsel = pytest.importorskip("parsel")
+    parsel = _oracle()
     html = b"<ul><li class=x>a</li><li>b</li></ul>"
     # a reverse position IS now supported in the attached ::text form; the detached subtree form isn't
     supported = "li:last-child::text"
@@ -830,7 +916,7 @@ def test_check_reason_matches_parsel_supported_boundary():
 def test_new_axis_and_has_selectors_match_parsel():
     # end-to-end parity for the newly-added coverage: CSS :has(), XPath following-sibling::, and the
     # upward ancestor::/parent:: axes — each cross-checked against parsel through the Python bindings.
-    parsel = pytest.importorskip("parsel")
+    parsel = _oracle()
     # double-quoted attrs so an outer-HTML (raw-source) column equals lxml's re-serialization — the
     # raw-source-vs-reserialized quote style is a documented divergence, out of scope for this parity check
     html = (
@@ -860,7 +946,7 @@ def test_new_axis_and_has_selectors_match_parsel():
 
 def test_text_content_predicates_match_parsel():
     # XPath text-content predicates on the subject: `.`/`text()` string tests, cross-checked vs parsel.
-    parsel = pytest.importorskip("parsel")
+    parsel = _oracle()
     html = (
         b"<html><body>"
         b"<h2>Price</h2><h2> Price </h2><h2>x<b>bold</b>Price</h2>"
@@ -886,7 +972,7 @@ def test_text_content_predicates_match_parsel():
 
 def test_is_where_selectors_match_parsel():
     # CSS :is()/:where() in the supported `[tag|*]:is(...)` shape, cross-checked vs parsel.
-    parsel = pytest.importorskip("parsel")
+    parsel = _oracle()
     html = (
         b"<html><body><h1>A</h1><h2>B</h2><h3>C</h3>"
         b'<div class="a">1</div><div class="b">2</div><div class="c">3</div>'
@@ -904,7 +990,7 @@ def test_nonsubject_sibling_predicate_matches_parsel():
     # Case B: a deferred predicate on a PRECEDING sibling, value from the later sibling — the
     # label->value + filter pattern. XPath (`//C[.="x"]/following-sibling::S`) and CSS (`C:has(..) ~ S`)
     # are both evaluated correctly by lxml/cssselect, so parsel is a valid DIRECT oracle.
-    parsel = pytest.importorskip("parsel")
+    parsel = _oracle()
     html = (
         b"<html><body>"
         b"<dl><dt>Price</dt><dd>$10</dd><dt>Size</dt><dd>L</dd><dt>Price</dt><dd>$20</dd></dl>"
@@ -940,7 +1026,7 @@ def test_has_widened_inners_match_correct_semantics():
     # Frostwork implements the correct semantics (a documented divergence in our favor). We can't use
     # parsel's `.css(":has(...)")` as the oracle (it errors), so the oracle is a parsel/lxml ancestor
     # walk: `E:has(F)` = the E-nodes that are an ancestor (or, for `:has(> F)`, the parent) of some F-node.
-    parsel = pytest.importorskip("parsel")
+    parsel = _oracle()
     html = (
         b"<html><body>"
         b'<div id="d1"><span data-x="1">a</span></div>'
@@ -998,7 +1084,7 @@ def test_is_where_correct_and_semantics_diverges_from_cssselect_bug():
     # (a DOCUMENTED divergence: cssselect 1.4.0 mis-translates it, ORing the base condition with the
     # alternatives). We can't use parsel directly as the oracle here (it IS the bug); instead compare
     # Frostwork against parsel on the equivalent correct comma-EXPANSION, which cssselect handles fine.
-    parsel = pytest.importorskip("parsel")
+    parsel = _oracle()
     html = (
         b'<html><body><div class="a x">1</div><div class="a c">2</div><div class="a">3</div>'
         b'<div class="b x">4</div><div class="c">5</div>'
@@ -1132,3 +1218,121 @@ def test_audit_cli_version(capsys):
         main(["--version"])
     assert exc.value.code == 0
     assert "frostwork-audit" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------- source scan (--scan)
+
+SPIDER_SOURCE = """
+import scrapy
+from scrapy.linkextractors import LinkExtractor
+from scrapy.loader import ItemLoader
+
+FIELD = "price"
+
+
+class Shop(scrapy.Spider):
+    rules = (LinkExtractor(restrict_css=[".pagination a", "li:contains('next') a"]),)
+
+    def parse(self, response):
+        for row in response.css(".product"):
+            yield {
+                "title": row.css("h3::text").get(),
+                "price": row.xpath("td/text()").get(),
+                "dyn": row.css(f"{FIELD}::text").get(),
+            }
+        loader = ItemLoader(response=response)
+        loader.add_css("name", "h1.title::text")
+        loader.add_xpath("desc", "//div[@class='desc']//text()")
+"""
+
+
+def _write_spider(tmp_path, name="spider.py", body=SPIDER_SOURCE):
+    p = tmp_path / name
+    p.write_text(body)
+    return str(p)
+
+
+def test_scan_finds_inline_selectors_without_importing(tmp_path, capsys):
+    # The gap Jan reported: a spider with inline .css()/.xpath(), an ItemLoader and a LinkExtractor has
+    # no schema object to audit, yet these are exactly the selectors a migration must classify. --scan
+    # parses the source (never imports it, so import-time setup can't fire) and reports file:line.
+    from frostwork.audit import main
+
+    target = _write_spider(tmp_path)
+    code = main(["--scan", target, "-v"])
+    out = capsys.readouterr().out
+    assert code == 1  # unsupported selectors present
+    assert "spider.py:10" in out and ":contains()" in out  # LinkExtractor restrict_css
+    assert "'.product'" in out and "'h3::text'" in out  # inline .css()
+    assert "'h1.title::text'" in out  # add_css takes (field_name, css) — the SECOND argument
+    assert "Many/One" in out  # relative `td/text()` names the rewrite
+    assert "not a literal" in out  # the f-string is skipped, not silently dropped
+    assert "5/7 literal selector(s) supported" in out
+
+
+def test_scan_json_and_directory_walk(tmp_path, capsys):
+    import json as _json
+
+    from frostwork.audit import main
+
+    _write_spider(tmp_path)
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "more.py").write_text("x = sel.xpath('//h1/text()')\n")
+    code = main(["--scan", str(tmp_path), "--json"])
+    payload = _json.loads(capsys.readouterr().out)
+    assert code == 1  # the spider's unsupported selectors are still there
+    assert payload["mode"] == "scan"
+    assert payload["summary"]["sites"] == 9  # 8 in spider.py (7 literal + 1 f-string) + 1 in pkg/
+    assert any(s["file"].endswith("more.py") and s["supported"] for s in payload["sites"])
+    dynamic = [s for s in payload["sites"] if s["supported"] is None]
+    assert len(dynamic) == 1 and dynamic[0]["selector"] is None
+
+
+def test_scan_all_supported_exits_zero(tmp_path, capsys):
+    from frostwork.audit import main
+
+    target = _write_spider(tmp_path, "clean.py", "v = response.css('h1::text')\nw = sel.xpath('//a/@href')\n")
+    assert main(["--scan", target]) == 0
+    assert "2/2 literal selector(s) supported (100%)" in capsys.readouterr().out
+
+
+def test_scan_reads_both_page_object_spellings(tmp_path, capsys):
+    # web-poet `field(selector)` / `Many(container, ...)` take the selector FIRST; the `Page` builders
+    # take a name first (`field(name, selector)`, `many(name, container, {...})`). Both are scanned.
+    from frostwork.audit import main
+
+    target = _write_spider(
+        tmp_path,
+        "objects.py",
+        "class P(FrostPage):\n"
+        "    title = field('h1::text')\n"
+        "    cards = Many('.card', name=field('.//h3/text()'))\n"
+        "    broken = field('li:contains(\"x\")::text')\n"
+        "p = Page().field('t', 'h2::text').many('rows', '.row', {'c': './/td/text()'})\n",
+    )
+    assert main(["--scan", target, "-v"]) == 1
+    out = capsys.readouterr().out
+    for selector in ("'h1::text'", "'.card'", "'.//h3/text()'", "'h2::text'", "'.row'", "'.//td/text()'"):
+        assert selector in out, selector
+    assert ":contains()" in out
+    assert "6/7 literal selector(s) supported" in out
+
+
+def test_scan_missing_path_and_unparseable_file(tmp_path, capsys):
+    from frostwork.audit import main
+
+    assert main(["--scan", str(tmp_path / "nope.py")]) == 2
+    assert "no such file or directory" in capsys.readouterr().err
+    # a file this Python can't parse is reported, not fatal
+    bad = _write_spider(tmp_path, "bad.py", "def broken(:\n")
+    assert main(["--scan", bad]) == 1
+    out = capsys.readouterr().out
+    assert "could not be parsed" in out and "1 file(s) UNPARSEABLE" in out
+
+
+def test_schema_audit_rejects_multiple_targets(tmp_path, capsys):
+    from frostwork.audit import main
+
+    a = _write(tmp_path, "from frostwork import Page\np = Page().field('t', 'h1::text')\n")
+    assert main([a, a]) == 2
+    assert "ONE module target" in capsys.readouterr().err

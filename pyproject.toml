@@ -37,10 +37,10 @@ webpoet = ["web-poet>=0.8"]
 frostwork-audit = "frostwork.audit:main"
 
 [project.urls]
-Homepage = "https://github.com/zytedata/frostwork"
-Repository = "https://github.com/zytedata/frostwork"
-Documentation = "https://github.com/zytedata/frostwork#readme"
-Issues = "https://github.com/zytedata/frostwork/issues"
+Homepage = "https://github.com/shaneaevans/frostwork"
+Repository = "https://github.com/shaneaevans/frostwork"
+Documentation = "https://github.com/shaneaevans/frostwork#readme"
+Issues = "https://github.com/shaneaevans/frostwork/issues"
 
 [tool.maturin]
 # Mixed Rust/Python project: pure-Python package lives under python/, the compiled core is dropped

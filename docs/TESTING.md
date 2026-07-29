@@ -9,6 +9,17 @@ lxml, and is that difference a documented divergence or a bug?*
 
 - **Oracle:** Parsel/lxml (`parsel.Selector(...).css(q).getall()`), the exact engine Scrapy ships,
   pinned to `parsel==1.11.0`.
+- **Oracle version matters — "byte-identical to lxml" means libxml2 ≥ 2.14.** Tree construction is
+  matched empirically to libxml2 2.14 (see [COMPATIBILITY.md](COMPATIBILITY.md)), and
+  `requirements-test.txt` cannot pin that: a wheel *vendors* its own libxml2, and the same lxml release
+  ships different ones per platform — lxml 6.1.1 carries libxml2 2.14.x in its manylinux/macOS wheels
+  and **2.11.9** in the Windows wheel, where CR-in-attribute-values and a raw `<` in text parse
+  differently. The same engine build therefore measures 0 DIVERGE on Linux/macOS and thousands on
+  Windows purely from the oracle. `tools/oracle.py` asserts `lxml.etree.LIBXML_VERSION >= (2, 14)` and
+  every harness entry point (`diff_lxml.py`, `enc_check.py`, both fuzzers) exits `2` with that
+  explanation rather than reporting divergences the engine is not accountable for; pass
+  `--allow-old-libxml2` (or set `FROSTWORK_ALLOW_OLD_LIBXML2=1`) to explore on such a platform anyway.
+  The same caveat applies to diffing Frostwork against a *crawl* whose lxml is older.
 - **Bar:** non-whitespace byte-identity per emitted value.
 - **Verdict per (input, selector):** `AGREE` · `WS` (equal after `.strip()`) · `SKIP-EXPECTED`
   (diverges on a documented tree-construction construct — foster-parenting, adoption agency, deep-`<p>`)
@@ -69,8 +80,17 @@ generators/oracle (which own lxml) drive it without a PyO3 build. CI runs the un
 differential gate, encoding parity, both differential fuzzers (crash-gated), and the Python suite on
 every change; the coverage-guided `cargo-fuzz` target is run locally/nightly.
 
+**The abi3 floor is a separate job.** The wheel is `abi3-py39`, but the pinned toolchain cannot be
+installed on Python 3.9 at all — `parsel`, `web-poet` *and* `pytest` each require ≥ 3.10 — so the floor
+runs `tools/abi3_smoke.py` instead: build the extension on a real 3.9 and exercise the dependency-free
+surface (primitive, strict/permissive, `Page`/`Item` + groups, `check`, `--scan`) with nothing but the
+standard library. Parity and the web-poet integration are covered by the jobs that own the oracle.
+`tools/abi3_smoke.py` is also the quickest local answer to "does this build work on this interpreter".
+
 ## Python
 
 `tests/test_python.py` (`.venv/bin/python -m pytest tests/test_python.py`) covers the primitive,
 `Page`/`Item`, the web-poet wiring (including that a multi-field page object triggers exactly **one**
-`extract` call), `Many`/`One`, and a Parsel cross-check.
+`extract` call), `Many`/`One`, and a Parsel cross-check. The cross-checks go through `_oracle()`, which
+skips them unless the installed lxml carries libxml2 ≥ 2.14 — same rule as the harness, so an
+environment with an older vendored libxml2 reports a skip rather than a spurious failure.

@@ -25,15 +25,13 @@ import subprocess
 import sys
 from collections import defaultdict
 
-import cssselect
-import lxml.etree
-import parsel
 from parsel import Selector as PS
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from families import FAMILIES, build_page  # tagged construct generators
 import conformant  # content-model-aware generator (the clean invariant gate)
 import foreign  # svg/math/template foreign-content generator (also a clean parity gate)
+import oracle  # oracle-toolchain guard: the verdicts only mean anything against libxml2 >= 2.14
 
 # unconstrained grammar generator (adversarial: measures SKIP-set distance, not a gate)
 try:  # optional: unconstrained-grammar generator for the adversarial (SKIP-distance) mode
@@ -247,7 +245,11 @@ def main():
                     help="unconstrained grammar docs (measures SKIP-set distance; not a gate)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--show", type=int, default=6)
+    oracle.add_argument(ap)
     args = ap.parse_args()
+    # Before spending any time: the gate is only meaningful against the pinned oracle's *libxml2*, which
+    # the lxml pin does not fix (see tools/oracle.py). Wrong oracle -> exit 2, not a bogus DIVERGE count.
+    oracle.require(args.allow_old_libxml2)
     rng = random.Random(args.seed)
 
     stat = defaultdict(int)
@@ -329,17 +331,17 @@ def main():
                 stat["pairs"] += 1
                 rows = mine_groups[gi] if gi < len(mine_groups) else []
                 containers = sel.xpath(container) if is_xpath(container) else sel.css(container)
-                oracle = [[(c.xpath(s) if is_xpath(s) else c.css(s)).getall() for s in subs]
-                          for c in containers]
-                if len(rows) != len(oracle):
+                theirs_rows = [[(c.xpath(s) if is_xpath(s) else c.css(s)).getall() for s in subs]
+                               for c in containers]
+                if len(rows) != len(theirs_rows):
                     stat["DIVERGE"] += 1
                     fam_div["(grouped)"]["DIVERGE"] += 1
                     if len(examples) < args.show:
                         examples.append(("grouped:rows", container, [f"{len(rows)} rows"],
-                                         [f"{len(oracle)} rows"], body.decode()[:220]))
+                                         [f"{len(theirs_rows)} rows"], body.decode()[:220]))
                     continue
                 cell_bad = None
-                for r_mine, r_theirs in zip(rows, oracle):
+                for r_mine, r_theirs in zip(rows, theirs_rows):
                     for si, sub in enumerate(subs):
                         if verdict(r_mine[si], r_theirs[si], "CONTROL", sub) in ("DIVERGE", "CRASH"):
                             cell_bad = (sub, r_mine[si], r_theirs[si])
@@ -395,10 +397,7 @@ def main():
 
     pairs = stat["pairs"] or 1
     print(f"PATH-2 DIFFERENTIAL vs lxml   seed={args.seed}  pairs={stat['pairs']}")
-    print(
-        f"  oracle: parsel={parsel.__version__} lxml={'.'.join(map(str, lxml.etree.LXML_VERSION))} "
-        f"libxml2={'.'.join(map(str, lxml.etree.LIBXML_VERSION))} cssselect={cssselect.__version__}\n"
-    )
+    print(oracle.banner() + "\n")
     print(f"  AGREE          {stat['AGREE']:>8}  ({100.0*stat['AGREE']/pairs:.2f}%)")
     print(f"  WS-only        {stat['WS']:>8}")
     print(f"  SKIP-EXPECTED  {stat['SKIP-EXPECTED']:>8}   (documented tree-construction, allowed)")

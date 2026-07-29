@@ -21,6 +21,8 @@ ROWS = [
     ("XPath upward", "flat", "//a/ancestor::div/@id", True),
     ("XPath text predicate", "flat", '//p[contains(.,"x")]/text()', True),
     ("XPath normalize-space", "flat", "normalize-space(//h1)", True),
+    ("XPath variable reference", "flat", "//*[@id=$pid]", False),
+    ("XPath unquoted operand", "flat", "//span[@x=2]/text()", False),
     ("Grouped basic container", "container", ".card", True),
     ("Grouped comma container", "container", "div, span", False),
     ("Grouped deferred container", "container", "div:has(a)", False),

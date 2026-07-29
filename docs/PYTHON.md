@@ -270,6 +270,53 @@ mixes schemas with heavy import-time setup, keep the page objects in a module th
 and audit that one. You can also expose an explicit mapping/iterable and audit only it with
 `frostwork-audit myproject.pages:SCHEMAS` (or `pages.py:SCHEMAS`).
 
+### Auditing code that has no schema yet — `--scan`
+
+The schema audit needs a `Page`/`FrostPage` object, so it cannot see selectors that live in plain
+spider code: inline `response.css(...)`/`.xpath(...)` in a callback, `ItemLoader.add_css`/`add_xpath`,
+`LinkExtractor(restrict_css=...)`. Those would have to be rewritten *before* they could be audited,
+which is backwards — the audit is what tells you whether a rewrite is needed. `--scan` answers the same
+question a step earlier: it parses the source with `ast` (**never imports it**, so import-time setup
+can't fire) and classifies every selector *literal*, with `file:line` for each site:
+
+```console
+$ frostwork-audit --scan myproject/spiders/            # a file, a directory, or several of each
+    ✗ spiders/shop.py:9 [LinkExtractor] "li:contains('next') a"
+        :contains() is unsupported (Frostwork does not match on text content)
+    ✗ spiders/shop.py:15 [xpath] 'td/text()'
+        relative XPath step — a per-container loop's selector. Port the loop to a Many/One group
+        (container + `.//`-anchored sub-fields); see docs/MIGRATION.md
+    ? spiders/shop.py:18 [css] not a literal (f-string/variable) — cannot audit statically
+
+5/7 literal selector(s) supported (71%), 2 unsupported, 1 skipped (not literals)   # exit status 1
+```
+
+A selector built at run time (f-string, concatenation, variable) cannot be decided statically, so it is
+reported as **skipped** rather than quietly dropped — as is any file this interpreter cannot parse
+(which also makes the exit status non-zero, since the scan is then incomplete). `-v` lists the supported
+sites too and `--json` emits the whole report (per-site `file`/`line`/`call`/`selector`/`supported`, plus
+a `summary` with the coverage ratio). This is a *migration sizing* tool, not a replacement for the
+schema audit: it sees call sites, not schemas, so it cannot check the member/sibling budget or the
+container↔sub-field relationship. Use both — `--scan` on un-ported code, the schema audit on page
+objects.
+
+### Dead selector or coverage gap? — `Item.empty_fields`
+
+Without a fallback, an empty column under `strict=False` has two possible causes: the engine does not
+support that selector, or the selector no longer matches the page. They *are* distinguishable, because
+support is **static** — audit once, then treat emptiness as a page signal:
+
+```python
+report = page.check()                    # startup / CI: any unsupported selector is a coverage gap
+item = page.extract(html)                # per response
+for name in item.empty_fields():         # supported + empty  =>  the page changed
+    log.warning("selector matched nothing: %s", name)
+```
+
+`empty_fields()` returns every declared field that matched nothing (a `many`/`one` group with no rows
+counts; a field that matched an empty string does not — it matched). Under the default `strict=True` the
+unsupported case cannot reach extraction at all, so every name it returns is a dead selector.
+
 ## Design notes
 
 - **One implementation, one gate.** Python never re-implements matching; it calls the Rust `extract`.

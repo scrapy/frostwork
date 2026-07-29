@@ -23,7 +23,9 @@
 //! `ancestor-or-self::`, downward synonyms like `child::`), a range/combined positional predicate
 //! (`[position()<n]`, `[N]`/`[last()]` plus a second predicate), a positional predicate on the sibling
 //! axis (`following-sibling::td[1]`), a text-content predicate in any other shape, other functions
-//! (`count()`, `string()`) — yields no members (the query is then unsupported: empty column, no fallback).
+//! (`count()`, `string()`), a variable reference (`$var`), a comparison against anything but a quoted
+//! string literal (`[@a=2]`, `[@a=b]`) — yields no members (the query is then unsupported: empty
+//! column, no fallback).
 
 use crate::selector::{
     AttrPred, Comb, Compound, Has, Nth, ReversePos, Selector, Terminal, TextAxis, TextOp, TextPred,
@@ -66,6 +68,9 @@ fn compile_members_depth(q: &str, depth: u32) -> Vec<Selector> {
         return Vec::new();
     }
     let q = q.trim();
+    if has_variable_ref(q) {
+        return Vec::new(); // `$var` has no binding here — see `has_variable_ref`
+    }
     // `normalize-space(inner)` is the whole query (XPath errors on unioning a string with a node-set),
     // so handle it before the union split. It wraps the inner path's terminal; the inner must be a
     // single node-set member (no union / `or` expansion). `normalize-space()` / `normalize-space(.)`
@@ -457,8 +462,30 @@ fn split_top<'a>(s: &'a str, needle: &str) -> Vec<&'a str> {
     parts
 }
 
-fn strip_quotes(v: &str) -> &str {
-    v.strip_prefix(['"', '\'']).and_then(|x| x.strip_suffix(['"', '\''])).unwrap_or(v)
+/// Does the query carry an XPath **variable reference** (`$pid`) outside a string literal? Parsel binds
+/// variables at call time (`sel.xpath('//*[@id=$pid]', pid=…)`); Frostwork's API takes no bindings, so
+/// there is nothing to substitute. Without this check `[@id=$pid]` parsed as a comparison against the
+/// literal text `"$pid"` — reporting the query SUPPORTED and then matching an element whose id really is
+/// `$pid` (a wrong value), or silently nothing. Reject the whole query instead: unsupported, empty
+/// column, and the audit says so. Any `$` outside a literal is a variable reference or a syntax error in
+/// XPath, so a bare `$` is rejected too; `$` *inside* a literal (`[contains(@id,"$p")]`, prices) is fine.
+pub(crate) fn has_variable_ref(q: &str) -> bool {
+    let b = q.as_bytes();
+    let mut quote = 0u8;
+    for &c in b {
+        if quote != 0 {
+            if c == quote {
+                quote = 0;
+            }
+            continue;
+        }
+        match c {
+            b'"' | b'\'' => quote = c,
+            b'$' => return true,
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Parse a reverse-position predicate to its 1-based FROM-END position: `last()` -> 1, `last()-k` ->
@@ -509,9 +536,11 @@ fn text_axis(s: &str) -> Option<TextAxis> {
     }
 }
 
-/// The right operand must be a SINGLE quoted string literal (`"v"` / `'v'`) — start and end with the
+/// The compared operand must be a SINGLE quoted string literal (`"v"` / `'v'`) — start and end with the
 /// same quote, nothing after. Rejects an `or`-joined or otherwise compound right side (which would not
-/// be a lone literal), so those predicates stay unsupported rather than parsing a bogus needle.
+/// be a lone literal), so those predicates stay unsupported rather than parsing a bogus needle. Used for
+/// both text predicates and attribute tests: an unquoted operand (a number, a bare name, a variable) has
+/// non-byte-compare XPath semantics, so it must not be taken for a literal.
 fn single_literal(s: &str) -> Option<String> {
     let b = s.as_bytes();
     if b.len() >= 2 && (b[0] == b'"' || b[0] == b'\'') && b[b.len() - 1] == b[0] {
@@ -539,7 +568,11 @@ fn parse_predicate_alts(pred: &str) -> Option<Vec<Vec<AttrPred>>> {
 }
 
 /// Parse one attribute test (`@a`, `@a="v"`, `contains(@a,"v")`, `starts-with(@a,"v")`) into an
-/// `AttrPred`. Anything else (positional, `text()`, function) is unsupported.
+/// `AttrPred`. Anything else (positional, `text()`, function) is unsupported. The compared value must be
+/// a QUOTED string literal: XPath gives `[@a=2]` numeric semantics (`number(@a)=2`, so `a="02"` matches)
+/// and `[@a=b]` node-set semantics (compare against child `<b>` elements' string-value), neither of which
+/// a byte compare against the raw text `2`/`b` reproduces — both used to yield wrong values (see
+/// `single_literal`), so an unquoted operand is now unsupported (empty column).
 fn parse_one_attr(t: &str, out: &mut Vec<AttrPred>) -> Option<()> {
     if let Some(inner) = t.strip_prefix("contains(").and_then(|r| r.strip_suffix(")")) {
         let (name, val) = fn_args(inner)?;
@@ -547,14 +580,16 @@ fn parse_one_attr(t: &str, out: &mut Vec<AttrPred>) -> Option<()> {
     } else if let Some(inner) = t.strip_prefix("starts-with(").and_then(|r| r.strip_suffix(")")) {
         let (name, val) = fn_args(inner)?;
         out.push(AttrPred::Prefix(name, val));
-    } else if let Some(rest) = t.strip_prefix('@') {
+    } else {
+        // not `@name…` -> positional / text() / function predicate -> unsupported
+        let rest = t.strip_prefix('@')?;
         if let Some(eq) = rest.find('=') {
             let name = rest[..eq].trim();
             if !valid_name(name) {
                 return None;
             }
-            let val = strip_quotes(rest[eq + 1..].trim());
-            out.push(AttrPred::Eq(name.to_string(), val.to_string()));
+            let val = single_literal(rest[eq + 1..].trim())?;
+            out.push(AttrPred::Eq(name.to_string(), val));
         } else {
             let name = rest.trim();
             if !valid_name(name) {
@@ -562,21 +597,20 @@ fn parse_one_attr(t: &str, out: &mut Vec<AttrPred>) -> Option<()> {
             }
             out.push(AttrPred::Exists(name.to_string()));
         }
-    } else {
-        return None; // positional / text() / function predicate -> unsupported
     }
     Some(())
 }
 
-/// Parse `@name , "value"` (a contains/starts-with argument list).
+/// Parse `@name , "value"` (a contains/starts-with argument list). The value must be a quoted literal —
+/// `contains(@a,2)` / `contains(@a,$v)` is a numeric/variable operand, not a byte compare.
 fn fn_args(inner: &str) -> Option<(String, String)> {
     let comma = inner.find(',')?;
     let name = inner[..comma].trim().strip_prefix('@')?.trim();
     if !valid_name(name) {
         return None;
     }
-    let val = strip_quotes(inner[comma + 1..].trim());
-    Some((name.to_string(), val.to_string()))
+    let val = single_literal(inner[comma + 1..].trim())?;
+    Some((name.to_string(), val))
 }
 
 #[cfg(test)]
@@ -671,6 +705,29 @@ mod tests {
         assert!(!ok("//ancestor::div")); // axis (has `::`, no node test after `/`)
         assert!(!ok("count(//a)")); // function
         assert_eq!(members("//@href"), 0); // bare descendant attr: no subject element
+    }
+
+    #[test]
+    fn variable_refs_and_unquoted_operands_reject() {
+        // A variable reference has no binding in this API (parsel passes them at call time), and an
+        // unquoted operand is a numeric / node-set comparison in XPath — neither is a byte compare
+        // against the raw text, so both are unsupported (empty column) rather than wrong values.
+        assert_eq!(members("//*[@id=$pid]"), 0); // reported: audited as supported, matched `id="$pid"`
+        assert_eq!(members("//div[@id=$pid]/text()"), 0);
+        assert_eq!(members("//span[contains(@x,$v)]/text()"), 0);
+        assert_eq!(members("//a[starts-with(@href,$p)]/@href"), 0);
+        assert_eq!(members("//div[.=$v]"), 0);
+        assert_eq!(members("//li[$n]"), 0);
+        assert_eq!(members("//a | //b[@id=$pid]"), 0); // one bad union member sinks the query
+        assert_eq!(members("normalize-space(//a[@id=$pid])"), 0);
+        assert_eq!(members("//div[@id=foo]/text()"), 0); // node-set compare (child <foo>), not "foo"
+        assert_eq!(members("//span[@x=2]/text()"), 0); // numeric: `x="02"` matches in lxml
+        assert_eq!(members("//span[contains(@x,2)]"), 0);
+        // `$` inside a string literal is just data (prices, `$`-prefixed ids) — still supported.
+        assert!(ok("//div[contains(@id,\"$p\")]/text()"));
+        assert!(ok("//div[@id=\"$pid\"]"));
+        assert!(ok("//span[.=\"$4.99\"]"));
+        assert!(ok("//div[@id='$x']//a/@href"));
     }
 
     #[test]

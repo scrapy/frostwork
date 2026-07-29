@@ -34,6 +34,7 @@ level, public Python APIs validate schemas and raise `UnsupportedSelector` by de
 | class / id (`.c`, `#i`) | ✅ supported |
 | attribute `[a]`, `[a=v]` | ✅ supported |
 | attribute operators `[a^=v]` `[a$=v]` `[a*=v]` `[a~=v]` `[a\|=v]` | ✅ supported (empty operand matches nothing; case-sensitive — matches lxml) |
+| attribute value **unquoted**: a CSS identifier only (`[a=v]`, `[a=-v]`, `[a=café]`) | ✅ supported. A non-identifier unquoted value (`[a=2]`, `[href^=/p]`, `[a=$v]`, `[a=--v]`, `[a=a.b]`) is ∅ unsupported (empty) — cssselect rejects those as a syntax error, so answering them would return values for a selector Parsel refuses. Quote it (`[a="2"]`, `[href^="/p"]`) — quoted values are unrestricted |
 | `:not(<compound>)` incl. compound arg (`a:not(a.x)`) and chained (`:not(.x):not(.y)`) | ✅ supported |
 | descendant (`a b`), child (`a > b`) | ✅ supported |
 | adjacent / general sibling (`a + b`, `a ~ b`), incl. chains (`a ~ b ~ c`), a descendant/child **base** (`.list li ~ li`), and a trailing descendant/child **step** (`a + b c`, `input + label p::text`) | ✅ supported |
@@ -61,7 +62,8 @@ level, public Python APIs validate schemas and raise `UnsupportedSelector` by de
 | document-rooted paths (`//div`, `/html/body/p`); `.`-relative **descendant** (`.//a`) | ✅ supported |
 | `.`-relative **child** anchor (`./div`, `./h3/text()`) | ∅ unsupported (empty) — the depth-agnostic matcher can't enforce a child anchor on the first step, so it is rejected rather than over-matched like `.//`. Use `.//` (descendant) instead. |
 | `//`→descendant, `/`→child steps; `*` and tag node tests | ✅ supported |
-| predicates `[@a]`, `[@a="v"]`, `[contains(@a,"v")]`, `[starts-with(@a,"v")]`, `[… and …]`, `[… or …]` | ✅ supported (a predicate `or` is distributed into union members) |
+| predicates `[@a]`, `[@a="v"]`, `[contains(@a,"v")]`, `[starts-with(@a,"v")]`, `[… and …]`, `[… or …]` | ✅ supported (a predicate `or` is distributed into union members). The compared value must be a **quoted string literal** |
+| comparison against a NON-literal operand — a variable reference (`[@id=$pid]`), a number (`[@a=2]`), or a bare name (`[@a=b]`) | ∅ unsupported (empty) — Frostwork's API takes no variable bindings (unlike `sel.xpath(q, pid=…)`), and XPath gives `[@a=2]` numeric semantics (`a="02"` matches) and `[@a=b]` node-set semantics (compare against child `<b>` elements), none of which is a byte compare. Quote the value if a literal is meant. A `$` **inside** a literal (`[contains(@id,"$p")]`) is just data |
 | terminals `text()` (self), `//text()` (descendant), `/@attr`, `//@attr` (descendant-or-self), bare element → node | ✅ supported |
 | unions (`a \| b`) | ✅ supported — one document-ordered, node-deduped column (same as a CSS comma group) |
 | `normalize-space(path)` as the whole query | ✅ supported — a **scalar**: the string-value of the FIRST matched node (element → concat of its subtree text; `/text()` → first text node; `/@a` → attr), whitespace-collapsed. Always exactly one value (`""` if nothing matched). `normalize-space()` / `normalize-space(.)` (context node) and `normalize-space` inside a predicate are ∅ unsupported. |

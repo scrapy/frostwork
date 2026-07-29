@@ -575,6 +575,28 @@ class Item:
         i = self._index(name)
         return None if i is None else _shape(self._cols[i], self._cards[i], self._transforms[i])
 
+    def empty_fields(self) -> List[str]:
+        """Declared fields that matched **nothing** on this page (a `many`/`one` group with no rows
+        counts as empty; a field that matched an empty string does not — it matched).
+
+        This is the runtime half of dead-selector detection. Frostwork has no fallback, so an empty
+        column under ``strict=False`` can mean two very different things — and they are distinguishable,
+        because support is *static*: audit the schema once with :meth:`Page.check` (or
+        ``frostwork-audit``) and any field it reports **supported** that is empty here is a selector that
+        no longer matches the page, not an engine gap. Under the default ``strict=True`` the unsupported
+        case cannot arise at all, so every name returned here is a dead selector::
+
+            report = page.check()                     # once, at startup / in CI
+            item = page.extract(html)
+            for name in item.empty_fields():          # per response
+                log.warning("selector matched nothing: %s", name)
+        """
+        out = [n for n, col in zip(self._names, self._cols) if not col]
+        for name, g in self._grouped.items():
+            if not g:  # [] for an empty `many`, None for a `one` with no container
+                out.append(name)
+        return out
+
     def to_dict(self) -> dict:
         """The whole item as a dict: flat fields shaped by cardinality/``map=``, plus `many`/`one`
         groups as row lists / a row / ``None``."""

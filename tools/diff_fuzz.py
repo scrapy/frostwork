@@ -36,6 +36,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import conformant  # well-formed base-page generator
 import foreign  # svg/math/template base pages (mutating foreign content is a rich desync surface)
 from diff_lxml import run_engine, parsel_vals, verdict  # reuse the exact engine driver + oracle + grader
+import oracle  # same libxml2 >= 2.14 requirement (an older oracle invents divergences of its own)
 
 CORPUS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "fuzz", "corpus", "extract")
 
@@ -239,7 +240,9 @@ def main():
     ap.add_argument("--only", help="apply only this mutation (triage a single class)")
     ap.add_argument("--gate", action="store_true", help="exit nonzero if any CRASH (for CI)")
     ap.add_argument("--show", type=int, default=8)
+    oracle.add_argument(ap)
     args = ap.parse_args()
+    oracle.require(args.allow_old_libxml2)
     if args.only and args.only not in ALL_MUTS:
         sys.exit(f"unknown --only {args.only!r}; choices: {', '.join(ALL_MUTS)}")
     rng = random.Random(args.seed)

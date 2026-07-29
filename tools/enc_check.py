@@ -1,7 +1,10 @@
 """Encoding parity: pages in various charsets (non-ASCII text + attr values) vs Parsel given the
 same label. Validates the engine decodes emitted values per the resolved encoding."""
-import subprocess, json, os
+import subprocess, json, os, sys
 from parsel import Selector as PS
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import oracle  # parity is defined against libxml2 >= 2.14 here too (meta sniffing moved between them)
+oracle.require()
 BIN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "target", "release", "differ")
 
 def engine(body, sels, label):
