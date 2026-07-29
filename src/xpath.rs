@@ -580,7 +580,9 @@ fn parse_one_attr(t: &str, out: &mut Vec<AttrPred>) -> Option<()> {
     } else if let Some(inner) = t.strip_prefix("starts-with(").and_then(|r| r.strip_suffix(")")) {
         let (name, val) = fn_args(inner)?;
         out.push(AttrPred::Prefix(name, val));
-    } else if let Some(rest) = t.strip_prefix('@') {
+    } else {
+        // not `@name…` -> positional / text() / function predicate -> unsupported
+        let rest = t.strip_prefix('@')?;
         if let Some(eq) = rest.find('=') {
             let name = rest[..eq].trim();
             if !valid_name(name) {
@@ -595,8 +597,6 @@ fn parse_one_attr(t: &str, out: &mut Vec<AttrPred>) -> Option<()> {
             }
             out.push(AttrPred::Exists(name.to_string()));
         }
-    } else {
-        return None; // positional / text() / function predicate -> unsupported
     }
     Some(())
 }

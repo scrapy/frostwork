@@ -20,6 +20,23 @@ PRODUCT = (
 )
 
 
+def _oracle():
+    """The Parsel/lxml oracle for a cross-check, or skip the test.
+
+    Value parity is only defined against **libxml2 >= 2.14** (docs/TESTING.md, tools/oracle.py): an
+    older vendored libxml2 parses CR-in-attribute-values and a raw `<` in text differently, so a
+    mismatch there is the oracle's behaviour, not Frostwork's. A pinned lxml does not pin the libxml2 it
+    carries — the lxml 6.1.1 Windows wheel ships 2.11.9 — so this has to be checked at run time rather
+    than assumed from requirements-test.txt.
+    """
+    parsel = pytest.importorskip("parsel")
+    etree = pytest.importorskip("lxml.etree")
+    if etree.LIBXML_VERSION < (2, 14):
+        got = ".".join(map(str, etree.LIBXML_VERSION))
+        pytest.skip(f"oracle libxml2 is {got}; value parity is defined against >= 2.14")
+    return parsel
+
+
 def _count_scans(monkeypatch, cls, calls):
     """Wrap a FrostPage class's pre-compiled native Plan with a proxy that counts each scan, so a test
     can assert every field is answered by ONE pass (the plan is compiled once, at class creation)."""
@@ -127,29 +144,44 @@ def test_extract_deeply_nested_is_declines_without_crashing():
 
 def test_extract_releases_gil_for_parallel_scans():
     # the scan runs without the GIL, so threads scale; this asserts real (not serialized) parallelism.
+    import os
     import threading
     import time
+
+    if (os.cpu_count() or 1) < 2:
+        pytest.skip("needs >= 2 cores to observe parallelism")
 
     html = b"<html><body>" + b"<div class=x><span class=p>v</span></div>" * 20000 + b"</body></html>"
     plan = frostwork.Page().field_all("p", ".p::text")
     plan.extract(html)  # compile once
 
-    def work():
-        for _ in range(4):
+    ROUNDS, THREADS, REPS = 8, 2, 3
+
+    def work(rounds):
+        for _ in range(rounds):
             plan.extract(html)
 
-    t0 = time.perf_counter()
-    work()
-    work()
-    serial = time.perf_counter() - t0
+    def best_of(fn):
+        # Take the MINIMUM of a few runs. Scheduler interference on a shared CI runner only ever makes
+        # a measurement slower, so the min is the cleanest estimate of each mode's real cost — a single
+        # sample of a ~10ms workload is what made this assertion flaky (macos runner: ratio 1.24).
+        return min((fn() for _ in range(REPS)), default=0.0)
 
-    threads = [threading.Thread(target=work) for _ in range(2)]
-    t0 = time.perf_counter()
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-    parallel = time.perf_counter() - t0
+    def timed_serial():
+        t0 = time.perf_counter()
+        work(ROUNDS * THREADS)  # same total work as the threaded run below
+        return time.perf_counter() - t0
+
+    def timed_parallel():
+        threads = [threading.Thread(target=work, args=(ROUNDS,)) for _ in range(THREADS)]
+        t0 = time.perf_counter()
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        return time.perf_counter() - t0
+
+    serial, parallel = best_of(timed_serial), best_of(timed_parallel)
 
     # Fully serialized would give ~1.0x; require a clear win while tolerating loaded CI machines.
     assert serial / parallel > 1.3, f"no parallel speedup (serial={serial:.3f}s parallel={parallel:.3f}s)"
@@ -571,7 +603,7 @@ def test_flat_and_grouped_one_pass(monkeypatch):
 
 
 def test_many_matches_parsel_per_container():
-    parsel = pytest.importorskip("parsel")
+    parsel = _oracle()
     import frostwork
 
     body = GRID
@@ -588,7 +620,7 @@ def test_many_matches_parsel_per_container():
 def test_matches_parsel_across_selectors():
     """Values crossing the FFI boundary equal Parsel's on a normal page (spot cross-check;
     the exhaustive gate is the Rust differential)."""
-    parsel = pytest.importorskip("parsel")
+    parsel = _oracle()
     html = (
         "<html><body><div class='product'><h1>Nice Widget</h1>"
         "<span class='price'>$9.99</span>"
@@ -793,7 +825,7 @@ def test_frostpage_check_schema_and_strict_class_def():
 
 
 def test_xpath_union_or_descendant_attr_match_parsel():
-    parsel = pytest.importorskip("parsel")
+    parsel = _oracle()
     body = (
         b"<html><body><a href=/1>A</a><b>B</b><a href=/2 x=1>C</a>"
         b"<div id=d href=/self><p><a href=/3>x</a><img src=/i href=/4></p></div></body></html>"
@@ -813,7 +845,7 @@ def test_xpath_union_or_descendant_attr_match_parsel():
 
 
 def test_positional_matches_parsel():
-    parsel = pytest.importorskip("parsel")
+    parsel = _oracle()
     body = b"<ul><li>a</li>t<li>b</li><span>s</span><li>c</li></ul><ol><li>x</li><li>y</li></ol>"
     css = [
         "li:first-child::text", "li:nth-child(2)::text", "li:nth-of-type(3)::text",
@@ -844,7 +876,7 @@ def test_positional_matches_parsel():
 
 
 def test_normalize_space_matches_parsel():
-    parsel = pytest.importorskip("parsel")
+    parsel = _oracle()
     body = (
         b"<html><body><h1>  Hello   <b>big</b>  world </h1><h1> second </h1>"
         b"<a href='  /x '>k</a><p>a\tb\n c</p><ul><li>  </li><li>i2</li></ul></body></html>"
@@ -867,7 +899,7 @@ def test_normalize_space_matches_parsel():
 def test_check_reason_matches_parsel_supported_boundary():
     # The DECISION must agree with the engine: a query parsel accepts but Frostwork doesn't support
     # is reported unsupported; a supported one is reported supported and yields the same column.
-    parsel = pytest.importorskip("parsel")
+    parsel = _oracle()
     html = b"<ul><li class=x>a</li><li>b</li></ul>"
     # a reverse position IS now supported in the attached ::text form; the detached subtree form isn't
     supported = "li:last-child::text"
@@ -884,7 +916,7 @@ def test_check_reason_matches_parsel_supported_boundary():
 def test_new_axis_and_has_selectors_match_parsel():
     # end-to-end parity for the newly-added coverage: CSS :has(), XPath following-sibling::, and the
     # upward ancestor::/parent:: axes — each cross-checked against parsel through the Python bindings.
-    parsel = pytest.importorskip("parsel")
+    parsel = _oracle()
     # double-quoted attrs so an outer-HTML (raw-source) column equals lxml's re-serialization — the
     # raw-source-vs-reserialized quote style is a documented divergence, out of scope for this parity check
     html = (
@@ -914,7 +946,7 @@ def test_new_axis_and_has_selectors_match_parsel():
 
 def test_text_content_predicates_match_parsel():
     # XPath text-content predicates on the subject: `.`/`text()` string tests, cross-checked vs parsel.
-    parsel = pytest.importorskip("parsel")
+    parsel = _oracle()
     html = (
         b"<html><body>"
         b"<h2>Price</h2><h2> Price </h2><h2>x<b>bold</b>Price</h2>"
@@ -940,7 +972,7 @@ def test_text_content_predicates_match_parsel():
 
 def test_is_where_selectors_match_parsel():
     # CSS :is()/:where() in the supported `[tag|*]:is(...)` shape, cross-checked vs parsel.
-    parsel = pytest.importorskip("parsel")
+    parsel = _oracle()
     html = (
         b"<html><body><h1>A</h1><h2>B</h2><h3>C</h3>"
         b'<div class="a">1</div><div class="b">2</div><div class="c">3</div>'
@@ -958,7 +990,7 @@ def test_nonsubject_sibling_predicate_matches_parsel():
     # Case B: a deferred predicate on a PRECEDING sibling, value from the later sibling — the
     # label->value + filter pattern. XPath (`//C[.="x"]/following-sibling::S`) and CSS (`C:has(..) ~ S`)
     # are both evaluated correctly by lxml/cssselect, so parsel is a valid DIRECT oracle.
-    parsel = pytest.importorskip("parsel")
+    parsel = _oracle()
     html = (
         b"<html><body>"
         b"<dl><dt>Price</dt><dd>$10</dd><dt>Size</dt><dd>L</dd><dt>Price</dt><dd>$20</dd></dl>"
@@ -994,7 +1026,7 @@ def test_has_widened_inners_match_correct_semantics():
     # Frostwork implements the correct semantics (a documented divergence in our favor). We can't use
     # parsel's `.css(":has(...)")` as the oracle (it errors), so the oracle is a parsel/lxml ancestor
     # walk: `E:has(F)` = the E-nodes that are an ancestor (or, for `:has(> F)`, the parent) of some F-node.
-    parsel = pytest.importorskip("parsel")
+    parsel = _oracle()
     html = (
         b"<html><body>"
         b'<div id="d1"><span data-x="1">a</span></div>'
@@ -1052,7 +1084,7 @@ def test_is_where_correct_and_semantics_diverges_from_cssselect_bug():
     # (a DOCUMENTED divergence: cssselect 1.4.0 mis-translates it, ORing the base condition with the
     # alternatives). We can't use parsel directly as the oracle here (it IS the bug); instead compare
     # Frostwork against parsel on the equivalent correct comma-EXPANSION, which cssselect handles fine.
-    parsel = pytest.importorskip("parsel")
+    parsel = _oracle()
     html = (
         b'<html><body><div class="a x">1</div><div class="a c">2</div><div class="a">3</div>'
         b'<div class="b x">4</div><div class="c">5</div>'

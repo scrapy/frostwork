@@ -80,8 +80,17 @@ generators/oracle (which own lxml) drive it without a PyO3 build. CI runs the un
 differential gate, encoding parity, both differential fuzzers (crash-gated), and the Python suite on
 every change; the coverage-guided `cargo-fuzz` target is run locally/nightly.
 
+**The abi3 floor is a separate job.** The wheel is `abi3-py39`, but the pinned toolchain cannot be
+installed on Python 3.9 at all — `parsel`, `web-poet` *and* `pytest` each require ≥ 3.10 — so the floor
+runs `tools/abi3_smoke.py` instead: build the extension on a real 3.9 and exercise the dependency-free
+surface (primitive, strict/permissive, `Page`/`Item` + groups, `check`, `--scan`) with nothing but the
+standard library. Parity and the web-poet integration are covered by the jobs that own the oracle.
+`tools/abi3_smoke.py` is also the quickest local answer to "does this build work on this interpreter".
+
 ## Python
 
 `tests/test_python.py` (`.venv/bin/python -m pytest tests/test_python.py`) covers the primitive,
 `Page`/`Item`, the web-poet wiring (including that a multi-field page object triggers exactly **one**
-`extract` call), `Many`/`One`, and a Parsel cross-check.
+`extract` call), `Many`/`One`, and a Parsel cross-check. The cross-checks go through `_oracle()`, which
+skips them unless the installed lxml carries libxml2 ≥ 2.14 — same rule as the harness, so an
+environment with an older vendored libxml2 reports a skip rather than a spurious failure.

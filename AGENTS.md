@@ -55,7 +55,8 @@ pre-release check. Individual targets (`gate`, `fuzz-smoke`, `bench`) run their 
   toolchain (libxml2 ≥ 2.14 — a pinned lxml does *not* pin its vendored libxml2); `diff_lxml.py` is the gate;
   `conformant.py`/`families.py`/`foreign.py` generate test pages; `enc_check.py` (encoding parity),
   `sel_fuzz.py`/`diff_fuzz.py` (selector + malformed-HTML fuzz), `soak.py` (multi-seed soak),
-  `support_snapshot.py` (regenerates/checks `docs/SUPPORT_SNAPSHOT.md`), `bench_matrix.py`/
+  `support_snapshot.py` (regenerates/checks `docs/SUPPORT_SNAPSHOT.md`), `abi3_smoke.py` (stdlib-only
+  floor check — the pinned toolchain can't be installed on py3.9), `bench_matrix.py`/
   `bench_corpus.py`/`bench_mem.py` (benchmarks).
 - `docs/` — `COMPATIBILITY.md` (contract), `DESIGN.md` (architecture), `PYTHON.md` (bindings),
   `TESTING.md`, `BENCHMARKS.md`, `MIGRATION.md` (from Parsel), `SUPPORT_SNAPSHOT.md` (generated).
