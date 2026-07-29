@@ -48,9 +48,11 @@ pre-release check. Individual targets (`gate`, `fuzz-smoke`, `bench`) run their 
   `src/bin/{differ,bench}.rs` back the Python harness.
 - `python/frostwork/` — the Python package (pure Python over the `_frostwork` extension): `page.py`
   (`extract` wrapper + `Page`/`Item`), `webpoet.py` (`FrostPage`/`field` web-poet integration, soft
-  dep), `audit.py` (`frostwork-audit` CLI). `pyproject.toml` = maturin build;
-  `tests/test_python.py` = pytest suite.
-- `tools/` — Python differential/benchmark harness (needs `parsel`). `diff_lxml.py` is the gate;
+  dep), `audit.py` (`frostwork-audit` CLI: schema audit + `--scan`), `scan.py` (ast-based selector-literal
+  scan for un-ported source — inline `.css()`, ItemLoaders, LinkExtractors). `pyproject.toml` = maturin
+  build; `tests/test_python.py` = pytest suite.
+- `tools/` — Python differential/benchmark harness (needs `parsel`). `oracle.py` guards the oracle
+  toolchain (libxml2 ≥ 2.14 — a pinned lxml does *not* pin its vendored libxml2); `diff_lxml.py` is the gate;
   `conformant.py`/`families.py`/`foreign.py` generate test pages; `enc_check.py` (encoding parity),
   `sel_fuzz.py`/`diff_fuzz.py` (selector + malformed-HTML fuzz), `soak.py` (multi-seed soak),
   `support_snapshot.py` (regenerates/checks `docs/SUPPORT_SNAPSHOT.md`), `bench_matrix.py`/

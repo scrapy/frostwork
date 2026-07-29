@@ -3,10 +3,17 @@
 Fast HTML extraction for Python and Rust, without a DOM.
 
 Frostwork runs a set of CSS or XPath selectors in one pass over an HTML response. It does not build
-a document tree, and it does not walk the document again for each field. Typical multi-field
-extraction in the benchmark suite is 10–20× faster than Parsel, rising to 40× or more on larger
-schemas. Zyte's production-selector corpus has a 10.5× median speedup. Working memory stays small
-because Frostwork retains parser state and pending matches, not a tree containing the whole page.
+a document tree, and it does not walk the document again for each field. Every speedup figure depends
+on the workload, so each one below names its own; [docs/BENCHMARKS.md](docs/BENCHMARKS.md) is the
+canonical source and the only place they are maintained:
+
+- **12–20×** faster than Parsel on realistic synthetic pages at typical field counts, up to **40–54×**
+  on selector-rich schemas (the Rust benchmark matrix).
+- **10.5×** median (12.4× aggregate) on Zyte's production-selector corpus — 788 real pages, each with
+  its own production selectors, through the Python binding.
+
+Working memory stays small because Frostwork retains parser state and pending matches, not a tree
+containing the whole page.
 
 Python is a first-class API. The bindings provide a low-level `extract()` function, declarative
 `Page` objects, and a `FrostPage` integration for web-poet and scrapy-poet. Frostwork is designed to
@@ -146,7 +153,9 @@ The common scraping selectors are covered:
 
 Some valid CSS and XPath expressions cannot be answered without retaining more tree state and remain
 unsupported. Reverse positions and `:has()` also have placement restrictions. Python validates these
-by default; `check()` provides the same audit as a report for tooling and CI. The
+by default; `check()` provides the same audit as a report for tooling and CI, and
+`frostwork-audit --scan myproject/spiders/` classifies the selector literals in code that has no
+Frostwork schema yet (inline `.css()`/`.xpath()`, ItemLoaders, LinkExtractors) without importing it. The
 [compatibility contract](docs/COMPATIBILITY.md) lists every supported, divergent, and unsupported form
 with examples.
 

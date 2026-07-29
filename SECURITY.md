@@ -27,6 +27,6 @@ malformed or adversarial input must never cause memory unsafety, and must not cr
 ## Reporting
 
 Please report suspected vulnerabilities privately using GitHub's
-[private vulnerability reporting](https://github.com/zytedata/frostwork/security/advisories/new)
+[private vulnerability reporting](https://github.com/shaneaevans/frostwork/security/advisories/new)
 rather than opening a public issue. Include a minimal reproducer (the HTML bytes and the selector
 list) where possible. We aim to acknowledge reports within a few business days.

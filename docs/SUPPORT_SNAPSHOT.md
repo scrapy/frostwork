@@ -16,6 +16,8 @@ contract remains in `COMPATIBILITY.md`; this table is a drift tripwire for headl
 | XPath upward | flat | `//a/ancestor::div/@id` | yes |
 | XPath text predicate | flat | `//p[contains(.,"x")]/text()` | yes |
 | XPath normalize-space | flat | `normalize-space(//h1)` | yes |
+| XPath variable reference | flat | `//*[@id=$pid]` | no |
+| XPath unquoted operand | flat | `//span[@x=2]/text()` | no |
 | Grouped basic container | container | `.card` | yes |
 | Grouped comma container | container | `div, span` | no |
 | Grouped deferred container | container | `div:has(a)` | no |

@@ -38,6 +38,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import conformant
 import foreign
 from diff_lxml import run_engine, run_support, parsel_vals, verdict
+import oracle  # same libxml2 >= 2.14 requirement as the gate (parsel is the oracle here too)
 
 TAGS = ["div", "p", "span", "a", "li", "td", "th", "ul", "ol", "dl", "dt", "dd", "option", "select",
         "table", "tr", "b", "em", "strong", "i", "small", "label", "img", "input", "section",
@@ -47,6 +48,10 @@ IDS = [f"i{i}" for i in range(12)] + ["tpl1", "s1"]
 ATTRS = ["class", "id", "data-k", "href", "src", "value", "title", "alt"]
 ATTR_VALS = ["v1", "c1", "shared", "/p1", "/a1", "s1.png", "x", "日本", "café", ""]
 ATTR_OPS = ["=", "^=", "$=", "*=", "~=", "|="]
+# unquoted attribute values: valid CSS identifiers (cssselect parses them) mixed with non-idents
+# (cssselect raises SelectorSyntaxError, so the engine must stay empty — see `is_css_ident`).
+UNQUOTED_VALS = ["v1", "c1", "shared", "-v", "_v", "café", "2", "2v", "1e5", "--v", "$v", "/p1",
+                 "s1.png", "#v", "", "-"]
 COMBS = [" ", " > ", " + ", " ~ "]
 TERMS = ["", "::text", "::attr(href)", "::attr(class)", "::attr(data-k)", " ::text"]
 # text-content-predicate needles: decoded forms of conformant.py TEXTBITS (full matches), substrings
@@ -58,6 +63,11 @@ def g_attr_pred(rng):
     name = rng.choice(ATTRS)
     if rng.random() < 0.35:
         return f"[{name}]"
+    if rng.random() < 0.12:
+        # UNQUOTED value. A CSS identifier (`v1`, `-v`, `café`) is valid and must match like Parsel;
+        # anything else (`2`, `/p1`, `$v`, `--v`) is a cssselect SelectorSyntaxError, so the engine must
+        # return EMPTY — a non-empty column there is the OVERMATCH the gate exists to catch.
+        return f"[{name}{rng.choice(ATTR_OPS)}{rng.choice(UNQUOTED_VALS)}]"
     return f'[{name}{rng.choice(ATTR_OPS)}"{rng.choice(ATTR_VALS)}"]'
 
 
@@ -248,7 +258,33 @@ def _g_caseb_xpath(rng):
     return f'//{c}[{pred}]/following-sibling::{sub}{tail}'
 
 
+def _g_nonliteral_operand(rng):
+    # Comparisons against something that is NOT a quoted literal, which must stay UNSUPPORTED (empty):
+    #   * a variable reference (`$v`) — parsel binds those at call time; Frostwork takes no bindings, so
+    #     lxml REJECTS the query here and any non-empty column is an OVERMATCH (this is the shape that
+    #     used to be audited as supported and match an element whose id really was `$v`);
+    #   * a numeric operand (`[@a=2]`, XPath compares numerically: `a="02"` matches) or a bare-name one
+    #     (`[@a=b]`, a node-set compare against child `<b>` elements) — valid for lxml, so the engine's
+    #     empty column grades as UNSUPPORTED, but a non-empty one grades WRONG.
+    a = rng.choice(ATTRS)
+    tag = rng.choice(TAGS)
+    tail = rng.choice(["", "/text()", f"/@{a}"])
+    pred = rng.choice([
+        f"[@{a}=$v]",
+        f"[contains(@{a},$v)]",
+        f"[starts-with(@{a},$v)]",
+        f'[.=$v]',
+        f"[@{a}={rng.randint(0, 20)}]",
+        f"[@{a}={rng.choice(TAGS)}]",
+        f"[contains(@{a},{rng.randint(0, 20)})]",
+    ])
+    return f"//{tag}{pred}{tail}"
+
+
 def g_xpath(rng):
+    # ~6% a non-literal comparison operand (variable / number / bare name): must be empty, never wrong.
+    if rng.random() < 0.06:
+        return _g_nonliteral_operand(rng)
     # ~10% Case B: text-predicate on a preceding sibling (label->value). Parsel is the oracle.
     if rng.random() < 0.1:
         return _g_caseb_xpath(rng)
@@ -338,7 +374,9 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--gate", action="store_true", help="exit nonzero on WRONG/OVERMATCH/CRASH")
     ap.add_argument("--show", type=int, default=12)
+    oracle.add_argument(ap)
     args = ap.parse_args()
+    oracle.require(args.allow_old_libxml2)
     rng = random.Random(args.seed)
 
     pool = [conformant.generate(rng) for _ in range(60)] + [foreign.generate(rng) for _ in range(20)]

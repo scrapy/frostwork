@@ -65,7 +65,14 @@ fn has_uppercase_name(qt: &str) -> bool {
 }
 
 fn xpath_reason(qt: &str) -> String {
-    let msg = if qt.contains("::") && !qt.contains("()") {
+    let msg = if crate::xpath::has_variable_ref(qt) {
+        "XPath variable reference (`$name`) is unsupported — Frostwork's API takes no variable \
+         bindings (unlike `sel.xpath(q, name=…)`); inline the value as a quoted literal"
+    } else if has_unquoted_comparand(qt) {
+        "comparison against an unquoted operand — XPath reads `[@a=2]` numerically (`@a=\"02\"` \
+         matches) and `[@a=b]` as a node-set compare against child `<b>` elements, neither of which is \
+         a byte compare; quote the value (`[@a=\"2\"]`) if a literal is what you meant"
+    } else if qt.contains("::") && !qt.contains("()") {
         "unsupported XPath axis — supported axes are child (`/`), descendant (`//`), \
          `following-sibling::` (after a single `/`), and `ancestor::`/`parent::` as an absolute two-step \
          path (`//INNER/ancestor::E`); `preceding[-sibling]::`, `ancestor-or-self::`, `following::` and \
@@ -160,6 +167,22 @@ fn has_positional_predicate(qt: &str) -> bool {
 
 fn predicate_has_text_test(qt: &str) -> bool {
     each_predicate(qt).any(|p| contains_ci(p, "text()"))
+}
+
+/// A predicate comparing against an operand that is not a quoted literal — `[@a=2]`, `[@a=b]`,
+/// `[contains(@a,2)]`. Coarse (advisory only): the RHS of the last `=`, or the last function argument, is
+/// a bare name/number token (no quotes, no call). Positional bodies (`position()=last()`) carry a call on
+/// the right and are left to `has_positional_predicate`.
+fn has_unquoted_comparand(qt: &str) -> bool {
+    each_predicate(qt).any(|p| {
+        let body = p.trim().trim_end_matches(')');
+        let rhs = match body.rsplit_once('=').or_else(|| body.rsplit_once(',')) {
+            Some((_, r)) => r.trim(),
+            None => return false,
+        };
+        !rhs.is_empty()
+            && rhs.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':' | '$'))
+    })
 }
 
 fn has_unsupported_function(qt: &str) -> bool {
@@ -282,6 +305,12 @@ mod tests {
         assert!(reason("./h3").contains("descendant"));
         assert!(reason("/div").contains("document root"));
         assert!(reason("//DIV").contains("case-sensitive"));
+        assert!(reason("//*[@id=$pid]").contains("variable"));
+        assert!(reason("//div[@id=foo]").contains("unquoted"));
+        assert!(reason("//span[@x=2]/text()").contains("unquoted"));
+        // the unquoted probe must not steal the more specific classifications
+        assert!(reason("//li[@x][position()=last()]").contains("positional"));
+        assert!(reason("//p[@x][text()=\"y\"]").contains("text-content"));
     }
 
     #[test]

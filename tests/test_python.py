@@ -629,6 +629,60 @@ def test_check_reports_supported_and_unsupported():
     assert r.groups[0].container.supported  # .offer is fine
 
 
+def test_check_rejects_xpath_variable_and_unquoted_operands():
+    # Reported by Jan Seidler: `//*[@id=$pid]` (a parsel XPath-variable query, used in a production PO)
+    # passed the audit, then matched an element whose id literally was `$pid` — a WRONG value under a
+    # "supported" verdict. Frostwork takes no variable bindings, so the query must be unsupported. Same
+    # for other non-literal operands: XPath compares `[@a=2]` numerically and `[@a=b]` against child
+    # `<b>` elements, neither of which is a byte compare.
+    html = b'<html><body><div id="$pid">LITERAL</div><span x="2">two</span>'
+    html += b'<span x="02">oh-two</span><em id="foo">byname</em></body></html>'
+    for q in ('//*[@id=$pid]', '//span[contains(@x,$v)]/text()', '//em[@id=foo]/text()',
+              '//span[@x=2]/text()'):
+        field = frostwork.check([q]).fields[0]
+        assert not field.supported, q
+        assert frostwork.extract(html, [q], strict=False)[0] == []  # no fallback, no wrong value
+        with pytest.raises(frostwork.UnsupportedSelector):
+            frostwork.extract(html, [q])
+    assert "variable" in frostwork.check(['//*[@id=$pid]']).fields[0].reason
+    assert "unquoted" in frostwork.check(['//span[@x=2]/text()']).fields[0].reason
+    # a `$` INSIDE a string literal is data, not a variable — still supported, still correct
+    r = frostwork.check(['//div[@id="$pid"]/text()', '//div[contains(@id,"$p")]/text()'])
+    assert r.ok
+    assert frostwork.extract(html, ['//div[@id="$pid"]/text()'])[0] == ["LITERAL"]
+
+
+def test_check_rejects_non_ident_unquoted_css_attr_values():
+    # Found while fixing the XPath case above: cssselect raises SelectorSyntaxError for these, so a
+    # non-empty column would be data for a selector Parsel refuses to run. Unsupported (empty) instead;
+    # the quoted spelling stays supported and matches.
+    html = b'<html><body><a href="/p/1" id="2">A</a></body></html>'
+    for q in ("a[href^=/p]::text", "a[id=2]::text", "a[id=$v]::text", "a[id=--v]::text"):
+        assert not frostwork.check([q]).fields[0].supported, q
+        assert frostwork.extract(html, [q], strict=False)[0] == []
+    r = frostwork.check(['a[href^="/p"]::text', 'a[id="2"]::text', "a[href*=p]::text"])
+    assert r.ok  # quoted values are unrestricted; an ident-shaped unquoted value is fine
+    assert frostwork.extract(html, ['a[id="2"]::text'])[0] == ["A"]
+
+
+def test_empty_fields_separates_dead_selectors_from_gaps():
+    # The runtime half of dead-selector detection: support is static (check), emptiness is per page.
+    page = (
+        frostwork.Page()
+        .field("title", "h1::text")
+        .field("gone", ".price::text")
+        .many("rows", ".card", {"h": ".//h3/text()"})
+        .many("absent", ".nope", {"h": ".//h3/text()"})
+    )
+    assert page.check().ok  # every selector supported -> emptiness below can only mean "no match"
+    item = page.extract(b"<html><body><h1>T</h1><div class='card'><h3>H</h3></div></body></html>")
+    assert item.empty_fields() == ["gone", "absent"]
+    assert item.get("title") == "T"
+    # a matched-but-EMPTY value counts as matched, not empty (an empty attribute value did match)
+    attrs = frostwork.Page().field("alt", "img::attr(alt)")
+    assert attrs.extract(b'<html><body><img alt="" src="x"></body></html>').empty_fields() == []
+
+
 def test_check_ok_schema():
     r = frostwork.check(["h1::text", "a::attr(href)"], [("g", ".card", {"t": ".//h3/text()"})])
     assert r.ok
@@ -1132,3 +1186,121 @@ def test_audit_cli_version(capsys):
         main(["--version"])
     assert exc.value.code == 0
     assert "frostwork-audit" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------- source scan (--scan)
+
+SPIDER_SOURCE = """
+import scrapy
+from scrapy.linkextractors import LinkExtractor
+from scrapy.loader import ItemLoader
+
+FIELD = "price"
+
+
+class Shop(scrapy.Spider):
+    rules = (LinkExtractor(restrict_css=[".pagination a", "li:contains('next') a"]),)
+
+    def parse(self, response):
+        for row in response.css(".product"):
+            yield {
+                "title": row.css("h3::text").get(),
+                "price": row.xpath("td/text()").get(),
+                "dyn": row.css(f"{FIELD}::text").get(),
+            }
+        loader = ItemLoader(response=response)
+        loader.add_css("name", "h1.title::text")
+        loader.add_xpath("desc", "//div[@class='desc']//text()")
+"""
+
+
+def _write_spider(tmp_path, name="spider.py", body=SPIDER_SOURCE):
+    p = tmp_path / name
+    p.write_text(body)
+    return str(p)
+
+
+def test_scan_finds_inline_selectors_without_importing(tmp_path, capsys):
+    # The gap Jan reported: a spider with inline .css()/.xpath(), an ItemLoader and a LinkExtractor has
+    # no schema object to audit, yet these are exactly the selectors a migration must classify. --scan
+    # parses the source (never imports it, so import-time setup can't fire) and reports file:line.
+    from frostwork.audit import main
+
+    target = _write_spider(tmp_path)
+    code = main(["--scan", target, "-v"])
+    out = capsys.readouterr().out
+    assert code == 1  # unsupported selectors present
+    assert "spider.py:10" in out and ":contains()" in out  # LinkExtractor restrict_css
+    assert "'.product'" in out and "'h3::text'" in out  # inline .css()
+    assert "'h1.title::text'" in out  # add_css takes (field_name, css) — the SECOND argument
+    assert "Many/One" in out  # relative `td/text()` names the rewrite
+    assert "not a literal" in out  # the f-string is skipped, not silently dropped
+    assert "5/7 literal selector(s) supported" in out
+
+
+def test_scan_json_and_directory_walk(tmp_path, capsys):
+    import json as _json
+
+    from frostwork.audit import main
+
+    _write_spider(tmp_path)
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "more.py").write_text("x = sel.xpath('//h1/text()')\n")
+    code = main(["--scan", str(tmp_path), "--json"])
+    payload = _json.loads(capsys.readouterr().out)
+    assert code == 1  # the spider's unsupported selectors are still there
+    assert payload["mode"] == "scan"
+    assert payload["summary"]["sites"] == 9  # 8 in spider.py (7 literal + 1 f-string) + 1 in pkg/
+    assert any(s["file"].endswith("more.py") and s["supported"] for s in payload["sites"])
+    dynamic = [s for s in payload["sites"] if s["supported"] is None]
+    assert len(dynamic) == 1 and dynamic[0]["selector"] is None
+
+
+def test_scan_all_supported_exits_zero(tmp_path, capsys):
+    from frostwork.audit import main
+
+    target = _write_spider(tmp_path, "clean.py", "v = response.css('h1::text')\nw = sel.xpath('//a/@href')\n")
+    assert main(["--scan", target]) == 0
+    assert "2/2 literal selector(s) supported (100%)" in capsys.readouterr().out
+
+
+def test_scan_reads_both_page_object_spellings(tmp_path, capsys):
+    # web-poet `field(selector)` / `Many(container, ...)` take the selector FIRST; the `Page` builders
+    # take a name first (`field(name, selector)`, `many(name, container, {...})`). Both are scanned.
+    from frostwork.audit import main
+
+    target = _write_spider(
+        tmp_path,
+        "objects.py",
+        "class P(FrostPage):\n"
+        "    title = field('h1::text')\n"
+        "    cards = Many('.card', name=field('.//h3/text()'))\n"
+        "    broken = field('li:contains(\"x\")::text')\n"
+        "p = Page().field('t', 'h2::text').many('rows', '.row', {'c': './/td/text()'})\n",
+    )
+    assert main(["--scan", target, "-v"]) == 1
+    out = capsys.readouterr().out
+    for selector in ("'h1::text'", "'.card'", "'.//h3/text()'", "'h2::text'", "'.row'", "'.//td/text()'"):
+        assert selector in out, selector
+    assert ":contains()" in out
+    assert "6/7 literal selector(s) supported" in out
+
+
+def test_scan_missing_path_and_unparseable_file(tmp_path, capsys):
+    from frostwork.audit import main
+
+    assert main(["--scan", str(tmp_path / "nope.py")]) == 2
+    assert "no such file or directory" in capsys.readouterr().err
+    # a file this Python can't parse is reported, not fatal
+    bad = _write_spider(tmp_path, "bad.py", "def broken(:\n")
+    assert main(["--scan", bad]) == 1
+    out = capsys.readouterr().out
+    assert "could not be parsed" in out and "1 file(s) UNPARSEABLE" in out
+
+
+def test_schema_audit_rejects_multiple_targets(tmp_path, capsys):
+    from frostwork.audit import main
+
+    a = _write(tmp_path, "from frostwork import Page\np = Page().field('t', 'h1::text')\n")
+    assert main([a, a]) == 2
+    assert "ONE module target" in capsys.readouterr().err

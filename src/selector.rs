@@ -134,6 +134,24 @@ fn is_ws(c: u8) -> bool {
     matches!(c, b' ' | b'\t' | b'\n' | b'\r' | 0x0c)
 }
 
+/// Is `v` a CSS **identifier** — the only unquoted form an attribute value may take? Measured against
+/// cssselect 1.4.0, which is the oracle here: `v`, `v2`, `-v`, `_v`, `v-2` and non-ASCII (`café`) parse,
+/// while a leading digit (`2`, `2v`, `1e5`), a double hyphen (`--v`), `-` + digit, an empty value, and any
+/// other punctuation (`$v`, `a.b`, `/p`, `#v`) are SelectorSyntaxError. Escapes (`\32 v`) are a valid CSS
+/// ident but stay unsupported here (they parse as non-ident → empty column, an allowed coverage gap, not
+/// a wrong value).
+fn is_css_ident(v: &str) -> bool {
+    let rest = v.strip_prefix('-').unwrap_or(v); // at most ONE leading hyphen (`--v` is not CSS 2.1)
+    let mut chars = rest.chars();
+    let first = match chars.next() {
+        Some(c) => c,
+        None => return false, // "" or a lone "-"
+    };
+    let start_ok = first == '_' || first.is_ascii_alphabetic() || first >= '\u{00A0}';
+    start_ok
+        && chars.all(|c| c == '_' || c == '-' || c.is_ascii_alphanumeric() || c >= '\u{00A0}')
+}
+
 /// Split a query on TOP-LEVEL commas (not inside `[]`, `()`, or quotes).
 fn split_top_commas(q: &str) -> Vec<&str> {
     let b = q.as_bytes();
@@ -495,7 +513,17 @@ fn parse_compound_depth(s: &str, depth: u32) -> Result<Compound, ()> {
                     while i < n && b[i] != b']' && !is_ws(b[i]) {
                         i += 1;
                     }
-                    s[start..i].to_string()
+                    let v = &s[start..i];
+                    // An UNQUOTED attribute value must be a CSS identifier. cssselect rejects anything
+                    // else outright (`[a=2]`, `[a=$v]`, `[href^=/p]`, `[a=--v]` are all
+                    // SelectorSyntaxError), so answering them would be a non-empty column on a selector
+                    // Parsel refuses — the "OVERMATCH" the selector fuzzer gates. Reject here instead;
+                    // quoting the value (`[a="2"]`) is the supported form. (Same root cause as the XPath
+                    // non-literal operand rejected in `xpath::parse_one_attr`.)
+                    if !is_css_ident(v) {
+                        return Err(());
+                    }
+                    v.to_string()
                 };
                 while i < n && is_ws(b[i]) {
                     i += 1;
@@ -760,6 +788,24 @@ mod tests {
         // one legitimate level still parses
         assert!(parse("div:is(.a, .b)").is_ok());
         assert!(parse(":is(:not(.x))").is_ok());
+    }
+
+    #[test]
+    fn unquoted_attr_value_must_be_a_css_ident() {
+        // cssselect rejects a non-ident unquoted value outright, so answering one would be a non-empty
+        // column on a selector Parsel refuses (the fuzzer's OVERMATCH). Quoted is always fine.
+        for q in ["a[href^=/p]", "i[a=2]", "i[a=2v]", "i[a=$v]", "i[a=--v]", "i[a=-2]", "i[a=a.b]",
+                  "i[a=#v]", "i[a=1e5]", "i[a=]", "i[a=-]", "i[a=v!]", "i[a=a:b]"] {
+            assert!(parse(q).is_err(), "{q} should not parse");
+        }
+        for q in ["i[a=v]", "i[a=v2]", "i[a=-v]", "i[a=_v]", "i[a=v-2]", "i[a=café]",
+                  "a[href^=\"/p\"]", "i[a=\"2\"]", "i[a='$v']", "i[a=\"\"]", "i[class~=x]"] {
+            assert!(parse(q).is_ok(), "{q} should parse");
+        }
+        assert!(matches!(
+            parse("i[a=\"2\"]").unwrap().parts[0].attrs.as_slice(),
+            [AttrPred::Eq(name, val)] if name == "a" && val == "2"
+        ));
     }
 
     #[test]
