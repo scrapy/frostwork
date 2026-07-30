@@ -158,6 +158,103 @@ def test_commented_charset_is_a_documented_divergence_from_w3lib():
     assert frostwork.extract(doc, ["p.c::text"], strict=False)[0] == ["café"]
 
 
+# ------------------------------------------------------- rule-table mutation sweep (mutate_rules.py)
+def test_mutation_sweep_enumerates_every_rule_table():
+    """The sweep's own failure mode is enumerating NOTHING and reporting success.
+
+    It reads the tag-id table out of `src/implied_close.rs` rather than keeping a second copy, which is
+    the right call for drift but means a rename or a reformat could silently yield an empty table — and an
+    empty mutant list passes every gate. So: assert the parse found the ids, that all four rule tables are
+    represented, and that a known cell is present in the form the Rust hook parses.
+    """
+    import mutate_rules
+
+    ids = mutate_rules.tag_ids()
+    for name in ("li", "dd", "dt", "p", "block", "table", "colgroup", "caption", "other"):
+        assert name in ids, f"tag id {name!r} missing — did `pub mod tag` change shape?"
+
+    specs = [s for s, _label in mutate_rules.mutants(ids)]
+    kinds = {s.split(":")[0] for s in specs}
+    assert kinds == {"cell", "scope", "void", "pclose"}, kinds
+    # the cross product must be complete, not a sample
+    assert sum(s.startswith("cell:") for s in specs) == len(ids) ** 2
+    # the cell that shipped wrong: `dd` closing an open `dt`
+    assert f"cell:{ids['dd']},{ids['dt']}" in specs
+    # the void set must include the HTML5-era names libxml2 deliberately does NOT treat as void,
+    # or the mutation sweep cannot tell "correctly absent" from "never considered"
+    for n in ("embed", "source", "track", "wbr"):
+        assert f"void:{n}" in specs
+    # and the p-closing candidates must include the sectioning elements that were wrongly closing <p>
+    for n in ("section", "article", "details"):
+        assert f"pclose:{n}" in specs
+
+
+def test_the_known_start_close_gap_may_shrink_but_never_grow():
+    """The cheapest way to make the rule audit green is to append to `KNOWN_START_CLOSE_GAP`.
+
+    So pin the ceiling. 87 pairs is what the widened audit measured; the list is a debt to pay down (the
+    divergence is documented in COMPATIBILITY.md), and any change that ADDS a pair has to raise this number
+    deliberately, in a diff someone reads, rather than quietly.
+    """
+    from audit_tree_rules import KNOWN_START_CLOSE_GAP
+
+    total = sum(len(v) for v in KNOWN_START_CLOSE_GAP.values())
+    assert total <= 87, (f"the known start-close gap GREW to {total} — a new divergence was added to the "
+                         f"allow-list instead of being fixed or deliberately documented")
+    # every entry must name real tags (a typo would silently mask a real divergence forever)
+    for inc, opens in KNOWN_START_CLOSE_GAP.items():
+        assert inc.isalnum() and opens, (inc, opens)
+        assert len(set(opens)) == len(opens), f"duplicate open tags for <{inc}>: {opens}"
+
+
+def test_the_rule_audit_notices_a_stale_gap_entry():
+    """A pair that stops diverging must fail, or the allow-list outlives the bug it documents.
+
+    Seed a KNOWN-GAP entry for a pair that actually AGREES (`<td>` does not close an open `<em>`) and check
+    the audit records a failure. Without this the list could accumulate entries for divergences that were
+    fixed years earlier, each one a hole where a REGRESSION would now pass.
+    """
+    pytest.importorskip("frostwork")
+    import audit_tree_rules as A
+
+    original = A.KNOWN_START_CLOSE_GAP
+    try:
+        A.KNOWN_START_CLOSE_GAP = dict(original, td=list(original.get("td", [])) + ["em"])
+        audit = A.Audit(verbose=False)
+        A.audit_start_close_pairs(audit)
+        stale = [f for f in audit.fails if "now AGREE" in str(f[1])]
+        assert stale, "a KNOWN_START_CLOSE_GAP entry that agrees must be reported as stale"
+    finally:
+        A.KNOWN_START_CLOSE_GAP = original
+
+    # and with the real list, that section is clean
+    audit = A.Audit(verbose=False)
+    A.audit_start_close_pairs(audit)
+    assert not audit.fails, audit.fails[:3]
+
+
+def test_the_mutate_feature_can_never_reach_a_shipped_build():
+    """`--features mutate` makes the tree-construction tables depend on an ENVIRONMENT VARIABLE. That is
+    the right trade for a mutation sweep and a catastrophe in a released wheel, so pin the two things that
+    keep it out: it must be off by default, and it must not be in the feature list maturin builds from."""
+    root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+    cargo = open(os.path.join(root, "Cargo.toml")).read()
+    pyproject = open(os.path.join(root, "pyproject.toml")).read()
+
+    feats = cargo.split("[features]", 1)[1]
+    assert "mutate = []" in feats, "the mutate feature must exist and be empty (opt-in only)"
+    assert "default =" not in feats, "mutate must not be reachable through a default feature set"
+    # maturin builds the wheel from pyproject's feature list
+    ml = [ln for ln in pyproject.splitlines() if ln.strip().startswith("features")]
+    assert ml and all("mutate" not in ln for ln in ml), f"mutate must not be in {ml}"
+
+    # and with the feature OFF the hook is compiled out entirely, so the module is an identity
+    src = open(os.path.join(root, "src", "mutate.rs")).read()
+    off = src.split('#[cfg(not(feature = "mutate"))]', 1)[1].split('#[cfg(feature = "mutate")]', 1)[0]
+    assert "env" not in off, "the feature-off path must not read the environment"
+    assert off.count("inline(always)") == 4, "all four hooks must be inline identities when off"
+
+
 def test_encoding_gate_exits_nonzero_on_mismatch():
     """`enc_check` printed MISMATCH and exited 0, so `make gate` and CI stayed green through an encoding
     regression. Guard the exit itself."""

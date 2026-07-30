@@ -8,7 +8,10 @@
 #   make test        Rust unit vectors + clippy (python feature OFF — it must be, see below)
 #   make gate        the correctness gate: build the bins, then differential + encoding parity vs lxml
 #   make fuzz-smoke  quick selector + malformed-HTML fuzz (crash/WRONG/OVERMATCH gate)
-#   make gate-corpus [CORPUS=<dir>]  value-parity gate over a page corpus (defaults to fixtures/)
+#   make gate-corpus [CORPUS=<dir>]  value-parity gate over a page corpus (defaults to tests/corpus)
+#   make corpus-real fetch REAL pages into fixtures/realweb (gitignored), then gate over them
+#   make gate-mutate flip rule-table cells one at a time and check a gate notices (sampled)
+#   make gate-mutate-full  the whole rule table, ~40 min — nightly
 #   make soak        multi-million differential/fuzz soak across independent seeds
 #   make py          rebuild the extension (maturin --release), Python suite + tree-rule audit
 #   make bench       full throughput matrix vs Parsel (minutes; for release notes)
@@ -23,7 +26,8 @@ MATURIN ?= .venv/bin/maturin
 FUZZ_ITERS ?= 6000
 
 .DEFAULT_GOAL := help
-.PHONY: help bootstrap test build gate gate-corpus fuzz-smoke soak py bench bench-smoke ci
+.PHONY: help bootstrap test build gate gate-corpus corpus-real gate-mutate gate-mutate-full \
+	fuzz-smoke soak py bench bench-smoke ci
 
 help:
 	@grep -E '^#   make ' Makefile | sed 's/^#   /  /'
@@ -56,6 +60,29 @@ fuzz-smoke: build
 CORPUS ?= tests/corpus
 gate-corpus: build
 	$(PY) tools/bench_corpus.py $(CORPUS) --gate
+
+# Fetch real third-party pages into a GITIGNORED dir and gate over them. Nothing is vendored; this is the
+# one check that sees markup nobody in this repo wrote or imagined. Still not a substitute for a crawl
+# corpus: it is one page per site, so it samples site variety rather than one site's template long tail.
+REALWEB ?= fixtures/realweb
+corpus-real: build
+	$(PY) tools/corpus_fetch.py --out $(REALWEB)
+	$(PY) tools/bench_corpus.py $(REALWEB) --gate
+
+# "Is every rule cell RIGHT?" is what tools/audit_tree_rules.py answers. This answers "if a cell were
+# WRONG, would any gate notice?" — the only check here that finds blind spots without a human guessing
+# where they are. Needs the `mutate` feature (one build serves every mutant); puts the normal build back
+# afterwards, because a mutate build must never be shipped or benchmarked.
+MUTANTS ?= 40
+gate-mutate:
+	cargo build --release --features mutate
+	$(MATURIN) develop --release --features python,mutate
+	-$(PY) tools/mutate_rules.py --sample $(MUTANTS) --gate
+	cargo build --release
+	$(MATURIN) develop --release
+
+gate-mutate-full:
+	$(MAKE) gate-mutate MUTANTS=0
 
 soak: build
 	$(PY) tools/soak.py

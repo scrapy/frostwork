@@ -39,7 +39,7 @@ pub fn is_table_scoped(tid: u8) -> bool {
     // `</div>` in libxml2 (the engine used to discard it and keep `AB` in the caption). Verified per
     // element with no wrapper — wrapping each in `<table>` hides its own contribution, since the table
     // blocks regardless.
-    matches!(tid, TABLE | THEAD | TBODY | TFOOT | TR | TD | TH)
+    crate::mutate::scope(tid, matches!(tid, TABLE | THEAD | TBODY | TFOOT | TR | TD | TH))
 }
 
 /// True iff an end tag named `name` must be IGNORED rather than pop the stack, given that at least one
@@ -60,6 +60,10 @@ pub fn end_tag_discardable(name: &[u8]) -> bool {
 
 /// Map a lowercased ASCII tag name to its `tag::*` id.
 pub fn tag_id(name: &str) -> u8 {
+    crate::mutate::tag_id(name, tag_id_pure(name))
+}
+
+fn tag_id_pure(name: &str) -> u8 {
     match name {
         "li" => tag::LI,
         "dd" => tag::DD,
@@ -90,6 +94,10 @@ pub fn tag_id(name: &str) -> u8 {
 
 /// True iff a `start` start-tag (by id) implicitly closes an open `top` element (by id).
 pub fn implies_close_id(start: u8, top: u8) -> bool {
+    crate::mutate::cell(start, top, implies_close_id_pure(start, top))
+}
+
+fn implies_close_id_pure(start: u8, top: u8) -> bool {
     use tag::*;
     match top {
         LI => start == LI,
@@ -132,9 +140,12 @@ pub fn implies_close_id(start: u8, top: u8) -> bool {
 /// NOT treat the HTML5-era `embed`/`source`/`track`/`wbr` as void (it keeps them open as ordinary
 /// containers), and we match libxml2 because it is the oracle. Verified empirically against lxml.
 pub fn is_void(name: &str) -> bool {
-    matches!(
+    crate::mutate::is_void(
         name,
-        "area" | "base" | "br" | "col" | "hr" | "img" | "input" | "link" | "meta" | "param"
+        matches!(
+            name,
+            "area" | "base" | "br" | "col" | "hr" | "img" | "input" | "link" | "meta" | "param"
+        ),
     )
 }
 

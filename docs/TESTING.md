@@ -117,7 +117,25 @@ Equally, when you add a differential family, check it actually *discriminates*: 
 family passed against the known-buggy engine because `optgroup` has no direct text, so every column was
 empty either way. Run a new family against the pre-fix build and confirm it fails.
 
-**Real-page parity — `make gate-corpus CORPUS=<dir>`.** `make gate` only ever sees *generated* pages,
+**Real-page parity, fetched — `make corpus-real`.** The gap above is real pages, and the reason it stayed
+open was licensing and size, not difficulty: third-party HTML cannot be committed here. So
+`tools/corpus_fetch.py` fetches it instead, into the gitignored `fixtures/realweb`, and derives a selector
+basket from each page's own classes and ids (a generic `h1::text` basket produces mostly-empty columns,
+which prove nothing). `make corpus-real` fetches and then gates.
+
+The current list is ~30 pages across ~24 sites, chosen for GENERATOR variety rather than traffic: Sphinx,
+MkDocs, Doxygen (two vintages), Javadoc (two vintages), rustdoc, godoc, Docusaurus, Hugo, Jekyll,
+Asciidoctor, texinfo and troff→HTML, MediaWiki, plus two scraping sandboxes. The texinfo and troff pages
+matter out of proportion to their traffic: they are `<dl>`-heavy and omit end tags freely, which is the
+exact shape that produced the `dd`/`dt` and dropped-end-tag bugs. Measured over that corpus: 720 columns,
+**429 of them carrying values, 177,704 values compared byte-for-byte, 0 divergences**.
+
+Read that number with its limits. It is one page per site, so it samples site variety, not the long tail
+of any one site's templates — a real crawl is still the thing this cannot replace. The pages are also a
+moving target: re-fetching next month diffs different bytes, which is a feature for finding bugs and
+useless for bisecting one, so `MANIFEST.json` records the URL each page came from.
+
+**Real-page parity, your own corpus — `make gate-corpus CORPUS=<dir>`.** `make gate` only ever sees *generated* pages,
 and a generator reproduces the malformations its author thought of: the `dd`/`dt` same-tag close and the
 dropped-end-tag split were both found on real pages while the generated gate read 100%. This runs the
 gate's own verdict over a real corpus (`<dir>/<page-object>/{selectors.json,pages/*.html}`) and exits
@@ -129,6 +147,52 @@ already known, which is the same limitation the generators have.
 `SEGMENT` (same text, extra node split) counts as a bug, not a cosmetic
 difference — a `One` field takes `col[0]`, so an extra split truncates it. No corpus is vendored in this
 repo. Doc-generator output is worth including, not just commerce pages.
+
+**Would a wrong rule be NOTICED? — `tools/mutate_rules.py` (`make gate-mutate`).** The audit above asks
+whether every rule cell is RIGHT. This asks the other half: **if a cell were wrong, would anything go
+red?** It flips one cell at a time (via the `mutate` cargo feature, so one build serves all ~425 mutants
+instead of ~425 rebuilds) and records which gates notice. It is the only check here that finds blind spots
+without a human first guessing where they are — and every gap closed before it was found by someone
+reading code and thinking "hold on, nothing covers that", which had already missed things three review
+rounds running.
+
+The first full sweep, 425 mutants against five gates:
+
+| gate | mutants it noticed |
+|---|---|
+| rule audit (`audit_tree_rules.py`) | 354 / 425 (83%) |
+| unit vectors (`cargo test`) | 116 / 425 (27%) |
+| differential vs lxml (reduced) | 107 / 425 (25%) |
+| corpus, self-authored fixtures | 44 / 425 (10%) |
+| corpus, real fetched pages | 23 / 425 (5%) |
+| **no gate at all** | **55 / 425 (13%)** |
+
+Two things in that table are worth internalising. **218 cells are caught by the rule audit and nothing
+else** — for those the audit is a single point of failure, which is why a new rule needs an audit ROW and
+not merely a passing differential. And the page-based gates are weak detectors of rule errors by nature:
+real pages exercised 5% of the table, because ordinary markup simply does not contain most of these
+constructs. That is not an argument against the corpus, it is the argument FOR the audit.
+
+The 55 survivors had one root cause, and it was the same one twice before: **the audit's universe was
+drawn from the things we already believed were special.** Its cross product was over 16 tag NAMES while
+the engine's table is over 19 tag IDS, three of which are not names (`OTHER`, `BLOCK`, `TABLE`) — so "does
+`<div>` close an open `<dd>`?" and "does `<dd>` close an open `<span>`?" were never asked. Widening it to
+cover those, plus the scope universe (`dd`/`dt`/`rp` were missing) took the audit from 451 to 5,169 cells
+and turned up **87 real divergences** — now the enumerated `KNOWN_START_CLOSE_GAP` in
+[COMPATIBILITY.md](COMPATIBILITY.md). After the widening the full table re-sweeps to **0 survivors** —
+measured with only the three fast gates (unit, audit, fixture corpus), a strictly weaker detector set than
+the table above, so the result holds for the full set too. The audit alone now catches 424 of 425.
+
+Three lessons are baked into the tool's own probes, each of which cost a wrong answer first:
+
+- **A `::text` probe cannot see inside a table.** Text in an open `<table>` is foster-parented, so the probe
+  reads empty whether or not the table was closed — which is exactly why the `table`-as-open-element cells
+  survived. An **attribute** is never foster-parented. Both probes now run; verified to agree cell for cell.
+- **A known wrapper confounds the probe.** With `<div>` as the wrapper, every cell whose open element is
+  also a `div` matches on the wrapper itself; a first pass read 72 spurious closes that way. The wrapper is
+  now an UNKNOWN element, which libxml2 closes for nothing.
+- **`if x == y: continue` silently deleted the diagonal.** One line of misplaced caution excluded every
+  "does `<X>` close an open `<X>`?" cell, and with it the nested-`<a>` and nested-`<form>` closes.
 
 **Do the gates actually fail? — `tests/test_gates.py` (in `make py`).** Every gate above is a claim of
 the form "if the engine regresses, this goes red", and that claim is itself untested code. It has been

@@ -40,6 +40,8 @@ Two limits of that gate are worth knowing before trusting a "100% parity" number
   were both found on real doc-generator output while the generated gate read 100%. `make gate-corpus`
   runs the gate's verdict over `tests/corpus` (self-authored, but shaped like what broke us, and
   proven to discriminate); point `CORPUS=<dir>` at a real corpus for what fixtures cannot give.
+  `make corpus-real` fetches ~30 real pages (gitignored, never vendored) chosen for doc-GENERATOR variety
+  and gates over them — the one check that sees markup nobody here wrote or imagined.
 - **Page coverage is not RULE coverage.** A tree-construction rule no generated page exercises is
   asserted, not tested. `tools/audit_tree_rules.py` (in `make py`) enumerates every rule cell against
   lxml — **add a row to it whenever you add a rule**. docs/TESTING.md has the count this turned up and
@@ -49,6 +51,11 @@ Two limits of that gate are worth knowing before trusting a "100% parity" number
   a gate. Same question for the generators: they can only find bugs in syntax they emit — CSS escapes
   appeared in no generated selector, so that whole surface rode on hand vectors until a review read the
   parser.
+- **`make gate-mutate` asks the inverse question: flip one rule cell, does any gate notice?** The first
+  sweep found 13% of the table protected by nothing, all from one root cause — the audit's universe was
+  drawn from the tags we already thought were special (16 NAMES vs the engine's 19 IDS). Widening it took
+  the audit from 451 to 5,169 cells, turned up 87 real divergences (now the enumerated
+  `KNOWN_START_CLOSE_GAP`), and left 0 survivors. Re-run it after touching a rule table.
 
 ## Repo map
 
@@ -60,7 +67,8 @@ Two limits of that gate are worth knowing before trusting a "100% parity" number
   (bounded state machines for deferred-close predicates), `decode.rs` (value decoding).
   `selector.rs` (CSS parse), `xpath.rs` (downward XPath → `Selector`), `diagnostics.rs`
   (advisory unsupported-reason classifier for the audit API), `implied_close.rs` (libxml2
-  tree-construction rules), `encoding.rs`, `entities.rs`. `page.rs` is the declarative `Page`/`field`
+  tree-construction rules), `encoding.rs`, `entities.rs`, `mutate.rs` (an identity function unless built
+  `--features mutate`, which lets `tools/mutate_rules.py` flip one rule cell per run). `page.rs` is the declarative `Page`/`field`
   → `Item` layer over `extract` (naming + cardinality only; no matching logic), plus `CompiledPage`.
   `python.rs` (feature-gated) is the PyO3 binding — `extract`/`extract_grouped`/`audit_schema`/`Plan`.
   `src/bin/{differ,bench}.rs` back the Python harness.
@@ -75,7 +83,9 @@ Two limits of that gate are worth knowing before trusting a "100% parity" number
   `sel_fuzz.py`/`diff_fuzz.py` (selector + malformed-HTML fuzz), `soak.py` (multi-seed soak),
   `support_snapshot.py` (regenerates/checks `docs/SUPPORT_SNAPSHOT.md`), `abi3_smoke.py` (stdlib-only
   floor check — the pinned toolchain can't be installed on py3.9), `bench_matrix.py`/
-  `bench_corpus.py`/`bench_mem.py` (benchmarks).
+  `bench_corpus.py`/`bench_mem.py` (benchmarks). `audit_tree_rules.py` asks lxml whether every rule cell
+  is RIGHT; `mutate_rules.py` asks whether a WRONG one would be noticed (flips a cell via the `mutate`
+  cargo feature and reruns the gates); `corpus_fetch.py` fetches real pages into a gitignored corpus.
 - `docs/` — `COMPATIBILITY.md` (contract), `DESIGN.md` (architecture), `PYTHON.md` (bindings),
   `TESTING.md`, `BENCHMARKS.md`, `MIGRATION.md` (from Parsel), `SUPPORT_SNAPSHOT.md` (generated).
 

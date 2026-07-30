@@ -180,6 +180,18 @@ next bug will be:
 - **Deep-`<p>`** — a block/item start closing a `<p>` that is an *ancestor* rather than the immediate
   open element (`<p><b><div>`); a known gap that leaves the un-reshaped nesting (never worse).
 - **Head-only elements in `<body>`** (`<title>` in body, etc.).
+- **libxml2's start-close NAME-pair table is only partly ported — 87 pairs where libxml2 closes an open
+  element and Frostwork nests it.** libxml2 decides "does this start tag close that open element?" from a
+  hardcoded name-pair list (`htmlStartClose`) that distinguishes names Frostwork's tag ids lump together:
+  `<td>` closes an open `<b>` but not an open `<em>`; `<table>` closes an open `<h1>` but not an open
+  `<div>`; `<a>` and `<form>` close a same-tag repeat. The affected pairs are ENUMERATED in
+  `KNOWN_START_CLOSE_GAP` in `tools/audit_tree_rules.py` and checked every run: a pair outside that list
+  that diverges fails the gate, and a listed pair that starts agreeing also fails, so the list cannot rot.
+  Every one is the same direction — libxml2 closes, Frostwork nests, **zero cases of Frostwork
+  over-closing** — so closing the gap is purely additive. The practical effect is on selectors that depend
+  on the boundary (`div > p`, an outer-HTML capture of the open element); the text itself is not lost.
+  Found by `tools/mutate_rules.py`, which flips one rule cell at a time and asks whether any gate notices.
+
 - **A `<meta charset>` inside a COMMENT is ignored — a divergence from w3lib.** Encoding *sniffing* is
   oracled against `w3lib.encoding.html_to_unicode` (what Scrapy uses; `parsel.Selector(body=…)` does not
   sniff `<meta>` at all, it defaults to UTF-8). w3lib has no comment handling, so it honours

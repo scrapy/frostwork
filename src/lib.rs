@@ -12,6 +12,8 @@ mod encoding;
 mod entities;
 mod implied_close;
 mod matcher;
+/// Rule-table mutation hook: an identity function unless built with `--features mutate`.
+mod mutate;
 mod page;
 #[cfg(feature = "python")]
 mod python;
