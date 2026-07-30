@@ -17,7 +17,9 @@ use std::borrow::Cow;
 
 use encoding_rs::Encoding;
 
-use crate::implied_close::{end_tag_discardable, classify, implies_close_id, is_table_scoped};
+use crate::implied_close::{
+    classify, end_tag_discardable, implies_close_id, is_table_scoped, start_closes,
+};
 use crate::selector::{
     AttrPred, Comb, Compound, Has, ReversePos, Selector, Terminal, TextPred,
 };
@@ -87,6 +89,10 @@ pub struct OpenElem<'a> {
     // `pub(super)` fields are the ones the read-only matching kernel (`matching`) reads.
     pub(super) tag: &'a [u8], // raw bytes (possibly mixed-case); matched case-insensitively
     tid: u8,
+    /// Start-close class (`implied_close::sc`). A second, finer id space than `tid`, because libxml2's
+    /// `htmlStartClose` pair table distinguishes names `tid` deliberately lumps together — `<td>` closes
+    /// an open `<b>` but not an open `<em>`, and both are `tag::OTHER`.
+    scid: u8,
     attrs: Vec<(&'a [u8], Cow<'a, str>)>, // only "interesting" attrs; value entity-decoded (lazy Cow)
     matched: u128, // bit k: this element is a subject match for member-selector k (≤128 members)
     matched_tree: u128, // OR of `matched` over this element and its open ancestors
@@ -129,6 +135,7 @@ impl<'a> OpenElem<'a> {
         OpenElem {
             tag,
             tid: 0,
+            scid: 0,
             attrs: Vec::new(),
             matched: 0,
             matched_tree: 0,
@@ -1714,10 +1721,11 @@ impl<'a> TokenSink<'a> for Matcher<'a> {
     ) {
         // Any buffered text belongs to the element open BEFORE this tag reshapes the stack.
         self.flush_text();
-        let (tid, void) = classify(name);
+        let (tid, void, scid) = classify(name);
         // inline implied-close reshape: a popped element's raw source ends where this tag begins
         while let Some(top) = self.stack.last() {
-            if implies_close_id(tid, top.tid) {
+            let closes = implies_close_id(tid, top.tid) || start_closes(scid, top.scid);
+            if crate::mutate::closes(name, top.tag, closes) {
                 let e = self.stack.pop().unwrap();
                 self.close_elem(e, span_start);
             } else {
@@ -1735,6 +1743,7 @@ impl<'a> TokenSink<'a> for Matcher<'a> {
         self.stack.push(OpenElem {
             tag: name,
             tid,
+            scid,
             attrs,
             matched: 0,
             matched_tree: 0,

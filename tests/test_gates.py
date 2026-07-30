@@ -71,11 +71,20 @@ def test_fuzz_attribution_leaves_an_unexplained_divergence_novel():
 
 
 def test_fuzz_documented_constructs_do_not_include_ported_behaviour():
-    """`unmatched-end` must NOT be in the documented set: it is implemented now, so if it ever explains a
-    divergence again that is a regression and belongs in NOVEL."""
+    """A construct that is IMPLEMENTED must not sit in the documented-divergence set: if it ever explains a
+    divergence again that is a regression, and belongs in NOVEL.
+
+    `unmatched-end` was the first. `nested-form` is the second — `<form>` closing an open `<form>` came in
+    with libxml2's start-close pair table, and leaving it on the allow-list would have made a regression in
+    that rule invisible to the fuzzer.
+    """
     import diff_fuzz
 
     assert "unmatched-end" not in diff_fuzz.DOCUMENTED
+    assert "nested-form" not in diff_fuzz.DOCUMENTED
+    # still recognised as a label — the classifier should describe the page, it just isn't an excuse
+    nested = b"<html><body><form>a<form>b</form></form></body></html>"
+    assert "nested-form" in diff_fuzz.constructs(nested)
 
 
 # ------------------------------------------------------------------ differential verdict (diff_lxml.py)
@@ -162,45 +171,47 @@ def test_commented_charset_is_a_documented_divergence_from_w3lib():
 def test_mutation_sweep_enumerates_every_rule_table():
     """The sweep's own failure mode is enumerating NOTHING and reporting success.
 
-    It reads the tag-id table out of `src/implied_close.rs` rather than keeping a second copy, which is
-    the right call for drift but means a rename or a reformat could silently yield an empty table — and an
-    empty mutant list passes every gate. So: assert the parse found the ids, that all four rule tables are
-    represented, and that a known cell is present in the form the Rust hook parses.
+    Two properties matter. Its universe must be INDEPENDENT of the engine's tables — a name the engine
+    wrongly treats as ordinary (`em`, `section`) has no cell to flip, but flipping it TO closing is exactly
+    the check that a gate would notice that mistake, and drawing the universe from our own tables is the
+    self-referential trap that hid `<colgroup>` having no rule at all. And it must not waste effort on
+    cells that are unobservable by construction: a VOID element is never the open element.
     """
     import mutate_rules
 
-    ids = mutate_rules.tag_ids()
-    for name in ("li", "dd", "dt", "p", "block", "table", "colgroup", "caption", "other"):
-        assert name in ids, f"tag id {name!r} missing — did `pub mod tag` change shape?"
-
-    specs = [s for s, _label in mutate_rules.mutants(ids)]
+    specs = [s for s, _label in mutate_rules.mutants(mutate_rules.tag_ids())]
     kinds = {s.split(":")[0] for s in specs}
-    assert kinds == {"cell", "scope", "void", "pclose"}, kinds
-    # the cross product must be complete, not a sample
-    assert sum(s.startswith("cell:") for s in specs) == len(ids) ** 2
-    # the cell that shipped wrong: `dd` closing an open `dt`
-    assert f"cell:{ids['dd']},{ids['dt']}" in specs
-    # the void set must include the HTML5-era names libxml2 deliberately does NOT treat as void,
-    # or the mutation sweep cannot tell "correctly absent" from "never considered"
+    assert kinds == {"close", "scope", "void"}, kinds
+
+    # independence: names the engine lumps into `tag::OTHER` / `sc::OTHER` are still probed
+    for n in ("em", "strong", "section", "span", "ruby"):
+        assert f"close:{n},p" in specs, f"{n} missing from the close universe"
+    # the pair that shipped wrong: `<dd>` closing an open `<dt>`
+    assert "close:dd,dt" in specs
+    # a void element is never the OPEN element, so no cell should name one there
+    voids = set(mutate_rules.VOID_NAMES)
+    bad = [s for s in specs if s.startswith("close:") and s.split(",", 1)[1] in voids]
+    assert not bad, f"unobservable cells enumerated (void open element): {bad[:5]}"
+    # ...but a void tag as the INCOMING tag is a real cell: `<col>` and `<hr>` close an open `<p>`
+    assert "close:col,p" in specs and "close:hr,p" in specs
+    # and the void set itself must include the HTML5-era names libxml2 deliberately keeps OPEN,
+    # or the sweep cannot tell "correctly absent" from "never considered"
     for n in ("embed", "source", "track", "wbr"):
         assert f"void:{n}" in specs
-    # and the p-closing candidates must include the sectioning elements that were wrongly closing <p>
-    for n in ("section", "article", "details"):
-        assert f"pclose:{n}" in specs
 
 
 def test_the_known_start_close_gap_may_shrink_but_never_grow():
     """The cheapest way to make the rule audit green is to append to `KNOWN_START_CLOSE_GAP`.
 
-    So pin the ceiling. 87 pairs is what the widened audit measured; the list is a debt to pay down (the
-    divergence is documented in COMPATIBILITY.md), and any change that ADDS a pair has to raise this number
-    deliberately, in a diff someone reads, rather than quietly.
+    It held 87 pairs, and the fix was to port libxml2's table rather than live with them, so the list is
+    now EMPTY and this test keeps it that way: appending an entry is appending a divergence.
     """
     from audit_tree_rules import KNOWN_START_CLOSE_GAP
 
     total = sum(len(v) for v in KNOWN_START_CLOSE_GAP.values())
-    assert total <= 87, (f"the known start-close gap GREW to {total} — a new divergence was added to the "
-                         f"allow-list instead of being fixed or deliberately documented")
+    assert total == 0, (f"the known start-close gap is {total}, expected 0 — it was closed by porting "
+                        f"libxml2's htmlStartClose table into implied_close::start_closes. A new entry "
+                        f"here is a NEW divergence and needs to be a deliberate, reviewed decision.")
     # every entry must name real tags (a typo would silently mask a real divergence forever)
     for inc, opens in KNOWN_START_CLOSE_GAP.items():
         assert inc.isalnum() and opens, (inc, opens)
@@ -252,7 +263,14 @@ def test_the_mutate_feature_can_never_reach_a_shipped_build():
     src = open(os.path.join(root, "src", "mutate.rs")).read()
     off = src.split('#[cfg(not(feature = "mutate"))]', 1)[1].split('#[cfg(feature = "mutate")]', 1)[0]
     assert "env" not in off, "the feature-off path must not read the environment"
-    assert off.count("inline(always)") == 4, "all four hooks must be inline identities when off"
+    # every hook must be an inline identity when the feature is off — asserted structurally rather than
+    # as a count, so adding a hook cannot quietly ship one that does real work
+    fns = off.count("pub fn ")
+    assert fns and off.count("inline(always)") == fns, \
+        f"{fns} hooks but {off.count('inline(always)')} marked inline(always)"
+    for line in off.splitlines():
+        if line.strip().startswith("pub fn "):
+            assert line.rstrip().endswith("-> bool {") or line.rstrip().endswith("-> u8 {"), line
 
 
 def test_encoding_gate_exits_nonzero_on_mismatch():

@@ -90,29 +90,19 @@ XPROD_INCOMING_ONLY = ["table"]
 # (0 cases of the engine over-closing), so closing this gap is purely additive. See COMPATIBILITY.md.
 STARTCLOSE_NAMES = ("p pre address dir menu ul ol dl dt dd li h1 h2 h3 h4 h5 h6 a b i u font span big "
                     "small tt em strong div section caption colgroup td th tr thead tbody tfoot option "
-                    "optgroup table fieldset form center blockquote ruby rt rp").split()
+                    "optgroup table fieldset form center blockquote ruby rt rp "
+                    # Every start-close CLASS needs a representative here or its cells are unreachable:
+                    # `col`/`hr` are void (incoming-role only), `legend` is closed only by <fieldset>, and
+                    # `s`/`strike` share a class with `big`/`small`/`tt` — omitting them left 93 cells
+                    # unprobed, which the mutation sweep found and nothing else would have.
+                    "col hr legend s strike").split()
 # incoming tag -> open elements it closes in libxml2 2.14 but not (yet) here
-KNOWN_START_CLOSE_GAP = {
-    # SAME-TAG repeats. libxml2 closes an open <a>/<form> when another one starts; the engine nests.
-    # Both are ordinary real-world malformations (an unclosed link, a form inside a form) and both were
-    # invisible until the `x == y` skip came out of the probe below — a one-line guard that silently
-    # excluded every diagonal cell of the table. `form` is the already-documented nested-form divergence.
-    "a": "a".split(),
-    "form": "form address dir dl h1 h2 h3 h4 h5 h6 menu ol pre ul".split(),
-    "address": "ul".split(),
-    "center": "b font i".split(),
-    "dd": "address dir menu pre".split(),
-    "dl": "address dir dt menu pre".split(),
-    "dt": "address dir menu pre".split(),
-    "fieldset": "a h1 h2 h3 h4 h5 h6 pre".split(),
-    "li": "address dl h1 h2 h3 h4 h5 h6 pre".split(),
-    "menu": "ul".split(),
-    "p": "b big h1 h2 h3 h4 h5 h6 i small tt u".split(),
-    "pre": "ul".split(),
-    "table": "a h1 h2 h3 h4 h5 h6 pre".split(),
-    "td": "a b font i span u".split(),
-    "th": "a b font i span u".split(),
-    "ul": "address dir menu pre".split(),
+KNOWN_START_CLOSE_GAP: dict[str, list[str]] = {
+    # EMPTY, and kept that way deliberately. This held 87 pairs where libxml2 closed an open element and
+    # the engine nested it; `implied_close::start_closes` now ports libxml2's htmlStartClose pair table
+    # and all 11,543 (open x incoming) cells agree. The mechanism stays because it is what keeps the list
+    # honest: an unlisted divergence fails the gate, and a LISTED pair that starts agreeing also fails, so
+    # a future gap has to be added here in a diff someone reads rather than absorbed silently.
 }
 
 

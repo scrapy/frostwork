@@ -14,7 +14,7 @@ missed things three review rounds running. This enumerates instead: flip one cel
 which ones noticed. A cell no gate notices is a cell where a future edit is unprotected.
 
 It needs the `mutate` cargo feature, which turns FROSTWORK_MUTATE into a one-cell override so a single
-build serves every mutant (~400 rebuilds would take hours):
+build serves every mutant (a rebuild per mutant would take hours):
 
     cargo build --release --features mutate
     .venv/bin/maturin develop --release --features python,mutate
@@ -50,28 +50,35 @@ sys.path.insert(0, HERE)
 PY = os.path.join(ROOT, ".venv", "bin", "python")
 
 
-def tag_ids() -> dict[str, int]:
-    """Read `tag::*` straight out of the Rust source — no second copy of the table to drift."""
+def _ids(module: str) -> dict[str, int]:
+    """Read an id table straight out of the Rust source — no second copy to drift."""
     src = open(os.path.join(ROOT, "src", "implied_close.rs")).read()
-    block = re.search(r"pub mod tag \{(.*?)\n\}", src, re.S)
+    block = re.search(r"pub mod %s \{(.*?)\n\}" % module, src, re.S)
     if not block:
-        raise SystemExit("could not find `pub mod tag` in src/implied_close.rs")
+        raise SystemExit(f"could not find `pub mod {module}` in src/implied_close.rs")
     ids = {m[1].lower(): int(m[2]) for m in
            re.finditer(r"pub const (\w+): u8 = (\d+);", block.group(1))}
     if not ids:
-        raise SystemExit("no tag ids parsed from src/implied_close.rs")
+        raise SystemExit(f"no ids parsed from `pub mod {module}`")
     return ids
 
 
-# names whose <p>-closing membership is a real question: libxml2's HTML4 block list, plus the HTML5-era
-# sectioning elements it does NOT close <p> on (the arm that was wrong before).
-PCLOSE_NAMES = [
-    "address", "blockquote", "center", "dir", "div", "dl", "fieldset", "form",
-    "h1", "h2", "h3", "h4", "h5", "h6", "hr", "menu", "ol", "pre", "ul",
-    "section", "article", "aside", "header", "footer", "nav", "main", "figure",
-    "details", "hgroup", "span", "b",
-]
-# the void set, plus the HTML5-era names libxml2 deliberately does NOT treat as void
+def tag_ids() -> dict[str, int]:
+    return _ids("tag")
+
+
+# The name universe for close-decision cells. Deliberately NOT read from the engine's own tables: a name
+# the engine wrongly treats as ordinary (`em`, `section`) has no cell to flip, but flipping it TO closing
+# is exactly the check that a gate would notice such a mistake. So this is an HTML element list, the same
+# independence rule the audit's universe follows.
+# One representative per behaviour class is enough where the engine cannot tell two names apart in BOTH
+# tables (`h3`-`h6` behave exactly as `h1`, `th` as `td`), so they are omitted to keep the sweep at a
+# runnable size — but only where that identity holds in the tag ids AND the start-close classes.
+CLOSE_NAMES = ("a address b big blockquote caption center col colgroup dd dir div dl dt em fieldset font "
+               "form h1 h2 hr i legend li menu ol optgroup option p pre s strike section small span "
+               "strong table tbody td tfoot th thead tr tt u ul rt rp ruby").split()
+# A void element is never the OPEN element, so `close:<any>,<void>` is unobservable by construction —
+# not a coverage gap. (The first sweep spent 70 mutants proving this the slow way.)
 VOID_NAMES = ["area", "base", "br", "col", "hr", "img", "input", "link", "meta", "param",
               "embed", "source", "track", "wbr"]
 
@@ -79,16 +86,16 @@ VOID_NAMES = ["area", "base", "br", "col", "hr", "img", "input", "link", "meta",
 def mutants(ids: dict[str, int]) -> list[tuple[str, str]]:
     """(spec, human label) for every rule cell that can be flipped."""
     out: list[tuple[str, str]] = []
+    for top in CLOSE_NAMES:
+        if top in VOID_NAMES:
+            continue
+        for inc in CLOSE_NAMES:
+            out.append((f"close:{inc},{top}", f"<{inc}> closes an open <{top}>"))
     by_id = {v: k for k, v in ids.items()}
-    for top in sorted(by_id):
-        for start in sorted(by_id):
-            out.append((f"cell:{start},{top}", f"implies_close({by_id[start]} closes {by_id[top]})"))
     for tid in sorted(by_id):
         out.append((f"scope:{tid}", f"table_scope({by_id[tid]})"))
     for n in VOID_NAMES:
         out.append((f"void:{n}", f"void({n})"))
-    for n in PCLOSE_NAMES:
-        out.append((f"pclose:{n}", f"p_closed_by({n})"))
     return out
 
 
@@ -144,12 +151,14 @@ def main() -> int:
     ap.add_argument("--only", help="SEMICOLON-separated specs to test (e.g. 'cell:2,0;scope:3' — the "
                                    "separator is ';' because a cell spec already contains a comma). Use "
                                    "this to re-test the survivors after widening a gate.")
+    ap.add_argument("--detectors", help="comma-separated subset to run (default: all). The `unit` "
+                                       "detector costs ~2.7s per mutant and catches no start-close cell, "
+                                       "so a full sc sweep is much faster without it.")
     ap.add_argument("--gate", action="store_true", help="exit nonzero if any mutant SURVIVES")
     ap.add_argument("--json", help="write the full matrix here")
     args = ap.parse_args()
 
-    ids = tag_ids()
-    all_m = mutants(ids)
+    all_m = mutants(tag_ids())
     rng = random.Random(args.seed)
     if args.only:
         want = [x.strip() for x in args.only.split(";") if x.strip()]
@@ -176,6 +185,13 @@ def main() -> int:
         print(f"note: --corpus {args.corpus} not found; skipping the real-page detector "
               f"(build it with tools/corpus_fetch.py)\n")
     dets = build_detectors(args.with_differential, corpus)
+    if args.detectors:
+        want = {x.strip() for x in args.detectors.split(",") if x.strip()}
+        unknown = want - {d.name for d in dets}
+        if unknown:
+            raise SystemExit(f"unknown detector(s): {sorted(unknown)}; have "
+                             f"{sorted(d.name for d in dets)}")
+        dets = [d for d in dets if d.name in want]
 
     print("RULE-TABLE MUTATION SWEEP")
     print(f"  mutants   : {len(chosen)} of {len(all_m)}"

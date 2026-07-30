@@ -11,7 +11,7 @@
 #   make gate-corpus [CORPUS=<dir>]  value-parity gate over a page corpus (defaults to tests/corpus)
 #   make corpus-real fetch REAL pages into fixtures/realweb (gitignored), then gate over them
 #   make gate-mutate flip rule-table cells one at a time and check a gate notices (sampled)
-#   make gate-mutate-full  the whole rule table, ~40 min — nightly
+#   make gate-mutate-full  every cell (~2,200 mutants, ~15 min with the fast gates) — nightly
 #   make soak        multi-million differential/fuzz soak across independent seeds
 #   make py          rebuild the extension (maturin --release), Python suite + tree-rule audit
 #   make bench       full throughput matrix vs Parsel (minutes; for release notes)
@@ -74,15 +74,18 @@ corpus-real: build
 # where they are. Needs the `mutate` feature (one build serves every mutant); puts the normal build back
 # afterwards, because a mutate build must never be shipped or benchmarked.
 MUTANTS ?= 40
+# The `unit` detector costs ~2.7s per mutant, so the full sweep runs the fast gates only; the sampled
+# form runs everything. A survivor is worth re-testing with every detector before believing it.
+DETECTORS ?=
 gate-mutate:
 	cargo build --release --features mutate
 	$(MATURIN) develop --release --features python,mutate
-	-$(PY) tools/mutate_rules.py --sample $(MUTANTS) --gate
+	-$(PY) tools/mutate_rules.py --sample $(MUTANTS) $(if $(DETECTORS),--detectors $(DETECTORS),) --gate
 	cargo build --release
 	$(MATURIN) develop --release
 
 gate-mutate-full:
-	$(MAKE) gate-mutate MUTANTS=0
+	$(MAKE) gate-mutate MUTANTS=0 DETECTORS=audit,corpus-fixtures
 
 soak: build
 	$(PY) tools/soak.py

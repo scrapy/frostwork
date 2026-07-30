@@ -17,17 +17,24 @@
 //!
 //! Spec grammar (`FROSTWORK_MUTATE`), one mutation per run:
 //! ```text
-//!   cell:<start_id>,<top_id>   flip implies_close_id for exactly that pair
-//!   scope:<tag_id>             flip is_table_scoped for that id
-//!   void:<name>                flip is_void for that name
-//!   pclose:<name>              move that name in/out of the <p>-closing BLOCK set
+//!   close:<inc_name>,<open_name>   invert the EFFECTIVE "does this start tag close that open element?"
+//!                                 answer for exactly that tag-name pair
+//!   scope:<tag_id>                flip is_table_scoped for that id
+//!   void:<name>                   flip is_void for that name
 //! ```
+//!
+//! `close:` deliberately hooks the COMPOSITE decision rather than one table. Two tables feed it —
+//! `implies_close_id` (tag ids) and `start_closes` (libxml2's finer name-pair list) — and they overlap,
+//! so mutating either one alone is MASKED wherever the other closes the same pair: 51 such mutants
+//! survived every gate while the behaviour was in fact protected. Mutating the answer instead of an
+//! implementation detail makes every cell observable and needs no equivalence bookkeeping.
+//!
 //! Driven by `tools/mutate_rules.py`; see docs/TESTING.md.
 
 #[cfg(not(feature = "mutate"))]
 mod imp {
     #[inline(always)]
-    pub fn cell(_start: u8, _top: u8, v: bool) -> bool {
+    pub fn closes(_inc: &[u8], _top: &[u8], v: bool) -> bool {
         v
     }
     #[inline(always)]
@@ -38,10 +45,6 @@ mod imp {
     pub fn is_void(_name: &str, v: bool) -> bool {
         v
     }
-    #[inline(always)]
-    pub fn tag_id(_name: &str, v: u8) -> u8 {
-        v
-    }
 }
 
 #[cfg(feature = "mutate")]
@@ -50,10 +53,9 @@ mod imp {
 
     enum Spec {
         None,
-        Cell(u8, u8),
+        Close(String, String),
         Scope(u8),
         Void(String),
-        PClose(String),
     }
 
     fn spec() -> &'static Spec {
@@ -68,23 +70,26 @@ mod imp {
                 None => panic!("FROSTWORK_MUTATE: expected `<kind>:<arg>`, got {raw:?}"),
             };
             match kind {
-                "cell" => {
+                "close" => {
                     let (a, b) = arg
                         .split_once(',')
-                        .unwrap_or_else(|| panic!("FROSTWORK_MUTATE cell: expected `start,top`"));
-                    Spec::Cell(a.trim().parse().unwrap(), b.trim().parse().unwrap())
+                        .unwrap_or_else(|| panic!("FROSTWORK_MUTATE close: expected `inc,open`"));
+                    Spec::Close(a.trim().to_ascii_lowercase(), b.trim().to_ascii_lowercase())
                 }
                 "scope" => Spec::Scope(arg.trim().parse().unwrap()),
                 "void" => Spec::Void(arg.trim().to_ascii_lowercase()),
-                "pclose" => Spec::PClose(arg.trim().to_ascii_lowercase()),
                 other => panic!("FROSTWORK_MUTATE: unknown kind {other:?}"),
             }
         })
     }
 
-    pub fn cell(start: u8, top: u8, v: bool) -> bool {
+    pub fn closes(inc: &[u8], top: &[u8], v: bool) -> bool {
         match spec() {
-            Spec::Cell(s, t) if *s == start && *t == top => !v,
+            Spec::Close(a, b)
+                if inc.eq_ignore_ascii_case(a.as_bytes()) && top.eq_ignore_ascii_case(b.as_bytes()) =>
+            {
+                !v
+            }
             _ => v,
         }
     }
@@ -103,22 +108,6 @@ mod imp {
         }
     }
 
-    /// Moving a name in or out of the `<p>`-closing set. `BLOCK` is exactly "closes an open `<p>` and
-    /// nothing else", so toggling against `OTHER` changes p-closing membership and no other rule.
-    pub fn tag_id(name: &str, v: u8) -> u8 {
-        match spec() {
-            Spec::PClose(n) if n == name => {
-                if v == crate::implied_close::tag::BLOCK {
-                    crate::implied_close::tag::OTHER
-                } else if v == crate::implied_close::tag::OTHER {
-                    crate::implied_close::tag::BLOCK
-                } else {
-                    v // a name with its own id (`li`, `td`, `table`) is not a BLOCK-set question
-                }
-            }
-            _ => v,
-        }
-    }
 }
 
 pub use imp::*;

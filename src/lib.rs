@@ -789,8 +789,48 @@ mod tests {
     fn ruby_annotations_never_auto_close() {
         assert_eq!(ex("<ruby><rt>a<rt>b</ruby>", "ruby > rt::text"), v(&["a"]));
         assert_eq!(ex("<ruby><rt>a<rp>b</ruby>", "ruby > rp::text"), v(&[]));
-        // ...but they still close an open <p>, so `b` is not p's text.
-        assert_eq!(ex("<div><p>a<rt>b</div>", "div > p::text"), v(&["a"]));
+        // ...and they do NOT close an open <p> either. `div > p::text` was asserted here before and
+        // cannot tell: it is p's DIRECT text, which is `a` whether the <rt> nested or became a sibling.
+        // `div > rt` discriminates — it matches only if the <rt> was lifted out of the <p>.
+        assert_eq!(ex("<div><p>a<rt>b</div>", "div > rt::text"), v(&[]));
+        assert_eq!(ex("<div><p>a<option>b</div>", "div > option::text"), v(&[]));
+    }
+
+    /// libxml2's `htmlStartClose` NAME-pair table (`implied_close::start_closes`).
+    ///
+    /// This is a different rule from the implied-close cross product, at a finer granularity than the
+    /// engine's tag ids: it closes an open `<b>` for an incoming `<td>` but NOT an open `<em>`, and an
+    /// open `<h1>` for an incoming `<table>` but NOT an open `<div>` — pairs that share a `tag::` id.
+    /// Every case here was read off libxml2 2.14 first; `tools/audit_tree_rules.py` re-checks all
+    /// 11,543 (open x incoming) cells, and `tools/mutate_rules.py` checks that flipping one is noticed.
+    #[test]
+    fn start_close_pairs_match_libxml2() {
+        // an incoming <p> closes an open heading or font-style element (very common in legacy markup:
+        // `<h1>Title<p>Body` with the `</h1>` omitted)
+        assert_eq!(ex("<div><h1>T<p>x</div>", "div > p::text"), v(&["x"]));
+        assert_eq!(ex("<div><h1>T<p>x</div>", "div > h1::text"), v(&["T"]));
+        assert_eq!(ex("<div><b>x<p>y</div>", "div > p::text"), v(&["y"]));
+        assert_eq!(ex("<div><u>x<p>y</div>", "div > p::text"), v(&["y"]));
+        assert_eq!(ex("<div><small>x<p>y</div>", "div > p::text"), v(&["y"]));
+        // ...but NOT an open <em>/<strong>, which are the same `tag::OTHER` id as <b>
+        assert_eq!(ex("<div><em>x<p>y</div>", "div > p::text"), v(&[]));
+        // a cell closes an open inline element, an anchor closes an anchor, a form closes a form
+        assert_eq!(ex("<div><span>x<td>y</div>", "div > td::text"), v(&["y"]));
+        assert_eq!(ex("<div><font>x<td>y</div>", "div > td::text"), v(&["y"]));
+        assert_eq!(ex("<div><a>x<a>y</div>", "div > a::text"), v(&["x", "y"]));
+        assert_eq!(ex("<div><form>a<form>b</div>", "div > form::text"), v(&["a", "b"]));
+        // <table> closes an open heading, but not an open <div> (both `tag::BLOCK`)
+        assert_eq!(ex("<div><h1>T<table><tr><td>c</table></div>", "div > table td::text"), v(&["c"]));
+        // list/definition starts close an open <pre> or <address>
+        assert_eq!(ex("<div><pre>a<li>b</div>", "div > li::text"), v(&["b"]));
+        assert_eq!(ex("<dl><pre>a<dt>b</dl>", "dl > dt::text"), v(&["b"]));
+        assert_eq!(ex("<div><address>a<dd>b</div>", "div > dd::text"), v(&["b"]));
+        assert_eq!(ex("<div><menu>a<ul>b</ul></div>", "div > ul::text"), v(&["b"]));
+        // <fieldset> closes an open <legend>
+        assert_eq!(ex("<div><legend>L<fieldset>x</div>", "div > fieldset::text"), v(&["x"]));
+        // a VOID incoming tag still closes: <col> closes an open <p>. The p-closing audit skips void
+        // elements ("no text of its own"), so this pair had no coverage at all before.
+        assert_eq!(ex("<div><p>x<col>y</div>", "div > p::text"), v(&["x"]));
     }
     #[test]
     fn p_closed_by_block() {

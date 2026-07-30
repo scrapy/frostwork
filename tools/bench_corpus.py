@@ -206,7 +206,6 @@ def main():
             body = f.read()
         if not body.strip():
             continue  # empty snapshot — Parsel can't build a Selector from it
-
         # warmup (also validates neither side crashes)
         fcols = frostwork.extract(body, queries, "utf-8")
         pcols = parsel_extract(body, queries)

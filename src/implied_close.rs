@@ -51,7 +51,7 @@ pub fn is_table_scoped(tid: u8) -> bool {
 /// end tags (`</table>`, `</tr>`, `</tbody>`, …) unwind normally, and `</body>`/`</html>` still close
 /// the document — verified cell-by-cell against libxml2 2.14.6.
 pub fn end_tag_discardable(name: &[u8]) -> bool {
-    let (tid, _) = classify(name);
+    let (tid, _void, _sc) = classify(name);
     if is_table_scoped(tid) {
         return false;
     }
@@ -60,10 +60,6 @@ pub fn end_tag_discardable(name: &[u8]) -> bool {
 
 /// Map a lowercased ASCII tag name to its `tag::*` id.
 pub fn tag_id(name: &str) -> u8 {
-    crate::mutate::tag_id(name, tag_id_pure(name))
-}
-
-fn tag_id_pure(name: &str) -> u8 {
     match name {
         "li" => tag::LI,
         "dd" => tag::DD,
@@ -94,10 +90,6 @@ fn tag_id_pure(name: &str) -> u8 {
 
 /// True iff a `start` start-tag (by id) implicitly closes an open `top` element (by id).
 pub fn implies_close_id(start: u8, top: u8) -> bool {
-    crate::mutate::cell(start, top, implies_close_id_pure(start, top))
-}
-
-fn implies_close_id_pure(start: u8, top: u8) -> bool {
     use tag::*;
     match top {
         LI => start == LI,
@@ -136,6 +128,131 @@ fn implies_close_id_pure(start: u8, top: u8) -> bool {
     }
 }
 
+/// Start-close classes: the granularity libxml2's `htmlStartClose` pair table actually needs.
+/// Derived from libxml2 2.14 by enumeration, not from the HTML spec — two names share a class only
+/// if they behave identically BOTH as the incoming tag and as the open element. See `start_closes`.
+pub mod sc {
+    pub const OTHER: u8 = 0; // closes nothing, closed by nothing (incl. every unknown element)
+    pub const A: u8 = 1; // a
+    pub const ADDRESS: u8 = 2; // address
+    pub const BIG_S: u8 = 3; // big s small strike tt
+    pub const BLOCKQUOTE_DIV: u8 = 4; // blockquote div frameset
+    pub const B_I: u8 = 5; // b i
+    pub const CAPTION: u8 = 6; // caption
+    pub const CENTER: u8 = 7; // center
+    pub const COL: u8 = 8; // col
+    pub const COLGROUP: u8 = 9; // colgroup
+    pub const DD: u8 = 10; // dd
+    pub const DIR: u8 = 11; // dir
+    pub const DL: u8 = 12; // dl
+    pub const DT: u8 = 13; // dt
+    pub const FIELDSET: u8 = 14; // fieldset
+    pub const FONT: u8 = 15; // font
+    pub const FORM: u8 = 16; // form
+    pub const H1_H2: u8 = 17; // h1 h2 h3 h4 h5 h6
+    pub const HR: u8 = 18; // hr
+    pub const LEGEND: u8 = 19; // legend
+    pub const LI: u8 = 20; // li
+    pub const MENU: u8 = 21; // menu
+    pub const OL: u8 = 22; // ol
+    pub const OPTGROUP: u8 = 23; // optgroup
+    pub const OPTION: u8 = 24; // option
+    pub const P: u8 = 25; // p
+    pub const PRE: u8 = 26; // pre
+    pub const SPAN: u8 = 27; // span
+    pub const TABLE: u8 = 28; // table
+    pub const TBODY: u8 = 29; // tbody
+    pub const TD_TH: u8 = 30; // td th
+    pub const TFOOT: u8 = 31; // tfoot
+    pub const THEAD: u8 = 32; // thead
+    pub const TR: u8 = 33; // tr
+    pub const U: u8 = 34; // u
+    pub const UL: u8 = 35; // ul
+}
+
+/// Start-close class for a lowercased ASCII tag name.
+pub fn sc_id(name: &str) -> u8 {
+    match name {
+        "a" => sc::A,
+        "address" => sc::ADDRESS,
+        "big" | "s" | "small" | "strike" | "tt" => sc::BIG_S,
+        "blockquote" | "div" | "frameset" => sc::BLOCKQUOTE_DIV,
+        "b" | "i" => sc::B_I,
+        "caption" => sc::CAPTION,
+        "center" => sc::CENTER,
+        "col" => sc::COL,
+        "colgroup" => sc::COLGROUP,
+        "dd" => sc::DD,
+        "dir" => sc::DIR,
+        "dl" => sc::DL,
+        "dt" => sc::DT,
+        "fieldset" => sc::FIELDSET,
+        "font" => sc::FONT,
+        "form" => sc::FORM,
+        "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => sc::H1_H2,
+        "hr" => sc::HR,
+        "legend" => sc::LEGEND,
+        "li" => sc::LI,
+        "menu" => sc::MENU,
+        "ol" => sc::OL,
+        "optgroup" => sc::OPTGROUP,
+        "option" => sc::OPTION,
+        "p" => sc::P,
+        "pre" => sc::PRE,
+        "span" => sc::SPAN,
+        "table" => sc::TABLE,
+        "tbody" => sc::TBODY,
+        "td" | "th" => sc::TD_TH,
+        "tfoot" => sc::TFOOT,
+        "thead" => sc::THEAD,
+        "tr" => sc::TR,
+        "u" => sc::U,
+        "ul" => sc::UL,
+        _ => sc::OTHER,
+    }
+}
+
+/// True iff an incoming start tag of class `inc` closes an open element of class `top`, per
+/// libxml2's `htmlStartClose` pair list. This is a NAME-pair rule, not a content-model one: it
+/// closes an open `<b>` for an incoming `<td>` but not an open `<em>`, and an open `<h1>` for an
+/// incoming `<table>` but not an open `<div>`. Enumerated against libxml2 2.14 over every
+/// (open x incoming) pair of the HTML element set; `tools/audit_tree_rules.py` re-checks all of them.
+pub fn start_closes(inc: u8, top: u8) -> bool {
+    use sc::*;
+    match inc {
+        A => top == A,
+        ADDRESS => matches!(top, P | UL),
+        BLOCKQUOTE_DIV => top == P,
+        CAPTION => top == P,
+        CENTER => matches!(top, B_I | FONT | P),
+        COL => matches!(top, CAPTION | P),
+        COLGROUP => matches!(top, CAPTION | COLGROUP | P),
+        DD => matches!(top, ADDRESS | DIR | DT | MENU | P | PRE),
+        DIR => top == P,
+        DL => matches!(top, ADDRESS | DIR | DT | MENU | P | PRE),
+        DT => matches!(top, ADDRESS | DD | DIR | MENU | P | PRE),
+        FIELDSET => matches!(top, A | H1_H2 | LEGEND | P | PRE),
+        FORM => matches!(top, ADDRESS | DIR | DL | FORM | H1_H2 | MENU | OL | P | PRE | UL),
+        H1_H2 => top == P,
+        HR => top == P,
+        LI => matches!(top, ADDRESS | DL | H1_H2 | LI | P | PRE),
+        MENU => matches!(top, P | UL),
+        OL => top == P,
+        OPTGROUP => top == OPTION,
+        OPTION => top == OPTION,
+        P => matches!(top, BIG_S | B_I | H1_H2 | P | U),
+        PRE => matches!(top, P | UL),
+        TABLE => matches!(top, A | H1_H2 | P | PRE),
+        TBODY => matches!(top, CAPTION | COLGROUP | P | TBODY | TD_TH | TFOOT | THEAD | TR),
+        TD_TH => matches!(top, A | B_I | FONT | P | SPAN | TD_TH | U),
+        TFOOT => matches!(top, CAPTION | COLGROUP | P | TBODY | TD_TH | THEAD | TR),
+        THEAD => matches!(top, CAPTION | COLGROUP),
+        TR => matches!(top, CAPTION | COLGROUP | P | TD_TH | TR),
+        UL => matches!(top, ADDRESS | DIR | MENU | P | PRE),
+        _ => false,
+    }
+}
+
 /// Void elements: no end tag, no children. This is libxml2 2.14's set, NOT HTML5's — libxml2 does
 /// NOT treat the HTML5-era `embed`/`source`/`track`/`wbr` as void (it keeps them open as ordinary
 /// containers), and we match libxml2 because it is the oracle. Verified empirically against lxml.
@@ -152,9 +269,9 @@ pub fn is_void(name: &str) -> bool {
 /// Case-insensitive `(tag_id, is_void)` for a raw (possibly mixed-case) tag name, with **no heap
 /// allocation** — lowercases into a stack buffer. Every recognized tag name is ≤10 ASCII bytes, so a
 /// longer name is unrecognized (`OTHER`, non-void) without copying. Hot path: called per start tag.
-pub fn classify(name: &[u8]) -> (u8, bool) {
+pub fn classify(name: &[u8]) -> (u8, bool, u8) {
     if name.len() > 10 {
-        return (tag::OTHER, false);
+        return (tag::OTHER, false, sc::OTHER);
     }
     let mut buf = [0u8; 10];
     for (i, &c) in name.iter().enumerate() {
@@ -162,7 +279,7 @@ pub fn classify(name: &[u8]) -> (u8, bool) {
     }
     // recognized tag names are ASCII; a non-ASCII (invalid-UTF-8) name is unrecognized -> OTHER.
     let low = std::str::from_utf8(&buf[..name.len()]).unwrap_or("");
-    (tag_id(low), is_void(low))
+    (tag_id(low), is_void(low), sc_id(low))
 }
 
 #[cfg(test)]

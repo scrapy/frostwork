@@ -253,8 +253,11 @@ _TAG_RE = re.compile(rb"<(/?)([a-zA-Z][^\s/>]*)")
 # Constructs docs/COMPATIBILITY.md lists as accepted divergences. Anything NOT in here that explains a
 # divergence is a bug: `unmatched-end` is deliberately absent — it is now ported, so if it ever shows
 # up as the sole explanation again, that is the regression we want the gate to catch.
+# `nested-form` is deliberately ABSENT: `<form>` closing an open `<form>` is implemented now (libxml2's
+# start-close pair table, `implied_close::start_closes`), so if a nested form ever explains a divergence
+# again that is a REGRESSION and belongs in NOVEL — the same reasoning that keeps `unmatched-end` out.
 DOCUMENTED = {"foster", "misnest", "deep-p", "head-in-body", "fragment", "outer-html",
-              "truncated-tag", "nested-form", "after-html"}
+              "truncated-tag", "after-html"}
 
 
 def constructs(html: bytes) -> set:
@@ -299,7 +302,9 @@ def constructs(html: bytes) -> set:
         if name in _HEAD_ONLY and "body" in stack:
             found.add("head-in-body")
         if name == "form" and "form" in stack:
-            found.add("nested-form")  # libxml2 IGNORES the inner form start tag; the engine nests it
+            # Kept as an attribution LABEL (it still says something useful about a page) but no longer
+            # documented: libxml2 closes the outer form and opens a sibling, and so does the engine.
+            found.add("nested-form")
         if name in _P_KEEPERS and "p" in stack and stack[-1] != "p":
             found.add("deep-p")
         stack.append(name)

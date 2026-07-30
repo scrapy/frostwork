@@ -53,9 +53,13 @@ Two limits of that gate are worth knowing before trusting a "100% parity" number
   parser.
 - **`make gate-mutate` asks the inverse question: flip one rule cell, does any gate notice?** The first
   sweep found 13% of the table protected by nothing, all from one root cause — the audit's universe was
-  drawn from the tags we already thought were special (16 NAMES vs the engine's 19 IDS). Widening it took
-  the audit from 451 to 5,169 cells, turned up 87 real divergences (now the enumerated
-  `KNOWN_START_CLOSE_GAP`), and left 0 survivors. Re-run it after touching a rule table.
+  drawn from the tags we already thought were special (16 NAMES vs the engine's 19 IDS). Widening it turned
+  up 87 real divergences, which were libxml2's `htmlStartClose` NAME-pair table (finer-grained than the tag
+  ids); that is now ported in full as `implied_close::start_closes`, GENERATED from the oracle rather than
+  transcribed. A second sweep then found 93 more unprobed cells, all of them the one tag name `s` missing
+  from the audit's probe list. 0 survivors today. The hook flips the EFFECTIVE close answer for a tag-name
+  pair, not a cell in one table — two tables feed that answer and mutating either alone is masked wherever
+  the other closes the same pair. Re-run the sweep after touching a rule table.
 
 ## Repo map
 

@@ -64,9 +64,14 @@ shift_jis, euc-jp, gbk, big5, koi8-r, utf-8, plus UTF-16 sniffing, vs Parsel giv
 - `tools/diff_fuzz.py` — mutates conformant/foreign pages and the fuzz corpus into *malformed* HTML,
   then diffs against lxml. Catches tokenizer desync the well-formed gate can't reach. `CRASH` is gated
   absolutely. Raw `DIVERGE` is expected here, so each one is **attributed** to the documented construct
-  that explains it (foster, misnest, deep-`p`, head-in-body, fragment, outer-HTML, nested-`form`,
-  truncated-tag); whatever no construct explains is reported as **NOVEL** and gated on a *rate*
+  that explains it (foster, misnest, deep-`p`, head-in-body, fragment, outer-HTML, truncated-tag);
+  whatever no construct explains is reported as **NOVEL** and gated on a *rate*
   (`--novel-budget`, default 0.10% of pairs).
+
+  A construct leaves that list the moment it is IMPLEMENTED, or it becomes an excuse: `nested-form` was
+  documented until `<form>` closing an open `<form>` came in with libxml2's start-close table, and leaving
+  it there would have made a regression in that rule invisible. `tests/test_gates.py` pins both it and
+  `unmatched-end` out of the set.
 
   This split exists because a bulk "DIVERGE is expected" bucket is where a real bug hides. The
   dropped-end-tag text split sat in this tool's output clustered under a `foster` mutation signature,
@@ -150,40 +155,55 @@ repo. Doc-generator output is worth including, not just commerce pages.
 
 **Would a wrong rule be NOTICED? — `tools/mutate_rules.py` (`make gate-mutate`).** The audit above asks
 whether every rule cell is RIGHT. This asks the other half: **if a cell were wrong, would anything go
-red?** It flips one cell at a time (via the `mutate` cargo feature, so one build serves all ~425 mutants
-instead of ~425 rebuilds) and records which gates notice. It is the only check here that finds blind spots
-without a human first guessing where they are — and every gap closed before it was found by someone
+red?** It flips one cell at a time (via the `mutate` cargo feature, so one build serves every mutant
+instead of one rebuild each) and records which gates notice. It is the only check here that finds blind
+spots without a human first guessing where they are — and every gap closed before it was found by someone
 reading code and thinking "hold on, nothing covers that", which had already missed things three review
 rounds running.
 
-The first full sweep, 425 mutants against five gates:
+**Mutate the ANSWER, not a table.** The first version flipped cells in one rule table at a time, and 51
+mutants survived every gate while the behaviour was in fact protected: two tables feed the close decision
+(`implies_close_id` over tag ids, `start_closes` over libxml2's finer name pairs) and the matcher ORs
+them, so mutating either alone is masked wherever the other closes the same pair. A survivor list padded
+with false alarms is worse than no list — it trains you to skim the one output that matters. So the hook
+now inverts the *effective* close decision for a tag-name pair. Nothing can mask it, and the only
+exclusion left is provable: a VOID element is never the open element, so `close:<any>,<void>` is
+unobservable by construction.
+
+The first sweep, over the implied-close id table alone, ran 425 mutants against five gates:
 
 | gate | mutants it noticed |
 |---|---|
-| rule audit (`audit_tree_rules.py`) | 354 / 425 (83%) |
-| unit vectors (`cargo test`) | 116 / 425 (27%) |
-| differential vs lxml (reduced) | 107 / 425 (25%) |
-| corpus, self-authored fixtures | 44 / 425 (10%) |
-| corpus, real fetched pages | 23 / 425 (5%) |
-| **no gate at all** | **55 / 425 (13%)** |
+| rule audit (`audit_tree_rules.py`) | 83% |
+| unit vectors (`cargo test`) | 27% |
+| differential vs lxml (reduced) | 25% |
+| corpus, self-authored fixtures | 10% |
+| corpus, real fetched pages | 5% |
+| **no gate at all** | **13%** |
 
-Two things in that table are worth internalising. **218 cells are caught by the rule audit and nothing
+Two things in that table are worth internalising. **Most cells are caught by the rule audit and nothing
 else** — for those the audit is a single point of failure, which is why a new rule needs an audit ROW and
 not merely a passing differential. And the page-based gates are weak detectors of rule errors by nature:
 real pages exercised 5% of the table, because ordinary markup simply does not contain most of these
 constructs. That is not an argument against the corpus, it is the argument FOR the audit.
 
-The 55 survivors had one root cause, and it was the same one twice before: **the audit's universe was
-drawn from the things we already believed were special.** Its cross product was over 16 tag NAMES while
-the engine's table is over 19 tag IDS, three of which are not names (`OTHER`, `BLOCK`, `TABLE`) — so "does
-`<div>` close an open `<dd>`?" and "does `<dd>` close an open `<span>`?" were never asked. Widening it to
-cover those, plus the scope universe (`dd`/`dt`/`rp` were missing) took the audit from 451 to 5,169 cells
-and turned up **87 real divergences** — now the enumerated `KNOWN_START_CLOSE_GAP` in
-[COMPATIBILITY.md](COMPATIBILITY.md). After the widening the full table re-sweeps to **0 survivors** —
-measured with only the three fast gates (unit, audit, fixture corpus), a strictly weaker detector set than
-the table above, so the result holds for the full set too. The audit alone now catches 424 of 425.
+**What it found, twice.** The 55 first-round survivors had one root cause, and it was the same one as
+twice before: **the audit's universe was drawn from the things we already believed were special.** Its
+cross product was over 16 tag NAMES while the engine's table is over 19 tag IDS, three of which are not
+names (`OTHER`, `BLOCK`, `TABLE`) — so "does `<div>` close an open `<dd>`?" and "does `<dd>` close an open
+`<span>`?" were never asked. Widening it (plus the scope universe, which was missing `dd`/`dt`/`rp`) turned
+up **87 real divergences**: libxml2 decides the close question from a hardcoded NAME-pair list
+(`htmlStartClose`) finer than the engine's ids — `<td>` closes an open `<b>` but not an `<em>`, `<table>`
+closes an open `<h1>` but not a `<div>`, `<a>` and `<form>` close a same-tag repeat. All 87 were the same
+direction, so that table was ported in full (`implied_close::start_closes`, generated from the oracle
+rather than transcribed) instead of tolerated.
 
-Three lessons are baked into the tool's own probes, each of which cost a wrong answer first:
+Then the sweep over the *composite* decision found 93 more survivors — every one of them the single tag
+name `s`, missing from the audit's probe list in both directions, because it shares a behaviour class with
+`big`/`small`/`tt` and "a representative is enough" had quietly become "a representative we remembered".
+Adding it took them all to caught. **0 survivors** now, over every cell of every rule table.
+
+Three probe-design lessons are baked into the tools, each of which cost a wrong answer first:
 
 - **A `::text` probe cannot see inside a table.** Text in an open `<table>` is foster-parented, so the probe
   reads empty whether or not the table was closed — which is exactly why the `table`-as-open-element cells

@@ -127,7 +127,23 @@ DOM, no full tree construction). These rules were derived empirically against li
     `table > thead th::text` returned nothing where lxml returns the cell.
 - **An open `<p>`** is closed by the block set plus list/table *items* (`li`, `dd`, `dt`, `tr`, `td`,
   `th`, `tbody`, `tfoot`, `caption`, `p`) — but **not** by `option`, `optgroup`, `thead`, `rt` or `rp`,
-  which nest inside it.
+  which nest inside it. Void tags count: `<col>` and `<hr>` close an open `<p>` too.
+- **libxml2's start-close NAME-pair table** (`htmlStartClose`) is ported in full
+  (`implied_close::start_closes`). It is a *name*-pair rule, deliberately finer than the implied-close
+  ids, and it is why two elements that look interchangeable are not:
+  - an incoming `<p>` closes an open `<b>`, `<i>`, `<u>`, `<big>`, `<small>`, `<tt>`, `<s>`, `<strike>`
+    and any `<h1>`–`<h6>` — but **not** an open `<em>` or `<strong>`. So `<h1>Title<p>Body` and
+    `<b>x<p>y` produce siblings, which is ordinary legacy and generator markup.
+  - an incoming `<td>`/`<th>` closes an open `<a>`, `<b>`, `<i>`, `<u>`, `<font>`, `<span>` and a cell;
+    `<table>` closes an open `<a>`, `<pre>` and any heading, but **not** an open `<div>`.
+  - `<a>` closes an open `<a>`, and `<form>` closes an open `<form>` — the unclosed-link and
+    form-in-form cases.
+  - `<fieldset>` closes an open `<legend>`; the list and definition starts (`li`, `dd`, `dt`, `dl`,
+    `ul`, `menu`, `dir`, `form`, `pre`, `address`) close each other per the pair list.
+
+  All 11,543 (open × incoming) pairs of the HTML element set are re-checked against libxml2 by
+  `tools/audit_tree_rules.py`, and `tools/mutate_rules.py` verifies that flipping any one of them is
+  noticed by a gate.
 - **An end tag never unwinds a table** ("table scope"). With a table-scoped element (`table`, `thead`,
   `tbody`, `tfoot`, `tr`, `td`, `th` — **not** `caption` or `colgroup`) open above its match, an ordinary
   end tag is *discarded*:
@@ -180,18 +196,6 @@ next bug will be:
 - **Deep-`<p>`** — a block/item start closing a `<p>` that is an *ancestor* rather than the immediate
   open element (`<p><b><div>`); a known gap that leaves the un-reshaped nesting (never worse).
 - **Head-only elements in `<body>`** (`<title>` in body, etc.).
-- **libxml2's start-close NAME-pair table is only partly ported — 87 pairs where libxml2 closes an open
-  element and Frostwork nests it.** libxml2 decides "does this start tag close that open element?" from a
-  hardcoded name-pair list (`htmlStartClose`) that distinguishes names Frostwork's tag ids lump together:
-  `<td>` closes an open `<b>` but not an open `<em>`; `<table>` closes an open `<h1>` but not an open
-  `<div>`; `<a>` and `<form>` close a same-tag repeat. The affected pairs are ENUMERATED in
-  `KNOWN_START_CLOSE_GAP` in `tools/audit_tree_rules.py` and checked every run: a pair outside that list
-  that diverges fails the gate, and a listed pair that starts agreeing also fails, so the list cannot rot.
-  Every one is the same direction — libxml2 closes, Frostwork nests, **zero cases of Frostwork
-  over-closing** — so closing the gap is purely additive. The practical effect is on selectors that depend
-  on the boundary (`div > p`, an outer-HTML capture of the open element); the text itself is not lost.
-  Found by `tools/mutate_rules.py`, which flips one rule cell at a time and asks whether any gate notices.
-
 - **A `<meta charset>` inside a COMMENT is ignored — a divergence from w3lib.** Encoding *sniffing* is
   oracled against `w3lib.encoding.html_to_unicode` (what Scrapy uses; `parsel.Selector(body=…)` does not
   sniff `<meta>` at all, it defaults to UTF-8). w3lib has no comment handling, so it honours
