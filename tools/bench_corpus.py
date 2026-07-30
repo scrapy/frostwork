@@ -122,6 +122,18 @@ def divergence_kind(fc, pc, query):
     return "WRONG"
 
 
+# Every selector this tool measures is one the engine claims to SUPPORT — `frostwork.extract` runs with
+# strict validation, so an unsupported one raises rather than reaching the comparison. That makes EMPTY
+# and SUBSET regressions, not coverage gaps: a supported column going from ["a","b"] to ["a"] is exactly
+# the failure a rule change causes, and grading it as a gap let `make gate-corpus` stay green through it.
+VALUE_BUG_KINDS = ("EMPTY", "SUBSET", "SEGMENT", "WRONG")
+
+
+def is_value_bug(kind: str) -> bool:
+    """Does this divergence kind fail the gate? Every non-whitespace divergence does."""
+    return kind in VALUE_BUG_KINDS
+
+
 def nonws_equal(a, b):
     """True if two value columns carry the same non-whitespace content (drop empty/ws-only items).
     This is the project's actual bar; the gate's WS check is length-sensitive to empty text nodes."""
@@ -276,17 +288,17 @@ def main():
     for reason, cnt in by_reason.most_common():
         flag = "  <-- REAL MISMATCH" if reason.startswith("unexplained") else ""
         print(f"      {cnt:>4}  {reason}{flag}")
-    # A divergence is a *bug* if frostwork emits content Parsel does not (WRONG) or splits a text node
-    # Parsel keeps whole (SEGMENT) — the latter reads as cosmetic but truncates a One-cardinality field,
-    # which is exactly how the dropped-end-tag split hid from this tool. EMPTY/SUBSET stay coverage gaps.
-    wrong = [(p, j, q, k) for p, j, q, k in diverge if k in ("WRONG", "SEGMENT")]
+    # EVERY non-whitespace divergence fails: these are all supported selectors (strict validation), so
+    # EMPTY/SUBSET are lost values, not coverage gaps. Grading them as gaps meant a regression from
+    # ["a","b"] to ["a"] left this gate green — the single most likely way a rule change breaks a scrape.
+    wrong = [(p, j, q, k) for p, j, q, k in diverge if is_value_bug(k)]
     if wrong:
-        print("    VALUE bugs (WRONG = content Parsel lacks; SEGMENT = extra text-node split ->"
-              " a One field truncates):")
+        print("    VALUE bugs (EMPTY/SUBSET = lost values; SEGMENT = extra text-node split -> a One"
+              " field truncates; WRONG = content Parsel lacks):")
         for page, j, q, k in wrong[:20]:
             print(f"      - [{k}] {page}  sel[{j}]  {q!r}")
     else:
-        print("    VALUE bugs: 0  (every divergence is an empty/subset coverage gap)")
+        print("    VALUE bugs: 0")
 
     os.makedirs(RESULTS, exist_ok=True)
     out = {
@@ -309,7 +321,7 @@ def main():
     print(f"\nwrote tools/results/corpusbench.json")
 
     if gate:
-        print(f"\nCORPUS GATE: value bugs (WRONG+SEGMENT) = {len(wrong)}  ->  "
+        print(f"\nCORPUS GATE: value bugs (any non-whitespace divergence) = {len(wrong)}  ->  "
               f"{'PASS' if not wrong else 'FAIL'}")
         if wrong:
             raise SystemExit(1)

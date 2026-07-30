@@ -9,6 +9,11 @@ lxml, and is that difference a documented divergence or a bug?*
 
 - **Oracle:** Parsel/lxml (`parsel.Selector(...).css(q).getall()`), the exact engine Scrapy ships,
   pinned to `parsel==1.11.0`.
+- **The oracle is per SUBSYSTEM, and picking the wrong one hides bugs.** Values are Parsel/lxml. Selector
+  *acceptance* is cssselect/lxml's own parser: a selector the oracle REJECTS must be reported unsupported,
+  not merely answered empty. Encoding *sniffing* is **w3lib** — `parsel.Selector(body=…)` never looks at
+  `<meta>`, it defaults to UTF-8, so oracling a prescan against it is vacuous: it agrees on every
+  declaration you MISS, because both sides produce mojibake. That mistake hid five prescan bugs.
 - **Oracle version matters — "byte-identical to lxml" means libxml2 ≥ 2.14.** Tree construction is
   matched empirically to libxml2 2.14 (see [COMPATIBILITY.md](COMPATIBILITY.md)), and
   `requirements-test.txt` cannot pin that: a wheel *vendors* its own libxml2, and the same lxml release
@@ -29,7 +34,7 @@ The gate is **`DIVERGE + CRASH == 0`**, with `SKIP-EXPECTED` reported as the mea
 
 ## Layers
 
-**Unit vectors — `cargo test`** (125 vectors, milliseconds). One per rule and edge: every implied-close
+**Unit vectors — `cargo test`** (milliseconds). One per rule and edge: every implied-close
 family (`li`/`p`/`td`/`tr`/`dt`/`dd`/`option`) × {closed, omitted}; void/self-closing; rawtext with
 `<`/`&` inside; comments/CDATA/DOCTYPE; entity edges; attribute quoting/case; selector compounds,
 combinators, `:not()`, comma groups; encoding resolution; XPath compilation; the `Page` layer; budget
@@ -69,10 +74,25 @@ shift_jis, euc-jp, gbk, big5, koi8-r, utf-8, plus UTF-16 sniffing, vs Parsel giv
   NOVEL rate was 0.250%, post-fix 0.049%. The residual tail is triaged malformed-input framing (corrupt
   `<html>` root, no implied `</head>` before `<body>`, NUL inside a tag name) — **tighten the budget to
   work it down; do not raise it to make a run pass.**
-- `tools/sel_fuzz.py` — fuzzes the *query* (valid / exotic / malformed / budget-bomb) against real
-  pages and asks the real compiler whether each selector is supported. A promised-supported selector
+- `tools/sel_fuzz.py` — fuzzes the *query* (valid / exotic / escaped / malformed / budget-bomb) against
+  real pages and asks the real compiler whether each selector is supported. A promised-supported selector
   may not lose oracle values, and an unsupported selector may not emit anything. Gates `WRONG` +
   `OVERMATCH` + `CRASH`.
+
+  **A generator can only find bugs in syntax it emits.** CSS escapes — which cssselect *decodes*, so
+  `.\63 1` is `.c1` — appeared in no generated selector, so the entire escape surface was covered by
+  hand vectors alone, and a review found it treated as literal text. Adding an escape family caught a
+  further real bug the hand vectors had missed: `::attr(data-\6b)` was reported SUPPORTED and then
+  matched literally, returning an empty column for a selector parsel answers (the identifier validator
+  only inspected the first character). When you add a parser rule, ask what SYNTAX the fuzzer never
+  writes — that is the blind spot, and it is a different question from which selectors are supported.
+
+  Its escape probes deliberately use substring/prefix operators over `class`/`data-k`/`href`, which every
+  generated page carries. The first version used exact-match values (`[data-k="\76 1"]` for
+  `data-k="v1"`) and only discriminated on pages that happened to hold that exact value — measured
+  against the pre-fix build it failed on 3 seeds out of 4 and **passed a broken engine on the fourth**.
+  Retargeted it fails every seed by 26–29 pairs. A new family's discrimination is a number to measure
+  over several seeds, not a property to assume from one red run.
 
 **Tree-rule audit — `tools/audit_tree_rules.py` (in `make py`).** Coverage of *pages* is not coverage of
 *rules*. The differential proves parity on the pages it generates, so a rule no generated page exercises
@@ -81,8 +101,8 @@ same-tag closes shipped wrong, then an audit of the remaining cells found **19 m
 missing table-scope rule**, all in regions no generated page reached (`optgroup`, `thead`/`tfoot`/
 `caption`, and `<p>` followed by a non-closer) — and widening the audit's universe afterwards found 12
 more (`colgroup` had no rule at all, and `caption` was wrongly a scope boundary). So this walks the rule tables *directly* — the
-implied-close cross product, the void set, the `<p>`-closing set, table scope and rawtext (451 cells
-today) — and asks lxml about every cell. It is fast and deterministic, so it gates.
+implied-close cross product, the void set, the `<p>`-closing set, table scope and rawtext — and asks lxml
+about every cell, printing the cell count it covered. It is fast and deterministic, so it gates.
 
 Two things make it able to find a MISSING rule, not just a wrong one. Its universe is the HTML
 **optional-end-tag set**, not a mirror of the engine's own tag ids — drawing it from the engine made it
@@ -104,10 +124,27 @@ gate's own verdict over a real corpus (`<dir>/<page-object>/{selectors.json,page
 nonzero on any value bug. It defaults to `tests/corpus` — a small SELF-AUTHORED set shaped like the
 doc-generator and table markup that broke the engine, which is verified to discriminate (the tabular page
 object alone reports 6 divergences against the pre-fix engine). That is not a substitute for a real crawl
-corpus: fixtures only encode the bugs already known, the same limitation the generators have.
+corpus — no real/third-party pages are vendored (licensing and size), and fixtures only encode the bugs
+already known, which is the same limitation the generators have.
 `SEGMENT` (same text, extra node split) counts as a bug, not a cosmetic
 difference — a `One` field takes `col[0]`, so an extra split truncates it. No corpus is vendored in this
-repo; point it at one. Doc-generator output is worth including, not just commerce pages.
+repo. Doc-generator output is worth including, not just commerce pages.
+
+**Do the gates actually fail? — `tests/test_gates.py` (in `make py`).** Every gate above is a claim of
+the form "if the engine regresses, this goes red", and that claim is itself untested code. It has been
+wrong three times: `enc_check` printed MISMATCH and exited 0; `diff_fuzz` filed real divergences into a
+bulk "expected" bucket; `bench_corpus` treated a supported selector losing values as a coverage gap and
+passed. Each time a gate was green while the engine was broken — the worst failure mode available to a
+test suite, because it converts a bug into a documented feature.
+
+So this suite seeds a KNOWN regression into each gate's *decision function* and asserts it goes red:
+`divergence_kind`/`is_value_bug` (corpus), `constructs`/`DOCUMENTED` (fuzz attribution), `verdict`
+(differential), the batch size vs the engine's advertised member budget, and the w3lib prescan
+comparison. It runs no engine and generates no pages, so it is fast enough to sit in `make py`.
+
+A related habit, cheaper than any tool: **when a test passes, check it can fail.** `assert "w3lib" in
+src` passed against a *comment* that mentioned w3lib. `if supported: assert parity` passes silently the
+moment support regresses — assert the support verdict too. Both shipped here.
 
 **Multi-million soak — `make soak`.** Runs the clean differential and support-aware selector fuzzer
 over five independent seeds, followed by a larger malformed-input crash run. The default workload is

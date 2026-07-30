@@ -11,8 +11,9 @@ exotic-but-unsupported, malformed, and budget-bombs — the invariant is:
 Selectors are drawn from the vocabulary that actually appears in conformant.py / foreign.py pages (tags,
 `c<N>`/`shared` classes, `i<N>` ids, href/src/data-k/title attrs) so supported queries genuinely match
 content — otherwise every column is trivially empty and nothing is tested. Categories mixed per run:
-valid CSS, valid XPath, deep `:not()`, exotic (likely-unsupported) forms, malformed strings, and budget
-bombs (>128 comma members / >64 sibling chains) that exercise the DEAD-clamp for crash-safety.
+valid CSS, valid XPath, deep `:not()`, exotic (likely-unsupported) forms, CSS ESCAPES (`.\63 1` is
+`.c1` to the oracle — a surface no generated selector reached until a review found it), malformed
+strings, and budget bombs (>128 comma members / >64 sibling chains) exercising the DEAD-clamp.
 
 Verdicts per (page, selector):
   AGREE       mine == lxml (or empty and lxml empty)
@@ -339,16 +340,63 @@ def g_malformed(rng):
     return base + "·λ→"  # non-ASCII junk
 
 
+def g_escaped(rng):
+    """CSS ESCAPES — a surface this fuzzer could not reach, so hand vectors were the only net.
+
+    cssselect DECODES escapes before matching: `.\\63 1` is `.c1`, `[data-k="caf\\e9"]` is
+    `[data-k="café"]`. An engine that keeps the backslash literally answers a *different* selector than
+    the oracle — and because escapes never appeared in any generated selector, that went unnoticed until a
+    review read the parser. The generated forms decode onto names the pages really carry, so parsel has
+    values and a literal-matching engine grades WRONG rather than harmlessly-empty-on-both-sides.
+
+    Escapes in a class / id / attribute *name* are an UNSUPPORTED gap rather than decoded, which the
+    contract allows (empty, never wrong); generating them pins the gap so it cannot drift into a wrong
+    answer. The trailing-lone-backslash forms are ones cssselect REJECTS, where any non-empty column is
+    an OVERMATCH.
+
+    The escaped values deliberately use SUBSTRING/PREFIX operators over `class`/`data-k`/`href`, which
+    every generated page carries. An exact-match probe (`[data-k="\76 1"]` for `data-k="v1"`) only
+    discriminates on pages that happen to hold that exact value: measured pre-fix it caught the bug on
+    3 seeds out of 4 and missed on the fourth, i.e. a net that passes a broken engine 25% of the time.
+    Retargeted it fails every seed. It then found a SECOND bug the hand vectors missed —
+    `::attr(data-\6b)` was reported supported and matched literally, so it answered a selector parsel
+    answers with an empty column.
+    """
+    return rng.choice([
+        # DISCRIMINATING: escapes where the engine decodes, matching content every page has
+        r'[class*="\63"]::text',            # -> [class*="c"]
+        r'[class^="\63 "]::text',           # -> [class^="c"]  (space terminates the escape)
+        r'[data-k^="\76"]::text',           # -> [data-k^="v"]
+        r'[data-k^="\000076"]::text',       # -> same, 6-digit form (max escape length, no terminator)
+        r'[href*="\2f "]::attr(href)',      # -> [href*="/"]   (escaped non-identifier char)
+        r'[title*="\74"]::text',            # -> [title*="t"]
+        r'[class*="c\31"]::text',           # -> [class*="c1"] (escaped digit)
+        r'[data-k]::attr(data-\6b)',        # ::attr() argument -> data-k
+        # decodes fine but matches nothing on these pages (title is `t` / `a<n>`): a decode-path probe
+        r'[title*="caf\e9"]::text',         # -> [title*="café"], non-ASCII via escape
+        # UNSUPPORTED GAP: must stay empty rather than drift into a literal match
+        r".\63 1::text",                    # class name
+        r"#\69 1::text",                    # id
+        r'[data-\6b ="v1"]::text',          # attribute name
+        r".\-x::text",                      # `\-` is a literal dash, not a hex escape
+        # REJECTED BY cssselect: any non-empty column here is an OVERMATCH
+        ".c1\\",                            # lone trailing backslash
+        '[data-k="v1\\"]::text',            # unterminated string via escaped quote
+    ])
+
+
 def gen_selector(rng):
     r = rng.random()
-    if r < 0.34:
+    if r < 0.32:
         return g_css(rng), False
-    if r < 0.50:
+    if r < 0.48:
         return g_xpath(rng), False
-    if r < 0.62:
+    if r < 0.60:
         return g_comma(rng), False
-    if r < 0.74:
+    if r < 0.72:
         return g_exotic(rng), False
+    if r < 0.80:
+        return g_escaped(rng), False
     if r < 0.88:
         return g_malformed(rng), False
     # budget bombs: clearly over the DEAD-clamp thresholds; must be crash-safe (empty or partial)
@@ -439,7 +487,7 @@ def main():
     print(f"  {'CRASH':<12} {stat['CRASH']:>8}  <-- gate: engine panic\n")
 
     print("  by category:  category      pairs  AGREE  UNSUP  BUDGET  OVERMATCH  WRONG")
-    for c in ("css", "xpath", "comma", "exotic", "malformed", "bomb"):
+    for c in ("css", "xpath", "comma", "exotic", "escaped", "malformed", "bomb"):
         d = cat[c]
         p = sum(d.values())
         print(f"    {c:<12}{p:>8}{d['AGREE']:>7}{d['UNSUPPORTED']:>7}{d['BUDGET']:>8}"
@@ -469,6 +517,8 @@ def _category(sel):
         return "bomb"
     if s.startswith(("/", ".//")):
         return "xpath"
+    if "\\" in s:
+        return "escaped"
     if any(x in s for x in (":nth", ":first", ":hover", "::before", ">>", ":is(", " i]", ":::")):
         return "exotic"
     if any(x in s for x in ("[", "]", "(", ")")) and not _balanced(s):

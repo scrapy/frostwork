@@ -73,20 +73,48 @@ if mine[0] != oracle:
 ok = "OK" if mine[0] == oracle else "MISMATCH"
 print(f"UTF-16 (BOM-sniffed): mine={mine[0]} decode-first-oracle={oracle} -> {ok}  (lxml body-path can't do UTF-16)")
 
-# meta-prescan divergences: constructs Parsel/w3lib do NOT honour must not switch the decode either.
-UTF8_BODY = '<p class="c">café</p>'
-for label, head in [
-    ("charset inside a comment", "<!-- <meta charset=big5> -->"),
-    ("content= without http-equiv", '<meta content="text/html; charset=big5">'),
-    ("declared utf-16 on ASCII-safe bytes", "<meta charset=utf-16>"),
-]:
-    doc = f"<html><head>{head}</head><body>{UTF8_BODY}</body></html>".encode("utf-8")
+# ---- meta prescan, oracled against W3LIB (not Parsel) -------------------------------------------
+# Parsel is the oracle for VALUES, but not for SNIFFING: `PS(body=…)` with no encoding never looks at
+# `<meta>` at all, it just defaults to UTF-8. Oracling the prescan against it was vacuous — it "agreed"
+# on every declaration we MISSED, because both produced mojibake. Scrapy resolves a response encoding
+# with w3lib.encoding.html_to_unicode, so that is the oracle a prescan has to match.
+from w3lib.encoding import html_to_unicode  # noqa: E402
+
+U8 = b'<p class="c">caf\xc3\xa9</p>'
+W1252 = b'<p class="c">caf\xe9</p>'
+PRESCAN_CASES = [
+    ("data-http-equiv is not http-equiv", b'<meta data-http-equiv="content-type" content="text/html; charset=big5">', U8),
+    ("http-equiv=refresh declares nothing", b'<meta http-equiv="refresh" content="0; url=/x?charset=big5">', U8),
+    ("charset= in an unrelated attribute", b'<meta http-equiv="content-type" content="text/html" data-note="charset=big5">', U8),
+    ("quoted > does not end the tag", b'<meta http-equiv="content-type" content="text/html; charset=windows-1252" title="a>b">', W1252),
+    ("whitespace around =", b"<meta charset\n=\nwindows-1252>", W1252),
+    ("abrupt comment close <!-->", b"<!--><meta charset=windows-1252>", W1252),
+    ("comment-end-bang --!>", b"<!--x--!><meta charset=windows-1252>", W1252),
+    ("content= without http-equiv", b'<meta content="text/html; charset=big5">', U8),
+    ("http-equiv content-type", b'<meta http-equiv="Content-Type" content="text/html; charset=windows-1252">', W1252),
+    ("bare charset attribute", b"<meta charset=utf-8>", U8),
+]
+for label, head, body in PRESCAN_CASES:
+    doc = b"<html><head>" + head + b"</head><body>" + body + b"</body></html>"
+    _, txt = html_to_unicode(None, doc, auto_detect_fun=None, default_encoding="utf8")
+    oracle = PS(text=txt).css("p.c::text").getall()
     mine = engine(doc, ["p.c::text"], None)
-    oracle = PS(body=doc).css("p.c::text").getall()
     if mine[0] != oracle:
         fails.append(("meta-prescan", label, mine[0], oracle))
-    print(f"meta prescan [{label}]: mine={mine[0]} parsel={oracle} "
+    print(f"meta prescan [{label}]: mine={mine[0]} w3lib={oracle} "
           f"-> {'OK' if mine[0] == oracle else 'MISMATCH'}")
+
+# The ONE deliberate divergence from w3lib: it has no comment handling, so it honours a charset inside a
+# comment. WHATWG's prescan and every browser skip comments, and the project's policy is to implement the
+# correct behaviour and document the difference rather than reproduce an oracle bug.
+doc = b'<html><head><!-- <meta charset=big5> --></head><body>' + U8 + b"</body></html>"
+_, txt = html_to_unicode(None, doc, auto_detect_fun=None, default_encoding="utf8")
+w3 = PS(text=txt).css("p.c::text").getall()
+mine = engine(doc, ["p.c::text"], None)
+if mine[0] != ["café"]:
+    fails.append(("meta-prescan", "commented charset must be ignored", mine[0], ["café"]))
+print(f"meta prescan [commented charset: DOCUMENTED divergence]: mine={mine[0]} w3lib={w3} "
+      f"-> {'OK' if mine[0] == ['café'] else 'MISMATCH'}")
 
 # THE GATE: any mismatch above is an encoding regression. Without this the target printed MISMATCH and
 # still exited 0, so `make gate` and hosted CI stayed green through an encoding bug.

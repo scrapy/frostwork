@@ -44,6 +44,11 @@ Two limits of that gate are worth knowing before trusting a "100% parity" number
   asserted, not tested. `tools/audit_tree_rules.py` (in `make py`) enumerates every rule cell against
   lxml — **add a row to it whenever you add a rule**. docs/TESTING.md has the count this turned up and
   why a new differential family must be checked against the pre-fix build to prove it discriminates.
+- **And a gate that cannot go red is not a gate.** Three of them couldn't. `tests/test_gates.py` seeds a
+  known regression into each gate's decision function and asserts it fails; add a case there when you add
+  a gate. Same question for the generators: they can only find bugs in syntax they emit — CSS escapes
+  appeared in no generated selector, so that whole surface rode on hand vectors until a review read the
+  parser.
 
 ## Repo map
 
@@ -95,6 +100,11 @@ Two limits of that gate are worth knowing before trusting a "100% parity" number
 - Commit/push only when asked; default branch is `main`.
 - Keep the differential gate green — treat any new `DIVERGE` as a release blocker.
 - Benchmark numbers: `docs/BENCHMARKS.md` is canonical — cite it, don't re-quote figures that drift.
+- Same rule for TEST COUNTS and differential pair counts: don't put an exact one in prose. Every review
+  round so far has caught a stale "N unit tests / ~Nk pairs" claim, because they change every commit. Say
+  what the gate proves and let the run print the number.
+- Pick the oracle per subsystem: values = Parsel/lxml, selector ACCEPTANCE = cssselect/lxml's parser,
+  encoding SNIFFING = w3lib. Parsel does not sniff `<meta>`, so it cannot oracle the prescan.
 - Rust: exhaustive `match`, keep `clippy` clean. Measure before optimizing (SIMD structural indexing
   and a tag-dispatch index were both prototyped and *rejected* by measurement — don't re-attempt
   without a workload that shows a win).

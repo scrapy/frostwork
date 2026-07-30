@@ -62,7 +62,7 @@ soak: build
 
 py:
 	$(MATURIN) develop --release
-	$(PY) -m pytest tests/test_python.py -q
+	$(PY) -m pytest tests/ -q
 	$(PY) tools/support_snapshot.py --check
 	$(PY) tools/audit_tree_rules.py --gate
 

@@ -34,7 +34,7 @@ level, public Python APIs validate schemas and raise `UnsupportedSelector` by de
 | class / id (`.c`, `#i`) | ✅ supported |
 | attribute `[a]`, `[a=v]` | ✅ supported |
 | attribute operators `[a^=v]` `[a$=v]` `[a*=v]` `[a~=v]` `[a\|=v]` | ✅ supported (empty operand matches nothing; case-sensitive — matches lxml) |
-| attribute value **unquoted**: a CSS identifier only (`[a=v]`, `[a=-v]`, `[a=café]`) | ✅ supported. A non-identifier unquoted value (`[a=2]`, `[href^=/p]`, `[a=$v]`, `[a=--v]`, `[a=a.b]`) is ∅ unsupported (empty) — cssselect rejects those as a syntax error, so answering them would return values for a selector Parsel refuses. Quote it (`[a="2"]`, `[href^="/p"]`) — quoted values are unrestricted |
+| attribute value **unquoted**: a CSS identifier only (`[a=v]`, `[a=-v]`, `[a=café]`) | ✅ supported. A non-identifier unquoted value (`[a=2]`, `[href^=/p]`, `[a=$v]`, `[a=--v]`, `[a=a.b]`) is ∅ unsupported (empty) — cssselect rejects those as a syntax error, so answering them would return values for a selector Parsel refuses. Quote it (`[a="2"]`, `[href^="/p"]`). A QUOTED value may hold anything except a lone trailing backslash, and **CSS escapes in it are decoded** the way cssselect decodes them — `[data-x="\61"]` selects `data-x="a"`, not the literal two characters. Same for a `::attr()` argument (`::attr(data-\6b)` = `::attr(data-k)`). An escape in a class / id / **type** / attribute *name* (`.\73 hared`, `#i\31`, `\70`, `[data-\6b]`) is ∅ unsupported (empty) rather than decoded |
 | `:not(<compound>)` incl. compound arg (`a:not(a.x)`) and chained (`:not(.x):not(.y)`) | ✅ supported |
 | descendant (`a b`), child (`a > b`) | ✅ supported |
 | adjacent / general sibling (`a + b`, `a ~ b`), incl. chains (`a ~ b ~ c`), a descendant/child **base** (`.list li ~ li`), and a trailing descendant/child **step** (`a + b c`, `input + label p::text`) | ✅ supported |
@@ -180,6 +180,11 @@ next bug will be:
 - **Deep-`<p>`** — a block/item start closing a `<p>` that is an *ancestor* rather than the immediate
   open element (`<p><b><div>`); a known gap that leaves the un-reshaped nesting (never worse).
 - **Head-only elements in `<body>`** (`<title>` in body, etc.).
+- **A `<meta charset>` inside a COMMENT is ignored — a divergence from w3lib.** Encoding *sniffing* is
+  oracled against `w3lib.encoding.html_to_unicode` (what Scrapy uses; `parsel.Selector(body=…)` does not
+  sniff `<meta>` at all, it defaults to UTF-8). w3lib has no comment handling, so it honours
+  `<!-- <meta charset=big5> -->`; WHATWG's prescan and every browser skip comments, so Frostwork does
+  too. Per the policy above, the correct behaviour ships and the difference is recorded here.
 - **Nested `<form>`** — libxml2 *ignores* a `<form>` start tag while another `<form>` is open; the
   engine nests it, so the inner content sits one level deeper (`<div><form><form>x` → `div > *::text`
   is `x` in lxml, empty here).
@@ -276,7 +281,7 @@ are transcoded to UTF-8 up front.
 Every ✅ above is held to non-whitespace parity with lxml by the differential harness; every ≈ is
 measured and bucketed, not assumed (full methodology: [TESTING.md](TESTING.md)):
 
-- **Differential gate** (`tools/diff_lxml.py`): **0 DIVERGE / 0 CRASH** across ~778k (page ×
+- **Differential gate** (`tools/diff_lxml.py`): **0 DIVERGE / 0 CRASH** across every (page ×
   selector/group) pairs per seed — conformant CSS/XPath, comma groups, sibling combinators, universal
   `*` terminals, `<svg>`/`<math>`/`<template>` foreign content, and single-pass `Many`/`One`.
 - **Differential fuzzing**: mutated malformed HTML (`tools/diff_fuzz.py`) and random selectors

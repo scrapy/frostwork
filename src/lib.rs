@@ -1119,6 +1119,39 @@ mod tests {
         assert!(cols[65].is_empty()); // over-budget selector: deterministic empty, no aliasing
     }
 
+    /// The documented budget is a SHARED 128 across every tier, and the bitsets that address members
+    /// are `u128` — so the number of LIVE members must never exceed it, whichever tiers they come from.
+    ///
+    /// Each deferred tier used its own counter, so 128 normal members plus 128 reverse ones left 256
+    /// live: `budget_usage` reported the schema over budget and Python rejected it while Rust ran every
+    /// one, contradicting COMPATIBILITY.md's "over-budget entries compile dead".
+    #[test]
+    fn live_members_never_exceed_the_shared_budget() {
+        let html = b"<html><body><ul><li class=\"c\">A</li></ul></body></html>";
+        // every selector here WOULD match, so a live column is always non-empty and the count of
+        // non-empty columns is exactly the count of live members
+        for (normal, reverse) in [(100usize, 100usize), (0, 200), (200, 0), (127, 2)] {
+            let mut qs: Vec<String> = vec![".c::text".to_string(); normal];
+            qs.extend(vec!["li:last-child::text".to_string(); reverse]);
+            let (members, _) = budget_usage(&qs, &[]);
+            let cols = extract(html, &qs, None);
+            let live = cols.iter().filter(|c| !c.is_empty()).count();
+            assert!(
+                live <= matcher::MAX_MEMBERS,
+                "{normal} normal + {reverse} reverse: {members} members reported, {live} live \
+                 (limit {})",
+                matcher::MAX_MEMBERS
+            );
+        }
+        // and an IN-budget schema must still answer every column (the clamp must not over-fire)
+        let qs: Vec<String> = vec![".c::text".to_string(); 60]
+            .into_iter()
+            .chain(vec!["li:last-child::text".to_string(); 60])
+            .collect();
+        let cols = extract(html, &qs, None);
+        assert!(cols.iter().all(|c| !c.is_empty()), "in-budget schema lost a column");
+    }
+
     #[test]
     fn budget_members_over_128_is_safe_empty() {
         // 130 flat members: columns 0..127 are live, 128/129 are over the 128-member budget (dead).

@@ -71,7 +71,7 @@ fn markup_kind(b: &[u8], p: usize) -> Option<Markup> {
 /// and `--!>` (comment-end-bang) close a running comment. An unterminated comment consumes to EOF.
 /// Getting this exactly right is non-negotiable: a missed close swallows the rest of the document as
 /// comment content and globally desyncs every downstream offset.
-fn scan_comment(b: &[u8], p: usize) -> usize {
+pub(crate) fn scan_comment(b: &[u8], p: usize) -> usize {
     let n = b.len();
     let i = p + 4; // first byte of comment content, past "<!--"
     // comment-start / comment-start-dash abrupt close: `<!-->` and `<!--->`

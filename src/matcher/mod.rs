@@ -790,6 +790,18 @@ impl CompiledSchema {
         // reads its subject tag's per-parent count via that slot). Deferred subject masks are `u128`,
         // sharing the advertised 128-member ceiling instead of imposing a hidden 64-entry limit.
         let mut tail_schemas: Vec<TailSchema> = Vec::new();
+        // ONE shared member allocation across every tier. `entries` (normal), reverse, `:has` and
+        // text-predicate each used their OWN counter, so a 129-member schema of 100 normal members plus
+        // 29 reverse selectors left all tiers live even though `budget_usage` reported it over budget and
+        // the Python layer rejected it — contradicting COMPATIBILITY.md's promise that an over-budget
+        // Rust entry "compiles dead". `entries.len()` is already committed by the time the deferred tiers
+        // are built, so seeding from it makes the order explicit: normal members first, then deferred.
+        let mut members_used = entries.len();
+        let mut take_member = |dead_already: bool| {
+            let over = members_used >= MAX_MEMBERS;
+            members_used += 1;
+            dead_already || over
+        };
         let mut reverse_entries: Vec<RevEntry> = Vec::new();
         for (col, sel) in rev_pending_sels {
             let k = compile::deferrable_reverse_at(sel).expect("routed as deferrable_reverse");
@@ -806,7 +818,7 @@ impl CompiledSchema {
             // `:last-*`/`:only-*` (== nth-last(1)) keep a single candidate; general `:nth-last-*(An+B)`
             // must buffer every matching child (any of them could be the nth from the end).
             let single_slot = rev.only || (rev.a == 0 && rev.b == 1);
-            let dead = tail_dead || reverse_entries.len() >= MAX_MEMBERS;
+            let dead = take_member(tail_dead);
             reverse_entries.push(RevEntry {
                 col,
                 seg,
@@ -827,7 +839,7 @@ impl CompiledSchema {
             let k = compile::deferrable_has_at(sel).expect("routed as deferrable_has");
             let (seg, tail, tail_dead) = split_deferred(sel, k, col, &mut tail_schemas);
             let has = sel.parts[k].has.clone().expect("deferrable_has => compound k has `:has`");
-            let dead = tail_dead || has_entries.len() >= MAX_MEMBERS;
+            let dead = take_member(tail_dead);
             has_entries.push(HasEntry {
                 col,
                 seg,
@@ -847,7 +859,7 @@ impl CompiledSchema {
             let (seg, tail, tail_dead) = split_deferred(sel, k, col, &mut tail_schemas);
             let pred =
                 sel.parts[k].text_pred.clone().expect("deferrable_text_pred => compound k has text_pred");
-            let dead = tail_dead || text_entries.len() >= MAX_MEMBERS;
+            let dead = take_member(tail_dead);
             text_entries.push(TextEntry {
                 col,
                 seg,

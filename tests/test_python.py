@@ -1343,3 +1343,136 @@ def test_schema_audit_rejects_multiple_targets(tmp_path, capsys):
     a = _write(tmp_path, "from frostwork import Page\np = Page().field('t', 'h1::text')\n")
     assert main([a, a]) == 2
     assert "ONE module target" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------- support-boundary parity vs the oracle
+# The no-fallback contract has TWO halves and only one was tested. "An unsupported selector returns an
+# empty column" was covered; "a selector the ORACLE rejects is REPORTED unsupported" was not — so the
+# engine could accept `.1::text`, answer empty, and still call itself supported. That is a broken promise
+# the scraper layer cannot distinguish from a legitimately empty field.
+# NB `#1id` is NOT here: cssselect accepts it (a hash token's payload is a NAME, not an identifier), so
+# rejecting it would make us narrower than the oracle. The precondition assert below catches exactly this
+# kind of wrong assumption — it caught this one.
+ORACLE_REJECTS_CSS = [".1::text", ".-2::text", "[1]::text", "div::attr(1)", ".2col::text", ".--x::text"]
+ORACLE_REJECTS_XPATH = ["//div/@1", "//svg:rect/text()", "//div/@x:y", "//1div/text()"]
+
+
+def test_selectors_the_oracle_rejects_are_reported_unsupported():
+    parsel = _oracle()
+    for sel in ORACLE_REJECTS_CSS + ORACLE_REJECTS_XPATH:
+        s = parsel.Selector(text="<div class='1' data-1='v'><p>T</p></div>")
+        try:
+            (s.xpath(sel) if sel.startswith("/") else s.css(sel)).getall()
+        except Exception:
+            pass  # the oracle refuses it, which is the precondition for this assertion
+        else:
+            raise AssertionError(f"{sel!r} was expected to be oracle-invalid; fixture needs updating")
+        assert not frostwork.check([sel]).fields[0].supported, (
+            f"{sel!r} is rejected by the oracle, so check() must report it unsupported"
+        )
+
+
+def test_css_escapes_in_quoted_values_match_parsel():
+    """`[data-x="\\61"]` selects `data-x="a"` in cssselect. Copying the raw bytes matched a DIFFERENT
+    element — a wrong value, the one thing no-fallback rules out."""
+    parsel = _oracle()
+    html = b'<html><body><i data-x="a">ESCAPED</i><i data-x="\\61">RAW</i></body></html>'
+    for sel in ['[data-x="\\61"]::text', '[data-x="a"]::text', '[data-x="\\0041"]::text']:
+        want = parsel.Selector(body=html, encoding="utf-8").css(sel).getall()
+        assert frostwork.check([sel]).fields[0].supported, sel  # not a conditional: it MUST stay supported
+        assert frostwork.extract(html, [sel])[0] == want, sel
+
+
+def test_the_whole_css_escape_surface_obeys_the_contract():
+    """Escapes appear in five places, and the contract is the same in all of them: **supported means
+    parity, unsupported means empty**. Never supported-and-empty, never non-empty-and-wrong.
+
+    Worth stating as one sweep rather than per-form vectors, because the bug that motivated it was
+    invisible per-form: `::attr(data-\\6b)` was reported SUPPORTED (the identifier validator only read the
+    first character) and then matched the literal name, so it returned an empty column for a selector
+    parsel answers. A per-form test that asserted "empty" would have passed. Only checking the pair
+    (support verdict, values) against parsel catches it.
+
+    Escapes in a class / id / attribute name / type name are an honest UNSUPPORTED gap today — this test
+    pins the gap as empty-not-wrong, and will start demanding parity the moment one is claimed supported.
+    """
+    parsel = _oracle()
+    html = (b'<html><body><p class="shared">A</p><p class="shared1">B</p>'
+            b'<p id="i1">D</p><p data-k="v1">C</p></body></html>')
+    surface = [
+        r"[data-k]::attr(data-\6b)",     # ::attr() argument      -> data-k
+        r'[data-k="\76 1"]::text',       # quoted value           -> v1
+        r'[data-k^="\76"]::text',        # quoted value, prefix op -> v
+        r".shared\31::text",             # class name             -> shared1
+        r"#i\31::text",                  # id                     -> i1
+        r".\73 hared::text",             # class, leading escape  -> shared
+        r"\70::text",                    # type name              -> p
+        r"[data-\6b]::text",             # attribute name         -> data-k
+        r".shared\ ::text",              # escaped space in a class name
+    ]
+    for sel in surface:
+        try:
+            want = parsel.Selector(body=html, encoding="utf-8").css(sel).getall()
+        except Exception:
+            want = None  # the oracle rejects it: we may not answer at all
+        got = frostwork.extract(html, [sel], strict=False)[0]
+        supported = frostwork.check([sel]).fields[0].supported
+        if want is None:
+            assert not got, f"{sel!r}: parsel rejects this, so answering it is a no-fallback violation"
+        elif supported:
+            assert got == want, f"{sel!r}: claimed supported, so it must equal parsel ({want!r})"
+        else:
+            assert not got, f"{sel!r}: unsupported must be EMPTY, got {got!r}"
+
+
+def test_selector_grammar_surface_obeys_the_contract():
+    """The same sweep over the REST of the grammar the fuzzer does not write.
+
+    The escape hole was found by asking "what syntax does no generator emit?", so the rest of that list is
+    worth pinning rather than re-deriving: single quotes (the fuzzer only writes double), a quote of the
+    other kind inside a value, namespace prefixes, tabs/newlines between combinators, CSS comments, and
+    tight combinators. All of these are correct today — two as parity, two as an honest unsupported gap —
+    and the test states which, so a change that turns a gap into a WRONG answer fails here.
+    """
+    parsel = _oracle()
+    html = (b'<html><body><p class="shared" data-k="v1" title="it\'s">A</p>'
+            b'<p class="shared1">B</p><div><p id="i1">D</p></div></body></html>')
+    for sel in [
+        "[data-k='v1']::text", "[title='it\\'s']::text", '[title="it\'s"]::text',  # single quotes
+        "*|p::text", "|p::text", "html|p::text",                                   # namespace prefixes
+        "div  >  p::text", "div\t>\tp::text", "div\n p::text", "  p::text  ",      # internal whitespace
+        "p/*c*/::text", "div/*x*/ p::text",                                        # CSS comments
+        "div>p::text", "div+p::text", "div~p::text",                               # no space around combs
+        '[data-k="V1" i]::text',                                                   # case-insensitive flag
+    ]:
+        try:
+            want = parsel.Selector(body=html, encoding="utf-8").css(sel).getall()
+        except Exception:
+            want = None
+        got = frostwork.extract(html, [sel], strict=False)[0]
+        if want is None:
+            assert not got, f"{sel!r}: parsel rejects this, so answering it is a no-fallback violation"
+        elif frostwork.check([sel]).fields[0].supported:
+            assert got == want, f"{sel!r}: claimed supported, so it must equal parsel ({want!r})"
+        else:
+            assert not got, f"{sel!r}: unsupported must be EMPTY, got {got!r}"
+
+
+def test_scanner_handles_keyword_builder_forms():
+    """Migration reports are only useful if they see every selector literal. The arity checks lost the
+    all-keyword form entirely (silently 'clean') and audited a FIELD NAME as a selector in the
+    keyword-selector form (noise that fails the audit)."""
+    from frostwork.scan import scan_source
+
+    def sites(expr):
+        return sorted(s.selector for s in scan_source(
+            f"from frostwork import Page\nclass P(Page):\n    x = {expr}\n", "x.py"))
+
+    assert sites('Page.many("cards", ".card", {"t": ".t::text"})') == [".card", ".t::text"]
+    assert sites('Page.many(name="cards", container=".card", subfields={"t": ".t::text"})') == \
+        [".card", ".t::text"]
+    assert sites('Page.many("cards", container=".card", subfields={"t": ".t::text"})') == \
+        [".card", ".t::text"]
+    assert sites('Page.field("title", "h1::text")') == ["h1::text"]
+    assert sites('Page.field("title", selector="h1::text")') == ["h1::text"]
+    assert sites('Page.field(name="title", selector="h1::text")') == ["h1::text"]

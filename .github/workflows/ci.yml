@@ -64,9 +64,13 @@ jobs:
       # the no-fallback contract — a column is empty OR equals lxml, never non-empty-and-wrong, never a
       # crash. Gates WRONG (disagree) + OVERMATCH (data on a parsel-invalid selector) + CRASH.
       - run: .venv/bin/python tools/sel_fuzz.py --iters 6000 --gate
-      # build the extension into the venv, then exercise the Python surface (extract, Page, FrostPage, Many/One)
+      # build the extension into the venv, then exercise the Python surface (extract, Page, FrostPage,
+      # Many/One) AND tests/test_gates.py, which seeds a known regression into each gate's decision
+      # function and asserts it goes red. `tests/` not `tests/test_python.py`: the gate meta-tests were
+      # written and then not run by either `make ci` or this workflow, which is the exact failure they
+      # exist to catch.
       - run: .venv/bin/maturin develop --release
-      - run: .venv/bin/python -m pytest tests/test_python.py -q
+      - run: .venv/bin/python -m pytest tests/ -q
       - run: .venv/bin/python tools/support_snapshot.py --check
       # Page coverage is not RULE coverage: this enumerates every tree-construction rule cell against
       # lxml. It is the check that catches the rule-table bugs the generated gate cannot reach, so it

@@ -91,6 +91,20 @@ def _literal_strings(node) -> Optional[List[str]]:
     return None
 
 
+def _kw(node: ast.Call, name: str):
+    """The value of keyword argument `name`, if this call passes it."""
+    for kw in node.keywords:
+        if kw.arg == name:
+            return kw.value
+    return None
+
+
+def _pick(node: ast.Call, pos: int, kwname: str):
+    """The argument at positional index `pos` OR keyword `kwname` — builders are called both ways, and
+    mixed (`many("cards", container=".card", subfields={...})`), so neither form may be assumed."""
+    return _kw(node, kwname) or (node.args[pos] if len(node.args) > pos else None)
+
+
 def _call_name(call: ast.Call) -> str:
     func = call.func
     if isinstance(func, ast.Attribute):
@@ -106,6 +120,8 @@ def scan_source(source: str, path: str) -> List[Site]:
     sites: List[Site] = []
 
     def add(node, call: str, kind: str) -> None:
+        if node is None:
+            return  # the call does not pass this argument at all
         got = _literal_strings(node)
         if got is None:
             # An f-string / concatenation / variable: honest SKIPPED, never silently dropped.
@@ -127,24 +143,27 @@ def scan_source(source: str, path: str) -> List[Site]:
                     if kw.arg in ("query", "css", "xpath"):
                         add(kw.value, name, kind)
         elif name in FIELD_CALLS:
-            if len(node.args) >= 2:
-                add(node.args[1], name, "auto")  # Page: field(name, selector)
-            elif len(node.args) == 1:
-                add(node.args[0], name, "auto")  # web-poet: field(selector)
-            for kw in node.keywords:
-                if kw.arg == "selector":
-                    add(kw.value, name, "auto")
-        elif name in GROUP_CALLS and len(node.args) >= 2:
-            add(node.args[1], name, "auto")  # Page: many(name, container, {sub: selector})
-            if len(node.args) >= 3 and isinstance(node.args[2], ast.Dict):
-                for value in node.args[2].values:
+            # Resolve by ARGUMENT IDENTITY, not arity. Counting positionals lost the all-keyword form
+            # entirely (a silently "clean" migration report) and, for `field("title", selector=...)`,
+            # audited the FIELD NAME as a selector — noise that then failed the audit.
+            sel = _pick(node, 1, "selector")
+            if sel is None and not node.args and not _kw(node, "name"):
+                sel = None  # nothing to go on
+            if sel is None and len(node.args) == 1 and not _kw(node, "selector"):
+                sel = node.args[0]  # web-poet: field(selector)
+            add(sel, name, "auto")
+        elif name in GROUP_CALLS:
+            add(_pick(node, 1, "container"), name, "auto")  # Page: many(name, container, subfields)
+            subs = _pick(node, 2, "subfields")
+            if isinstance(subs, ast.Dict):
+                for value in subs.values:
                     # a sub-field may be a cardinality TUPLE — `(".tag::text", "join", " ")`. Only its
                     # first element is a selector; scanning the whole tuple reported "join" and " " as
                     # selector sites, and the separator then failed the audit.
                     add(value.elts[0] if isinstance(value, ast.Tuple) and value.elts else value,
                         name, "auto")
-        elif name in WEBPOET_GROUP_CALLS and node.args:
-            add(node.args[0], name, "auto")  # web-poet: Many(container, sub=field(...))
+        elif name in WEBPOET_GROUP_CALLS:
+            add(_pick(node, 0, "container"), name, "auto")  # web-poet: Many(container, sub=field(...))
         for kw in node.keywords:
             if kw.arg in KEYWORD_ARGS:
                 add(kw.value, name, KEYWORD_ARGS[kw.arg])
