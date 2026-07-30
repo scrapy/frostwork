@@ -439,6 +439,14 @@ fn parse_compound_depth(s: &str, depth: u32) -> Result<Compound, ()> {
             i += 1;
         } else {
             let name = read_name(b, &mut i);
+            // A TAG name must be ASCII, unlike a class/id/attribute name: the tokenizer's tag-name state
+            // is ASCII-only (`tokenizer::is_name_char`), so `café::text` could never match and used to
+            // pass strict schema validation while always returning empty. Reject it instead — an
+            // unsupported selector must be *reported*, not silently empty. (lxml does match these; if
+            // that ever matters, widen the tokenizer rather than re-accepting them here.)
+            if !name.is_ascii() {
+                return Err(());
+            }
             c.tag = Some(name.to_ascii_lowercase());
         }
     }

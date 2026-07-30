@@ -21,8 +21,11 @@ pub trait TokenSink<'a> {
     );
     /// `close_start` is the offset of the end tag's `<`; `close_end` is just past its `>`.
     fn end_tag(&mut self, name: &'a [u8], close_start: usize, close_end: usize);
-    /// One text node. `allows_entities` is false only for RAWTEXT (`script`/`style`).
-    fn text(&mut self, text: &'a [u8], allows_entities: bool);
+    /// One text RUN. `allows_entities` is false only for RAWTEXT (`script`/`style`). `start` is the
+    /// run's offset in the document — the sink needs it both to rank the value in document order and
+    /// to detect two runs separated by nothing but a DROPPED end tag (which libxml2 coalesces into a
+    /// single text node; see `Matcher::text`). A run is NOT always a text node on its own.
+    fn text(&mut self, text: &'a [u8], allows_entities: bool, start: usize);
 }
 
 fn is_ws(c: u8) -> bool {
@@ -147,7 +150,7 @@ pub fn tokenize<'a, S: TokenSink<'a>>(b: &'a [u8], sink: &mut S) {
                     }
                     Some(kind) => {
                         if p > text_from {
-                            sink.text(&b[text_from..p], true);
+                            sink.text(&b[text_from..p], true, text_from);
                         }
                         let after = handle_markup(kind, b, p, sink, &mut attr_buf);
                         i = after;
@@ -158,7 +161,7 @@ pub fn tokenize<'a, S: TokenSink<'a>>(b: &'a [u8], sink: &mut S) {
         }
     }
     if n > text_from {
-        sink.text(&b[text_from..n], true);
+        sink.text(&b[text_from..n], true, text_from);
     }
 }
 
@@ -279,7 +282,7 @@ fn handle_start<'a, S: TokenSink<'a>>(
         if !self_closing {
             let (text_end, after) = find_raw_end(b, i, name);
             if text_end > i {
-                sink.text(&b[i..text_end], rcdata);
+                sink.text(&b[i..text_end], rcdata, i);
             }
             if after > text_end {
                 sink.end_tag(name, text_end, after);
@@ -324,7 +327,7 @@ mod tests {
         fn end_tag(&mut self, name: &'a [u8], _s: usize, _e: usize) {
             self.ev.push(format!("E:{}", String::from_utf8_lossy(name)));
         }
-        fn text(&mut self, t: &'a [u8], allows_entities: bool) {
+        fn text(&mut self, t: &'a [u8], allows_entities: bool, _start: usize) {
             // `!` marks RAWTEXT (script/style): entities are NOT expanded downstream
             self.ev.push(format!("T{}:{}", if allows_entities { "" } else { "!" }, String::from_utf8_lossy(t)));
         }

@@ -13,11 +13,66 @@ use encoding_rs::Encoding;
 /// Scrapy uses) require attribute context, so a `<!-- saved from url … charset=windows-1252 -->`
 /// banner or `charset=big5` in early visible text must NOT switch the decode. Within a meta tag the
 /// loose `charset=` scan still covers both bare `charset=` and `http-equiv`+`content="…; charset=…"`.
+/// Start of an unclosed `<!--` before `at`, if `at` sits inside a comment.
+fn last_comment_open_before(lower: &[u8], at: usize) -> Option<usize> {
+    let open = memchr::memmem::rfind(&lower[..at], b"<!--")?;
+    (comment_end(lower, open) > at).then_some(open)
+}
+
+/// Offset just past the `-->` closing the comment that starts at `open`, or the end of the head.
+fn comment_end(lower: &[u8], open: usize) -> usize {
+    let from = open + b"<!--".len();
+    match memchr::memmem::find(&lower[from.min(lower.len())..], b"-->") {
+        Some(k) => from + k + b"-->".len(),
+        None => lower.len(),
+    }
+}
+
+/// The value of a genuine `charset` ATTRIBUTE on this tag (`<meta charset=…>`), as opposed to a
+/// `charset=` appearing inside some other attribute's value such as `content="…; charset=…"`.
+fn attr_charset(head: &[u8], lower: &[u8], tag_start: usize, tag_end: usize) -> Option<usize> {
+    let mut from = tag_start;
+    while let Some(rel) = memchr::memmem::find(&lower[from..tag_end], b"charset") {
+        let at = from + rel;
+        // An attribute NAME sits outside any quoted value and is followed by `=`. Tracking the quote
+        // state is what separates `<meta charset=x>` from `<meta content="text/html; charset=x">`: in the
+        // latter the `charset` is inside `content`'s value, where only `http-equiv` makes it a
+        // declaration. A "preceded by whitespace" test alone accepts both (`; charset=`).
+        let mut quote = 0u8;
+        for &c in &head[tag_start..at] {
+            match c {
+                b'"' | b'\'' if quote == 0 => quote = c,
+                c if c == quote => quote = 0,
+                _ => {}
+            }
+        }
+        let mut j = at + b"charset".len();
+        while j < tag_end && matches!(head[j], b' ' | b'\t') {
+            j += 1;
+        }
+        let name_start = at == tag_start
+            || matches!(head[at - 1], b' ' | b'\t' | b'\n' | b'\r' | 0x0c | b'/');
+        if quote == 0 && name_start && j < tag_end && head[j] == b'=' {
+            return Some(at);
+        }
+        from = at + b"charset".len();
+    }
+    None
+}
+
 fn meta_prescan(head: &[u8]) -> Option<&'static Encoding> {
     let lower: Vec<u8> = head.iter().map(|b| b.to_ascii_lowercase()).collect();
     let mut mfrom = 0usize;
     while let Some(mrel) = memchr::memmem::find(&lower[mfrom..], b"<meta") {
-        let tag_start = mfrom + mrel + b"<meta".len();
+        let hit = mfrom + mrel;
+        // A COMMENT is skipped wholesale: the prescan runs the tokenizer's comment state, so
+        // `<!-- <meta charset=big5> -->` declares nothing. Scanning raw bytes for `<meta` honoured it and
+        // switched the decode, corrupting every value on an otherwise-UTF-8 page.
+        if let Some(c) = last_comment_open_before(&lower, hit) {
+            mfrom = comment_end(&lower, c);
+            continue;
+        }
+        let tag_start = hit + b"<meta".len();
         // require a tag-name terminator after `<meta` so `<metadata …>` isn't treated as a meta tag
         if !matches!(head.get(tag_start), Some(b' ' | b'\t' | b'\n' | b'\r' | 0x0c | b'/' | b'>')) {
             mfrom = tag_start;
@@ -25,6 +80,15 @@ fn meta_prescan(head: &[u8]) -> Option<&'static Encoding> {
         }
         // the tag ends at the next `>` (or the end of the scanned head)
         let tag_end = memchr::memchr(b'>', &head[tag_start..]).map_or(head.len(), |k| tag_start + k);
+        // The `content="…; charset=…"` form declares an encoding ONLY with `http-equiv` present — a bare
+        // `<meta content="text/html; charset=big5">` is inert for WHATWG/w3lib, so honouring it diverged.
+        let bare_charset = attr_charset(head, &lower, tag_start, tag_end);
+        if bare_charset.is_none()
+            && memchr::memmem::find(&lower[tag_start..tag_end], b"http-equiv").is_none()
+        {
+            mfrom = tag_end;
+            continue;
+        }
         let mut from = tag_start;
         while let Some(rel) = memchr::memmem::find(&lower[from..tag_end], b"charset") {
             let mut j = from + rel + b"charset".len();
@@ -44,6 +108,13 @@ fn meta_prescan(head: &[u8]) -> Option<&'static Encoding> {
                 }
                 if j > start {
                     if let Some(enc) = Encoding::for_label(&head[start..j]) {
+                        // WHATWG: a document that declares a UTF-16 encoding in `<meta>` is read as
+                        // UTF-8 (the bytes reaching the prescan are ASCII-compatible by construction —
+                        // real UTF-16 is caught by the BOM). Transcoding as UTF-16 instead turned an
+                        // ASCII document into mojibake and every selector returned empty.
+                        if enc == encoding_rs::UTF_16LE || enc == encoding_rs::UTF_16BE {
+                            return Some(encoding_rs::UTF_8);
+                        }
                         return Some(enc);
                     }
                 }

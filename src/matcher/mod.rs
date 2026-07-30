@@ -17,7 +17,7 @@ use std::borrow::Cow;
 
 use encoding_rs::Encoding;
 
-use crate::implied_close::{classify, implies_close_id};
+use crate::implied_close::{end_tag_discardable, classify, implies_close_id, is_table_scoped};
 use crate::selector::{
     AttrPred, Comb, Compound, Has, ReversePos, Selector, Terminal, TextPred,
 };
@@ -77,7 +77,10 @@ pub fn budget_usage(queries: &[Vec<Selector>], groups: &[GroupInput]) -> (usize,
             tally(c);
         }
     }
-    (members, sib)
+    // Output columns are addressed by BIT position (`1u128 << col`) and a column IS its query index, so
+    // the query count is itself a member budget: a schema of 128 UNSUPPORTED queries (which parse to no
+    // members) followed by a valid one otherwise reports 1/128 while silently dropping the valid column.
+    (members.max(queries.len()), sib)
 }
 
 pub struct OpenElem<'a> {
@@ -257,6 +260,10 @@ struct RevEntry {
     of_type_tag: Option<usize>, // slot in `positional_tags` for the subject tag (of-type variants)
     single_slot: bool,          // keep only the last candidate per parent (last/only), not all
     dead: bool,                 // over the 64 reverse-entry budget: never matches (empty column)
+    // `Some(slot)` when the value is NOT this element's own — a subtree terminal or a value-bearing
+    // descendant. Nothing streams then; the winner's raw span is re-scanned with
+    // `schema.tail_schemas[slot]` at finish. See `split_deferred`.
+    tail: Option<usize>,
 }
 
 /// A deferred reverse candidate awaiting its parent's close. `idx` is the subject's 1-based sibling
@@ -266,6 +273,9 @@ struct RevEntry {
 struct RevCand {
     idx: u32,
     vals: Vec<(usize, String)>,
+    /// The subject's raw source span. Unused for an attached terminal (`vals` carries the answer); for a
+    /// SUBTREE terminal it is the whole answer — two integers instead of a buffered subtree.
+    span: (usize, usize),
 }
 
 struct RevPend {
@@ -291,6 +301,9 @@ struct HasEntry {
     // case (`C:has(..) ~ S`), where a *later* sibling `S` (a normal entry anchored to `bit`) is the
     // value-bearer. `None` = the ordinary flat `:has` column (`col`/`terminal`).
     trigger: Option<usize>,
+    /// As [`RevEntry::tail`]: `Some(slot)` when the value comes from this element's subtree rather than
+    /// the element itself, recovered by re-scanning its span.
+    tail: Option<usize>,
 }
 
 /// An XPath text-content-predicate flat selector held out of `entries` (like [`HasEntry`]): its subject
@@ -309,6 +322,8 @@ struct TextEntry {
     // sibling-trigger `bit` on the parent at the subject's close (if the predicate holds) instead of
     // emitting a value; `None` = the ordinary flat text-predicate column.
     trigger: Option<usize>,
+    /// As [`RevEntry::tail`]: `Some(slot)` when the value comes from this element's subtree.
+    tail: Option<usize>,
 }
 
 /// One open container instance: a scope for its group's sub-selectors. `buckets[sub]` accumulates the
@@ -327,6 +342,58 @@ struct OpenInstance {
 enum Dest {
     Flat(usize),
     Grouped { seq: u64, sub: usize }, // seq is globally unique -> identifies the (group, row)
+}
+
+/// A compiled tail: the sub-schema that recovers a deferred winner's values from its raw span, paired
+/// with the output column those values belong to. One per deferred entry that has a tail.
+struct TailSchema {
+    schema: CompiledSchema,
+    col: usize,
+}
+
+/// Split a deferred selector at the compound carrying its predicate (`k`).
+///
+/// Returns the PREFIX segment — compounds `0..=k`, matched in context to find the deferred element — and
+/// the slot of the TAIL schema that recovers the values from that element's span, if the values are not
+/// the element's own. Three cases:
+///   * value is the element's own (`div:has(a)::attr(id)`) — no tail, the value streams as today;
+///   * value is its whole subtree (`li:last-child ::text`) — tail is `* ::text`, descendant-or-**self**
+///     (not `strict_desc`), so the element's own text counts;
+///   * value is a DESCENDANT's (`div:has(a) a::attr(href)`) — tail is the compounds after `k`, with
+///     `strict_desc` so the span's root is excluded (a *proper* descendant).
+///
+/// The `bool` is "the tail is unsupported" — then the caller marks the entry DEAD, so the audit keeps
+/// reporting the whole selector unsupported instead of the column silently coming back empty.
+fn split_deferred(
+    sel: &Selector,
+    k: usize,
+    col: usize,
+    tail_schemas: &mut Vec<TailSchema>,
+) -> (Segment, Option<usize>, bool) {
+    let full = to_segments(sel).0.into_iter().next().expect("deferrable => 1 segment");
+    let prefix = Segment {
+        parts: full.parts[..=k].to_vec(),
+        combs: full.combs[..k].to_vec(),
+        strict: full.strict,
+    };
+    let members = match compile::tail_selector(sel, k) {
+        Some(t) => Some(vec![t]),
+        None => match &sel.terminal {
+            Terminal::Text { subtree: true } => Some(crate::selector::parse_list("* ::text")),
+            Terminal::Attr { subtree: true, name } => {
+                Some(crate::selector::parse_list(&format!("* ::attr({name})")))
+            }
+            _ => None,
+        },
+    };
+    let Some(members) = members else { return (prefix, None, false) };
+    let schema = CompiledSchema::compile(std::slice::from_ref(&members), &[]);
+    if !schema.flat_col_supported(0) {
+        return (prefix, None, true);
+    }
+    tail_schemas.push(TailSchema { schema, col });
+    let slot = tail_schemas.len() - 1;
+    (prefix, Some(slot), false)
 }
 
 fn to_segments(sel: &Selector) -> (Vec<Segment>, Vec<bool>) {
@@ -382,6 +449,12 @@ pub struct CompiledSchema {
     has_entries: Vec<HasEntry>, // deferred `:has()` flat selectors (held out of `entries`)
     has_text_pred: bool,        // any text-content-predicate entry? (skips the deferred-text work otherwise)
     text_entries: Vec<TextEntry>, // deferred text-content-predicate flat selectors (held out of `entries`)
+    // TAIL schemas for deferred entries whose value is NOT the deferred element's own: a subtree terminal
+    // (`li:last-child ::text`) or a value-bearing DESCENDANT (`div:has(a) a::attr(href)`). Nothing is
+    // buffered for these during the pass — the winner's raw span is re-scanned with its tail schema at
+    // finish (`Matcher::resolve_tail_spans`). Entries hold a slot index; a tail is itself deferral-free,
+    // so this nests exactly one level.
+    tail_schemas: Vec<TailSchema>,
     // `!` of the Case-B deferred-boundary bitset: `eval`'s open-time trigger set is ANDed with this so a
     // deferred (preceding-sibling-predicate) boundary fires only at its `C`'s close, not at open. All
     // ones when no Case-B selector is compiled — the hot sibling path is then unchanged.
@@ -415,6 +488,54 @@ pub struct Matcher<'a> {
     // Count of currently-open text-content-predicate subjects, so `text_event`'s ancestor walk runs only
     // while at least one subject is open (0 elsewhere, even when the schema has text-pred entries).
     txt_open: usize,
+    // `(tail slot, span_start, span_end)` for each deferred winner whose value lives in its subtree.
+    // Two integers per winner is the whole retention cost — values are recovered by re-scanning at finish.
+    tail_spans: Vec<(usize, usize, usize)>,
+    // The text run not yet delivered to the consumers, held back by one event so that a run split by
+    // DROPPED end tags can be re-joined first (libxml2 makes it ONE text node; see `text`). Flushed by
+    // the next start tag / matched end tag / EOF, so ordering vs. tag events is unchanged.
+    pending_text: Option<PendingText<'a>>,
+}
+
+/// A buffered text node. In the common case it is ONE borrowed run (`joined` empty, no allocation).
+///
+/// When dropped end tags join several runs into one node, each run is decoded on its own and the
+/// STRINGS are concatenated into `joined` — never the raw bytes. The oracle decodes entities and
+/// characters while tokenizing, i.e. before tree construction, so a construct split across a discarded
+/// tag must NOT reassemble: `<div>A&am</p>p;B</div>` is `A&amp;B` in lxml (the unterminated `&am` stays
+/// literal), and the bytes `C3 </p> A9` are two replacement characters, not `é`. Joining bytes first
+/// manufactured both.
+/// One text node handed to the consumers: either a raw run still to be decoded (the common case, so
+/// unselected text costs nothing) or a value already decoded run-by-run because dropped end tags joined
+/// it. `finalize` is called only where a consumer actually wants the value.
+#[derive(Clone, Copy)]
+enum TextVal<'t> {
+    Raw { bytes: &'t [u8], entities: bool },
+    Decoded(&'t str),
+}
+
+impl TextVal<'_> {
+    fn finalize(&self, enc: &'static Encoding) -> String {
+        match *self {
+            TextVal::Raw { bytes, entities } => finalize(bytes, entities, enc),
+            TextVal::Decoded(s) => s.to_string(),
+        }
+    }
+}
+
+struct PendingText<'a> {
+    bytes: std::borrow::Cow<'a, [u8]>,
+    /// Decoded text of runs 1..n once a join has happened; empty while the node is a single run.
+    joined: String,
+    allows_entities: bool,
+    /// Document offset of the run's first byte — ranks the value in document order.
+    start: usize,
+    /// End of the buffered node's GAP: the run's own end, advanced over each dropped end tag that abuts
+    /// it. A following run joins iff it starts exactly here, which is what makes the join "nothing but
+    /// dropped tags in between" rather than "exactly one dropped tag" — `<div>A</p></p>B</div>` is one
+    /// text node in libxml2, and tracking a single dropped tag would still split it. Anything that is a
+    /// real node in libxml2 (comment, CDATA, PI, element) leaves a byte gap and so breaks the join.
+    gap_end: usize,
 }
 
 /// Per-entry capture state for a `normalize-space(...)` terminal. Only the FIRST matched node's
@@ -473,7 +594,18 @@ impl CompiledSchema {
                 // (u128), and a sibling bit >= 64 would overflow-shift `seen`/`prev` (u64) — panic in
                 // debug, silently alias bit `n & 63` in release (cross-selector contamination -> wrong
                 // values). A dead entry keeps its column but never matches: deterministic empty.
-                let dead = entries.len() >= MAX_MEMBERS || *n_sib + n_seg_bits > MAX_SIB_BITS;
+                // `col >= MAX_MEMBERS` matters as much as the member count: `text_cols`/`cap` address
+                // output columns by BIT (`1u128 << cs.col`), so a query past column 127 could never be
+                // delivered. It used to compile live and return empty while the audit called it
+                // supported — the one outcome the no-fallback contract rules out.
+                // `col >= MAX_MEMBERS` matters as much as the member count: `text_cols`/`cap` address
+                // output columns by BIT (`1u128 << cs.col`), so a query past column 127 could never be
+                // delivered — it used to compile live and return empty while the audit called it
+                // supported, the one outcome the no-fallback contract rules out. `emit == false` entries
+                // (group containers, `col == usize::MAX`) address no output column and are exempt.
+                let dead = entries.len() >= MAX_MEMBERS
+                    || (emit && col >= MAX_MEMBERS)
+                    || *n_sib + n_seg_bits > MAX_SIB_BITS;
                 let seg_bits: Vec<usize> = if dead {
                     Vec::new()
                 } else {
@@ -625,13 +757,16 @@ impl CompiledSchema {
         // Build the deferred reverse entries now that `positional_tags` is final (an of-type reverse
         // reads its subject tag's per-parent count via that slot). Deferred subject masks are `u128`,
         // sharing the advertised 128-member ceiling instead of imposing a hidden 64-entry limit.
+        let mut tail_schemas: Vec<TailSchema> = Vec::new();
         let mut reverse_entries: Vec<RevEntry> = Vec::new();
         for (col, sel) in rev_pending_sels {
-            let seg = to_segments(sel).0.into_iter().next().expect("deferrable_reverse => 1 segment");
-            let subject = seg.parts.last().expect("a segment has >=1 compound");
-            let rev = subject.reverse.expect("deferrable_reverse => subject has reverse");
+            let k = compile::deferrable_reverse_at(sel).expect("routed as deferrable_reverse");
+            let (seg, tail, tail_dead) = split_deferred(sel, k, col, &mut tail_schemas);
+            // the reverse position belongs to compound `k`, which need NOT be the subject
+            let anchor = &sel.parts[k];
+            let rev = anchor.reverse.expect("deferrable_reverse => compound k has reverse");
             let of_type_tag = if rev.of_type {
-                let tag = subject.tag.as_deref().unwrap_or("").to_ascii_lowercase();
+                let tag = anchor.tag.as_deref().unwrap_or("").to_ascii_lowercase();
                 positional_tags.iter().position(|t| **t == *tag.as_bytes())
             } else {
                 None
@@ -639,7 +774,7 @@ impl CompiledSchema {
             // `:last-*`/`:only-*` (== nth-last(1)) keep a single candidate; general `:nth-last-*(An+B)`
             // must buffer every matching child (any of them could be the nth from the end).
             let single_slot = rev.only || (rev.a == 0 && rev.b == 1);
-            let dead = reverse_entries.len() >= MAX_MEMBERS;
+            let dead = tail_dead || reverse_entries.len() >= MAX_MEMBERS;
             reverse_entries.push(RevEntry {
                 col,
                 seg,
@@ -648,6 +783,7 @@ impl CompiledSchema {
                 of_type_tag,
                 single_slot,
                 dead,
+                tail,
             });
         }
         let has_reverse = !reverse_entries.is_empty();
@@ -656,10 +792,10 @@ impl CompiledSchema {
         // the constraint. `has_subj`/`has_done` are `u128`, under the shared member ceiling.
         let mut has_entries: Vec<HasEntry> = Vec::new();
         for (col, sel) in has_pending_sels {
-            let seg = to_segments(sel).0.into_iter().next().expect("deferrable_has => 1 segment");
-            let subject = seg.parts.last().expect("a segment has >=1 compound");
-            let has = subject.has.clone().expect("deferrable_has => subject has `:has`");
-            let dead = has_entries.len() >= MAX_MEMBERS;
+            let k = compile::deferrable_has_at(sel).expect("routed as deferrable_has");
+            let (seg, tail, tail_dead) = split_deferred(sel, k, col, &mut tail_schemas);
+            let has = sel.parts[k].has.clone().expect("deferrable_has => compound k has `:has`");
+            let dead = tail_dead || has_entries.len() >= MAX_MEMBERS;
             has_entries.push(HasEntry {
                 col,
                 seg,
@@ -667,6 +803,7 @@ impl CompiledSchema {
                 has,
                 dead,
                 trigger: None,
+                tail,
             });
         }
 
@@ -674,10 +811,11 @@ impl CompiledSchema {
         // `compound_matches`) plus the predicate. `txt_subj` is `u128`, under the shared ceiling.
         let mut text_entries: Vec<TextEntry> = Vec::new();
         for (col, sel) in text_pending_sels {
-            let seg = to_segments(sel).0.into_iter().next().expect("deferrable_text_pred => 1 segment");
-            let subject = seg.parts.last().expect("a segment has >=1 compound");
-            let pred = subject.text_pred.clone().expect("deferrable_text_pred => subject has text_pred");
-            let dead = text_entries.len() >= MAX_MEMBERS;
+            let k = compile::deferrable_text_pred_at(sel).expect("routed as deferrable_text_pred");
+            let (seg, tail, tail_dead) = split_deferred(sel, k, col, &mut tail_schemas);
+            let pred =
+                sel.parts[k].text_pred.clone().expect("deferrable_text_pred => compound k has text_pred");
+            let dead = tail_dead || text_entries.len() >= MAX_MEMBERS;
             text_entries.push(TextEntry {
                 col,
                 seg,
@@ -685,6 +823,7 @@ impl CompiledSchema {
                 pred,
                 dead,
                 trigger: None,
+                tail,
             });
         }
 
@@ -708,6 +847,7 @@ impl CompiledSchema {
                     has,
                     dead,
                     trigger: Some(bit),
+                    tail: None, // a trigger emits no value
                 });
             } else if let Some(pred) = c.text_pred.clone() {
                 let dead = text_entries.len() >= MAX_MEMBERS;
@@ -718,6 +858,7 @@ impl CompiledSchema {
                     pred,
                     dead,
                     trigger: Some(bit),
+                    tail: None, // a trigger emits no value
                 });
             }
         }
@@ -751,6 +892,7 @@ impl CompiledSchema {
             has_entries,
             has_text_pred,
             text_entries,
+            tail_schemas,
             trig_immediate_mask,
         }
     }
@@ -820,6 +962,47 @@ impl<'a> Matcher<'a> {
             pending: Vec::new(),
             doc_rev_pending: Vec::new(),
             txt_open: 0,
+            tail_spans: Vec::new(),
+            pending_text: None,
+        }
+    }
+
+    /// Recover the values of every deferred winner whose value is NOT its own element's, by re-scanning
+    /// that element's raw span. Shared by all three deferred tiers (reverse, `:has`, text-predicate) —
+    /// they differ only in WHEN a winner is known, not in how its subtree is read.
+    ///
+    /// Nothing was buffered for these during the pass — only `(start, end)`. That is sound because the
+    /// span is SELF-CONTAINED: an end tag inside it that matched an ancestor would have ended the span,
+    /// and one discarded by table scope behaves identically standalone. It is the same re-parse
+    /// equivalence the differential already proves for outer-HTML node queries.
+    ///
+    /// Two details matter. The re-scan runs the REAL engine (`schema.tail_schemas[slot]`), so it inherits
+    /// dropped-end-tag coalescing, table scope and implied close rather than re-deriving them — a
+    /// hand-rolled collector here would silently re-introduce the split-text bug. And winners NEST (a
+    /// last-child inside a last-child, a `:has` div inside a `:has` div), so a contained span's values are
+    /// a subset of its container's and would double-count: element spans only nest or are disjoint, so
+    /// keeping the MAXIMAL ones de-duplicates exactly — which also bounds the work to one extra pass.
+    fn resolve_tail_spans(&mut self) {
+        let mut spans = std::mem::take(&mut self.tail_spans);
+        // Sorting by `(slot, start, end)` groups each entry's winners in document order. Within a slot
+        // the starts are DISTINCT (one per element), so a container always sorts before what it contains
+        // — which means "contained in some kept winner" is just "ends at or before the furthest end kept
+        // so far". A running max is therefore enough; scanning all spans per span made this quadratic in
+        // winner count, and disjoint winners (a page of sibling cards — the normal shape) never
+        // short-circuit, so `div:has(a) ::text` over thousands of cards paid it in full.
+        spans.sort_unstable();
+        let (mut cur_slot, mut max_end) = (usize::MAX, 0usize);
+        for (slot, s, e) in spans {
+            if slot != cur_slot {
+                (cur_slot, max_end) = (slot, 0);
+            }
+            if e <= max_end {
+                continue; // contained in an earlier winner of this slot (or an exact duplicate)
+            }
+            max_end = e;
+            let (cols, _) = self.schema.tail_schemas[slot].schema.run(&self.input[s..e], self.enc);
+            let vals = cols.into_iter().next().expect("a tail schema has exactly one column");
+            self.results[self.schema.tail_schemas[slot].col].extend(vals);
         }
     }
 
@@ -857,8 +1040,14 @@ impl<'a> Matcher<'a> {
                 };
                 for cand in &pend.cands {
                     if reverse_matches(&re.rev, cand.idx, total) {
-                        for (off, v) in &cand.vals {
-                            self.pending.push((re.col, *off, v.clone()));
+                        if let Some(slot) = re.tail {
+                            // value lives in the winner's subtree: remember the span; re-scanned at
+                            // finish, once nested winners can be de-duplicated against each other
+                            self.tail_spans.push((slot, cand.span.0, cand.span.1));
+                        } else {
+                            for (off, v) in &cand.vals {
+                                self.pending.push((re.col, *off, v.clone()));
+                            }
                         }
                     }
                 }
@@ -888,7 +1077,7 @@ impl<'a> Matcher<'a> {
                     .filter(|(er, _, _)| *er == r)
                     .map(|(_, o, v)| (*o, v.clone()))
                     .collect();
-                let cand = RevCand { idx, vals };
+                let cand = RevCand { idx, vals, span: (e.start, end) };
                 let target = match self.stack.last_mut() {
                     Some(parent) => &mut parent.rev_pending,
                     None => &mut self.doc_rev_pending,
@@ -926,7 +1115,10 @@ impl<'a> Matcher<'a> {
                     }
                     continue;
                 }
-                if matches!(he.terminal, Terminal::OuterHtml) {
+                if let Some(slot) = he.tail {
+                    // value lives in this element's subtree (`div:has(a) ::text`, `div:has(a) a::attr(..)`)
+                    self.tail_spans.push((slot, e.start, end));
+                } else if matches!(he.terminal, Terminal::OuterHtml) {
                     let val = self.enc.decode_without_bom_handling(&self.input[e.start..end]).0.into_owned();
                     self.pending.push((he.col, e.start, val));
                 } else {
@@ -964,6 +1156,11 @@ impl<'a> Matcher<'a> {
                     }
                     continue;
                 }
+                if let Some(slot) = te.tail {
+                    // value lives in this element's subtree (`//div[contains(.,"x")]/a/@href`)
+                    self.tail_spans.push((slot, e.start, end));
+                    continue;
+                }
                 match te.terminal {
                     Terminal::OuterHtml => {
                         let val =
@@ -997,6 +1194,8 @@ impl<'a> Matcher<'a> {
     /// `(flat_columns, grouped)` where `grouped[g]` is group `g`'s rows in document order, each row a
     /// `Vec` of sub-field value-columns (`[group][row][sub][value]`).
     pub fn finish_grouped(mut self) -> (FlatColumns, Vec<GroupRows>) {
+        // deliver the trailing text run before the stack unwinds out from under it
+        self.flush_text();
         // close any elements still open at EOF (raw source runs to end of input)
         let end = self.input.len();
         while let Some(e) = self.stack.pop() {
@@ -1019,13 +1218,18 @@ impl<'a> Matcher<'a> {
                     };
                     for cand in &pend.cands {
                         if reverse_matches(&re.rev, cand.idx, total) {
-                            for (off, v) in &cand.vals {
-                                self.pending.push((re.col, *off, v.clone()));
+                            if let Some(slot) = re.tail {
+                                self.tail_spans.push((slot, cand.span.0, cand.span.1));
+                            } else {
+                                for (off, v) in &cand.vals {
+                                    self.pending.push((re.col, *off, v.clone()));
+                                }
                             }
                         }
                     }
                 }
             }
+            self.resolve_tail_spans();
             if !self.pending.is_empty() {
                 let mut pend = std::mem::take(&mut self.pending);
                 pend.sort_by_key(|&(col, off, _)| (col, off));
@@ -1231,7 +1435,8 @@ impl<'a> Matcher<'a> {
                 continue;
             }
             subj |= 1u128 << r;
-            if let Terminal::Attr { name, .. } = &re.terminal {
+            // A subtree entry streams nothing — its values are recovered from the winner's span later.
+            if let (None, Terminal::Attr { name, subtree: false }) = (re.tail, &re.terminal) {
                 if let Some(v) = self.stack[top].attr(name) {
                     caps.push((r as u32, start, v.to_string()));
                 }
@@ -1245,26 +1450,26 @@ impl<'a> Matcher<'a> {
     /// The value is held on the subject's `rev_buf` keyed by its byte offset — reverse values can be
     /// committed out of document order (a nested last-child resolves before an outer one), so the offset
     /// is what re-sorts each column back into document order at finish.
-    fn reverse_text(&mut self, top: usize, text: &'a [u8], allows_entities: bool) {
+    fn reverse_text(&mut self, top: usize, val: TextVal<'_>, off: usize) {
         let mut want = 0u128;
         let mut m = self.stack[top].rev_subj;
         while m != 0 {
             let r = m.trailing_zeros();
             m &= m - 1;
-            if matches!(self.schema.reverse_entries[r as usize].terminal, Terminal::Text { subtree: false }) {
+            let re = &self.schema.reverse_entries[r as usize];
+            if re.tail.is_none() && matches!(re.terminal, Terminal::Text { subtree: false }) {
                 want |= 1u128 << r;
             }
         }
         if want == 0 {
             return;
         }
-        let val = finalize(text, allows_entities, self.enc);
-        let off = text.as_ptr() as usize - self.input.as_ptr() as usize;
+        let out = val.finalize(self.enc);
         let mut w = want;
         while w != 0 {
             let r = w.trailing_zeros();
             w &= w - 1;
-            self.stack[top].rev_buf.push((r, off, val.clone()));
+            self.stack[top].rev_buf.push((r, off, out.clone()));
         }
     }
 
@@ -1282,7 +1487,8 @@ impl<'a> Matcher<'a> {
                 continue;
             }
             subj |= 1u128 << h;
-            if let Terminal::Attr { name, .. } = &he.terminal {
+            // a tail entry streams nothing — its values come from the span re-scan at resolution
+            if let (None, Terminal::Attr { name, .. }) = (he.tail, &he.terminal) {
                 if let Some(v) = self.stack[top].attr(name) {
                     caps.push((h as u32, start, v.to_string()));
                 }
@@ -1324,26 +1530,26 @@ impl<'a> Matcher<'a> {
     /// Capture this text node for any `:has` entry whose (attached) `::text` subject is `stack[top]` —
     /// held on `has_buf` keyed by byte offset (values commit out of document order when subjects nest,
     /// so the offset re-sorts each column at finish). Mirrors [`Matcher::reverse_text`].
-    fn has_text(&mut self, top: usize, text: &'a [u8], allows_entities: bool) {
+    fn has_text(&mut self, top: usize, val: TextVal<'_>, off: usize) {
         let mut want = 0u128;
         let mut m = self.stack[top].has_subj;
         while m != 0 {
             let h = m.trailing_zeros();
             m &= m - 1;
-            if matches!(self.schema.has_entries[h as usize].terminal, Terminal::Text { subtree: false }) {
+            let he = &self.schema.has_entries[h as usize];
+            if he.tail.is_none() && matches!(he.terminal, Terminal::Text { subtree: false }) {
                 want |= 1u128 << h;
             }
         }
         if want == 0 {
             return;
         }
-        let val = finalize(text, allows_entities, self.enc);
-        let off = text.as_ptr() as usize - self.input.as_ptr() as usize;
+        let out = val.finalize(self.enc);
         let mut w = want;
         while w != 0 {
             let h = w.trailing_zeros();
             w &= w - 1;
-            self.stack[top].has_buf.push((h, off, val.clone()));
+            self.stack[top].has_buf.push((h, off, out.clone()));
         }
     }
 
@@ -1376,9 +1582,8 @@ impl<'a> Matcher<'a> {
 
     /// Stream this text node through every open predicate state it belongs to. Only direct text values
     /// that may become terminal output are retained; descendant predicate input stays bounded.
-    fn text_event(&mut self, top: usize, text: &'a [u8], allows_entities: bool) {
-        let off = text.as_ptr() as usize - self.input.as_ptr() as usize;
-        let val = finalize(text, allows_entities, self.enc);
+    fn text_event(&mut self, top: usize, val: TextVal<'_>, off: usize) {
+        let out = val.finalize(self.enc);
         for e in 0..=top {
             if self.stack[e].txt_subj == 0 {
                 continue;
@@ -1389,21 +1594,21 @@ impl<'a> Matcher<'a> {
                 let elem = &mut self.stack[e];
                 for state in &mut elem.txt_states {
                     let te = &self.schema.text_entries[state.entry as usize];
-                    state.update(&te.pred, &val, direct);
-                    if direct && matches!(te.terminal, Terminal::Text { subtree: false }) {
+                    state.update(&te.pred, &out, direct);
+                    if direct && te.tail.is_none() && matches!(te.terminal, Terminal::Text { subtree: false }) {
                         emit_entries.push(state.entry);
                     }
                 }
             }
             for entry in emit_entries {
-                self.stack[e].txt_emit.push((entry, off, val.clone()));
+                self.stack[e].txt_emit.push((entry, off, out.clone()));
             }
         }
     }
 
     /// Feed this text node into the `normalize-space(...)` accumulators: append to any open element
     /// string-value (`//el`), and capture the first matched text node for a `text()` inner.
-    fn ns_text(&mut self, top: usize, text: &'a [u8], allows_entities: bool) {
+    fn ns_text(&mut self, top: usize, val: TextVal<'_>) {
         let enc = self.enc;
         for k in 0..self.schema.entries.len().min(128) {
             let inner = match &self.schema.entries[k].terminal {
@@ -1414,7 +1619,7 @@ impl<'a> Matcher<'a> {
                 // element string-value: all text while the first matched element is open is its subtree
                 Terminal::OuterHtml => {
                     if let Some((_d, buf)) = &mut self.ns[k].pending {
-                        buf.push_str(&finalize(text, allows_entities, enc));
+                        buf.push_str(&val.finalize(enc));
                     }
                 }
                 // first matched text node (self or descendant, per the inner subtree flag)
@@ -1426,7 +1631,7 @@ impl<'a> Matcher<'a> {
                     };
                     if hit {
                         self.ns[k].value =
-                            Some(decode::normalize_space(&finalize(text, allows_entities, enc)));
+                            Some(decode::normalize_space(&val.finalize(enc)));
                     }
                 }
                 _ => {}
@@ -1463,6 +1668,8 @@ impl<'a> TokenSink<'a> for Matcher<'a> {
         span_start: usize,
         open_end: usize,
     ) {
+        // Any buffered text belongs to the element open BEFORE this tag reshapes the stack.
+        self.flush_text();
         let (tid, void) = classify(name);
         // inline implied-close reshape: a popped element's raw source ends where this tag begins
         while let Some(top) = self.stack.last() {
@@ -1629,34 +1836,105 @@ impl<'a> TokenSink<'a> for Matcher<'a> {
     }
 
     fn end_tag(&mut self, name: &[u8], close_start: usize, close_end: usize) {
-        if let Some(k) = self.stack.iter().rposition(|e| e.tag.eq_ignore_ascii_case(name)) {
-            // elements ABOVE the match are implicitly closed — their raw source ends at the end
-            // tag's `<` (close_start); the matching element itself ends after its `>` (close_end).
-            while self.stack.len() > k + 1 {
-                let e = self.stack.pop().unwrap();
-                self.close_elem(e, close_start);
+        // Is this tag DISCARDED rather than honored? Either it matches no open element, or it would have
+        // to unwind a table — libxml2 refuses that (TABLE SCOPE), so `<td>A</div>B` keeps `AB` in the
+        // cell. Both cases leave the stack alone and extend the buffered text node's gap.
+        let matched = self.stack.iter().rposition(|e| e.tag.eq_ignore_ascii_case(name));
+        let discarded = match matched {
+            None => true,
+            Some(k) => {
+                self.stack[k + 1..].iter().any(|e| is_table_scoped(e.tid)) && end_tag_discardable(name)
             }
-            let e = self.stack.pop().unwrap();
-            self.close_elem(e, close_end);
+        };
+        if discarded {
+            // Absorb the tag into the pending node's gap so a following run still joins across it —
+            // consecutive drops (`<div>A</p></p>B</div>`) chain, since each abuts the previous gap end.
+            if let Some(p) = &mut self.pending_text {
+                if p.gap_end == close_start {
+                    p.gap_end = close_end;
+                }
+            }
+            return;
         }
+        let k = matched.expect("not discarded => matched");
+        // Buffered text belongs inside the element about to close, so deliver it first.
+        self.flush_text();
+        // elements ABOVE the match are implicitly closed — their raw source ends at the end
+        // tag's `<` (close_start); the matching element itself ends after its `>` (close_end).
+        while self.stack.len() > k + 1 {
+            let e = self.stack.pop().unwrap();
+            self.close_elem(e, close_start);
+        }
+        let e = self.stack.pop().unwrap();
+        self.close_elem(e, close_end);
     }
 
-    fn text(&mut self, text: &'a [u8], allows_entities: bool) {
+    /// Buffer one text RUN, delivering the PREVIOUS one — a run is not a text node until we know no
+    /// dropped end tag follows it.
+    ///
+    /// libxml2 drops an end tag with no open element to match (`<div>A</p>B</div>`) and the character
+    /// data either side of it becomes ONE text node (`AB`). The tokenizer, which has no stack, can only
+    /// hand us two runs. Re-joining them here — rather than at each consumer — is what keeps
+    /// `::text` columns, `/text()`, `normalize-space(...)` and the text-content predicates consistent:
+    /// they all see the same single node lxml does. Comments/CDATA/PIs also split a run, but they split
+    /// it in lxml too, so only source-ADJACENCY across the dropped tag may be re-joined.
+    fn text(&mut self, text: &'a [u8], allows_entities: bool, start: usize) {
+        // A run starting exactly at the buffered node's gap end continues it: everything between the two
+        // is dropped end tags, which libxml2 discards. Any real node in the gap shifts `start` past
+        // `gap_end` and so breaks the join.
+        if let Some(p) = &mut self.pending_text {
+            if p.gap_end == start && p.allows_entities == allows_entities {
+                // decode this run on its own and append the STRING — see `PendingText`
+                if p.joined.is_empty() {
+                    p.joined = finalize(&p.bytes, allows_entities, self.enc);
+                }
+                p.joined.push_str(&finalize(text, allows_entities, self.enc));
+                p.gap_end = start + text.len();
+                return;
+            }
+        }
+        self.flush_text();
+        self.pending_text = Some(PendingText {
+            bytes: std::borrow::Cow::Borrowed(text),
+            joined: String::new(),
+            allows_entities,
+            start,
+            gap_end: start + text.len(),
+        });
+    }
+}
+
+impl<'a> Matcher<'a> {
+    /// Deliver the buffered text node (if any) to every consumer. Called before any event that could
+    /// observe it out of order, and at EOF.
+    fn flush_text(&mut self) {
+        let Some(p) = self.pending_text.take() else {
+            return;
+        };
+        let val = if p.joined.is_empty() {
+            TextVal::Raw { bytes: &p.bytes, entities: p.allows_entities }
+        } else {
+            TextVal::Decoded(&p.joined)
+        };
+        self.emit_text(val, p.start);
+    }
+
+    fn emit_text(&mut self, val: TextVal<'_>, off: usize) {
         if self.stack.is_empty() {
             return;
         }
         let top = self.stack.len() - 1;
         if self.schema.has_ns {
-            self.ns_text(top, text, allows_entities);
+            self.ns_text(top, val);
         }
         if self.schema.has_reverse && self.stack[top].rev_subj != 0 {
-            self.reverse_text(top, text, allows_entities);
+            self.reverse_text(top, val, off);
         }
         if self.schema.has_has && self.stack[top].has_subj != 0 {
-            self.has_text(top, text, allows_entities);
+            self.has_text(top, val, off);
         }
         if self.schema.has_text_pred && self.txt_open != 0 {
-            self.text_event(top, text, allows_entities);
+            self.text_event(top, val, off);
         }
         // Which output columns want this text node (deduped across comma-group members). Decided
         // FIRST, so `finalize` (validate+decode) runs only when the text is actually captured —
@@ -1677,21 +1955,21 @@ impl<'a> TokenSink<'a> for Matcher<'a> {
         if colmask == 0 && gtargets.is_empty() {
             return;
         }
-        let val = finalize(text, allows_entities, self.enc);
+        let out = val.finalize(self.enc);
         for (ii, sub_idx) in gtargets {
-            self.open_instances[ii].buckets[sub_idx].push(val.clone());
+            self.open_instances[ii].buckets[sub_idx].push(out.clone());
         }
         if colmask == 0 {
             return;
         }
         if colmask.count_ones() == 1 {
-            self.results[colmask.trailing_zeros() as usize].push(val); // common case: move, no clone
+            self.results[colmask.trailing_zeros() as usize].push(out); // common case: move, no clone
         } else {
             let mut m = colmask;
             while m != 0 {
                 let col = m.trailing_zeros() as usize;
                 m &= m - 1;
-                self.results[col].push(val.clone());
+                self.results[col].push(out.clone());
             }
         }
     }

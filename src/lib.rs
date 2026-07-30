@@ -549,12 +549,85 @@ mod tests {
         assert_eq!(ex(five, "//li[last()-1]/text()"), v(&["d"]));
         assert_eq!(ex(five, "//ul/*[last()]/text()"), v(&["e"]));
         assert_eq!(ex(links, "//a[last()]/@href"), v(&["/2"]));
-        // unsupported reverse forms -> empty (never wrong):
-        // subtree terminal (inherits the general subtree-`::text` adjacency divergence — see matcher)
-        assert_eq!(ex("<ul><li><b>p</b>q</li></ul>", "li:last-child ::text"), Vec::<String>::new());
-        assert_eq!(ex("<ul><li>c</li></ul>", "//li[last()]//text()"), Vec::<String>::new());
-        assert_eq!(ex(links, "div:only-child a::attr(href)"), Vec::<String>::new()); // reverse on ANCESTOR
+        // SUBTREE terminals are supported: values are recovered by re-scanning the winner's raw span
+        // (`Matcher::resolve_tail_spans`), so nothing is buffered during the pass.
+        assert_eq!(ex("<ul><li><b>p</b>q</li></ul>", "li:last-child ::text"), v(&["p", "q"]));
+        assert_eq!(ex("<ul><li>c</li></ul>", "//li[last()]//text()"), v(&["c"]));
+        assert_eq!(ex("<ul><li>a<li>L<b>t</b></ul>", "li:last-child ::text"), v(&["L", "t"]));
+        // the re-scan runs the real engine, so tree rules inside the span still apply: a dropped end
+        // tag coalesces, and table scope holds
+        assert_eq!(ex("<ul><li>a<li>HELLO</p>WORLD</ul>", "li:last-child ::text"), v(&["HELLOWORLD"]));
+        assert_eq!(
+            ex("<ul><li>a<li><div><table><tr><td>X</div>Y</table></ul>", "li:last-child ::text"),
+            v(&["XY"])
+        );
+        // NESTED winners de-duplicate (a contained span's values are a subset of its container's)
+        assert_eq!(
+            ex("<ul><li>a<li>L<ul><li>x<li>IN</ul>M</ul>", "li:last-child ::text"),
+            v(&["L", "x", "IN", "M"])
+        );
+        assert_eq!(ex("<div>1<div>A<div>B</div></div></div>", "div:last-child ::text"), v(&["1", "A", "B"]));
+        // subtree `::attr` and the of-type / nth-last variants
+        assert_eq!(
+            ex("<ul><li><a href=\"/1\">x</a><li><a href=\"/2\">y</a><a href=\"/3\">z</a></ul>",
+               "li:last-child ::attr(href)"),
+            v(&["/2", "/3"])
+        );
+        assert_eq!(ex("<ul><li>A<li>B<li>C</ul>", "li:nth-last-child(2) ::text"), v(&["B"]));
+        // reverse on an ANCESTOR compound: the value comes from a DESCENDANT, recovered by re-scanning
+        // the winner's span with the selector tail (`b::text`) — see `split_deferred`.
+        assert_eq!(ex(links, "div:only-child a::attr(href)"), v(&["/1", "/2"]));
+        assert_eq!(
+            ex("<ul><li><b>b1</b><li><b>b2</b></ul>", "li:last-child b::text"),
+            v(&["b2"])
+        );
+        assert_eq!(
+            ex("<ul><li><span><a href=\"/1\">x</a></span><li><span><a href=\"/2\">y</a></span></ul>",
+               "li:last-child span a::attr(href)"),
+            v(&["/2"])
+        );
+        assert_eq!(ex("<ul><li><b>a</b><li><b>b</b></ul>", "//li[last()]//b/text()"), v(&["b"]));
+        // nested winners still de-duplicate through the tail
+        assert_eq!(
+            ex("<ul><li>x<li>L<b>bl</b><ul><li>y<li>IN<b>bi</b></ul></ul>", "li:last-child b::text"),
+            v(&["bl", "bi"])
+        );
+        // still unsupported -> empty (never wrong):
+        // a CHILD step into the tail needs "depth exactly 1 in the span", which the depth-agnostic
+        // matcher can't express (same reason grouped sub-fields reject `./x`)
+        assert_eq!(ex("<ul><li><b>a</b><li><b>b</b></ul>", "li:last-child > b::text"), Vec::<String>::new());
+        assert_eq!(ex("<ul><li><b>a</b><li><b>b</b></ul>", "//li[last()]/b/text()"), Vec::<String>::new());
         assert_eq!(ex(h, "h1::text, li:last-child::text"), Vec::<String>::new()); // reverse in a comma group
+    }
+
+    /// `:has()` and text-content predicates share the reverse tier's span re-scan, so their values may
+    /// also come from the subject's SUBTREE (`div:has(a) ::text`) or from a value-bearing DESCENDANT
+    /// (`div:has(a) a::attr(href)`) — the common "link inside a card that has an image" shape.
+    #[test]
+    fn deferred_predicate_subtree_and_descendant_values() {
+        let d = "<div class=w><p class=x>px</p><a href='/w'>aw</a>wt</div><div class=n><p>pn</p>nt</div>";
+        // :has with a SUBTREE terminal
+        assert_eq!(ex(d, "div:has(a) ::text"), v(&["px", "aw", "wt"]));
+        assert_eq!(ex(d, "div:has(a) ::attr(href)"), v(&["/w"]));
+        // :has on an ANCESTOR — value from a descendant
+        assert_eq!(ex(d, "div:has(a) p::text"), v(&["px"]));
+        assert_eq!(ex(d, "div:has(a) a::attr(href)"), v(&["/w"]));
+        assert_eq!(ex(d, "div:has(p) a::text"), v(&["aw"]));
+        assert_eq!(ex(d, "div:has(a) p.x::text"), v(&["px"]));
+        // XPath text-content predicate with a non-attached terminal
+        assert_eq!(ex(d, "//div[contains(.,\"aw\")]//text()"), v(&["px", "aw", "wt"]));
+        assert_eq!(ex(d, "//div[contains(.,\"aw\")]//a/@href"), v(&["/w"]));
+        assert_eq!(ex(d, "//div[.=\"pxawwt\"]//a/@href"), v(&["/w"]));
+        // NESTED qualifying subjects de-duplicate (outer span contains the inner one)
+        let n = "<div class=o><a href=/o>o</a><div class=i><a href=/i>i</a></div></div>";
+        assert_eq!(ex(n, "div:has(a) a::attr(href)"), v(&["/o", "/i"]));
+        assert_eq!(ex(n, "div:has(a) ::text"), v(&["o", "i"]));
+        // attached forms unchanged, and a CHILD step into the tail stays out of tier
+        assert_eq!(ex(d, "div:has(a)::attr(class)"), v(&["w"]));
+        assert_eq!(ex(d, "//div[contains(.,\"aw\")]/text()"), v(&["wt"]));
+        assert_eq!(ex(d, "div:has(a) > p::text"), Vec::<String>::new());
+        // two deferred predicates in one selector remain out of tier
+        assert_eq!(ex(d, "div:has(a) p:has(b)::text"), Vec::<String>::new());
     }
 
     #[test]
@@ -687,9 +760,118 @@ mod tests {
             v(&["a", "b"])
         );
     }
+    // libxml2 2.14 NESTS a same-tag dt/dd repeat instead of auto-closing it (unlike `li`/`td`/`option`
+    // above), and never auto-closes ruby annotations at all. The ported rule table asserted the HTML5
+    // behavior for both and over-closed. See `implied_close::implies_close_id`.
+    #[test]
+    fn dt_dd_same_tag_repeat_nests() {
+        assert_eq!(ex("<dl><dt>a<dt>b</dl>", "dl > dt::text"), v(&["a"]));
+        assert_eq!(ex("<dl><dd>a<dd>b</dl>", "dl > dd::text"), v(&["a"]));
+    }
+    #[test]
+    fn ruby_annotations_never_auto_close() {
+        assert_eq!(ex("<ruby><rt>a<rt>b</ruby>", "ruby > rt::text"), v(&["a"]));
+        assert_eq!(ex("<ruby><rt>a<rp>b</ruby>", "ruby > rp::text"), v(&[]));
+        // ...but they still close an open <p>, so `b` is not p's text.
+        assert_eq!(ex("<div><p>a<rt>b</div>", "div > p::text"), v(&["a"]));
+    }
     #[test]
     fn p_closed_by_block() {
         assert_eq!(ex("<div><p>x<h2>y</h2><p>z</div>", "div > p::text"), v(&["x", "z"]));
+    }
+
+    // Content after `</html>` is KEPT — a DELIBERATE divergence from libxml2, which stops there and
+    // discards the rest. Trailing injected markup is common in the wild, so dropping real content
+    // silently is the worse failure for a scraper. Locked here because an intentional divergence with no
+    // test is indistinguishable from a bug.
+    //
+    // Only PARTLY browser-equivalent, and the test pins both halves: a browser ALSO re-parents the
+    // content into `<body>` (HTML Standard "after after body" reprocesses the token in body — verified
+    // against Chrome `--dump-dom`), whereas the engine leaves it where the byte stream put it. So an
+    // unscoped selector finds it (like a browser, unlike lxml) but a `body`-scoped one does not (like
+    // lxml, unlike a browser) — the same root cause as the no-`<body>`-synthesis divergence.
+    #[test]
+    fn content_after_close_html_is_kept() {
+        let h = "<html><body><p>in</p></body></html><div>late</div>";
+        assert_eq!(ex(h, "p::text"), v(&["in"]));
+        assert_eq!(ex(h, "div::text"), v(&["late"])); // lxml/Parsel: empty
+        assert_eq!(ex(h, "div ::text"), v(&["late"]));
+        // ...but NOT re-parented into <body>, so ancestor-scoped selectors agree with lxml, not a browser
+        assert_eq!(ex(h, "body div::text"), Vec::<String>::new());
+        assert_eq!(ex(h, "body > div::text"), Vec::<String>::new());
+        // whitespace-only tails are inert either way
+        assert_eq!(ex("<html><body><p>in</p></body></html>\n\n", "p::text"), v(&["in"]));
+    }
+
+    // TABLE SCOPE: libxml2 will not unwind a table for an ordinary end tag, so a stray `</div>` inside
+    // a cell is discarded and the cell's text stays whole. Unbalanced `<div>`s around tables are a
+    // common real-world malformation. See `implied_close::blocks_end_tag`.
+    #[test]
+    fn end_tag_does_not_unwind_a_table() {
+        assert_eq!(ex("<div><table><tr><td>A</div>B</td></tr></table>", "td::text"), v(&["AB"]));
+        assert_eq!(ex("<div><td>A</div>B", "td::text"), v(&["AB"])); // no <table> needed
+        assert_eq!(ex("<ul><table><tr><td>A</ul>B", "td::text"), v(&["AB"]));
+        assert_eq!(ex("<span><table><tr><td>A</span>B", "td::text"), v(&["AB"]));
+        // ...but a table-scoped end tag unwinds normally, and </body>/</html> still close the document
+        assert_eq!(ex("<div><table><tr><td>A</table>B</div>", "div::text"), v(&["B"]));
+        assert_eq!(ex("<table><tbody><tr><td>A</tbody>B</table>", "td::text"), v(&["A"]));
+        // `</body>` needs a real open <body> to match: the engine synthesizes no document frame, so on
+        // a bare FRAGMENT it is an unmatched end tag and coalesces instead (documented fragment
+        // divergence — real HTTP responses have a <body>).
+        assert_eq!(ex("<body><div><table><tr><td>A</body>B", "td::text"), v(&["A"]));
+        assert_eq!(ex("<div><table><tr><td>A</body>B", "td::text"), v(&["AB"]));
+        // a non-table container does NOT block, and a </div> matched inside a cell is honoured
+        assert_eq!(ex("<div><ul><li>A</div>B", "li::text"), v(&["A"]));
+        assert_eq!(ex("<table><tr><td><div>A</div>B</td></tr></table>", "td::text"), v(&["B"]));
+    }
+
+    // ---- an end tag with nothing to match is DROPPED, and does not split the text node ----
+    // libxml2 discards it and keeps the character data either side as ONE text node. Emitting two
+    // values instead silently TRUNCATES a `One`-cardinality field (`.get()` -> "HELLO", not
+    // "HELLOWORLD") — the one failure mode no-fallback is supposed to rule out. Real pages hit this:
+    // Sphinx emits stray `</p>`. See `Matcher::text`.
+    #[test]
+    fn dropped_end_tag_does_not_split_text() {
+        for tag in ["p", "span", "b", "li", "td", "bogus", "br"] {
+            let html = format!("<div>HELLO</{tag}>WORLD</div>");
+            assert_eq!(ex(&html, "div::text"), v(&["HELLOWORLD"]), "</{tag}>");
+        }
+        // chains across consecutive dropped tags, and applies to the XPath terminals too
+        assert_eq!(ex("<div>A</p>B</p>C</div>", "div::text"), v(&["ABC"]));
+        // ADJACENT drops with no text between must chain too — tracking one dropped tag instead of the
+        // node's whole gap split these, and the Sphinx `</p>\n</p>` case only passed via the `\n` run
+        assert_eq!(ex("<div>A</p></p>B</div>", "div::text"), v(&["AB"]));
+        assert_eq!(ex("<div>A</p></span></b>B</div>", "div::text"), v(&["AB"]));
+        assert_eq!(ex("<div>A</p>B</div>", "//div/text()"), v(&["AB"]));
+        assert_eq!(ex("<div>A</p>B</div>", "//div//text()"), v(&["AB"]));
+        // entity decoding still spans the join
+        assert_eq!(ex("<div>A&amp;</p>&lt;B</div>", "div::text"), v(&["A&<B"]));
+        // ...but each run is decoded on its OWN: the oracle decodes while tokenizing, i.e. before tree
+        // construction, so a construct split across a discarded tag must NOT reassemble. Joining the raw
+        // bytes first manufactured an entity here and a character in the next case.
+        assert_eq!(ex("<div>A&am</p>p;B</div>", "div::text"), v(&["A&amp;B"]));
+        assert_eq!(ex("<div>x&lt</p>;y</div>", "div::text"), v(&["x<;y"]));
+        assert_eq!(
+            extract(b"<div>\xc3</p>\xa9</div>", &["div::text".to_string()], None).pop().unwrap(),
+            v(&["\u{fffd}\u{fffd}"]) // two replacement chars, NOT `é`
+        );
+    }
+    // The join is SOURCE-ADJACENCY only: everything that is a real node in libxml2 still splits the
+    // run, including a comment sitting in the gap left by a dropped tag.
+    #[test]
+    fn real_nodes_still_split_text() {
+        assert_eq!(ex("<div>A<!--c-->B</div>", "div::text"), v(&["A", "B"]));
+        assert_eq!(ex("<div>A<span>s</span>B</div>", "div::text"), v(&["A", "B"]));
+        assert_eq!(ex("<div>A<br>B</div>", "div::text"), v(&["A", "B"]));
+        assert_eq!(ex("<div>A</p><!--c-->B</div>", "div::text"), v(&["A", "B"]));
+    }
+    // A dropped tag must not corrupt the deferred text-content predicates either — they resolve on the
+    // element's own text nodes, so they need the same joined node the value columns get.
+    #[test]
+    fn dropped_end_tag_text_predicates() {
+        assert_eq!(ex("<div>HELLO</p>WORLD</div>", "//div[text()='HELLOWORLD']/text()"), v(&["HELLOWORLD"]));
+        assert_eq!(ex("<div>HELLO</p>WORLD</div>", "//div[contains(text(),'LOWOR')]/text()"), v(&["HELLOWORLD"]));
+        assert_eq!(ex("<div>HELLO</p>WORLD</div>", "normalize-space(//div/text())"), v(&["HELLOWORLD"]));
     }
 
     // ---- the invariant: well-formed input is unchanged (== lxml, == today's engine) ----
