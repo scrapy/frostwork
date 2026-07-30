@@ -244,6 +244,32 @@ def test_the_rule_audit_notices_a_stale_gap_entry():
     assert not audit.fails, audit.fails[:3]
 
 
+def test_the_oracle_version_guard_actually_rejects_an_old_libxml2():
+    """Every gate's verdict is meaningless if the oracle is the wrong version.
+
+    lxml vendors its own libxml2 and a pinned lxml does NOT pin it — the same release ships 2.14 on
+    Linux/macOS and 2.11.9 on Windows, where CR-in-attributes and a raw `<` in text parse differently. So
+    `tools/oracle.py` refuses to run. That refusal is the load-bearing part: if it silently passed, a
+    Windows CI job would grade the engine against a spec it never claimed, and the divergences would look
+    like engine bugs. Simulate the old version and require the exit.
+    """
+    import lxml.etree
+
+    import oracle
+
+    original = lxml.etree.LIBXML_VERSION
+    try:
+        lxml.etree.LIBXML_VERSION = (2, 11, 9)
+        with pytest.raises(SystemExit) as e:
+            oracle.require(False)
+        assert e.value.code == 2, f"expected exit 2 (toolchain unusable), got {e.value.code}"
+        # ...and the documented escape hatch must still work, or exploring on such a platform is impossible
+        oracle.require(True)
+    finally:
+        lxml.etree.LIBXML_VERSION = original
+    oracle.require(False)  # the real toolchain is fine
+
+
 def test_the_mutate_feature_can_never_reach_a_shipped_build():
     """`--features mutate` makes the tree-construction tables depend on an ENVIRONMENT VARIABLE. That is
     the right trade for a mutation sweep and a catastrophe in a released wheel, so pin the two things that

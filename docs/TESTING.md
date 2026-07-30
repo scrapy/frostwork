@@ -58,7 +58,19 @@ each pair gets a verdict:
 - **grouped** — single-pass `Many`/`One` vs Parsel's per-container loop.
 
 **Encoding parity — `tools/enc_check.py`.** 35 (encoding × selector) cases across windows-1252,
-shift_jis, euc-jp, gbk, big5, koi8-r, utf-8, plus UTF-16 sniffing, vs Parsel given the same label.
+shift_jis, euc-jp, gbk, big5, koi8-r, utf-8, plus UTF-16 sniffing, vs Parsel given the same label; the
+`<meta>` prescan is oracled against **w3lib**, not Parsel (see the per-subsystem rule above).
+
+Those 35 vectors are ordinary text, and that turned out to matter: fuzzing declaration forms against
+w3lib surfaced that the two sides do not even use the same DECODER. Frostwork decodes with `encoding_rs`
+(the WHATWG standard, what browsers use); Parsel uses Python's stdlib codecs via w3lib, which also
+translates labels (`big5`→`big5hkscs`, `shift_jis`→`cp932`). A WHATWG index is **total**, Python's codecs
+are not, so they disagree on bytes no ordinary vector contains. The difference is now measured and
+enumerated rather than assumed away — 5 bytes for windows-1252/iso-8859-1, 11 assigned two-byte sequences
+for big5, full parity on validly encoded text elsewhere — and gated in both directions, so a divergence
+outside the list fails and a listed one that starts agreeing fails too. See
+[COMPATIBILITY.md](COMPATIBILITY.md) for the contract. The lesson is the same one the CSS escapes taught:
+**vectors made of realistic content only test the middle of the input space.**
 
 **Differential fuzzing** (the malformed-input surface):
 - `tools/diff_fuzz.py` — mutates conformant/foreign pages and the fuzz corpus into *malformed* HTML,
@@ -213,6 +225,22 @@ Three probe-design lessons are baked into the tools, each of which cost a wrong 
   now an UNKNOWN element, which libxml2 closes for nothing.
 - **`if x == y: continue` silently deleted the diagonal.** One line of misplaced caution excluded every
   "does `<X>` close an open `<X>`?" cell, and with it the nested-`<a>` and nested-`<form>` closes.
+
+**Contract sweeps over a whole syntax surface** (`tests/test_python.py`). One test per surface, each
+asserting the same two-sided contract — **supported means parity with the oracle, unsupported means
+empty** — over every shape in a grammar rather than a hand-picked few: the CSS selector surface, CSS
+escapes, the XPath surface (50 shapes, including `position()`/`last()`/`not()`/axes/unions/non-literal
+operands), the migration scanner's source shapes, and `:has()`/reverse-positional/text-predicate
+combinations on randomly generated CONFORMANT pages. These are cheap (well under a second all together)
+and they catch the failure the per-feature vectors cannot: a selector that quietly stops being supported
+still "passes" a test that only asserts its value is empty.
+
+Two probe-design traps are worth knowing before adding one. A sweep over MALFORMED generated pages
+measures the documented divergences (deep-`p`, misnest), not the feature — the first version of the
+deferred sweep reported 9 "failures" that were all foster-parenting and misnest. And a sweep that compares
+only VALUES will report the no-fallback contract as hundreds of divergences: deferred predicates are
+unsupported as grouped containers, so a grouped probe has to consult the support verdict, not just diff
+against Parsel.
 
 **Do the gates actually fail? — `tests/test_gates.py` (in `make py`).** Every gate above is a claim of
 the form "if the engine regresses, this goes red", and that claim is itself untested code. It has been

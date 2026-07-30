@@ -116,6 +116,118 @@ if mine[0] != ["café"]:
 print(f"meta prescan [commented charset: DOCUMENTED divergence]: mine={mine[0]} w3lib={w3} "
       f"-> {'OK' if mine[0] == ['café'] else 'MISMATCH'}")
 
+# ---------------------------------------------------------------- DECODER divergence from Parsel
+# The engine decodes with `encoding_rs` (the WHATWG Encoding Standard — what browsers do). Parsel decodes
+# with Python's stdlib codecs, and the two are NOT the same function: a WHATWG index is TOTAL, so every
+# byte maps to a character, while Python's `cp1252` leaves five bytes undefined and yields U+FFFD for them.
+# WHATWG is the correct, lossless behaviour, so per the project's oracle-bug policy we keep it and
+# enumerate the difference here instead of matching a codec that discards data.
+#
+# The list is checked in BOTH directions: a byte outside it that diverges FAILS (a real regression), and a
+# listed byte that starts AGREEING also fails, so the list cannot rot. That matters because the 35 parity
+# vectors above are all ordinary text — they never touch these bytes, so nothing else here can see them.
+WHATWG_ONLY_BYTES = {
+    # byte -> the character the WHATWG windows-1252 index defines (Python's cp1252: undefined -> U+FFFD)
+    0x81: "\u0081", 0x8D: "\u008d", 0x8F: "\u008f", 0x90: "\u0090", 0x9D: "\u009d",
+}
+SKIP_BYTES = set(b"<>&\r\n\t \x00")  # HTML delimiters / whitespace: not a decoder question
+for label in ("windows-1252", "iso-8859-1"):  # WHATWG maps the iso-8859-1 LABEL to windows-1252
+    probe = [bytes([b]) for b in range(0x20, 0x100) if b not in SKIP_BYTES]
+    ps = b"".join(b'<p class="c">' + s_ + b"</p>" for s_ in probe)
+    doc = b'<html><head><meta charset="' + label.encode() + b'"></head><body>' + ps + b"</body></html>"
+    mine = engine(doc, ["p.c::text"], None)[0]
+    _, txt = html_to_unicode(None, doc, auto_detect_fun=None, default_encoding="utf8")
+    theirs = PS(text=txt).css("p.c::text").getall()
+    diverged = {s_[0] for s_, m, t in zip(probe, mine, theirs) if m != t}
+    unexpected = diverged - set(WHATWG_ONLY_BYTES)
+    stale = set(WHATWG_ONLY_BYTES) - diverged
+    for b in sorted(unexpected):
+        fails.append(("decoder", f"{label} byte {b:#04x} diverges from Parsel and is not a known "
+                                 f"WHATWG-only byte", "?", "?"))
+    for b in sorted(stale):
+        fails.append(("decoder", f"{label} byte {b:#04x} no longer diverges — drop it from "
+                                 f"WHATWG_ONLY_BYTES", "?", "?"))
+    # and the character we produce must be the one WHATWG defines, not merely "something"
+    for s_, m in zip(probe, mine):
+        want = WHATWG_ONLY_BYTES.get(s_[0])
+        if want is not None and m != want:
+            fails.append(("decoder", f"{label} byte {s_[0]:#04x}", [m], [want]))
+    print(f"decoder [{label}]: {len(diverged)} of {len(probe)} bytes differ from Parsel; "
+          f"expected exactly {sorted(hex(b) for b in WHATWG_ONLY_BYTES)} "
+          f"-> {'OK' if not unexpected and not stale else 'MISMATCH'}")
+
+# WHATWG: a `<meta charset=utf-16*>` becomes UTF-8, because the prescan could only READ that declaration
+# by treating the bytes as ASCII-compatible — the declaration contradicts itself. w3lib honours the label,
+# decodes the whole document as UTF-16 and produces garbage Parsel finds nothing in. Divergence in our
+# favour, pinned here so it cannot regress into honouring the label.
+for _lab in (b"utf-16", b"utf-16le", b"utf-16be", b"UTF-16"):
+    _doc = (b'<html><head><meta charset="' + _lab + b'"></head><body><p class="c">'
+            + b"caf\xc3\xa9" + b"</p></body></html>")
+    _mine = engine(_doc, ["p.c::text"], None)[0]
+    if _mine != ["café"]:
+        fails.append(("meta-prescan", f"<meta charset={_lab.decode()}> must be read as UTF-8",
+                      _mine, ["café"]))
+# ...and a genuine UTF-16 document (BOM) must still decode as UTF-16
+_doc16 = '<html><head></head><body><p class="c">café</p></body></html>'.encode("utf-16")
+_m16 = engine(_doc16, ["p.c::text"], None)[0]
+if _m16 != ["café"]:
+    fails.append(("bom", "real UTF-16 document with a BOM", _m16, ["café"]))
+print(f"meta prescan [utf-16 label -> UTF-8, BOM still UTF-16]: "
+      f"-> {'OK' if not [f for f in fails if f[0] in ('bom',) or 'utf-16' in str(f[1])] else 'MISMATCH'}")
+
+# The multi-byte counterpart. WHATWG's big5 index resolves a handful of DUPLICATE pointers to different
+# code points than Python's `big5hkscs` — these are assigned characters a real page can contain, so unlike
+# the unassigned ranges they are worth naming one by one. Enumerated over every assigned two-byte
+# sequence (~18k), both directions gated: a new divergence fails, and one that disappears fails too.
+#
+# Measured for the other legacy labels: on VALIDLY ENCODED text (800 assigned characters each)
+# shift_jis / euc-jp / euc-kr / gb18030 / windows-1252 are at full parity. The two decoders differ far
+# more widely over UNASSIGNED byte sequences (8-22% of all two-byte combinations), which is inherent —
+# a WHATWG index is total, Python's codecs raise — and is not text any page contains.
+BIG5_INDEX_DIVERGENCE = {
+    b"\xa1\x45": ("\u2027", "\u2022"), b"\xa1\x4e": ("\ufe51", "\uff64"),
+    b"\xa1\xc2": ("\u00af", "\u203e"), b"\xa1\xe3": ("\uff5e", "\u223c"),
+    b"\xa1\xf2": ("\u2295", "\u2641"), b"\xa1\xf3": ("\u2299", "\u2609"),
+    b"\xa2\x41": ("\u2215", "\uff0f"), b"\xa2\x42": ("\ufe68", "\uff3c"),
+    b"\xa2\x44": ("\uffe5", "\u00a5"), b"\xa2\x46": ("\uffe0", "\u00a2"),
+    b"\xa2\x47": ("\uffe1", "\u00a3"),
+}
+big5_assigned = []
+for _l in range(0x81, 0xFF):
+    for _t in range(0x40, 0xFF):
+        _b = bytes([_l, _t])
+        if _l in b"<>&" or _t in b"<>&\r\n\t \x00":
+            continue
+        try:
+            _b.decode("big5hkscs")
+        except Exception:
+            continue
+        big5_assigned.append(_b)
+big5_diff = {}
+for _i in range(0, len(big5_assigned), 4000):
+    _part = big5_assigned[_i:_i + 4000]
+    _ps = b"".join(b'<p class="c">' + _s + b"</p>" for _s in _part)
+    _doc = b'<html><head><meta charset="big5"></head><body>' + _ps + b"</body></html>"
+    _mine = engine(_doc, ["p.c::text"], None)[0]
+    _, _txt = html_to_unicode(None, _doc, auto_detect_fun=None, default_encoding="utf8")
+    _theirs = PS(text=_txt).css("p.c::text").getall()
+    for _s, _m, _t in zip(_part, _mine, _theirs):
+        if _m != _t:
+            big5_diff[_s] = (_m, _t)
+for _s in sorted(set(big5_diff) - set(BIG5_INDEX_DIVERGENCE)):
+    fails.append(("decoder", f"big5 {_s.hex()} diverges and is not a listed index difference",
+                  [big5_diff[_s][0]], [big5_diff[_s][1]]))
+for _s in sorted(set(BIG5_INDEX_DIVERGENCE) - set(big5_diff)):
+    fails.append(("decoder", f"big5 {_s.hex()} no longer diverges — drop it from "
+                             f"BIG5_INDEX_DIVERGENCE", "?", "?"))
+for _s, (_ours, _theirs2) in BIG5_INDEX_DIVERGENCE.items():
+    if _s in big5_diff and big5_diff[_s] != (_ours, _theirs2):
+        fails.append(("decoder", f"big5 {_s.hex()} maps differently now", [big5_diff[_s]],
+                      [(_ours, _theirs2)]))
+print(f"decoder [big5 index]: {len(big5_diff)} of {len(big5_assigned)} ASSIGNED sequences differ from "
+      f"Parsel; expected exactly {len(BIG5_INDEX_DIVERGENCE)} "
+      f"-> {'OK' if len(big5_diff) == len(BIG5_INDEX_DIVERGENCE) and not (set(big5_diff) ^ set(BIG5_INDEX_DIVERGENCE)) else 'MISMATCH'}")
+
 # THE GATE: any mismatch above is an encoding regression. Without this the target printed MISMATCH and
 # still exited 0, so `make gate` and hosted CI stayed green through an encoding bug.
 print(f"\nENCODING GATE: mismatches = {len(fails)}  ->  {'PASS' if not fails else 'FAIL'}")

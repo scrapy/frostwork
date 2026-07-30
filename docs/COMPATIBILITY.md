@@ -271,8 +271,34 @@ bytes for every ASCII-compatible encoding (all HTML delimiters are `< 0x40`); on
 values are decoded with the resolved encoding (`encoding_rs`). UTF-16LE/BE (BOM- or label-detected)
 are transcoded to UTF-8 up front.
 
-- ✅ **Validated 35/35 vs Parsel** given the same label — windows-1252, shift_jis, euc-jp, gbk, big5,
-  koi8-r, utf-8 — in both text nodes and attribute values (`tools/enc_check.py`).
+- ✅ **Validated vs Parsel** given the same label — windows-1252, shift_jis, euc-jp, gbk, big5, koi8-r,
+  utf-8 — in both text nodes and attribute values (`tools/enc_check.py`).
+- ≈ **The DECODER is not Parsel's decoder, and on some bytes that shows.** Frostwork decodes with
+  `encoding_rs` (the WHATWG Encoding Standard — what browsers use); Parsel decodes with Python's stdlib
+  codecs, via w3lib, which also *translates* some labels (`big5`→`big5hkscs`, `gb2312`/`gbk`→`gb18030`,
+  `shift_jis`→`cp932`). A WHATWG index is **total** — every byte maps to a character — while Python's
+  codecs leave bytes undefined and yield U+FFFD. WHATWG is the lossless behaviour and the one a browser
+  shows, so per the oracle-bug policy above Frostwork keeps it and the difference is enumerated:
+  - **`windows-1252` / `iso-8859-1`: exactly 5 bytes** — `0x81 0x8D 0x8F 0x90 0x9D`, which WHATWG maps to
+    the C1 controls U+0081…U+009D and Python's `cp1252` leaves undefined. Parsel returns U+FFFD there.
+  - **`big5`: exactly 11 assigned two-byte sequences** (of ~18,400) where WHATWG's index resolves a
+    duplicate pointer differently from `big5hkscs` — `A145` → U+2027 not U+2022, `A244`/`A246`/`A247` →
+    the fullwidth ￥/￠/￡ not the halfwidth ¥/¢/£, and seven more.
+  - **Every other legacy label is at full parity on validly encoded text** (measured over 800 assigned
+    characters each for shift_jis, euc-jp, euc-kr, gb18030, windows-1252).
+  - Over **unassigned** byte sequences the two differ much more widely (8–22% of all two-byte
+    combinations, depending on label). That is inherent to total-vs-partial indexes and is not text any
+    real page contains.
+
+  Both enumerated lists are gated in `tools/enc_check.py` in both directions: a divergence outside the
+  list fails, and a listed one that starts agreeing fails too, so the list cannot rot. The 35 ordinary
+  parity vectors never touch these bytes, which is why nothing caught this until the decoders were
+  compared byte by byte.
+- ≈ **A `<meta charset=utf-16…>` is treated as UTF-8**, per WHATWG: the prescan only read that
+  declaration because the bytes were ASCII-compatible, so the declaration contradicts itself. w3lib
+  honours the label instead, decodes the whole document as UTF-16, and Parsel then finds nothing in the
+  resulting garbage — so this is a divergence in our favour, and gated in `tools/enc_check.py`. A *real*
+  UTF-16 document (BOM, or an HTTP/caller label) is unaffected and decodes as UTF-16.
 - ✅ **UTF-16** (LE/BE, BOM or label) decodes correctly, matching the decode-first result Scrapy uses.
   (Note: lxml's HTML parser can't parse UTF-16 *bytes* — `Selector(body=…, encoding="utf-16")` returns
   `[]`/errors — so here the engine is strictly *more* capable than raw Parsel; a divergence in our favor.)
