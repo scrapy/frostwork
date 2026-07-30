@@ -20,9 +20,13 @@ malformed or adversarial input must never cause memory unsafety, and must not cr
 
 - Documented divergences from lxml (foster-parenting, adoption-agency, outer-HTML raw source).
 - Unsupported selectors returning an empty column (the no-fallback contract).
-- Pathological worst-case CPU time on adversarial inputs within documented complexity bounds (deep
-  descendant/`:has` matching is linear-per-ancestor by design; see [docs/BENCHMARKS.md](docs/BENCHMARKS.md)).
-  A case that is dramatically worse than documented is worth reporting.
+- Pathological worst-case CPU time on adversarial inputs **within documented complexity bounds**. Matching
+  one selector segment against an element is `O(ancestor-depth x compounds-in-the-segment)`: the ancestor
+  chain is a path, so the kernel places maximal `>`-runs greedily rather than searching combinations
+  (`matcher/matching.rs::seg_match_anchored`). A case that is dramatically worse than that bound is worth
+  reporting — an earlier version searched overlapping states without memoization and was *exponential*
+  (~28 s for an 11-compound selector against 40 nested `<div>`s), which was reachable from a selector
+  string alone and would have been in scope.
 
 ## Reporting
 

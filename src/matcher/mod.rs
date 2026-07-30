@@ -122,6 +122,38 @@ pub struct OpenElem<'a> {
 }
 
 impl<'a> OpenElem<'a> {
+    /// A bare element for matching-kernel tests: a tag, no attributes, no bookkeeping. Only the
+    /// `matching` unit tests build elements directly; the scan always goes through `start_tag`.
+    #[cfg(test)]
+    pub(super) fn for_test(tag: &'a [u8]) -> Self {
+        OpenElem {
+            tag,
+            tid: 0,
+            attrs: Vec::new(),
+            matched: 0,
+            matched_tree: 0,
+            text_cols: 0,
+            seen: 0,
+            prev: 0,
+            anchor: 0,
+            start: 0,
+            cap_cols: 0,
+            insts: 0,
+            gcaps: Vec::new(),
+            child_index: 0,
+            of_type_index: 0,
+            rev_subj: 0,
+            rev_buf: Vec::new(),
+            rev_pending: Vec::new(),
+            has_subj: 0,
+            has_done: 0,
+            has_buf: Vec::new(),
+            txt_subj: 0,
+            txt_states: Vec::new(),
+            txt_emit: Vec::new(),
+        }
+    }
+
     pub(super) fn attr(&self, name: &str) -> Option<&str> {
         self.attrs
             .iter()
