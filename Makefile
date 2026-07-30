@@ -8,8 +8,9 @@
 #   make test        Rust unit vectors + clippy (python feature OFF — it must be, see below)
 #   make gate        the correctness gate: build the bins, then differential + encoding parity vs lxml
 #   make fuzz-smoke  quick selector + malformed-HTML fuzz (crash/WRONG/OVERMATCH gate)
+#   make gate-corpus CORPUS=<dir>  value-parity gate over a REAL page corpus (see below)
 #   make soak        multi-million differential/fuzz soak across independent seeds
-#   make py          rebuild the extension (maturin --release) and run the Python test suite
+#   make py          rebuild the extension (maturin --release), Python suite + tree-rule audit
 #   make bench       full throughput matrix vs Parsel (minutes; for release notes)
 #   make bench-smoke quick article/deep-nesting performance check
 #   make ci          test + gate + fuzz-smoke + py  — the minimum pre-release check
@@ -22,7 +23,7 @@ MATURIN ?= .venv/bin/maturin
 FUZZ_ITERS ?= 6000
 
 .DEFAULT_GOAL := help
-.PHONY: help bootstrap test build gate fuzz-smoke soak py bench bench-smoke ci
+.PHONY: help bootstrap test build gate gate-corpus fuzz-smoke soak py bench bench-smoke ci
 
 help:
 	@grep -E '^#   make ' Makefile | sed 's/^#   /  /'
@@ -46,6 +47,14 @@ fuzz-smoke: build
 	$(PY) tools/sel_fuzz.py --iters $(FUZZ_ITERS) --gate
 	$(PY) tools/diff_fuzz.py --iters $(FUZZ_ITERS) --gate
 
+# Value-parity over REAL pages: `gate` only ever sees GENERATED pages, which is not evidence about the
+# real web (docs/TESTING.md explains what that missed). No corpus is vendored — third-party page
+# snapshots are a licensing/size call, not a code one — so point this at one, laid out as
+# `<dir>/<page-object>/{selectors.json,pages/*.html}`.
+gate-corpus: build
+	@test -n "$(CORPUS)" || { echo "usage: make gate-corpus CORPUS=/path/to/corpus"; exit 2; }
+	$(PY) tools/bench_corpus.py $(CORPUS) --gate
+
 soak: build
 	$(PY) tools/soak.py
 
@@ -53,6 +62,7 @@ py:
 	$(MATURIN) develop --release
 	$(PY) -m pytest tests/test_python.py -q
 	$(PY) tools/support_snapshot.py --check
+	$(PY) tools/audit_tree_rules.py --gate
 
 bench: build
 	$(PY) tools/bench_matrix.py

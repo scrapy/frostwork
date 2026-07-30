@@ -138,7 +138,11 @@ def scan_source(source: str, path: str) -> List[Site]:
             add(node.args[1], name, "auto")  # Page: many(name, container, {sub: selector})
             if len(node.args) >= 3 and isinstance(node.args[2], ast.Dict):
                 for value in node.args[2].values:
-                    add(value, name, "auto")
+                    # a sub-field may be a cardinality TUPLE — `(".tag::text", "join", " ")`. Only its
+                    # first element is a selector; scanning the whole tuple reported "join" and " " as
+                    # selector sites, and the separator then failed the audit.
+                    add(value.elts[0] if isinstance(value, ast.Tuple) and value.elts else value,
+                        name, "auto")
         elif name in WEBPOET_GROUP_CALLS and node.args:
             add(node.args[0], name, "auto")  # web-poet: Many(container, sub=field(...))
         for kw in node.keywords:

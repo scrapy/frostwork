@@ -395,7 +395,10 @@ def main():
     CHUNK = 500
     for base in range(0, len(cases), CHUNK):
         chunk = cases[base: base + CHUNK]
-        results, crashed, diag = run_engine([(h, s) for h, s, _sel, _b, _sup in chunk])
+        # budget bombs are deliberate here (see the BUDGET verdict), so do NOT ask the bridge to treat
+        # an over-budget schema as a harness error — surviving it with empty/partial columns is the test
+        results, crashed, diag = run_engine([(h, s) for h, s, _sel, _b, _sup in chunk],
+                                            strict_budget=False)
         stat["CRASH"] += crashed
         if diag:
             crash_diags.append((base, diag))

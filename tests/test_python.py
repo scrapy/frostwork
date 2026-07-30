@@ -866,8 +866,14 @@ def test_positional_matches_parsel():
         assert frostwork.extract(body, [q])[0] == sel.css(q).getall(), q
     for q in ["//li[last()]/text()", "//li[last()-1]/text()", "//ul/*[last()]/text()"]:
         assert frostwork.extract(body, [q])[0] == sel.xpath(q).getall(), q
-    # Permissive mode exposes the engine's safe empty-column contract for unsupported forms.
-    assert frostwork.extract(body, ["li:last-child ::text"], strict=False)[0] == []
+    # SUBTREE reverse terminals are supported too (values recovered by re-scanning the winner's span)
+    for q in ["li:last-child ::text", "li:nth-last-child(2) ::text", "li:only-child ::text"]:
+        assert frostwork.extract(body, [q])[0] == sel.css(q).getall(), q
+    for q in ["//li[last()]//text()", "//li[last()-1]//text()"]:
+        assert frostwork.extract(body, [q])[0] == sel.xpath(q).getall(), q
+    # Permissive mode exposes the engine's safe empty-column contract for the forms still out of tier
+    # (a reverse position on a non-subject/ancestor compound).
+    assert frostwork.extract(body, ["li:last-child b::text"], strict=False)[0] == []
     for q in xp:
         # last() is unsupported -> frostwork empty (allowed gap); the rest match exactly
         mine = frostwork.extract(body, [q])[0]
@@ -900,10 +906,11 @@ def test_check_reason_matches_parsel_supported_boundary():
     # The DECISION must agree with the engine: a query parsel accepts but Frostwork doesn't support
     # is reported unsupported; a supported one is reported supported and yields the same column.
     parsel = _oracle()
-    html = b"<ul><li class=x>a</li><li>b</li></ul>"
-    # a reverse position IS now supported in the attached ::text form; the detached subtree form isn't
-    supported = "li:last-child::text"
-    unsupported = "li:last-child ::text"
+    html = b"<ul><li class=x>a</li><li><b>b</b></li></ul>"
+    # a reverse position is supported on any ONE compound, with the value being the element's own, its
+    # subtree, or a DESCENDANT's; a CHILD step into that value tail still isn't (see COMPATIBILITY)
+    supported = "li:last-child b::text"
+    unsupported = "li:last-child > b::text"
     r = frostwork.check([supported, unsupported])
     assert r.fields[0].supported and not r.fields[1].supported
     # supported one: frostwork column == parsel

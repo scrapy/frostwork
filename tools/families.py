@@ -45,12 +45,49 @@ def c_td(rng):  # <td>/<tr> with omitted end tags
                   (".probe td::text", "descendant")]
 
 
-def c_dl(rng):  # <dt>/<dd> with omitted end tags
-    parts = "".join(f"<dt>{_w(rng)}<dd>{_w(rng)}" for _ in range(rng.randint(1, 3)))
-    html = f"<dl>{parts}</dl>"
+def c_dl(rng):  # <dt>/<dd> with omitted end tags — incl. same-tag RUNS (libxml2 nests those)
+    parts = []
+    for _ in range(rng.randint(1, 3)):
+        for tag in ("dt", "dd"):
+            parts += [f"<{tag}>{_w(rng)}" for _ in range(rng.randint(1, 2))]
+    html = f"<dl>{''.join(parts)}</dl>"
     return html, [(".probe dl > dd::text", "child"),
                   (".probe dt + dd::text", "sibling"),
+                  (".probe dl > dt::text", "child-dt"),
+                  (".probe dt + dt::text", "sibling-same"),
                   (".probe dd::text", "descendant")]
+
+
+def c_ruby(rng):  # <rt>/<rp> with omitted end tags — libxml2 NESTS these (never auto-closes)
+    parts = []
+    for _ in range(rng.randint(1, 3)):
+        parts.append(_w(rng))
+        for tag in rng.choice([("rt",), ("rt", "rp"), ("rt", "rt"), ("rp", "rt")]):
+            parts.append(f"<{tag}>{_w(rng)}")
+    html = f"<ruby>{''.join(parts)}</ruby>"
+    return html, [(".probe ruby > rt::text", "child"),
+                  (".probe ruby > rp::text", "child-rp"),
+                  (".probe rt + rt::text", "sibling-same"),
+                  (".probe ruby ::text", "descendant")]
+
+
+def c_stray_close(rng):
+    """An end tag with NO open element to match. libxml2 drops it and keeps the character data either
+    side as ONE text node; a streaming engine naturally emits two. Malformed, but *doc generators emit
+    it* (Sphinx: `</p>\\n</p>`), so it belongs in the gate and not only in the fuzzer — a split here
+    silently TRUNCATES a One-cardinality field rather than emptying it."""
+    stray = rng.choice(["</p>", "</span>", "</b>", "</li>", "</td>", "</div>", "</bogus>"])
+    a, b, c = _w(rng), _w(rng), _w(rng)
+    shape = rng.randint(0, 2)
+    if shape == 0:
+        html = f"<div>{a}{stray}{b}</div>"
+    elif shape == 1:  # chained, as Sphinx emits it
+        html = f"<div><p>{a}</p>\n{stray}\n{stray}<span>{b}</span>{c}</div>"
+    else:  # a real node in the gap must STILL split the run
+        html = f"<div>{a}{stray}<!--c-->{b}{stray}{c}</div>"
+    return html, [(".probe div::text", "self-text"),
+                  (".probe div ::text", "descendant-text"),
+                  (".probe > div::text", "child-text")]
 
 
 def c_option(rng):  # <option> with omitted </option>
@@ -59,6 +96,70 @@ def c_option(rng):  # <option> with omitted </option>
     return html, [(".probe select > option::text", "child"),
                   (".probe option + option::text", "sibling"),
                   (".probe option::text", "descendant")]
+
+
+def c_optgroup(rng):
+    """`<optgroup>` runs with omitted end tags — a grouped `<select>` as real pages write it. libxml2
+    NESTS a same-tag repeat here (it does not auto-close), and an `<option>` does not close a group."""
+    parts = []
+    for i in range(rng.randint(2, 3)):
+        # direct text inside the group, so `> optgroup::text` can tell nesting from siblings at all
+        # (with only <option> children every column is empty either way and the family proves nothing)
+        parts.append(f'<optgroup label="g{i}">{_w(rng)}')
+        parts += [f"<option>{_w(rng)}" for _ in range(rng.randint(1, 2))]
+    html = f"<select>{''.join(parts)}</select>"
+    return html, [(".probe select > optgroup::text", "child"),
+                  (".probe optgroup + optgroup::text", "sibling-same"),
+                  # the structural discriminator: nested groups make the 2nd group's options
+                  # grandchildren, so they drop out of `select > optgroup > option`
+                  (".probe select > optgroup > option::text", "group-child-option"),
+                  (".probe optgroup optgroup::text", "nested-group"),
+                  (".probe select > option::text", "child-option"),
+                  (".probe option::text", "descendant")]
+
+
+def c_table_sections(rng):
+    """`<thead>`/`<tbody>`/`<tfoot>`/`<caption>` runs with omitted end tags. The three sections are NOT
+    interchangeable in libxml2: `<tbody>`/`<tfoot>` close an open row/cell, `<thead>` nests instead."""
+    head = f"<thead><tr><th>{_w(rng)}"
+    body = "".join(f"<tr><td>{_w(rng)}" for _ in range(rng.randint(1, 2)))
+    foot = f"<tfoot><tr><td>{_w(rng)}" if rng.random() < 0.6 else ""
+    cap = f"<caption>{_w(rng)}" if rng.random() < 0.5 else ""
+    html = f"<table>{cap}{head}<tbody>{body}{foot}</table>"
+    return html, [(".probe table > thead::text", "child-thead"),
+                  (".probe table > tbody::text", "child-tbody"),
+                  (".probe table > tfoot::text", "child-tfoot"),
+                  (".probe table > caption::text", "child-caption"),
+                  (".probe thead th::text", "head-cell"),
+                  (".probe tbody td::text", "body-cell"),
+                  (".probe td::text", "descendant")]
+
+
+def c_p_nonclosers(rng):
+    """An unclosed `<p>` followed by a tag that does NOT close it. `option`/`optgroup`/`thead`/`rt`/`rp`
+    nest inside the `<p>` in libxml2; a blanket 'any recognized tag closes <p>' rule over-closes here."""
+    t = rng.choice(["option", "optgroup", "thead", "rt", "rp"])
+    html = f"<div><p>{_w(rng)}<{t}>{_w(rng)}</div>"
+    return html, [(".probe div > p::text", "p-self-text"),
+                  (".probe div > *::text", "div-children"),
+                  (f".probe div > {t}::text", "would-be-sibling"),
+                  (".probe p ::text", "p-subtree")]
+
+
+def c_table_scope(rng):
+    """A stray end tag that would have to unwind a table. libxml2 DISCARDS it (table scope), keeping the
+    cell open and its text whole; popping through instead closes the cell early and splits the text.
+    Unbalanced `<div>`s wrapped around tables are one of the commonest real-world malformations."""
+    outer = rng.choice(["div", "ul", "span", "section"])
+    a, b = _w(rng), _w(rng)
+    if rng.random() < 0.5:
+        html = f"<{outer}><table><tr><td>{a}</{outer}>{b}</td></tr></table>"
+    else:  # table-scoped end tags must STILL unwind normally
+        html = f"<{outer}><table><tr><td>{a}</table>{b}</{outer}>"
+    return html, [(".probe td::text", "cell-text"),
+                  (".probe table td::text", "cell-descendant"),
+                  (f".probe {outer}::text", "outer-text"),
+                  (".probe tr > td::text", "child-cell")]
 
 
 def c_misnest(rng):  # SKIP: misnested formatting -> adoption agency
@@ -87,7 +188,13 @@ FAMILIES = [
     ("p", "SHOULD", c_p),
     ("td/tr", "SHOULD", c_td),
     ("dt/dd", "SHOULD", c_dl),
+    ("ruby", "SHOULD", c_ruby),
+    ("stray-close", "SHOULD", c_stray_close),
     ("option", "SHOULD", c_option),
+    ("optgroup", "SHOULD", c_optgroup),
+    ("table-sections", "SHOULD", c_table_sections),
+    ("p-nonclosers", "SHOULD", c_p_nonclosers),
+    ("table-scope", "SHOULD", c_table_scope),
     ("misnest-fmt", "SKIP", c_misnest),
     ("table-foster", "SKIP", c_foster),
     ("well-formed", "CONTROL", c_wellformed),

@@ -8,6 +8,13 @@ contract remains in `COMPATIBILITY.md`; this table is a drift tripwire for headl
 | CSS compound | flat | `div.card[data-x]::text` | yes |
 | CSS sibling | flat | `dt + dd::text` | yes |
 | CSS reverse position | flat | `li:last-child::text` | yes |
+| CSS reverse subtree | flat | `li:last-child ::text` | yes |
+| CSS reverse on ancestor | flat | `li:last-child b::text` | yes |
+| CSS reverse child tail | flat | `li:last-child > b::text` | no |
+| CSS :has subtree | flat | `div:has(a) ::text` | yes |
+| CSS :has on ancestor | flat | `div:has(a) a::attr(href)` | yes |
+| XPath text-pred descendant | flat | `//div[contains(.,"x")]//a/@href` | yes |
+| XPath reverse subtree | flat | `//li[last()]//text()` | yes |
 | CSS :has | flat | `div:has(a)::text` | yes |
 | CSS widened :has | flat | `div:has([data-x])::attr(id)` | yes |
 | CSS :is | flat | `div:is(.a, .b)::text` | yes |

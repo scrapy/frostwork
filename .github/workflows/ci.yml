@@ -68,6 +68,10 @@ jobs:
       - run: .venv/bin/maturin develop --release
       - run: .venv/bin/python -m pytest tests/test_python.py -q
       - run: .venv/bin/python tools/support_snapshot.py --check
+      # Page coverage is not RULE coverage: this enumerates every tree-construction rule cell against
+      # lxml. It is the check that catches the rule-table bugs the generated gate cannot reach, so it
+      # has to run here and not only in `make py`.
+      - run: .venv/bin/python tools/audit_tree_rules.py --gate
 
   bindings:
     name: bindings (py${{ matrix.python }} / ${{ matrix.os }})

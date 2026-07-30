@@ -58,6 +58,8 @@ decoy = ('<!-- saved from url=(0037)https://x/ charset=big5 -->'
          '<html><head></head><body><p class="c">café 日本語</p></body></html>').encode("utf-8")
 mine = engine(decoy, ["p.c::text"], None)
 oracle = PS(body=decoy, encoding="utf-8").css("p.c::text").getall()  # w3lib ignores the comment -> utf-8
+if mine[0] != oracle:
+    fails.append(("sniffed", "comment charset= decoy", mine[0], oracle))
 print(f"comment charset= decoy (sniffed): mine={mine[0]} utf-8-oracle={oracle} "
       f"-> {'OK' if mine[0] == oracle else 'MISMATCH'}")
 
@@ -66,5 +68,30 @@ u16 = '<html><body><p class="c">café 日本語</p></body></html>'.encode("utf-1
 mine = engine(u16, ["p::text"], None)
 # oracle = decode-first (what Scrapy does); lxml's body+encoding path can't parse UTF-16 bytes
 oracle = PS(text=u16.decode("utf-16")).css("p::text").getall()
+if mine[0] != oracle:
+    fails.append(("bom-sniffed", "UTF-16", mine[0], oracle))
 ok = "OK" if mine[0] == oracle else "MISMATCH"
 print(f"UTF-16 (BOM-sniffed): mine={mine[0]} decode-first-oracle={oracle} -> {ok}  (lxml body-path can't do UTF-16)")
+
+# meta-prescan divergences: constructs Parsel/w3lib do NOT honour must not switch the decode either.
+UTF8_BODY = '<p class="c">café</p>'
+for label, head in [
+    ("charset inside a comment", "<!-- <meta charset=big5> -->"),
+    ("content= without http-equiv", '<meta content="text/html; charset=big5">'),
+    ("declared utf-16 on ASCII-safe bytes", "<meta charset=utf-16>"),
+]:
+    doc = f"<html><head>{head}</head><body>{UTF8_BODY}</body></html>".encode("utf-8")
+    mine = engine(doc, ["p.c::text"], None)
+    oracle = PS(body=doc).css("p.c::text").getall()
+    if mine[0] != oracle:
+        fails.append(("meta-prescan", label, mine[0], oracle))
+    print(f"meta prescan [{label}]: mine={mine[0]} parsel={oracle} "
+          f"-> {'OK' if mine[0] == oracle else 'MISMATCH'}")
+
+# THE GATE: any mismatch above is an encoding regression. Without this the target printed MISMATCH and
+# still exited 0, so `make gate` and hosted CI stayed green through an encoding bug.
+print(f"\nENCODING GATE: mismatches = {len(fails)}  ->  {'PASS' if not fails else 'FAIL'}")
+for label, s_, m, t in fails:
+    print(f"  MISMATCH [{label}] {s_}: mine={m} lxml={t}")
+if fails:
+    raise SystemExit(1)

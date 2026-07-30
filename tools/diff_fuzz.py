@@ -35,7 +35,8 @@ from collections import defaultdict
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import conformant  # well-formed base-page generator
 import foreign  # svg/math/template base pages (mutating foreign content is a rich desync surface)
-from diff_lxml import run_engine, parsel_vals, verdict  # reuse the exact engine driver + oracle + grader
+from diff_lxml import run_engine, parsel_vals, verdict, is_node_query, _batches  # engine driver + oracle + grader
+import audit_tree_rules  # the single Python home for the engine's tag tables (checked against lxml there)
 import oracle  # same libxml2 >= 2.14 requirement (an older oracle invents divergences of its own)
 
 CORPUS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "fuzz", "corpus", "extract")
@@ -230,6 +231,81 @@ def minimize(html, sel, budget):
     return cur
 
 
+# --------------------------------------------------------------- documented-construct attribution
+# A bulk "DIVERGE > 0 is expected" bucket is how a real bug hides: the unmatched-end-tag text split
+# (Sphinx emits it) sat in this tool's output for a long time, clustered under a `foster` mutation
+# signature, indistinguishable from the accepted adoption-agency cases. So attribute every divergence
+# to the documented construct that explains it, and treat anything left over as NOVEL — a candidate bug.
+_FORMATTING = {"a", "b", "i", "em", "strong", "small", "label", "font", "u", "s", "big", "tt", "nobr"}
+# The tag tables are the ENGINE's rules, so they live in one Python place — `audit_tree_rules`, which
+# checks them cell-by-cell against lxml. Copying them here is how they drift: an earlier copy still
+# listed `option`/`optgroup`/`thead` as `<p>`-closers after that was proved wrong, which silently
+# attributed every `<p>`-nesting divergence to `deep-p` and kept it out of the NOVEL bucket this gate
+# is built around.
+_TABLE_SCOPED = set(audit_tree_rules.TABLE_SCOPED)
+_HEAD_ONLY = {"title", "base", "meta", "link", "basefont"}
+_VOID = set(audit_tree_rules.VOID)
+# closes an open `<p>`: the block set plus list/table ITEMS — NOT option/optgroup/thead/rt/rp
+_P_KEEPERS = set(audit_tree_rules.BLOCK) | {
+    "li", "dd", "dt", "td", "th", "tr", "tbody", "tfoot", "caption"}
+_TAG_RE = re.compile(rb"<(/?)([a-zA-Z][^\s/>]*)")
+
+# Constructs docs/COMPATIBILITY.md lists as accepted divergences. Anything NOT in here that explains a
+# divergence is a bug: `unmatched-end` is deliberately absent — it is now ported, so if it ever shows
+# up as the sole explanation again, that is the regression we want the gate to catch.
+DOCUMENTED = {"foster", "misnest", "deep-p", "head-in-body", "fragment", "outer-html",
+              "truncated-tag", "nested-form", "after-html"}
+
+
+def constructs(html: bytes) -> set:
+    """Which documented-divergence constructs this (page, selector) contains. Approximate but
+    conservative: a cheap stack walk over tag tokens, no tree build (we cannot use lxml's own tree
+    here — the point is to classify WITHOUT trusting either implementation)."""
+    found = set()
+    low = html.lower()
+    if b"<body" not in low:
+        found.add("fragment")
+    # A tag left unterminated by EOF (a response cut off mid-tag). libxml2 discards the incomplete tag
+    # outright; the engine, which has already seen the attributes, keeps them.
+    last = html.rfind(b"<")
+    if last != -1 and _TAG_RE.match(html, last) and b">" not in html[last:]:
+        found.add("truncated-tag")
+    # Content after `</html>`: libxml2 discards it, the engine KEEPS it (browser behavior) — a
+    # deliberate divergence, so it explains a disagreement rather than being a candidate bug.
+    close = low.rfind(b"</html>")
+    if close != -1 and html[close + 7:].strip():
+        found.add("after-html")
+    stack = []
+    for m in _TAG_RE.finditer(html):
+        closing, name = m.group(1), m.group(2).decode("latin-1").lower()
+        if closing:
+            if name in stack:
+                k = len(stack) - 1 - stack[::-1].index(name)
+                # elements implicitly closed above the match: a formatting element crossing a block
+                # boundary is the adoption-agency signature
+                above = stack[k + 1:]
+                if above and (name in _FORMATTING or any(a in _FORMATTING for a in above)):
+                    found.add("misnest")
+                del stack[k:]
+            else:
+                found.add("unmatched-end")
+            continue
+        if name in _VOID:
+            continue
+        if name in _TABLE_SCOPED and "table" not in stack:
+            found.add("foster")
+        if stack and stack[-1] == "table" and name not in _TABLE_SCOPED:
+            found.add("foster")
+        if name in _HEAD_ONLY and "body" in stack:
+            found.add("head-in-body")
+        if name == "form" and "form" in stack:
+            found.add("nested-form")  # libxml2 IGNORES the inner form start tag; the engine nests it
+        if name in _P_KEEPERS and "p" in stack and stack[-1] != "p":
+            found.add("deep-p")
+        stack.append(name)
+    return found
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--iters", type=int, default=5000, help="mutated pages to test")
@@ -238,7 +314,12 @@ def main():
     ap.add_argument("--corpus", action="store_true", help="also mutate the checked-in fuzz corpus seeds")
     ap.add_argument("--minimize", type=int, default=0, help="minimize up to N divergent repros (0=off)")
     ap.add_argument("--only", help="apply only this mutation (triage a single class)")
-    ap.add_argument("--gate", action="store_true", help="exit nonzero if any CRASH (for CI)")
+    ap.add_argument("--gate", action="store_true", help="exit nonzero on CRASH, or NOVEL over budget")
+    # The NOVEL tail is a known, triaged residue (malformed-input framing: corrupt `<html>` root, no
+    # implied `</head>` before `<body>`, NUL inside a tag name) — not zero, so the gate is a RATE not an
+    # absolute. Tightening this number is the way to work that tail down; raising it needs a reason.
+    ap.add_argument("--novel-budget", type=float, default=0.10,
+                    help="max %% of pairs allowed in the NOVEL bucket under --gate (default 0.10%%)")
     ap.add_argument("--show", type=int, default=8)
     oracle.add_argument(ap)
     args = ap.parse_args()
@@ -262,16 +343,21 @@ def main():
     if not bases:
         sys.exit("no base pages")
 
-    sels = conformant.BASKET
+    # batched to stay inside the engine's fixed-width member budget (`differ` panics past it, since
+    # over-budget columns come back empty and would read as divergence in every one of them)
+    batches = _batches(conformant.BASKET)
     cases, sigs = [], []
     for _ in range(args.iters):
         html, sig = mutate(rng, rng.choice(bases), args.per, args.only)
-        cases.append((html, sels))
-        sigs.append(sig)
+        for batch in batches:
+            cases.append((html, batch))
+            sigs.append(sig)
 
     stat = defaultdict(int)
     cluster = defaultdict(lambda: defaultdict(int))  # mutation-sig -> verdict -> count
     examples, seen_ex, crash_diags = [], set(), []
+    attributed = defaultdict(int)          # documented construct -> divergences it explains
+    novel, seen_novel = [], set()          # divergences NO documented construct explains
 
     CHUNK = 500  # localize a panic to its chunk so one crash doesn't blind the rest of the run
     for base_i in range(0, len(cases), CHUNK):
@@ -280,30 +366,52 @@ def main():
         stat["CRASH"] += crashed
         if diag:
             crash_diags.append((base_i, diag))
-        for k, (html, _s) in enumerate(chunk):
+        for k, (html, case_sels) in enumerate(chunk):
             sig = sigs[base_i + k]
             mine_cols = results[k] if k < len(results) else None
             if mine_cols is None:
                 continue  # undelivered: already counted as CRASH via _crash_check
-            for si, sel in enumerate(sels):
+            page_constructs = None
+            for si, sel in enumerate(case_sels):
                 mine = mine_cols[si] if si < len(mine_cols) else []
-                v = verdict(mine, parsel_vals(html, sel), "CONTROL", sel)
+                theirs = parsel_vals(html, sel)
+                v = verdict(mine, theirs, "CONTROL", sel)
                 stat[v] += 1
                 stat["pairs"] += 1
                 cluster[sig][v] += 1
                 if v == "DIVERGE":
+                    if page_constructs is None:
+                        page_constructs = constructs(html)  # page-scoped, so safe to memoize
+                    why = (page_constructs | ({"outer-html"} if is_node_query(sel) else set())) & DOCUMENTED
+                    if why:
+                        for c in why:
+                            attributed[c] += 1
+                    else:
+                        stat["NOVEL"] += 1
+                        nkey = (sig, sel)
+                        if nkey not in seen_novel and len(novel) < args.show:
+                            seen_novel.add(nkey)
+                            novel.append([sig, sel, mine[:4], (theirs or [])[:4], html])
                     key = (sig, sel)
                     if key not in seen_ex and len(examples) < args.show:
                         seen_ex.add(key)
-                        examples.append([sig, sel, mine[:4], (parsel_vals(html, sel) or [])[:4], html])
+                        examples.append([sig, sel, mine[:4], (theirs or [])[:4], html])
 
     pairs = stat["pairs"] or 1
     print(f"DIFFERENTIAL FUZZ vs lxml   seed={args.seed}  iters={args.iters}  per={args.per}"
           f"{'  only=' + args.only if args.only else ''}  pairs={stat['pairs']}\n")
     print(f"  AGREE          {stat['AGREE']:>9}  ({100.0 * stat['AGREE'] / pairs:.2f}%)")
     print(f"  WS-only        {stat['WS']:>9}")
-    print(f"  DIVERGE        {stat['DIVERGE']:>9}  (candidate bugs OR documented SKIP — triage below)")
+    print(f"  DIVERGE        {stat['DIVERGE']:>9}  (documented SKIP constructs + NOVEL, split below)")
+    print(f"  NOVEL          {stat['NOVEL']:>9}  <-- gate: no documented construct explains these")
     print(f"  CRASH          {stat['CRASH']:>9}  <-- HARD gate: must be 0\n")
+
+    print("  DIVERGE attributed to a documented construct (a divergence can have >1 explanation):")
+    for c, n in sorted(attributed.items(), key=lambda kv: -kv[1]):
+        print(f"    {c:<40} {n:>6}")
+    if not attributed:
+        print("    (none)")
+    print()
 
     print("  DIVERGE by mutation signature (which breakage the disagreement clusters under):")
     ranked = sorted(cluster.items(), key=lambda kv: -kv[1]["DIVERGE"])
@@ -326,14 +434,30 @@ def main():
             print(f"    [{'+'.join(sig)}] {sel!r}\n        mine ={mine}\n        lxml ={theirs}"
                   f"\n        html ({len(html)}B): {snip!r}\n        hex : {html.hex()}")
 
+    if novel:
+        print("\n  NOVEL divergences — NO documented construct on the page explains these. This is the"
+              "\n  bucket a real bug hides in; triage each one before dismissing it:")
+        for sig, sel, mine, theirs, html in novel:
+            snip = html.decode("utf-8", "replace")
+            snip = snip if len(snip) <= 200 else snip[:200] + "…"
+            print(f"    [{'+'.join(sig)}] {sel!r}\n        mine ={mine}\n        lxml ={theirs}"
+                  f"\n        html ({len(html)}B): {snip!r}\n        hex : {html.hex()}")
+
     if crash_diags:
         print("\n  ENGINE CRASHES (each hex below is a panic repro — feed to `differ` or the fuzz target):")
         for where, diag in crash_diags:
             print(f"    [chunk@{where}] {diag}")
 
     if args.gate:
-        print(f"\n  GATE (crash-only): CRASH = {stat['CRASH']}  ->  {'PASS' if not stat['CRASH'] else 'FAIL'}")
-        sys.exit(1 if stat["CRASH"] else 0)
+        novel_pct = 100.0 * stat["NOVEL"] / pairs
+        over = novel_pct > args.novel_budget
+        print(f"\n  GATE: CRASH = {stat['CRASH']} (must be 0); NOVEL = {stat['NOVEL']}"
+              f" = {novel_pct:.3f}% of pairs (budget {args.novel_budget:.2f}%)"
+              f"  ->  {'FAIL' if (stat['CRASH'] or over) else 'PASS'}")
+        if over:
+            print("  NOVEL over budget: a divergence class no documented construct explains has grown."
+                  "\n  Triage the examples above — do NOT raise the budget to make this pass.")
+        sys.exit(1 if (stat["CRASH"] or over) else 0)
 
 
 if __name__ == "__main__":
