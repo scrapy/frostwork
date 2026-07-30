@@ -32,6 +32,17 @@ The `Makefile` bundles these into one-command gates (`make help` lists them): `m
 (unit + clippy) + `gate` (differential + encoding parity vs lxml) + `fuzz-smoke` + `py` — the minimum
 pre-release check. Individual targets (`gate`, `fuzz-smoke`, `bench`) run their piece.
 
+Two limits of that gate are worth knowing before trusting a "100% parity" number:
+
+- **It only sees generated pages.** A generator reproduces the malformations its author thought of, so it
+  is not evidence about the real web — the `dd`/`dt` same-tag close and the dropped-end-tag text split
+  were both found on real doc-generator output while the generated gate read 100%. Also run
+  `make gate-corpus CORPUS=<dir>` over an actual page corpus.
+- **Page coverage is not RULE coverage.** A tree-construction rule no generated page exercises is
+  asserted, not tested. `tools/audit_tree_rules.py` (in `make py`) enumerates every rule cell against
+  lxml — **add a row to it whenever you add a rule**. docs/TESTING.md has the count this turned up and
+  why a new differential family must be checked against the pre-fix build to prove it discriminates.
+
 ## Repo map
 
 - `src/` — the engine. `lib.rs` (`extract`/`extract_grouped` entry points + routing, `Plan`

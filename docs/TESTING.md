@@ -29,7 +29,7 @@ The gate is **`DIVERGE + CRASH == 0`**, with `SKIP-EXPECTED` reported as the mea
 
 ## Layers
 
-**Unit vectors — `cargo test`** (109 vectors, milliseconds). One per rule and edge: every implied-close
+**Unit vectors — `cargo test`** (121 vectors, milliseconds). One per rule and edge: every implied-close
 family (`li`/`p`/`td`/`tr`/`dt`/`dd`/`option`) × {closed, omitted}; void/self-closing; rawtext with
 `<`/`&` inside; comments/CDATA/DOCTYPE; entity edges; attribute quoting/case; selector compounds,
 combinators, `:not()`, comma groups; encoding resolution; XPath compilation; the `Page` layer; budget
@@ -57,12 +57,45 @@ shift_jis, euc-jp, gbk, big5, koi8-r, utf-8, plus UTF-16 sniffing, vs Parsel giv
 
 **Differential fuzzing** (the malformed-input surface):
 - `tools/diff_fuzz.py` — mutates conformant/foreign pages and the fuzz corpus into *malformed* HTML,
-  then diffs against lxml. `DIVERGE` is expected here (documented SKIP set) and reported/clustered;
-  `CRASH` is gated. Catches tokenizer desync the well-formed gate can't reach.
+  then diffs against lxml. Catches tokenizer desync the well-formed gate can't reach. `CRASH` is gated
+  absolutely. Raw `DIVERGE` is expected here, so each one is **attributed** to the documented construct
+  that explains it (foster, misnest, deep-`p`, head-in-body, fragment, outer-HTML, nested-`form`,
+  truncated-tag); whatever no construct explains is reported as **NOVEL** and gated on a *rate*
+  (`--novel-budget`, default 0.10% of pairs).
+
+  This split exists because a bulk "DIVERGE is expected" bucket is where a real bug hides. The
+  dropped-end-tag text split sat in this tool's output clustered under a `foster` mutation signature,
+  indistinguishable from the accepted adoption-agency cases. Attribution separates the two: pre-fix the
+  NOVEL rate was 0.250%, post-fix 0.049%. The residual tail is triaged malformed-input framing (corrupt
+  `<html>` root, no implied `</head>` before `<body>`, NUL inside a tag name) — **tighten the budget to
+  work it down; do not raise it to make a run pass.**
 - `tools/sel_fuzz.py` — fuzzes the *query* (valid / exotic / malformed / budget-bomb) against real
   pages and asks the real compiler whether each selector is supported. A promised-supported selector
   may not lose oracle values, and an unsupported selector may not emit anything. Gates `WRONG` +
   `OVERMATCH` + `CRASH`.
+
+**Tree-rule audit — `tools/audit_tree_rules.py` (in `make py`).** Coverage of *pages* is not coverage of
+*rules*. The differential proves parity on the pages it generates, so a rule no generated page exercises
+is asserted, not tested — and that is precisely where bugs were found: the `dd`/`dt` and `rt`/`rp`
+same-tag closes shipped wrong, then an audit of the remaining cells found **19 more wrong cells and a
+missing table-scope rule**, all in regions no generated page reached (`optgroup`, `thead`/`tfoot`/
+`caption`, and `<p>` followed by a non-closer). So this walks the rule tables *directly* — the
+355-cell implied-close cross product, the void set, the `<p>`-closing set, table scope, rawtext — and
+asks lxml about every cell. It is fast and deterministic, so it gates.
+
+**When you add a tree-construction rule, add a row to that audit.** A rule with no row is a rule on
+trust, and a family that "looks covered" because a sibling tag is generated is the exact trap here.
+Equally, when you add a differential family, check it actually *discriminates*: the first `optgroup`
+family passed against the known-buggy engine because `optgroup` has no direct text, so every column was
+empty either way. Run a new family against the pre-fix build and confirm it fails.
+
+**Real-page parity — `make gate-corpus CORPUS=<dir>`.** `make gate` only ever sees *generated* pages,
+and a generator reproduces the malformations its author thought of: the `dd`/`dt` same-tag close and the
+dropped-end-tag split were both found on real pages while the generated gate read 100%. This runs the
+gate's own verdict over a real corpus (`<dir>/<page-object>/{selectors.json,pages/*.html}`) and exits
+nonzero on any value bug. `SEGMENT` (same text, extra node split) counts as a bug, not a cosmetic
+difference — a `One` field takes `col[0]`, so an extra split truncates it. No corpus is vendored in this
+repo; point it at one. Doc-generator output is worth including, not just commerce pages.
 
 **Multi-million soak — `make soak`.** Runs the clean differential and support-aware selector fuzzer
 over five independent seeds, followed by a larger malformed-input crash run. The default workload is

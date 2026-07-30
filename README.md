@@ -183,7 +183,7 @@ divergences and zero crashes against the pinned Parsel/lxml oracle.
 Frostwork is usable from source but is not yet published to PyPI. Build the Python extension with
 `maturin develop --release`.
 
-Correctness is checked against lxml across roughly 569,000 page/selector pairs per differential seed,
+Correctness is checked against lxml across roughly 778,000 page/selector pairs per differential seed,
 with additional encoding, random-selector, and malformed-HTML fuzzing. The Rust and Python page-object
 layers, nested `Many`/`One` extraction, schema audit, and web-poet integration are included in those
 release gates.
