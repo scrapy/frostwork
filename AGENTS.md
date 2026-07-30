@@ -29,15 +29,17 @@ Note: the `python` feature builds an `extension-module` cdylib. `cargo test`/`ca
 must NOT enable it (they'd fail to link libpython); maturin builds only the `--features python` cdylib.
 
 The `Makefile` bundles these into one-command gates (`make help` lists them): `make ci` = `test`
-(unit + clippy) + `gate` (differential + encoding parity vs lxml) + `fuzz-smoke` + `py` — the minimum
-pre-release check. Individual targets (`gate`, `fuzz-smoke`, `bench`) run their piece.
+(unit + clippy) + `gate` (differential + encoding parity vs lxml) + `gate-corpus` (value parity over
+the fixture corpus) + `fuzz-smoke` + `py` — the minimum pre-release check. Individual targets run
+their own piece.
 
 Two limits of that gate are worth knowing before trusting a "100% parity" number:
 
 - **It only sees generated pages.** A generator reproduces the malformations its author thought of, so it
   is not evidence about the real web — the `dd`/`dt` same-tag close and the dropped-end-tag text split
-  were both found on real doc-generator output while the generated gate read 100%. Also run
-  `make gate-corpus CORPUS=<dir>` over an actual page corpus.
+  were both found on real doc-generator output while the generated gate read 100%. `make gate-corpus`
+  runs the gate's verdict over `tests/corpus` (self-authored, but shaped like what broke us, and
+  proven to discriminate); point `CORPUS=<dir>` at a real corpus for what fixtures cannot give.
 - **Page coverage is not RULE coverage.** A tree-construction rule no generated page exercises is
   asserted, not tested. `tools/audit_tree_rules.py` (in `make py`) enumerates every rule cell against
   lxml — **add a row to it whenever you add a rule**. docs/TESTING.md has the count this turned up and

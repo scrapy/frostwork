@@ -101,7 +101,11 @@ empty either way. Run a new family against the pre-fix build and confirm it fail
 and a generator reproduces the malformations its author thought of: the `dd`/`dt` same-tag close and the
 dropped-end-tag split were both found on real pages while the generated gate read 100%. This runs the
 gate's own verdict over a real corpus (`<dir>/<page-object>/{selectors.json,pages/*.html}`) and exits
-nonzero on any value bug. `SEGMENT` (same text, extra node split) counts as a bug, not a cosmetic
+nonzero on any value bug. It defaults to `tests/corpus` — a small SELF-AUTHORED set shaped like the
+doc-generator and table markup that broke the engine, which is verified to discriminate (the tabular page
+object alone reports 6 divergences against the pre-fix engine). That is not a substitute for a real crawl
+corpus: fixtures only encode the bugs already known, the same limitation the generators have.
+`SEGMENT` (same text, extra node split) counts as a bug, not a cosmetic
 difference — a `One` field takes `col[0]`, so an extra split truncates it. No corpus is vendored in this
 repo; point it at one. Doc-generator output is worth including, not just commerce pages.
 

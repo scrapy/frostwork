@@ -130,9 +130,16 @@ Retention per candidate is therefore two integers, and the streaming path is unt
 
 That "single bounded extra pass" is **per selector**, though: each deferred tail is its own sub-schema, so
 N tail-bearing fields over the same outer subtree re-scan it N times, losing the multi-selector scan
-sharing the main pass has. It is the known cost of this tier — merging compatible tails into one
-sub-schema is the fix if a schema turns out to be tail-heavy, and the benchmark pool contains no
-tail-bearing selectors today, so that cost is currently unmeasured.
+sharing the main pass has. Measured on a 200 KB product listing (`bench_matrix`'s `TAIL_POOL`): one tail
+field costs ~2.6× a plain one and eight cost ~4.3×, i.e. the penalty grows with FIELD COUNT. Left as is
+deliberately — the absolute cost is milliseconds and no real schema is tail-heavy yet — but it is now in
+the benchmark so the decision is revisitable. The fix, if it ever matters, is merging tails that share a
+deferred prefix into one sub-schema (their winner spans are identical by construction).
+
+For contrast, the other suspected hot spot in this tier was **rejected by measurement**: `sub_hits` with a
+subtree terminal loops `seg_match` over `floor..=top`, which looks like O(depth² × compounds) per text
+node, but a grouped subtree sub-field measures ~1.0× an attached one from nesting depth 2 to 40. Per the
+repo's rule, that stays unoptimised until a workload shows a win.
 
 **`:has()`** rides the same discipline, but resolves at the element's *own* close (its descendants are
 all known then) rather than the parent's. A provisional structural subject match at open starts

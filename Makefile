@@ -8,12 +8,12 @@
 #   make test        Rust unit vectors + clippy (python feature OFF — it must be, see below)
 #   make gate        the correctness gate: build the bins, then differential + encoding parity vs lxml
 #   make fuzz-smoke  quick selector + malformed-HTML fuzz (crash/WRONG/OVERMATCH gate)
-#   make gate-corpus CORPUS=<dir>  value-parity gate over a REAL page corpus (see below)
+#   make gate-corpus [CORPUS=<dir>]  value-parity gate over a page corpus (defaults to fixtures/)
 #   make soak        multi-million differential/fuzz soak across independent seeds
 #   make py          rebuild the extension (maturin --release), Python suite + tree-rule audit
 #   make bench       full throughput matrix vs Parsel (minutes; for release notes)
 #   make bench-smoke quick article/deep-nesting performance check
-#   make ci          test + gate + fuzz-smoke + py  — the minimum pre-release check
+#   make ci          test + gate + gate-corpus + fuzz-smoke + py — minimum pre-release check
 #
 # The `python` cargo feature builds an extension-module cdylib that can't link into the test/bin
 # targets; only maturin (the `py` target) builds it. So `cargo test`/`build` here never pass it.
@@ -50,9 +50,11 @@ fuzz-smoke: build
 # Value-parity over REAL pages: `gate` only ever sees GENERATED pages, which is not evidence about the
 # real web (docs/TESTING.md explains what that missed). No corpus is vendored — third-party page
 # snapshots are a licensing/size call, not a code one — so point this at one, laid out as
-# `<dir>/<page-object>/{selectors.json,pages/*.html}`.
+# `<dir>/<page-object>/{selectors.json,pages/*.html}`. Defaults to the self-authored fixtures in
+# tests/corpus (which DO discriminate: 6 divergences against the pre-fix engine), so the target runs
+# with no arguments; point CORPUS at a real crawl corpus for the coverage fixtures cannot give.
+CORPUS ?= tests/corpus
 gate-corpus: build
-	@test -n "$(CORPUS)" || { echo "usage: make gate-corpus CORPUS=/path/to/corpus"; exit 2; }
 	$(PY) tools/bench_corpus.py $(CORPUS) --gate
 
 soak: build
@@ -70,5 +72,5 @@ bench: build
 bench-smoke: build
 	$(PY) tools/bench_matrix.py --smoke
 
-ci: test gate fuzz-smoke py
+ci: test gate gate-corpus fuzz-smoke py
 	@echo "frostwork: all local gates passed"
