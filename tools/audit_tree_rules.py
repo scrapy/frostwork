@@ -35,10 +35,18 @@ import oracle  # noqa: E402  — same libxml2 >= 2.14 requirement as the differe
 # the harness's own oracle driver: same css/xpath dispatch and same parsel-error handling as the gate
 from diff_lxml import parsel_vals  # noqa: E402
 
-# An open element and the wrapper it needs to be in scope.
+# An open element and the wrapper it needs to be in scope. This is the HTML **optional-end-tag** set —
+# a fixed universe from the spec, NOT a mirror of the engine's own tag ids. Drawing it from the engine
+# would make the audit self-referential: it could find a wrong cell but never a MISSING rule, and
+# `colgroup` (which had no rule at all) is exactly what that blind spot hid.
 WRAP = {"li": "ul", "dd": "dl", "dt": "dl", "option": "select", "optgroup": "select",
         "tr": "table", "thead": "table", "tbody": "table", "tfoot": "table", "caption": "table",
-        "td": "table", "th": "table", "rt": "ruby", "rp": "ruby", "p": "div"}
+        "td": "table", "th": "table", "rt": "ruby", "rp": "ruby", "p": "div",
+        "colgroup": "table"}
+# Extra markup needed between the wrapper and the element (a cell needs a row).
+EXTRA = {"td": "<tr>", "th": "<tr>"}
+# Void, so never the OPEN element, but it must still appear as an INCOMING tag.
+INCOMING_ONLY = ["col"]
 VOID = "area base br col hr img input link meta param".split()
 NONVOID_CLAIMED = "embed source track wbr".split()      # contract: libxml2 keeps these OPEN
 BLOCK = ("address blockquote center dir div dl fieldset form h1 h2 h3 h4 h5 h6 hr menu ol pre table "
@@ -48,8 +56,8 @@ INLINE = "span a b em strong small label".split()
 TABLE_SCOPED = "table caption thead tbody tfoot tr td th".split()
 # markup needed BEFORE an element for it to be in scope, derived from WRAP so adding a tag there is
 # enough (`table` needs no wrapper; a cell needs a row as well)
-SCOPE_PRE = {t: f"<{w}>" for t, w in WRAP.items()}
-SCOPE_PRE.update({"td": "<table><tr>", "th": "<table><tr>", "table": "", "p": "", "span": ""})
+SCOPE_PRE = {t: f"<{w}>{EXTRA.get(t, '')}" for t, w in WRAP.items()}
+SCOPE_PRE.update({"table": "", "p": "", "span": ""})
 
 
 def both(html: bytes, sel: str):
@@ -128,8 +136,15 @@ def audit_implied_close(a: Audit):
 def audit_table_scope(a: Audit):
     """libxml2 will not unwind a table for an ordinary end tag; it discards it instead."""
     with a.section("table scope (end tag through an open table-scoped element)"):
-        for inner in TABLE_SCOPED + ["li", "p", "span", "option", "optgroup", "rt"]:
-            pre = SCOPE_PRE[inner]
+        # BARE: no wrapper, so this measures the element's OWN scope contribution. Wrapping each in
+        # `<table>` hid it (the table blocks regardless) — which is how a wrong `caption` entry survived.
+        for inner in TABLE_SCOPED + ["colgroup", "li", "p", "span", "option", "optgroup", "rt"]:
+            for outer in ("div", "ul", "span", "section"):
+                html = f"<html><body><{outer}><{inner}>AAA</{outer}>BBB</body></html>".encode()
+                a.check("table-scope-bare", f"<{outer}><{inner}>AAA</{outer}>BBB", html,
+                        f"{inner}::text")
+        for inner in TABLE_SCOPED + ["colgroup", "li", "p", "span", "option", "optgroup", "rt"]:
+            pre = SCOPE_PRE.get(inner, "")
             for outer in ("div", "ul", "span", "section"):
                 html = f"<html><body><{outer}>{pre}<{inner}>AAA</{outer}>BBB</body></html>".encode()
                 a.check("table-scope", f"<{outer}>{pre}<{inner}>AAA</{outer}>BBB", html,

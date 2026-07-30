@@ -47,14 +47,17 @@ derived empirically against lxml):
 - **Implied end tags** are NOT uniform per family — every cell is verified individually, because the
   families disagree with each other and with HTML5. A same-tag repeat auto-closes for
   `li`/`option`/`tr`/`td`/`th`/`tbody`/`p` but **nests** for `dt`/`dd`/`rt`/`rp`/`optgroup`/`thead`/
-  `tfoot`/`caption`. `<tbody>`/`<tfoot>` close an open row/cell; `<thead>` does not.
+  `tfoot`/`caption`. `<tbody>`/`<tfoot>` close an open row/cell; `<thead>` does not. `<colgroup>` is
+  closed by a section or a row, and closes an open `<caption>` or `<p>`.
 - **`<p>`-closing set** = the HTML4 block list (`div`, `p`, `h1`–`h6`, `ul`, `ol`, `dl`, `menu`, `dir`,
   `center`, `address`, `blockquote`, `fieldset`, `form`, `pre`, `table`, `hr`) plus list/table *items*
   (`li`, `dd`, `dt`, `tr`, `td`, `th`, `tbody`, `tfoot`, `caption`) — **not** the HTML5 sectioning
   elements (`section`/`article`/`header`/…), and **not** `option`/`optgroup`/`thead`/`rt`/`rp`, all of
   which libxml2 leaves nested inside the `<p>`.
 - **Table scope**: an ordinary end tag never unwinds a table. With a table-scoped element open above its
-  match, libxml2 discards the tag (`<div><table><tr><td>A</div>B` keeps `AB` in the cell).
+  match, libxml2 discards the tag (`<div><table><tr><td>A</div>B` keeps `AB` in the cell). The set is
+  per element and excludes `caption`/`colgroup`, which is only visible BARE — wrapped in a `<table>`
+  the table blocks regardless, which is how a wrong `caption` entry survived the first audit.
 - **Void set** = `area base br col hr img input link meta param` — libxml2 2.14 treats
   `embed`/`source`/`track`/`wbr` as **non-void**, so Frostwork does too.
 - None of these arms had differential coverage until `tools/audit_tree_rules.py` enumerated them cell by

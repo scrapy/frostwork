@@ -29,7 +29,7 @@ The gate is **`DIVERGE + CRASH == 0`**, with `SKIP-EXPECTED` reported as the mea
 
 ## Layers
 
-**Unit vectors — `cargo test`** (121 vectors, milliseconds). One per rule and edge: every implied-close
+**Unit vectors — `cargo test`** (125 vectors, milliseconds). One per rule and edge: every implied-close
 family (`li`/`p`/`td`/`tr`/`dt`/`dd`/`option`) × {closed, omitted}; void/self-closing; rawtext with
 `<`/`&` inside; comments/CDATA/DOCTYPE; entity edges; attribute quoting/case; selector compounds,
 combinators, `:not()`, comma groups; encoding resolution; XPath compilation; the `Page` layer; budget
@@ -79,9 +79,17 @@ shift_jis, euc-jp, gbk, big5, koi8-r, utf-8, plus UTF-16 sniffing, vs Parsel giv
 is asserted, not tested — and that is precisely where bugs were found: the `dd`/`dt` and `rt`/`rp`
 same-tag closes shipped wrong, then an audit of the remaining cells found **19 more wrong cells and a
 missing table-scope rule**, all in regions no generated page reached (`optgroup`, `thead`/`tfoot`/
-`caption`, and `<p>` followed by a non-closer). So this walks the rule tables *directly* — the
-355-cell implied-close cross product, the void set, the `<p>`-closing set, table scope, rawtext — and
-asks lxml about every cell. It is fast and deterministic, so it gates.
+`caption`, and `<p>` followed by a non-closer) — and widening the audit's universe afterwards found 12
+more (`colgroup` had no rule at all, and `caption` was wrongly a scope boundary). So this walks the rule tables *directly* — the
+implied-close cross product, the void set, the `<p>`-closing set, table scope and rawtext (451 cells
+today) — and asks lxml about every cell. It is fast and deterministic, so it gates.
+
+Two things make it able to find a MISSING rule, not just a wrong one. Its universe is the HTML
+**optional-end-tag set**, not a mirror of the engine's own tag ids — drawing it from the engine made it
+self-referential, which is what hid `<colgroup>` having no rule at all. And it tests each element's scope
+contribution **bare**: wrapping every candidate in `<table>` masked their own behaviour, because the
+table blocks regardless, which is how a wrong `caption` scope entry survived. Both were found by widening
+the universe, and both were real: 12 further disagreements.
 
 **When you add a tree-construction rule, add a row to that audit.** A rule with no row is a rule on
 trust, and a family that "looks covered" because a sibling tag is generated is the exact trap here.

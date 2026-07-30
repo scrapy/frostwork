@@ -145,6 +145,11 @@ def _table(rng, depth, ctr):
         inner += "<tfoot><tr><td>" + _text(rng) + ("" if omit else "</td></tr></tfoot>")
     if rng.random() < 0.3:
         inner = f"<caption>{_text(rng)}" + ("" if omit else "</caption>") + inner
+    # `<colgroup><col>…` with an omitted `</colgroup>` is ordinary table markup and had NO rule: the
+    # sections ended up nested inside the colgroup, so a child-anchored selector lost the cells.
+    if rng.random() < 0.35:
+        cols = "".join(f"<col{_attr(rng, _next(ctr))}>" for _ in range(rng.randint(1, 3)))
+        inner = f"<colgroup>{cols}" + ("" if omit else "</colgroup>") + inner
     return "<table>" + inner + "</table>"
 
 
@@ -222,6 +227,9 @@ BASKET = [
     # table sections + optgroup: arms that had NO differential coverage until these were added
     "table > thead::text", "table > tbody::text", "table > tfoot::text", "table > caption::text",
     "thead > tr::text", "tbody > tr::text", "thead th::text", "tbody td::text",
+    # child-anchored past a colgroup: these are what a nested-colgroup bug drops
+    "table > colgroup::attr(id)", "table > thead th::text", "table > tbody td::text",
+    "table > tfoot td::text", "colgroup + thead th::text", "table > colgroup > col::attr(class)",
     "select > optgroup::text", "optgroup > option::text", "optgroup + optgroup::text",
     "thead + tbody::text", "caption + thead::text",
     "table tr > td::text", "select > option::text", "table > tr::text", "tr > th::text",

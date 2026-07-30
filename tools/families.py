@@ -146,6 +146,23 @@ def c_p_nonclosers(rng):
                   (".probe p ::text", "p-subtree")]
 
 
+def c_colgroup(rng):
+    """`<colgroup><col>` with an omitted `</colgroup>`, followed by the sections. libxml2 closes the
+    colgroup on `<thead>`/`<tbody>`/`<tfoot>`/`<tr>`/`<colgroup>`; nesting them instead loses every
+    child-anchored selector past the colgroup. `<col>` is void, so it is never the open element."""
+    cols = "".join("<col>" for _ in range(rng.randint(1, 3)))
+    body = "".join(f"<tr><td>{_w(rng)}" for _ in range(rng.randint(1, 2)))
+    head = f"<thead><tr><th>{_w(rng)}" if rng.random() < 0.7 else ""
+    cap = f"<caption>{_w(rng)}" if rng.random() < 0.4 else ""
+    html = f"<table>{cap}<colgroup>{cols}{head}<tbody>{body}</table>"
+    return html, [(".probe table > thead th::text", "child-head-cell"),
+                  (".probe table > tbody td::text", "child-body-cell"),
+                  (".probe table > colgroup::attr(id)", "child-colgroup"),
+                  (".probe colgroup thead th::text", "must-not-nest"),
+                  (".probe th::text", "descendant-head"),
+                  (".probe td::text", "descendant-body")]
+
+
 def c_table_scope(rng):
     """A stray end tag that would have to unwind a table. libxml2 DISCARDS it (table scope), keeping the
     cell open and its text whole; popping through instead closes the cell early and splits the text.
@@ -195,6 +212,7 @@ FAMILIES = [
     ("table-sections", "SHOULD", c_table_sections),
     ("p-nonclosers", "SHOULD", c_p_nonclosers),
     ("table-scope", "SHOULD", c_table_scope),
+    ("colgroup", "SHOULD", c_colgroup),
     ("misnest-fmt", "SKIP", c_misnest),
     ("table-foster", "SKIP", c_foster),
     ("well-formed", "CONTROL", c_wellformed),

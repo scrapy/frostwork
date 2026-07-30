@@ -28,13 +28,18 @@ pub mod tag {
     pub const P: u8 = 15;
     pub const BLOCK: u8 = 16; // a block-level start tag that closes an open <p>
     pub const TABLE: u8 = 17; // a BLOCK for <p>-closing, but also a table SCOPE boundary
+    pub const COLGROUP: u8 = 18;
 }
 
 /// Table-scoped elements. libxml2 will not pop through one of these for an ordinary end tag — see
 /// [`end_tag_discardable`]. (`table` needs its own id rather than folding into `BLOCK` for exactly this.)
 pub fn is_table_scoped(tid: u8) -> bool {
     use tag::*;
-    matches!(tid, TABLE | CAPTION | THEAD | TBODY | TFOOT | TR | TD | TH)
+    // `caption` and `colgroup` are deliberately ABSENT: a bare `<div><caption>A</div>B` honours the
+    // `</div>` in libxml2 (the engine used to discard it and keep `AB` in the caption). Verified per
+    // element with no wrapper — wrapping each in `<table>` hides its own contribution, since the table
+    // blocks regardless.
+    matches!(tid, TABLE | THEAD | TBODY | TFOOT | TR | TD | TH)
 }
 
 /// True iff an end tag named `name` must be IGNORED rather than pop the stack, given that at least one
@@ -68,6 +73,7 @@ pub fn tag_id(name: &str) -> u8 {
         "tbody" => tag::TBODY,
         "tfoot" => tag::TFOOT,
         "caption" => tag::CAPTION,
+        "colgroup" => tag::COLGROUP,
         "rt" => tag::RT,
         "rp" => tag::RP,
         "p" => tag::P,
@@ -102,14 +108,22 @@ pub fn implies_close_id(start: u8, top: u8) -> bool {
         TD | TH => matches!(start, TD | TH | TR | TBODY | TFOOT),
         THEAD | TBODY => matches!(start, TBODY | TFOOT),
         TFOOT => start == TBODY, // closed by <tbody>, but NESTS a second <tfoot> and a <thead>
-        CAPTION => matches!(start, THEAD | TBODY | TFOOT | TR),
+        CAPTION => matches!(start, THEAD | TBODY | TFOOT | TR | COLGROUP),
+        // `<colgroup>` with an omitted end tag is ordinary table markup, and it had NO rule at all:
+        // `<table><colgroup><col><col><thead><tr><th>H` left the `<thead>` nested inside the colgroup,
+        // so `table > thead th::text` returned nothing where lxml returns the cell. (`col` needs no
+        // rule — it is void, so it is never the open element.)
+        COLGROUP => matches!(start, COLGROUP | THEAD | TBODY | TFOOT | TR),
         // Ruby annotations NEVER auto-close in libxml2 2.14 — neither same-tag nor cross-tag:
         // `<ruby><rt>a<rp>b</ruby>` nests the `<rp>` INSIDE the `<rt>`.
         RT | RP => false,
         // An open `<p>` is closed by the block set plus list/table ITEMS — but NOT by `option`,
         // `optgroup`, `thead`, `rt` or `rp`, which nest inside it. The previous blanket `start != OTHER`
         // over-closed on all five. Every entry here is verified cell-by-cell against libxml2 2.14.6.
-        P => matches!(start, BLOCK | TABLE | LI | DD | DT | TR | TD | TH | TBODY | TFOOT | CAPTION | P),
+        P => matches!(
+            start,
+            BLOCK | TABLE | LI | DD | DT | TR | TD | TH | TBODY | TFOOT | CAPTION | COLGROUP | P
+        ),
         _ => false,
     }
 }
@@ -203,5 +217,22 @@ mod tests {
         assert!(implies("tbody", "tbody"));
         assert!(implies("tfoot", "tbody"));
         assert!(implies("tbody", "tfoot"));
+        // `<colgroup>` had NO rule at all, so an omitted `</colgroup>` nested the sections inside it
+        for t in ["colgroup", "thead", "tbody", "tfoot", "tr"] {
+            assert!(implies(t, "colgroup"), "<{t}> must close an open <colgroup>");
+        }
+        for t in ["col", "caption", "td", "th", "p", "li", "option"] {
+            assert!(!implies(t, "colgroup"), "<{t}> must NOT close an open <colgroup>");
+        }
+        assert!(implies("colgroup", "caption")); // a colgroup closes an open caption ...
+        assert!(implies("colgroup", "p")); // ... and an open <p>
+        // scope is per element, and `caption`/`colgroup` are NOT boundaries (a bare `<div><caption>A</div>B`
+        // honours the `</div>` in libxml2). Wrapping each in `<table>` hid this — the table blocks anyway.
+        for t in ["table", "thead", "tbody", "tfoot", "tr", "td", "th"] {
+            assert!(is_table_scoped(tag_id(t)), "<{t}> is a scope boundary");
+        }
+        for t in ["caption", "colgroup", "li", "p", "option"] {
+            assert!(!is_table_scoped(tag_id(t)), "<{t}> is NOT a scope boundary");
+        }
     }
 }

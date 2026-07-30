@@ -120,11 +120,17 @@ DOM, no full tree construction). These rules were derived empirically against li
   - **cross-tag**: `dt`↔`dd` close each other; `rt`/`rp` never close anything. `<tbody>`/`<tfoot>`
     close an open `tr`/`td`/`th`/`caption`, but **`<thead>` does not** — the three sections are not
     interchangeable. `<tfoot>` is closed by `<tbody>` but nests a second `<tfoot>`.
+  - **`<colgroup>`** is closed by `<colgroup>`/`<thead>`/`<tbody>`/`<tfoot>`/`<tr>` — but not by
+    `<col>` (void, so never the open element), a cell, or a caption. It closes an open `<caption>` and
+    an open `<p>`. An omitted `</colgroup>` is ordinary table markup: without this rule
+    `<table><colgroup><col><col><thead><tr><th>H` nested the sections inside the colgroup, so
+    `table > thead th::text` returned nothing where lxml returns the cell.
 - **An open `<p>`** is closed by the block set plus list/table *items* (`li`, `dd`, `dt`, `tr`, `td`,
   `th`, `tbody`, `tfoot`, `caption`, `p`) — but **not** by `option`, `optgroup`, `thead`, `rt` or `rp`,
   which nest inside it.
-- **An end tag never unwinds a table** ("table scope"). With a table-scoped element (`table`, `caption`,
-  `thead`, `tbody`, `tfoot`, `tr`, `td`, `th`) open above its match, an ordinary end tag is *discarded*:
+- **An end tag never unwinds a table** ("table scope"). With a table-scoped element (`table`, `thead`,
+  `tbody`, `tfoot`, `tr`, `td`, `th` — **not** `caption` or `colgroup`) open above its match, an ordinary
+  end tag is *discarded*:
   in `<div><table><tr><td>A</div>B`, the `</div>` is dropped and the cell keeps `AB` as one text node.
   Table-scoped end tags (`</table>`, `</tr>`, …) unwind normally, and `</body>`/`</html>` still close the
   document. Unbalanced `<div>`s around tables are a common real-world malformation, so this path matters.

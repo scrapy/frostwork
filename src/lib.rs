@@ -768,6 +768,21 @@ mod tests {
         assert_eq!(ex("<dl><dt>a<dt>b</dl>", "dl > dt::text"), v(&["a"]));
         assert_eq!(ex("<dl><dd>a<dd>b</dl>", "dl > dd::text"), v(&["a"]));
     }
+    /// `<colgroup>` with an omitted end tag is ordinary table markup and had NO rule, so the sections
+    /// nested inside it and every child-anchored selector past the colgroup lost its cells.
+    #[test]
+    fn colgroup_closed_by_sections_and_rows() {
+        let t = "<table><colgroup><col><col><thead><tr><th>H<tbody><tr><td>D</table>";
+        assert_eq!(ex(t, "table > thead th::text"), v(&["H"]));
+        assert_eq!(ex(t, "table > tbody td::text"), v(&["D"]));
+        assert_eq!(ex(t, "colgroup thead th::text"), v(&[])); // must NOT nest
+        // a colgroup closes an open caption, and an open <p>
+        assert_eq!(ex("<table><caption>C<colgroup><col><thead><tr><th>H</table>", "table > thead th::text"), v(&["H"]));
+        assert_eq!(ex("<div><p>a<colgroup><col></div>", "div > p::text"), v(&["a"]));
+        // ...but a bare <caption> is NOT a scope boundary: the `</div>` is honoured
+        assert_eq!(ex("<div><caption>A</div>B", "caption::text"), v(&["A"]));
+    }
+
     #[test]
     fn ruby_annotations_never_auto_close() {
         assert_eq!(ex("<ruby><rt>a<rt>b</ruby>", "ruby > rt::text"), v(&["a"]));
