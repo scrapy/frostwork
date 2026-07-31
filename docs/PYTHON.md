@@ -219,6 +219,30 @@ for f in report.unsupported:
 report.raise_for_status()   # raises frostwork.UnsupportedSelector unless ok
 ```
 
+### Schema shapes `check` accepts
+
+`queries` is one of — a **`{name: selector}` mapping**, an iterable of bare selectors (labelled `[0]`,
+`[1]`, … by position), or an iterable of `(name, selector)` pairs. `groups` is one of — a
+**`{name: (container, subfields)}` mapping**, `(name, container, subfields)` triples, or the bare
+`(container, subfields)` shape `extract_grouped` takes (auto-named `group[0]`, …); `subfields` is
+`{subname: selector}` or `[(subname, selector), …]` in every case. Anything else raises `TypeError`
+naming these shapes.
+
+The two mapping shapes are exactly what `FrostPage.frost_schema()` returns, so an exported schema can
+be audited as-is:
+
+```python
+schema = ProductPage.frost_schema()
+frostwork.check(schema["fields"], schema["groups"]).raise_for_status()
+```
+
+A mapping is **destructured, never iterated** — iterating `{"title": "h1::text"}` would audit the
+field *name* `title`, which is a valid type selector, so every field would report supported and
+`report.ok` would be `True`: a green report on a schema that was never looked at. For the same reason
+`extract`/`extract_grouped` **reject** a mapping for `queries` with a `TypeError` instead of
+extracting the names (their columns are positional — pass `list(schema.values())`, or use `Page` for a
+named schema).
+
 The primitive and both page-object layers validate by default:
 
 ```python

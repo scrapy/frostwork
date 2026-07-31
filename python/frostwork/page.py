@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import codecs
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field as _dc_field
 from functools import lru_cache
 from typing import Callable, Iterable, Iterator, List, Optional, Tuple, Union
@@ -52,11 +53,19 @@ def _as_bytes(html: Bytesish) -> bytes:
 
 
 def _query_list(queries) -> List[str]:
-    """Reject a bare selector string before ``list()`` explodes it into characters."""
+    """Reject a bare selector string before ``list()`` explodes it into characters, and a
+    ``{name: selector}`` dict before ``list()`` silently keeps its *keys* as the selectors."""
     if isinstance(queries, (str, bytes)):
         raise TypeError(
             f"frostwork: `queries` must be an iterable of selector strings, got a single "
             f"{type(queries).__name__} — wrap it in a list: extract(html, [{queries!r}])"
+        )
+    if isinstance(queries, Mapping):
+        raise TypeError(
+            "frostwork: `queries` must be an iterable of selector strings, got a Mapping — "
+            "iterating it would use its KEYS (the field names) as selectors. `extract` returns "
+            "positional columns, so pass `list(queries.values())`; for a named "
+            "`{name: selector}` schema use `frostwork.Page` (or `frostwork.check` to audit one)."
         )
     return list(queries)
 
@@ -295,10 +304,19 @@ def check(queries=None, groups=None) -> SchemaReport:
     """Audit a schema without parsing any HTML: report which selectors the engine supports (with an
     advisory reason for those it does not) and the budget usage.
 
-    ``queries`` is an iterable of flat selectors (or ``(name, selector)`` pairs to label them).
-    ``groups`` is a list of ``(name, container_selector, {subname: subselector})`` — or the bare
-    ``(container, [(subname, sel)])`` shape that :func:`extract_grouped` takes. Returns a
+    ``queries`` is a ``{name: selector}`` mapping, an iterable of flat selectors (labelled ``[i]`` by
+    position), or an iterable of ``(name, selector)`` pairs. ``groups`` is a
+    ``{name: (container, subfields)}`` mapping, an iterable of ``(name, container, subfields)``
+    triples, or the bare ``(container, subfields)`` shape that :func:`extract_grouped` takes
+    (auto-named ``group[i]``) — with ``subfields`` given as ``{subname: sel}`` or
+    ``[(subname, sel), ...]`` in any of them. Anything else raises :class:`TypeError` naming these
+    shapes rather than auditing the wrong strings: a mapping is destructured, never iterated, since
+    auditing its *keys* would report a green schema that was never looked at. Returns a
     :class:`SchemaReport`; call :meth:`SchemaReport.raise_for_status` for strict validation.
+
+        >>> import frostwork
+        >>> [(f.name, f.supported) for f in frostwork.check({"blurb": ":contains(x)::text"}).fields]
+        [('blurb', False)]
     """
     fnames, fsels = _split_named(queries or [])
     gnames, gcontainers, gsub_names, gsub_sels, native_groups = _split_groups(groups or [])
@@ -314,38 +332,108 @@ def check(queries=None, groups=None) -> SchemaReport:
     return SchemaReport(fields, group_reports, members, max_members, sib_bits, max_sib_bits)
 
 
+# The shapes `check` accepts, quoted verbatim in the TypeError so a wrong one names its way out. A
+# schema shape that is *misread* rather than rejected is the worst outcome here: auditing the field
+# names of a `{name: selector}` dict reports every field supported (a bare `title` is a valid type
+# selector), so the schema comes back green without ever having been looked at.
+_QUERY_SHAPES = "`queries` must be {name: selector}, [selector, ...], or [(name, selector), ...]"
+_GROUP_SHAPES = (
+    "each group must be {name: (container, subfields)}, (name, container, subfields), or "
+    "(container, subfields), where subfields is {sub: sel} or [(sub, sel), ...]"
+)
+
+
+def _as_tuple(x):
+    """``tuple(x)`` for a shape check — ``None`` if ``x`` is a string, a Mapping, or not iterable at
+    all. Those are all wrong shapes *where this is called*, and each would otherwise "unpack" into
+    something plausible-looking: a string into its characters, a 2-key Mapping into its two keys."""
+    if isinstance(x, (str, bytes, bytearray, Mapping)):
+        return None
+    try:
+        return tuple(x)
+    except TypeError:
+        return None
+
+
+def _pair(item, shapes):
+    """Unpack one ``(name, selector)`` pair, naming the accepted ``shapes`` instead of failing with an
+    opaque index error (or silently splitting a 2-character string into a name and a selector)."""
+    parts = _as_tuple(item)
+    if parts is None or len(parts) != 2 or not isinstance(parts[1], str):
+        raise TypeError(f"frostwork: {shapes}; got {item!r}")
+    return str(parts[0]), parts[1]
+
+
 def _split_named(queries):
-    """Accept `[selector, ...]` or `[(name, selector), ...]`; return (names, selectors)."""
+    """Accept `{name: selector}`, `[selector, ...]`, or `[(name, selector), ...]`; return
+    (names, selectors).
+
+    A Mapping is read as `{name: selector}` — the shape `Page`/`FrostPage` schemas are written in.
+    Iterating it instead would audit the field NAMES as selectors and report the whole schema
+    supported (see `_QUERY_SHAPES`), so a Mapping is destructured explicitly, never iterated."""
+    if isinstance(queries, Mapping):
+        queries = list(queries.items())
+    elif isinstance(queries, (str, bytes, bytearray)):
+        raise TypeError(
+            f"frostwork: {_QUERY_SHAPES}; got a single {type(queries).__name__} "
+            f"{queries!r} — wrap it in a list"
+        )
     names, sels = [], []
     for i, q in enumerate(queries):
         if isinstance(q, str):
             names.append(f"[{i}]")
             sels.append(q)
         else:
-            names.append(str(q[0]))
-            sels.append(q[1])
+            name, sel = _pair(q, _QUERY_SHAPES)
+            names.append(name)
+            sels.append(sel)
     return names, sels
 
 
 def _split_groups(groups):
-    """Accept `(name, container, {sub: sel})` or `(container, [(sub, sel)])`; return the parallel name
-    lists plus the native `(container, [(sub, sel)])` shape `_audit_schema` expects."""
+    """Accept `{name: (container, subfields)}`, `(name, container, subfields)`, or the bare
+    `(container, subfields)` shape `extract_grouped` takes (auto-named `group[i]`), where `subfields`
+    is `{sub: sel}` or `[(sub, sel), ...]`; return the parallel name lists plus the native
+    `(container, [(sub, sel)])` shape `_audit_schema` expects.
+
+    A Mapping is read as `{name: (container, subfields)}` — what `FrostPage.frost_schema()["groups"]`
+    returns — for the same reason `_split_named` reads one as `{name: selector}`: iterating it would
+    audit the group names instead of the schema."""
+    if isinstance(groups, Mapping):
+        groups = [_named_group(name, body) for name, body in groups.items()]
     gnames, gcontainers, gsub_names, gsub_sels, native = [], [], [], [], []
     for i, g in enumerate(groups):
-        if len(g) == 3 and isinstance(g[2], dict):
-            name, container, sub = g[0], g[1], g[2]
-            subn, subs = list(sub.keys()), list(sub.values())
+        parts = _as_tuple(g)
+        if parts is not None and len(parts) == 3:
+            name, container, sub = str(parts[0]), parts[1], parts[2]
+        elif parts is not None and len(parts) == 2:
+            name, container, sub = f"group[{i}]", parts[0], parts[1]
         else:
-            container, sub = g[0], list(g[1])
-            name = f"group[{i}]"
-            subn = [s[0] for s in sub]
-            subs = [s[1] for s in sub]
+            raise TypeError(f"frostwork: {_GROUP_SHAPES}; got {g!r}")
+        subn, subs = _split_subfields(sub)
         gnames.append(name)
         gcontainers.append(container)
         gsub_names.append(subn)
         gsub_sels.append(subs)
         native.append((container, list(zip(subn, subs))))
     return gnames, gcontainers, gsub_names, gsub_sels, native
+
+
+def _named_group(name, body) -> tuple:
+    """One `{name: (container, subfields)}` entry as the `(name, container, subfields)` triple."""
+    parts = _as_tuple(body)
+    if parts is None or len(parts) != 2:
+        raise TypeError(f"frostwork: {_GROUP_SHAPES}; got {{{name!r}: {body!r}}}")
+    return (name, parts[0], parts[1])
+
+
+def _split_subfields(sub):
+    """A group's sub-fields — `{sub: sel}` or `[(sub, sel), ...]` — as parallel (names, selectors)."""
+    items = tuple(sub.items()) if isinstance(sub, Mapping) else _as_tuple(sub)
+    if items is None:
+        raise TypeError(f"frostwork: {_GROUP_SHAPES}; got subfields {sub!r}")
+    pairs = [_pair(sf, _GROUP_SHAPES) for sf in items]
+    return [n for n, _s in pairs], [s for _n, s in pairs]
 
 
 _Transforms = Tuple[Callable, ...]

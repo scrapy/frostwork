@@ -661,6 +661,104 @@ def test_check_reports_supported_and_unsupported():
     assert r.groups[0].container.supported  # .offer is fine
 
 
+def test_check_reads_a_dict_as_name_to_selector():
+    # Regression: `{name: selector}` — the shape Page/FrostPage schemas are written in, and what
+    # `FrostPage.frost_schema()` returns — used to be ITERATED, auditing the field NAMES as selectors.
+    # A bare name like `title` is a valid type selector, so every field reported supported and
+    # `report.ok` was True: a silently green audit of a schema that was never looked at.
+    good, bad = "h1::text", "div:has(.a .b)::text"
+    for queries in ({"title": good, "bad": bad}, [("title", good), ("bad", bad)]):
+        r = frostwork.check(queries)
+        assert [(f.name, f.selector, f.supported) for f in r.fields] == [
+            ("title", good, True), ("bad", bad, False)
+        ]
+        assert not r.ok
+        assert [f.name for f in r.unsupported] == ["bad"]
+        with pytest.raises(frostwork.UnsupportedSelector, match="div:has"):
+            r.raise_for_status()
+    # unlabelled selectors keep their positional names
+    r = frostwork.check([good, bad])
+    assert [(f.name, f.selector, f.supported) for f in r.fields] == [
+        ("[0]", good, True), ("[1]", bad, False)
+    ]
+    assert not r.ok
+
+
+def test_check_reads_a_dict_of_groups_and_of_subfields():
+    subs = {"price": ".//span/text()", "kid": "./h3/text()"}  # `./x` child anchor -> unsupported
+    for groups in (
+        {"offers": (".offer", subs)},                    # {name: (container, subfields)}
+        {"offers": (".offer", list(subs.items()))},      # ... with sub-fields as pairs
+        [("offers", ".offer", subs)],                    # (name, container, subfields)
+        [("offers", ".offer", list(subs.items()))],
+    ):
+        r = frostwork.check([], groups)
+        g = r.groups[0]
+        assert g.name == "offers"
+        assert (g.container.selector, g.container.supported) == (".offer", True)
+        assert [(s.name, s.selector) for s in g.subfields] == list(subs.items())
+        assert not r.ok
+        assert [s.name for s in r.unsupported] == ["kid"]
+    # the bare `extract_grouped` shape still auto-names; a dict of sub-fields is read as one there too
+    for groups in ([(".offer", {"price": ".//span/text()"})], [(".offer", [("price", ".//span/text()")])]):
+        r = frostwork.check([], groups)
+        assert r.ok
+        assert r.groups[0].name == "group[0]"
+        assert [(s.name, s.selector) for s in r.groups[0].subfields] == [("price", ".//span/text()")]
+
+
+def test_check_audits_a_frostpage_schema_round_trip():
+    # `frost_schema()` hands back exactly the two Mapping shapes `check` now accepts, so a schema
+    # exported for tooling can be audited as-is instead of coming back green-but-unread.
+    from frostwork.webpoet import FrostPage, Many, field
+
+    class Exported(FrostPage, strict=False):
+        title = field("h1::text")
+        blurb = field("div:contains('x')::text")
+        offers = Many(".offer", price=field(".//span/text()"))
+
+    schema = Exported.frost_schema()
+    r = frostwork.check(schema["fields"], schema["groups"])
+    assert [f.name for f in r.unsupported] == ["blurb"]
+    assert r.groups[0].name == "offers"
+    assert [(s.name, s.selector) for s in r.groups[0].subfields] == [("price", ".//span/text()")]
+    assert {f.name: f.supported for f in r.fields} == {"title": True, "blurb": False}
+
+
+@pytest.mark.parametrize(
+    "queries",
+    ["h1::text", ["h1::text", 5], [("t", "h1::text", "all")], [{"t": "h1::text", "b": ".p::text"}]],
+)
+def test_check_rejects_unknown_query_shapes(queries):
+    # Anything that is not one of the three documented shapes names them, rather than auditing
+    # whatever `list()`/`[0]`/`[1]` happens to yield (a 2-key dict would "unpack" into its keys).
+    with pytest.raises(TypeError, match="`queries` must be"):
+        frostwork.check(queries)
+
+
+@pytest.mark.parametrize(
+    "groups",
+    [["offers"], {"offers": ".offer"}, [(".offer", 5)], [(".offer", ["price"])], [(".offer",)]],
+)
+def test_check_rejects_unknown_group_shapes(groups):
+    with pytest.raises(TypeError, match="each group must be"):
+        frostwork.check([], groups)
+
+
+def test_extract_rejects_dict_queries_rather_than_extracting_the_field_names():
+    # The extraction twin of the audit bug, and worse: iterating `{name: selector}` used to extract
+    # the NAMES (`title` matched <title>), a silently WRONG value. `extract` returns positional
+    # columns, so a named schema means `Page`; a dict here is a caller mistake either way.
+    html = b"<html><head><title>T</title></head><body><h1>H</h1></body></html>"
+    schema = {"title": "h1::text"}
+    for call in (lambda: frostwork.extract(html, schema),
+                 lambda: frostwork.extract_grouped(html, schema, [])):
+        with pytest.raises(TypeError, match="KEYS"):
+            call()
+    assert frostwork.extract(html, list(schema.values())) == [["H"]]
+    assert Page().field("title", "h1::text").extract(html).get("title") == "H"
+
+
 def test_check_rejects_xpath_variable_and_unquoted_operands():
     # Reported by Jan Seidler: `//*[@id=$pid]` (a parsel XPath-variable query, used in a production PO)
     # passed the audit, then matched an element whose id literally was `$pid` — a WRONG value under a

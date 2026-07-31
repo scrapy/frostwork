@@ -19,6 +19,13 @@ the first public package is released.
   `[href^=/p]`, `[a=$v]` and `[a=--v]` are syntax errors in cssselect, but Frostwork answered them with
   values — a non-empty column for a selector Parsel refuses. They are now unsupported (empty); quoting
   the value (`[a="2"]`) is the supported form, and the selector fuzzer now generates both.
+- **Fix (audit input shapes):** `frostwork.check` now reads a `dict` as `{name: selector}` (and
+  `{name: (container, subfields)}` for groups — the shapes `FrostPage.frost_schema()` returns) instead
+  of iterating it. Iterating audited the field *names* as selectors, and a bare name like `title` is a
+  valid type selector, so `report.ok` came back `True` for a schema that was never looked at. Sub-fields
+  may now be a `dict` in the bare `(container, subfields)` group shape too, and any other shape raises
+  `TypeError` naming the accepted ones. `extract`/`extract_grouped` likewise reject a `dict` of queries
+  (their columns are positional) rather than extracting the names as selectors.
 - `frostwork-audit --scan FILE|DIR` audits selector *literals* mined from Python source with `ast`
   (never importing it), covering inline `.css()`/`.xpath()`, `ItemLoader.add_*` and
   `LinkExtractor(restrict_*)` — code with no Frostwork schema yet. Reports `file:line` per site and
