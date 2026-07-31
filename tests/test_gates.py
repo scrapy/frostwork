@@ -264,11 +264,24 @@ def test_mutation_sweep_enumerates_every_rule_table():
         assert name_class[n] in by_class, f"{n} is in no class"
     # the pair that shipped wrong is its own class either way: `<dd>` closing an open `<dt>`
     assert "close:dd,dt" in specs
-    # a void element is never the OPEN element, so no cell should name one there
-    voids = set(mutate_rules.VOID_NAMES)
-    bad = [s for s in specs if s.startswith("close:") and s.split(",", 1)[1] in voids]
-    assert not bad, f"unobservable cells enumerated (void open element): {bad[:5]}"
-    # ...but a void tag as the INCOMING tag is a real cell: `<col>` closes an open `<p>`
+    # A name that can never be on the stack when a start tag arrives is unobservable BY CONSTRUCTION, so
+    # enumerating it wastes a mutant and lands in the survivor list as a FALSE ALARM. Restricting this to
+    # the void half did exactly that: a full sweep reported 39 `close:<X>,title` survivors, because
+    # `title` is RCDATA. The exclusion is derived from the oracle (void + non-normal data mode).
+    unobs = set(mutate_rules.UNOBSERVABLE_AS_OPEN)
+    assert {"title", "script", "style", "iframe", "xmp", "plaintext", "br", "col"} <= unobs
+    bad = [s for s in specs if s.startswith("close:") and s.split(",", 1)[1] in unobs]
+    assert not bad, f"unobservable cells enumerated (open element can never be on the stack): {bad[:5]}"
+    # ...but `html`/`body` ARE on the stack — nothing closes them, yet a mutation that makes something
+    # close one IS observable, so they must not be excluded on that basis
+    assert "body" not in unobs and "html" not in unobs
+    # ...and no class may be represented by an unobservable name while it holds an observable one, or the
+    # whole column disappears from the sweep (`body`/`div` share a class with the void `hr` and raw `xmp`)
+    tops = {s.split(",", 1)[1] for s in specs if s.startswith("close:")}
+    for cls, names in by_class.items():
+        if any(n not in unobs for n in names):
+            assert tops & set(names), f"class {cls} has an observable name but no swept representative"
+    # a void tag as the INCOMING tag is a real cell: `<col>` closes an open `<p>`
     assert "close:col,p" in specs
     # the void set is derived, so the HTML4 names libxml2 treats as empty are in it...
     for n in ("basefont", "frame", "isindex"):
@@ -281,6 +294,34 @@ def test_mutation_sweep_enumerates_every_rule_table():
     # "the raw-text set is the four names we remembered" is the bug this dimension exists to catch
     assert {f"mode:{n}" for n in ELEMENTS} <= set(specs)
     assert {"mode:iframe", "mode:noembed", "mode:xmp", "mode:plaintext", "mode:listing"} <= set(specs)
+
+
+def test_the_mutation_sweep_refuses_to_run_against_an_inert_build():
+    """The sweep's own worst failure is reporting survivors when no mutation was applied at all.
+
+    Its baseline check only proves the detectors are green when NOTHING is mutated — a build without the
+    `mutate` feature passes that and then reports every mutant as a survivor. The `mutate` artifacts are
+    shared state (a release binary plus whatever `maturin develop` last installed into the venv), so
+    anything else that builds swaps them mid-run: that happened during a full sweep and 451 of 1621
+    mutants came back as a contiguous tail of false survivors, which reads as a coverage collapse and
+    means nothing. So a canary mutation must be SEEN before and during the run, and failure is fatal.
+    """
+    import mutate_rules
+
+    env = {"PATH": os.environ.get("PATH", "")}
+    green = mutate_rules.Detector("never-red", [sys.executable, "-c", "raise SystemExit(0)"], "green")
+    red = mutate_rules.Detector("goes-red", [sys.executable, "-c", "raise SystemExit(1)"], "red")
+
+    # nothing notices the canary -> the run must abort, not proceed
+    with pytest.raises(SystemExit) as e:
+        mutate_rules.check_canary([green], env, "in a test")
+    assert "CANARY FAILED" in str(e.value) and "mutate" in str(e.value)
+    # ...and a detector that does notice lets the sweep proceed
+    mutate_rules.check_canary([red], env, "in a test")
+    mutate_rules.check_canary([green, red], env, "in a test")
+    # the canary itself must be a mutation a gate really covers, not an arbitrary spec
+    assert mutate_rules.CANARY_SPEC in dict(mutate_rules.mutants(mutate_rules.tag_ids()))
+    assert mutate_rules.CANARY_EVERY > 0, "a start-only canary cannot catch a mid-run rebuild"
 
 
 def test_the_known_start_close_gap_may_shrink_but_never_grow():

@@ -80,24 +80,37 @@ def tag_ids() -> dict[str, int]:
 # names in a class are indistinguishable to every rule table by construction — and the per-name residual
 # risk is covered because the rule AUDIT (this sweep's strongest detector) probes all 142 names, not the
 # representatives. A full name-pair sweep would be 142² mutants; at ~2.3s each that is about 13 hours.
-def _derived_universe() -> tuple[list[str], list[str], list[str]]:
+def _derived_universe() -> tuple[list[str], list[str], list[str], list[str]]:
     from gen_tree_rules import ELEMENTS, Oracle, classify
     o = Oracle()
     _, by_class, _ = classify(o)
-    reps = sorted(names[0] for names in by_class.values() if names)
-    void = o.void()
-    return reps, sorted(t for t in ELEMENTS if void[t]), sorted(t for t in ELEMENTS if not void[t])
+    void, modes = o.void(), o.modes()
+    # Names that can never be the OPEN element when a start tag arrives, so `close:<any>,<name>` is
+    # unobservable BY CONSTRUCTION rather than untested: a void element has no content, and a raw-text /
+    # RCDATA / PLAINTEXT element's content is character data, so no start tag is tokenized inside it.
+    # Restricting this to the VOID half left 39 `close:<X>,title` mutants in a full sweep's survivor list,
+    # every one of them a false alarm — `title` is RCDATA. `html`/`body` are deliberately NOT here:
+    # nothing closes them, but they ARE on the stack, so a mutation that makes something close one is
+    # perfectly observable and must stay in the sweep.
+    unobservable = sorted(t for t in ELEMENTS if void[t] or modes[t] != "normal")
+    # Prefer an OBSERVABLE-as-open representative: a class holding both (e.g. `blockquote` with the void
+    # `hr` and the raw-text `xmp`) would otherwise be skipped wholesale if the alphabetically-first name
+    # happened to be the unobservable one, silently dropping every cell of a column that IS reachable.
+    reps = []
+    for names in by_class.values():
+        obs = [n for n in sorted(names) if n not in unobservable]
+        reps.append(obs[0] if obs else sorted(names)[0])
+    return (sorted(reps), sorted(t for t in ELEMENTS if void[t]),
+            sorted(t for t in ELEMENTS if not void[t]), unobservable)
 
 
-CLOSE_NAMES, VOID_SET, NONVOID_SET = _derived_universe()
+CLOSE_NAMES, VOID_SET, NONVOID_SET, UNOBSERVABLE_AS_OPEN = _derived_universe()
 # The data-mode table gets the WHOLE universe rather than representatives: it is one mutant per name
 # (cheap), and "the raw-text universe was the four names we already knew about" is precisely the bug
 # that let `iframe`/`noembed`/`xmp`/`plaintext` fabricate elements out of their own text content.
 DATA_MODE_NAMES = sorted(VOID_SET + NONVOID_SET)
-# A void element is never the OPEN element, so `close:<any>,<void>` is unobservable by construction —
-# not a coverage gap. (The first sweep spent 70 mutants proving this the slow way.) `void:` mutants cover
-# the whole void set plus the HTML5-era names libxml2 deliberately keeps OPEN, since flipping one of
-# THOSE to void is the mistake the contract exists to prevent.
+# `void:` mutants cover the whole void set plus the HTML5-era names libxml2 deliberately keeps OPEN,
+# since flipping one of THOSE to void is the mistake the contract exists to prevent.
 VOID_NAMES = VOID_SET + ["embed", "source", "track", "wbr"]
 
 
@@ -105,7 +118,11 @@ def mutants(ids: dict[str, int]) -> list[tuple[str, str]]:
     """(spec, human label) for every rule cell that can be flipped."""
     out: list[tuple[str, str]] = []
     for top in CLOSE_NAMES:
-        if top in VOID_NAMES:
+        # Not a carve-out: `UNOBSERVABLE_AS_OPEN` is derived from the oracle, and such a name is never on
+        # the stack when a start tag arrives, so the mutant cannot change any output. The first sweep
+        # spent 70 mutants proving that for the void half the slow way; the raw-text half then produced
+        # 39 `close:<X>,title` false survivors for exactly the same reason.
+        if top in UNOBSERVABLE_AS_OPEN:
             continue
         for inc in CLOSE_NAMES:
             out.append((f"close:{inc},{top}", f"<{inc}> closes an open <{top}>"))
@@ -135,6 +152,43 @@ class Detector:
             # reserved by the harness for "oracle unusable" — not a verdict about the mutation
             raise SystemExit(f"{self.name}: exit 2 (oracle/toolchain guard). Run it directly to see why.")
         return p.returncode != 0
+
+
+# A mutation that MUST be noticed: `img` is void, so flipping it makes `<div><img>A</div>` put `A` inside
+# the img, which the rule audit checks by name. If this is not detected then the build the detectors run
+# against does not have the `mutate` feature live, and NOTHING in the run means anything.
+CANARY_SPEC = "void:img"
+CANARY_EVERY = 100
+
+
+def check_canary(dets: list[Detector], clean_env: dict[str, str], where: str) -> None:
+    """Abort unless a known-detectable mutation is still detected.
+
+    "Survived" is only information if the mutation was applied at all, and the baseline check in `main`
+    does not establish that — it only shows the detectors are green when NOTHING is mutated. A build that
+    has lost the feature passes the baseline and then reports every remaining mutant as a survivor.
+
+    This is not hypothetical. The `mutate` artifacts are shared state (a release binary plus whatever
+    `maturin develop` last installed into the venv), so anything else that builds — another session in a
+    worktree, a stray `make py` — silently swaps them mid-run. That happened during a full sweep and 451 of
+    1621 mutants came back as a contiguous TAIL of false survivors: a result that reads as a catastrophic
+    coverage collapse and means nothing. So the canary runs before the sweep and every `CANARY_EVERY`
+    mutants, and a failure is fatal rather than a warning — a partially-inert run is worse than no run,
+    because the survivor list is the output people act on.
+    """
+    env = dict(clean_env, FROSTWORK_MUTATE=CANARY_SPEC)
+    for d in dets:
+        p = subprocess.run(d.argv, cwd=ROOT, env=env,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if p.returncode not in (0, 2):
+            return  # someone noticed — the hook is live
+    raise SystemExit(
+        f"\nCANARY FAILED {where}: the mutation `{CANARY_SPEC}` was noticed by NO detector, so the build "
+        f"they run against does not have the `mutate` feature. Every result from here would be a false "
+        f"survivor. Rebuild both artifacts and start again:\n"
+        f"    cargo build --release --features mutate\n"
+        f"    .venv/bin/maturin develop --release --features python,mutate\n"
+        f"(and check nothing else is rebuilding them while the sweep runs — that is how this happened.)")
 
 
 def build_detectors(with_differential: bool, corpus: str | None) -> list[Detector]:
@@ -224,12 +278,16 @@ def main() -> int:
         if d.run(clean_env):
             raise SystemExit(f"{d.name} is RED on the UNMUTATED build — fix that first, "
                              f"or every mutant looks caught")
-    print("  baseline  : all detectors green on the unmutated build\n")
+    print("  baseline  : all detectors green on the unmutated build")
+    check_canary(dets, clean_env, "before the sweep")
+    print(f"  canary    : `{CANARY_SPEC}` IS noticed, so the mutate build is live for the detectors\n")
 
     survivors: list[tuple[str, str]] = []
     matrix: dict[str, list[str]] = {}
     t0 = time.perf_counter()
     for n, (spec, label) in enumerate(chosen, 1):
+        if n % CANARY_EVERY == 0:
+            check_canary(dets, clean_env, f"at mutant {n}/{len(chosen)}")
         env = dict(clean_env, FROSTWORK_MUTATE=spec)
         caught_by = []
         for d in dets:

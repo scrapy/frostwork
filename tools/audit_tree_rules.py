@@ -369,6 +369,17 @@ def audit_document_frame(a: Audit):
                          [f"div > {stray}::attr(id)", "div::text", f"{stray}::attr(id)"])
         a.check_many("frame", "a redundant <body> still runs its implied closes",
                      b"<html><body><p>x<body>y</body></html>", ["p::text", "body > p::text"])
+        # A redundant frame tag INSIDE the part it names, asked unscoped. Every probe above is scoped to
+        # a frame part, and a second `<head>` arriving while one is open is invisible to all of them: if
+        # the open head were popped, the duplicate would be inserted as a SIBLING, which no
+        # `head > …`/`body > …` selector can see. `close:head,head` was the one cell of the head column
+        # that survived the mutation sweep for exactly that reason — an unscoped probe closes it.
+        for stray in ("html", "head", "body"):
+            a.check_many("frame", f"a duplicate <{stray}> inside itself inserts nothing",
+                         f'<html><head><title>T</title><{stray} id="Z"><meta id=M></head>'
+                         f"<body>b</body></html>".encode(),
+                         [f"{stray}::attr(id)", f"html > {stray}::attr(id)",
+                          "head > meta::attr(id)", "head > title::text"])
 
 
 def audit_frame_synthesis(a: Audit):

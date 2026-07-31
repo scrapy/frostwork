@@ -285,6 +285,32 @@ added at the same time: `void:` covers the derived void set plus the four names 
 open, and `mode:` covers the DATA MODE of every name in the universe — because "the raw-text set is the
 four names we remembered" was the same bug in a different table.
 
+**Then a full sweep over that widened universe found two more things, and only one was a coverage gap.**
+
+- **39 × `close:<X>,title` were FALSE survivors.** `title` is RCDATA, so no start tag is ever tokenized
+  while it is the open element and flipping the cell cannot change any output. The skip list already made
+  that argument for VOID open elements and covered only the void half; it is now derived from the oracle —
+  void ∪ every non-normal data mode (`UNOBSERVABLE_AS_OPEN`). `html`/`body` are deliberately NOT in it:
+  nothing closes them, but they *are* on the stack, so a mutation that makes something close one is real.
+  A survivor list padded with false alarms is worse than no list — it trains you to skim the one output
+  that matters.
+- **`close:head,head` was a real hole, and a one-cell one.** Every frame probe is scoped to a frame part
+  (`head > …`, `body > …`), and a duplicate `<head>` arriving while one is open is invisible to all of
+  them: if the open head were popped, the duplicate would be inserted as a SIBLING. An unscoped probe
+  closes it. The lesson generalizes past this cell — **a probe's SCOPE is part of its universe**, the same
+  way its name list is.
+
+**The sweep also needs a canary.** Its baseline check proves the detectors are green when *nothing* is
+mutated, which is not the same as proving a mutation is applied — a build without the `mutate` feature
+passes the baseline and then reports every mutant as a survivor. The `mutate` artifacts are shared state (a
+release binary plus whatever `maturin develop` last installed into the venv), so anything else that builds
+swaps them mid-run: it happened during a full sweep, and 451 of 1621 mutants came back as a contiguous
+*tail* of false survivors — a result that reads as a catastrophic coverage collapse and means nothing.
+`check_canary` now runs a known-detectable mutation (`void:img`) before the sweep and every 100 mutants and
+aborts loudly, because a partially-inert run is worse than no run. `tests/test_gates.py` pins both halves.
+If you are running the sweep while other sessions share this checkout's `.venv`, expect it to abort — give
+each worktree its own venv, or run the sweep alone.
+
 Three probe-design lessons are baked into the tools, each of which cost a wrong answer first:
 
 - **A `::text` probe cannot see inside a table.** Text in an open `<table>` is foster-parented, so the probe
