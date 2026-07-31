@@ -55,6 +55,13 @@ jobs:
       # correctness gate: 0 non-whitespace DIVERGE + 0 CRASH vs lxml (flat AND grouped One/Many)
       - run: .venv/bin/python tools/diff_lxml.py
       - run: .venv/bin/python tools/enc_check.py
+      # The extension has to exist from here on: `diff_fuzz.py` reads the engine's tag tables through
+      # `audit_tree_rules`, which imports `frostwork`, and `bench_corpus.py` extracts through it. Building
+      # it later (as this job used to) made every one of those steps a ModuleNotFoundError the moment the
+      # fuzzer grew that import — a gate that cannot even start. It does NOT disturb the `differ`/`bench`
+      # bins built above: this compiles the lib under a different feature set and leaves the existing
+      # binaries in place (nothing rebuilds them after, which is what would matter — see AGENTS.md).
+      - run: .venv/bin/maturin develop --release
       # differential fuzz: mutate well-formed pages into MALFORMED HTML and diff vs lxml. DIVERGE is
       # expected here (documented foster-parenting / adoption-agency SKIP set), so only CRASH is gated
       # (--gate): any panic on any input is a real bug. Catches tokenizer desync (e.g. comment-close)
@@ -64,12 +71,10 @@ jobs:
       # the no-fallback contract — a column is empty OR equals lxml, never non-empty-and-wrong, never a
       # crash. Gates WRONG (disagree) + OVERMATCH (data on a parsel-invalid selector) + CRASH.
       - run: .venv/bin/python tools/sel_fuzz.py --iters 6000 --gate
-      # build the extension into the venv, then exercise the Python surface (extract, Page, FrostPage,
-      # Many/One) AND tests/test_gates.py, which seeds a known regression into each gate's decision
-      # function and asserts it goes red. `tests/` not `tests/test_python.py`: the gate meta-tests were
-      # written and then not run by either `make ci` or this workflow, which is the exact failure they
-      # exist to catch.
-      - run: .venv/bin/maturin develop --release
+      # exercise the Python surface (extract, Page, FrostPage, Many/One) AND tests/test_gates.py, which
+      # seeds a known regression into each gate's decision function and asserts it goes red. `tests/` not
+      # `tests/test_python.py`: the gate meta-tests were written and then not run by either `make ci` or
+      # this workflow, which is the exact failure they exist to catch.
       - run: .venv/bin/python -m pytest tests/ -q
       - run: .venv/bin/python tools/support_snapshot.py --check
       # Page coverage is not RULE coverage: this enumerates every tree-construction rule cell against

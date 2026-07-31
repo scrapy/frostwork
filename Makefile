@@ -102,5 +102,10 @@ bench: build
 bench-smoke: build
 	$(PY) tools/bench_matrix.py --smoke
 
-ci: test gate gate-corpus fuzz-smoke py
+# `py` runs THIRD, not last: it builds the extension, and both `gate-corpus` (bench_corpus.py extracts
+# through it) and `fuzz-smoke` (diff_fuzz.py reads the tag tables via audit_tree_rules) import it. With
+# `py` at the end, this target died on a ModuleNotFoundError in any venv where the extension wasn't
+# already installed — the gates after it never ran at all, which no amount of them going red would have
+# told you. Same reason the workflow builds it before its fuzz steps.
+ci: test gate py gate-corpus fuzz-smoke
 	@echo "frostwork: all local gates passed"
