@@ -69,11 +69,21 @@ def _crash_check(cases, results, returncode, err):
     return crashed, diag
 
 
-def run_engine(cases):
+def run_engine(cases, strict_budget=True):
     """cases: list of (html_bytes, [selectors]) -> (results, crashed_cases, diag).
 
-    results[i] holds the value-columns for cases[i] (truncated if the engine crashed mid-batch)."""
-    proc = subprocess.Popen([BIN], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    results[i] holds the value-columns for cases[i] (truncated if the engine crashed mid-batch).
+
+    `strict_budget` makes an over-budget schema a loud harness error instead of empty columns — right
+    for PARITY callers (empty columns would read as divergence in every one of them), wrong for
+    `sel_fuzz.py`, whose budget bombs are the thing under test."""
+    env = dict(os.environ)
+    if strict_budget:
+        env["FROSTWORK_DIFFER_BUDGET_STRICT"] = "1"
+    else:
+        env.pop("FROSTWORK_DIFFER_BUDGET_STRICT", None)
+    proc = subprocess.Popen([BIN], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, env=env)
     # protocol: ENC \t HEXHTML \t sels...   (empty ENC = sniff)
     payload = "".join(
         "\t" + html.hex() + ("\t" if sels else "") + "\t".join(sels) + "\n" for html, sels in cases
@@ -127,6 +137,16 @@ def is_node_query(sel):
     if re.search(r"/@[A-Za-z_][\w:.-]*$", s):  # xpath /@name terminal
         return False
     return True
+
+
+# The engine tracks per-selector membership in fixed-width bitsets (u128), so ONE pass answers at most
+# `MAX_MEMBERS` selectors. Sibling combinators (`+`/`~`) also draw on a separate trigger-bit budget, so
+# batch well under the member cap to leave headroom for a basket that is combinator-heavy.
+MAX_SELECTORS_PER_PASS = 96
+
+
+def _batches(selectors, n=MAX_SELECTORS_PER_PASS):
+    return [list(selectors[i:i + n]) for i in range(0, len(selectors), n)] or [[]]
 
 
 def verdict(mine, theirs, bucket, sel):
@@ -280,7 +300,16 @@ def main():
                 examples.append((name, sel, mine[:4], (theirs or [])[:4], body.decode()[:160]))
 
     # ---- CONFORMANT: content-model-valid trees; invariant = byte-identical to lxml (THE GATE) ----
-    conf_cases = [(conformant.generate(rng), conformant.BASKET) for _ in range(args.conformant)]
+    # The basket is BATCHED to stay inside the engine's fixed-width member budget. Over the budget the
+    # surplus columns come back deterministically empty, which a differential reads as divergence in
+    # every one of them — so growing the basket past the limit would look like a catastrophic parity
+    # regression rather than a harness error. `differ` panics on an over-budget batch to make that loud.
+    basket_batches = _batches(conformant.BASKET)  # invariant: slice once, not once per page
+    conf_cases = [
+        (page, batch)
+        for page in (conformant.generate(rng) for _ in range(args.conformant))
+        for batch in basket_batches
+    ]
     engine_out, crashed, diag = run_engine(conf_cases)
     stat["CRASH"] += crashed
     if diag:

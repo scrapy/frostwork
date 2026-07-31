@@ -2,8 +2,10 @@
 
 Fast HTML extraction for Python and Rust, without a DOM.
 
-Frostwork runs a set of CSS or XPath selectors in one pass over an HTML response. It does not build
-a document tree, and it does not walk the document again for each field. Every speedup figure depends
+Frostwork runs a set of CSS or XPath selectors in one streaming pass over an HTML response. It does not
+build a document tree, and one pass answers every ordinary field. (A deferred predicate whose value lives
+in a subtree — `div:has(a) a::attr(href)` — re-reads just that element's span afterwards; see
+[docs/DESIGN.md](docs/DESIGN.md).) Every speedup figure depends
 on the workload, so each one below names its own; [docs/BENCHMARKS.md](docs/BENCHMARKS.md) is the
 canonical source and the only place they are maintained:
 
@@ -183,7 +185,8 @@ divergences and zero crashes against the pinned Parsel/lxml oracle.
 Frostwork is usable from source but is not yet published to PyPI. Build the Python extension with
 `maturin develop --release`.
 
-Correctness is checked against lxml across roughly 569,000 page/selector pairs per differential seed,
+Correctness is checked against lxml across hundreds of thousands of page/selector pairs per differential
+seed (the gate prints the exact figure; see [docs/TESTING.md](docs/TESTING.md)),
 with additional encoding, random-selector, and malformed-HTML fuzzing. The Rust and Python page-object
 layers, nested `Many`/`One` extraction, schema audit, and web-poet integration are included in those
 release gates.

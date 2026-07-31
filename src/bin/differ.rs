@@ -58,6 +58,13 @@ fn json_col(col: &[String], out: &mut String) {
 }
 
 fn main() {
+    // Opt-in (set by the parity harnesses, NOT by the budget-bomb selector fuzzer): treat a schema over
+    // the fixed-width bitset budget as a harness error rather than silently answering empty columns.
+    let budget_strict = std::env::var_os("FROSTWORK_DIFFER_BUDGET_STRICT").is_some();
+    // A run cycles through a couple of fixed selector batches and varies only the HTML, so remember
+    // every list already approved — `budget_usage` re-parses all of them, which otherwise cost ~30% of
+    // the whole harness. A single-slot cache is not enough: consecutive lines alternate batches.
+    let mut budget_ok: Vec<Vec<String>> = Vec::new();
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut o = io::BufWriter::new(stdout.lock());
@@ -132,6 +139,24 @@ fn main() {
             let sels: Vec<String> = parts.map(|s| s.to_string()).collect();
             let html = hex_decode(hex);
             let enc = if enc_label.is_empty() { None } else { Some(enc_label) };
+            // A schema over the fixed-width bitset budget yields deterministically EMPTY columns for
+            // the members past the budget (see `budget_members_over_128_is_safe_empty`). That is safe
+            // for a caller, and `sel_fuzz.py` deliberately feeds budget bombs to prove it — but it is
+            // poison for a PARITY harness, where every over-budget column reads as a divergence against
+            // lxml and buries any real one. So the parity harnesses opt in to failing loudly instead.
+            if budget_strict && !budget_ok.contains(&sels) {
+                let (members, sib) = frostwork::budget_usage(&sels, &[]);
+                if members > frostwork::MAX_MEMBERS || sib > frostwork::MAX_SIB_BITS {
+                    panic!(
+                        "differ: schema over budget ({members} members / {sib} sibling bits vs limits \
+                         {} / {}). Batch the selector basket — over-budget columns come back empty, \
+                         not wrong, so a parity run would report them all as divergences.",
+                        frostwork::MAX_MEMBERS,
+                        frostwork::MAX_SIB_BITS
+                    );
+                }
+                budget_ok.push(sels.clone());
+            }
             let res = frostwork::extract(&html, &sels, enc);
             out.push('[');
             for (i, col) in res.iter().enumerate() {

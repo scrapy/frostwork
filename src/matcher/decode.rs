@@ -21,8 +21,14 @@ fn normalize_crlf(s: Cow<str>) -> Cow<str> {
 }
 
 /// Finalize an emitted value from raw bytes: decode with the resolved encoding, CRLF-normalize,
-/// entity-decode / drop NUL. Called ONLY for values that actually match (a small fraction of the
+/// entity-decode. Called ONLY for values that actually match (a small fraction of the
 /// document), so the whole-document decode/validation the old `&str` path paid up front is gone.
+///
+/// The NUL filtering below is now a backstop, not the mechanism: raw NUL is deleted from the whole
+/// document before tokenizing (`crate::strip_nul`), because dropping it only from emitted values made
+/// the engine and lxml disagree about the document's STRUCTURE. It stays because it costs one
+/// `contains(&0)` on a path that already scans the value, and because a decoded U+0000 arriving from
+/// somewhere else must not reach a column.
 pub(super) fn finalize(bytes: &[u8], allows_entities: bool, enc: &'static Encoding) -> String {
     // `decode` (not `decode_without_bom_handling`) would strip a leading U+FEFF from every value —
     // wrong: the document BOM is already removed up front, and a U+FEFF mid-text is real content

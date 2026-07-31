@@ -96,9 +96,10 @@ def divergence_kind(fc, pc, query):
     """The ACTUAL severity of a divergence, per the no-fallback contract ('never a wrong value'):
       EMPTY   — frostwork returns nothing (safe: an unsupported query yields an empty column)
       SUBSET  — frostwork's non-ws content is a strict subset of Parsel's (missing values, not wrong)
-      SEGMENT — same total text, different text-node boundaries (universal ::text collector splits
-                differently); the extracted content is identical, only node segmentation differs
-      WRONG   — frostwork emits non-ws content Parsel does NOT (the only real 'wrong value' bug)
+      SEGMENT — same total text, different text-node BOUNDARIES. Benign ONLY under join cardinality:
+                a `One` field takes col[0], so an extra split silently TRUNCATES it ('HELLO', not
+                'HELLOWORLD'). Treated as a bug by --gate; do not wave it through as cosmetic.
+      WRONG   — frostwork emits non-ws content Parsel does NOT (an outright wrong value)
     Node (outer-HTML) queries are compared on re-parsed non-ws text (raw-source vs lxml reflow)."""
     if is_node_query(query):
         def texts(frag):
@@ -115,10 +116,22 @@ def divergence_kind(fc, pc, query):
         return "EMPTY"
     if fset <= pset:
         return "SUBSET"
-    # WS-collapsed concatenation identical -> same content, only text-node split differs (benign)
+    # WS-collapsed concatenation identical -> same content, only the text-node split differs
     if " ".join("".join(fc).split()) == " ".join("".join(pc or []).split()):
-        return "SEGMENT"
+        return "SEGMENT"  # NOT benign for a One-cardinality field — see the docstring
     return "WRONG"
+
+
+# Every selector this tool measures is one the engine claims to SUPPORT — `frostwork.extract` runs with
+# strict validation, so an unsupported one raises rather than reaching the comparison. That makes EMPTY
+# and SUBSET regressions, not coverage gaps: a supported column going from ["a","b"] to ["a"] is exactly
+# the failure a rule change causes, and grading it as a gap let `make gate-corpus` stay green through it.
+VALUE_BUG_KINDS = ("EMPTY", "SUBSET", "SEGMENT", "WRONG")
+
+
+def is_value_bug(kind: str) -> bool:
+    """Does this divergence kind fail the gate? Every non-whitespace divergence does."""
+    return kind in VALUE_BUG_KINDS
 
 
 def nonws_equal(a, b):
@@ -154,7 +167,10 @@ def main():
         raise SystemExit(__doc__)
     corpus_dir = os.path.abspath(args[0])
     limit = int(args[args.index("--limit") + 1]) if "--limit" in args else None
-    repeats = int(args[args.index("--repeats") + 1]) if "--repeats" in args else 3
+    gate = "--gate" in args  # exit nonzero on any VALUE bug, so a real corpus can guard a release
+    # a parity verdict needs ONE run of each engine; timing repeats would just re-parse with lxml
+    default_repeats = 1 if gate else 3
+    repeats = int(args[args.index("--repeats") + 1]) if "--repeats" in args else default_repeats
 
     pages = sorted(glob.glob(os.path.join(corpus_dir, "*", "pages", "*.html")), key=os.path.getsize)
     if not pages:
@@ -190,7 +206,6 @@ def main():
             body = f.read()
         if not body.strip():
             continue  # empty snapshot — Parsel can't build a Selector from it
-
         # warmup (also validates neither side crashes)
         fcols = frostwork.extract(body, queries, "utf-8")
         pcols = parsel_extract(body, queries)
@@ -272,14 +287,17 @@ def main():
     for reason, cnt in by_reason.most_common():
         flag = "  <-- REAL MISMATCH" if reason.startswith("unexplained") else ""
         print(f"      {cnt:>4}  {reason}{flag}")
-    # a divergence is a *bug* only if frostwork emits content Parsel does not (kind == WRONG)
-    wrong = [(p, j, q) for p, j, q, k in diverge if k == "WRONG"]
+    # EVERY non-whitespace divergence fails: these are all supported selectors (strict validation), so
+    # EMPTY/SUBSET are lost values, not coverage gaps. Grading them as gaps meant a regression from
+    # ["a","b"] to ["a"] left this gate green — the single most likely way a rule change breaks a scrape.
+    wrong = [(p, j, q, k) for p, j, q, k in diverge if is_value_bug(k)]
     if wrong:
-        print(f"    WRONG-value cases (frostwork emits content Parsel does not — real bugs):")
-        for page, j, q in wrong[:20]:
-            print(f"      - {page}  sel[{j}]  {q!r}")
+        print("    VALUE bugs (EMPTY/SUBSET = lost values; SEGMENT = extra text-node split -> a One"
+              " field truncates; WRONG = content Parsel lacks):")
+        for page, j, q, k in wrong[:20]:
+            print(f"      - [{k}] {page}  sel[{j}]  {q!r}")
     else:
-        print("    WRONG-value cases: 0  (every divergence is an empty/subset coverage gap)")
+        print("    VALUE bugs: 0")
 
     os.makedirs(RESULTS, exist_ok=True)
     out = {
@@ -300,6 +318,12 @@ def main():
     with open(os.path.join(RESULTS, "corpusbench.json"), "w") as f:
         json.dump(out, f, indent=2)
     print(f"\nwrote tools/results/corpusbench.json")
+
+    if gate:
+        print(f"\nCORPUS GATE: value bugs (any non-whitespace divergence) = {len(wrong)}  ->  "
+              f"{'PASS' if not wrong else 'FAIL'}")
+        if wrong:
+            raise SystemExit(1)
 
 
 if __name__ == "__main__":

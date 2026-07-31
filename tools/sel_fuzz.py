@@ -11,8 +11,9 @@ exotic-but-unsupported, malformed, and budget-bombs — the invariant is:
 Selectors are drawn from the vocabulary that actually appears in conformant.py / foreign.py pages (tags,
 `c<N>`/`shared` classes, `i<N>` ids, href/src/data-k/title attrs) so supported queries genuinely match
 content — otherwise every column is trivially empty and nothing is tested. Categories mixed per run:
-valid CSS, valid XPath, deep `:not()`, exotic (likely-unsupported) forms, malformed strings, and budget
-bombs (>128 comma members / >64 sibling chains) that exercise the DEAD-clamp for crash-safety.
+valid CSS, valid XPath, deep `:not()`, exotic (likely-unsupported) forms, CSS ESCAPES (`.\63 1` is
+`.c1` to the oracle — a surface no generated selector reached until a review found it), malformed
+strings, and budget bombs (>128 comma members / >64 sibling chains) exercising the DEAD-clamp.
 
 Verdicts per (page, selector):
   AGREE       mine == lxml (or empty and lxml empty)
@@ -339,17 +340,116 @@ def g_malformed(rng):
     return base + "·λ→"  # non-ASCII junk
 
 
+def g_escaped(rng):
+    """CSS ESCAPES — a surface this fuzzer could not reach, so hand vectors were the only net.
+
+    cssselect DECODES escapes before matching: `.\\63 1` is `.c1`, `[data-k="caf\\e9"]` is
+    `[data-k="café"]`. An engine that keeps the backslash literally answers a *different* selector than
+    the oracle — and because escapes never appeared in any generated selector, that went unnoticed until a
+    review read the parser. The generated forms decode onto names the pages really carry, so parsel has
+    values and a literal-matching engine grades WRONG rather than harmlessly-empty-on-both-sides.
+
+    Escapes in a class / id / attribute *name* are an UNSUPPORTED gap rather than decoded, which the
+    contract allows (empty, never wrong); generating them pins the gap so it cannot drift into a wrong
+    answer. The trailing-lone-backslash forms are ones cssselect REJECTS, where any non-empty column is
+    an OVERMATCH.
+
+    The escaped values deliberately use SUBSTRING/PREFIX operators over `class`/`data-k`/`href`, which
+    every generated page carries. An exact-match probe (`[data-k="\76 1"]` for `data-k="v1"`) only
+    discriminates on pages that happen to hold that exact value: measured pre-fix it caught the bug on
+    3 seeds out of 4 and missed on the fourth, i.e. a net that passes a broken engine 25% of the time.
+    Retargeted it fails every seed. It then found a SECOND bug the hand vectors missed —
+    `::attr(data-\6b)` was reported supported and matched literally, so it answered a selector parsel
+    answers with an empty column.
+    """
+    return rng.choice([
+        # DISCRIMINATING: escapes where the engine decodes, matching content every page has
+        r'[class*="\63"]::text',            # -> [class*="c"]
+        r'[class^="\63 "]::text',           # -> [class^="c"]  (space terminates the escape)
+        r'[data-k^="\76"]::text',           # -> [data-k^="v"]
+        r'[data-k^="\000076"]::text',       # -> same, 6-digit form (max escape length, no terminator)
+        r'[href*="\2f "]::attr(href)',      # -> [href*="/"]   (escaped non-identifier char)
+        r'[title*="\74"]::text',            # -> [title*="t"]
+        r'[class*="c\31"]::text',           # -> [class*="c1"] (escaped digit)
+        r'[data-k]::attr(data-\6b)',        # ::attr() argument -> data-k
+        # decodes fine but matches nothing on these pages (title is `t` / `a<n>`): a decode-path probe
+        r'[title*="caf\e9"]::text',         # -> [title*="café"], non-ASCII via escape
+        # UNSUPPORTED GAP: must stay empty rather than drift into a literal match
+        r".\63 1::text",                    # class name
+        r"#\69 1::text",                    # id
+        r'[data-\6b ="v1"]::text',          # attribute name
+        r".\-x::text",                      # `\-` is a literal dash, not a hex escape
+        # REJECTED BY cssselect: any non-empty column here is an OVERMATCH
+        ".c1\\",                            # lone trailing backslash
+        '[data-k="v1\\"]::text',            # unterminated string via escaped quote
+    ])
+
+
+def g_quoted_delim(rng):
+    r"""QUOTED DELIMITERS inside a functional pseudo — the same blind spot as the escapes above, one
+    level up: no generated selector ever put a `)` or a `,` inside a quoted attribute value, so the
+    entire question "does the `:is()`/`:not()` argument scanner know what a string is?" rode on hand
+    vectors. It did not: a bare paren-depth counter ended the pseudo at the quoted `)`, the leftover
+    `"])` failed to parse, and `div:is(#outer, [data-x=")"])` — valid CSS that parsel answers — reported
+    UNSUPPORTED and returned an empty column.
+
+    Discrimination is the whole design here. The generated pages contain no `)` in any attribute value,
+    so an exact-match probe would be empty on BOTH sides and grade AGREE against a broken parser. These
+    put the quoted delimiter inside a `:not()` (or as the losing alternative of an `:is()`) so the
+    predicate is universally TRUE and the column equals the plain selector's.
+
+    Be precise about what that measures, because it is NOT a red gate. A parser gap makes these selectors
+    report UNSUPPORTED, and empty-when-unsupported is exactly what the no-fallback contract permits — so
+    against the pre-fix build this family moves from 0 UNSUPPORTED pairs to ~20-30% of the family (303,
+    221 and 216 pairs over seeds 0/1/2) and the gate still passes. What it buys is the WRONG/OVERMATCH
+    invariant across many generated pages, plus a visible number in the per-category table. The assertion
+    that these shapes must be SUPPORTED (the half that goes red) is a contract sweep:
+    `tests/test_python.py::test_quoted_delimiters_in_functional_pseudos_are_supported`.
+
+    `:is()`/`:where()` forms keep a BARE base, because cssselect mis-translates an `:is()` whose compound
+    carries any other condition (a documented divergence in our favour) and the fuzzer's oracle is
+    parsel. `:has()` is left out for the same reason: cssselect REJECTS an attribute inner, so every
+    correct answer here would grade OVERMATCH. Both are covered by unit vectors instead.
+    """
+    return rng.choice([
+        # DISCRIMINATING: universally-true `:not()`, so the column matches the plain selector's
+        r'[class*="c"]:not([class*=")"])::text',
+        r'[class*="c"]:not([class*="("])::text',
+        r'[class*="c"]:not([class*=","])::text',
+        r"[class*='c']:not([class*=')'])::text",
+        r'[class*="c"]:not([title*="a(b"])::text',
+        r'[class*="c"]:not([class*="\29"])::text',   # the same `)`, written as a CSS escape
+        r'[class*="c"]:not([class*="\2c"])::text',   # ...and the same `,`
+        # ...and the `:is()`/`:where()` form: the second alternative is the one that matches
+        r':is([class*=")"], [class*="c"])::text',
+        r':where([class*="("], [class*="c"])::text',
+        r':is([data-k*=","], [class*="c"])::text',
+        # PARSES but matches nothing on either side — a parse-path probe, not a discriminator
+        r'[data-k*=")"]::text',
+        r'[class$=")"]::text',
+        r':is([class*=")"])::text',
+        # REJECTED BY cssselect: any non-empty column here is an OVERMATCH
+        r'[class*="c"]:not([class*=")"]::text',      # argument never closed
+        r':is([class*=")"], [class*="c"]::text',
+        r':is([class*=")::text',                     # unterminated string
+    ])
+
+
 def gen_selector(rng):
     r = rng.random()
-    if r < 0.34:
+    if r < 0.30:
         return g_css(rng), False
-    if r < 0.50:
+    if r < 0.45:
         return g_xpath(rng), False
-    if r < 0.62:
+    if r < 0.57:
         return g_comma(rng), False
-    if r < 0.74:
+    if r < 0.68:
         return g_exotic(rng), False
-    if r < 0.88:
+    if r < 0.76:
+        return g_escaped(rng), False
+    if r < 0.84:
+        return g_quoted_delim(rng), False
+    if r < 0.92:
         return g_malformed(rng), False
     # budget bombs: clearly over the DEAD-clamp thresholds; must be crash-safe (empty or partial)
     if rng.random() < 0.5:
@@ -395,7 +495,10 @@ def main():
     CHUNK = 500
     for base in range(0, len(cases), CHUNK):
         chunk = cases[base: base + CHUNK]
-        results, crashed, diag = run_engine([(h, s) for h, s, _sel, _b, _sup in chunk])
+        # budget bombs are deliberate here (see the BUDGET verdict), so do NOT ask the bridge to treat
+        # an over-budget schema as a harness error — surviving it with empty/partial columns is the test
+        results, crashed, diag = run_engine([(h, s) for h, s, _sel, _b, _sup in chunk],
+                                            strict_budget=False)
         stat["CRASH"] += crashed
         if diag:
             crash_diags.append((base, diag))
@@ -436,7 +539,7 @@ def main():
     print(f"  {'CRASH':<12} {stat['CRASH']:>8}  <-- gate: engine panic\n")
 
     print("  by category:  category      pairs  AGREE  UNSUP  BUDGET  OVERMATCH  WRONG")
-    for c in ("css", "xpath", "comma", "exotic", "malformed", "bomb"):
+    for c in ("css", "xpath", "comma", "exotic", "escaped", "quoted", "malformed", "bomb"):
         d = cat[c]
         p = sum(d.values())
         print(f"    {c:<12}{p:>8}{d['AGREE']:>7}{d['UNSUPPORTED']:>7}{d['BUDGET']:>8}"
@@ -466,6 +569,13 @@ def _category(sel):
         return "bomb"
     if s.startswith(("/", ".//")):
         return "xpath"
+    # a delimiter INSIDE a quoted value is the quoted-delimiter family, whether or not it also carries an
+    # escape — checked before "escaped" so the two categories do not collide in the report
+    if any(d in s for d in ('=")', "=')", '="(', "='(", '=",', "=',", '*="\\29', '*="\\2c',
+                            '="a(b', '$=")')):
+        return "quoted"
+    if "\\" in s:
+        return "escaped"
     if any(x in s for x in (":nth", ":first", ":hover", "::before", ">>", ":is(", " i]", ":::")):
         return "exotic"
     if any(x in s for x in ("[", "]", "(", ")")) and not _balanced(s):

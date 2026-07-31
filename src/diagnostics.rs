@@ -106,12 +106,13 @@ fn xpath_reason(qt: &str) -> String {
 fn css_reason(qt: &str) -> String {
     let lower = qt.to_ascii_lowercase();
     let msg = if lower.contains(":has(") {
-        ":has() is supported as `:has(<compound>)` / `:has(> <compound>)` on the SUBJECT of a lone \
-         selector with an attached `::text`/`::attr` or bare-element terminal — the inner may be a \
+        ":has() is supported as `:has(<compound>)` / `:has(> <compound>)` on ONE compound of a lone \
+         selector — the value may be that element's own (`div:has(a)::attr(id)`), its subtree \
+         (`div:has(a) ::text`), or a DESCENDANT's (`div:has(a) a::attr(href)`). The inner may be a \
          tag/`*`/id/class/attribute/`:not` compound (id/attribute/`:not` inners are a divergence in our \
          favor; cssselect rejects them). Unsupported: a chain/sibling inside (`:has(.a .b)`, \
-         `:has(a + b)`), a comma list, a nested `:has`, a positional inner, or a `:has` on a \
-         non-subject/detached-subtree/group member"
+         `:has(a + b)`), a comma list, a nested/second `:has`, a positional inner, a group member, or a \
+         CHILD step into the value tail (`div:has(a) > p::text` — use the descendant form)"
     } else if lower.contains(":is(") || lower.contains(":where(") {
         ":is()/:where() alternatives must be plain compounds (tag/`*`/class/id/attr/`:not`); a \
          combinator (`:is(a b)`), a positional/reverse/`:has` inside an alternative, or a nested `:is` \
@@ -125,10 +126,11 @@ fn css_reason(qt: &str) -> String {
         || lower.contains(":only-child")
         || lower.contains(":only-of-type")
     {
-        "a reverse position (`:last-*`/`:only-*`/`:nth-last-*`) is supported only as an ATTACHED \
-         `::text`/`::attr(...)` terminal on the SUBJECT of a lone selector; a detached subtree terminal \
-         (`E :last-child ::text`), a comma group, a group sub-field, `*`-of-type, or a reverse on a \
-         non-subject compound isn't"
+        "a reverse position (`:last-*`/`:only-*`/`:nth-last-*`) is supported on ONE compound of a lone \
+         selector, with the value being that element's own (`li:last-child::text`), its subtree \
+         (`li:last-child ::text`), or a DESCENDANT's (`li:last-child b::text`); a comma group, a group \
+         sub-field, `*`-of-type, or a CHILD step into the value tail (`li:last-child > b::text` — use \
+         the descendant form) isn't"
     } else if lower.contains(":nth-") {
         "`:nth-child()`/`:nth-of-type()` on the universal `*` (e.g. `*:nth-of-type(2)`) is \
          unsupported; name the element (`li:nth-of-type(2)`) — that form is supported"

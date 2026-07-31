@@ -22,14 +22,23 @@ bytes ─▶ tokenizer (TokenSink: start/text/end) ─▶ corrected-stack matche
 ```
 
 - **Tokenizer** (`tokenizer.rs`) — a minimal, correctness-first HTML tokenizer over **raw `&[u8]`**.
-  It implements only the states needed to avoid a *global* offset desync: rawtext/RCDATA
-  (`script`/`style`/`textarea`/`title`), comments, CDATA/DOCTYPE/PI skipping, attribute parsing, and
-  "`<`-not-a-tag as text". It emits borrowed byte slices through a source-agnostic `TokenSink` trait —
-  so the matcher is decoupled from it and the tokenizer can be swapped/optimised independently.
+  It implements only the states needed to avoid a *global* offset desync: every one of libxml2's DATA
+  MODES (raw text for `script`/`style`/`iframe`/`noembed`/`noframes`/`xmp`, RCDATA for
+  `textarea`/`title`, PLAINTEXT for `plaintext`, plus script's escaped/double-escaped states), comments,
+  CDATA/DOCTYPE/PI skipping, attribute parsing, and "`<`-not-a-tag as text". A missing data mode is the
+  worst class of bug available here — it *fabricates* elements out of an element's text content and then
+  honours the wrong end tag — so the set is swept against the whole element universe rather than
+  maintained by hand. It emits borrowed byte slices through a source-agnostic `TokenSink` trait — so the
+  matcher is decoupled from it and the tokenizer can be swapped/optimised independently.
 - **Matcher** (`matcher/`) — maintains an open-element stack **reshaped by HTML implied-end-tag
   rules** so combinators match the tree lxml *would* build. Each open element carries a `matched`
   bitset (subject-match per selector) and per-parent `seen`/`prev` frames for sibling combinators.
   Descendant/child are resolved by a right-to-left ancestor walk; `+`/`~` (incl. chains) by the frames.
+  That walk is `O(depth x compounds)`: within a segment the ancestor chain is a **path**, so matching is
+  anchored glob matching — group maximal `>`-runs into contiguous blocks and place each at the deepest
+  feasible position, right to left. Greedy is sound because a deeper placement leaves strictly more room
+  above (exchange argument), and grouping `>`-runs is what makes it sound: greedy on individual compounds
+  gets `a > b c` against `<a><b><b><c>` wrong. Searching combinations instead was exponential.
 - **Selectors** — `selector.rs` parses the CSS subset; `xpath.rs` compiles the **downward** XPath
   subset to the *same* `Selector` model (so XPath and CSS share matching + performance).
 
@@ -39,13 +48,34 @@ Frostwork runs the HTML5 *tokenizer* faithfully but not the HTML5 *tree-construc
 Instead it applies the small set of implied-close rules libxml2 actually uses (`implied_close.rs`,
 derived empirically against lxml):
 
-- **Implied end tags**: `li`; `dd`/`dt`; `option`/`optgroup`; `td`/`th`/`tr` + table sections; `rt`/`rp`.
-  An open `<p>` is closed by *any* block-level or list/table-item start tag.
+- **Implied end tags** are NOT uniform per family — every cell is verified individually, because the
+  families disagree with each other and with HTML5. A same-tag repeat auto-closes for
+  `li`/`option`/`tr`/`td`/`th`/`tbody`/`p` but **nests** for `dt`/`dd`/`rt`/`rp`/`optgroup`/`thead`/
+  `tfoot`/`caption`. `<tbody>`/`<tfoot>` close an open row/cell; `<thead>` does not. `<colgroup>` is
+  closed by a section or a row, and closes an open `<caption>` or `<p>`.
 - **`<p>`-closing set** = the HTML4 block list (`div`, `p`, `h1`–`h6`, `ul`, `ol`, `dl`, `menu`, `dir`,
-  `center`, `address`, `blockquote`, `fieldset`, `form`, `pre`, `table`, `hr`) — **not** the HTML5
-  sectioning elements (`section`/`article`/`header`/…), which libxml2 leaves inside `<p>`.
-- **Void set** = `area base br col hr img input link meta param` — libxml2 2.14 treats
+  `center`, `address`, `blockquote`, `fieldset`, `form`, `pre`, `table`, `hr`) plus list/table *items*
+  (`li`, `dd`, `dt`, `tr`, `td`, `th`, `tbody`, `tfoot`, `caption`) — **not** the HTML5 sectioning
+  elements (`section`/`article`/`header`/…), and **not** `option`/`optgroup`/`thead`/`rt`/`rp`, all of
+  which libxml2 leaves nested inside the `<p>`.
+- **Table scope**: an ordinary end tag never unwinds a table. With a table-scoped element open above its
+  match, libxml2 discards the tag (`<div><table><tr><td>A</div>B` keeps `AB` in the cell). The set is
+  per element and excludes `caption`/`colgroup`, which is only visible BARE — wrapped in a `<table>`
+  the table blocks regardless, which is how a wrong `caption` entry survived the first audit.
+- **Void set** = `area base basefont br col frame hr img input isindex link meta param` — libxml2 2.14
+  treats the HTML4-only `basefont`/`frame`/`isindex` as empty and the HTML5-era
   `embed`/`source`/`track`/`wbr` as **non-void**, so Frostwork does too.
+- **Start-close NAME pairs** (`start_closes`) are a second, finer table: libxml2 decides "does this start
+  tag close that open element?" from a hardcoded name-pair list, so `<td>` closes an open `<b>` but not
+  an `<em>`. That table is **generated** by `tools/gen_tree_rules.py` from the oracle rather than written
+  — three successive hand-written versions each omitted names (and with them whole rules), which is a
+  code-generation problem, not a diligence problem.
+- **The document frame** (`<html>`/`<head>`/`<body>`) is accepted only where it belongs and ignored
+  elsewhere, with a phantom-entry counter so the matching end tag pops the ignored tag rather than
+  closing the document. This is deliberately *not* frame synthesis: the engine never invents a frame the
+  byte stream does not contain.
+- None of these arms had differential coverage until `tools/audit_tree_rules.py` enumerated them cell by
+  cell against lxml. Add a row there when you add a rule; docs/TESTING.md has what that turned up.
 
 **Guiding principle — local divergence, never global desync.** Accepted divergences are always *local*
 (one field differs). The states that would cause a *global* offset desync (rawtext, comment/CDATA
@@ -59,9 +89,14 @@ adoption agency, deep-`<p>`) is accepted and documented, because libxml2 barely 
 - **Outer HTML** (bare element / node query) — the element's **raw source bytes**, a deliberate
   divergence from lxml's tree *reflow* (which normalizes quotes/case/whitespace and synthesizes omitted
   end tags). Raw source is cheaper, faithful, and **re-parse-equivalent**.
-- **Encoding** — resolved BOM → caller label → `<meta charset>` → UTF-8. Tokenization stays on raw
-  bytes for every ASCII-compatible encoding; only emitted values are decoded (`encoding_rs`). UTF-16
-  is transcoded up front.
+- **Encoding** — resolved BOM (incl. the BOM-less UTF-16 `<?` prefix) → caller label → prescan of the
+  first 1024 bytes (`<meta charset>` and an XML declaration) → UTF-8. Tokenization stays on raw bytes for
+  every ASCII-compatible encoding; only emitted values are decoded (`encoding_rs`). UTF-16 is transcoded
+  up front. The target is browser/WHATWG behaviour, not w3lib parity — see COMPATIBILITY.md for the table
+  of deliberate differences.
+- **Raw NUL** is deleted from the whole document before tokenizing, as Parsel/w3lib do. It has to be
+  before, not at emit time: a NUL inside a tag or attribute *name* is invisible to lxml, so dropping it
+  only from values made the two sides disagree about the tree. One `memchr` on the ordinary path.
 
 ## Deferred-to-close constraints: positions, `:has()`, upward axes
 
@@ -79,11 +114,51 @@ promoted to the parent (for `:last-*`/`:only-*` a single slot, overwritten — o
 candidate can win, so resolution is O(1) per parent; `:nth-last-*` buffers each matching child, bounded
 by that parent's subtree); at the parent's close the total is read from the counter frame and qualifying
 values are committed. Because a nested last-child resolves before an outer one, committed values carry a
-byte offset and are re-sorted into document order at finish. Reverse is scoped to the selector's
-**subject** with an **attached** `::text`/`::attr` terminal: a detached subtree terminal would inherit
-lxml's merging of text nodes made adjacent by restructuring (a divergence that also affects plain
-`div ::text`), and a `Many`/`One` sub-field or non-subject compound is out of this tier — all yield an
-empty column, never a wrong value.
+byte offset and are re-sorted into document order at finish. Reverse is scoped to a single segment; a
+`Many`/`One` sub-field or a comma member is out of this tier and yields an empty column, never a wrong
+value.
+
+**Where the value lives is a separate question from which predicate defers**, and all three deferred
+tiers (reverse, `:has()`, text-predicate) share one answer. The value may be the deferred element's own
+(`li:last-child::text`, `div:has(a)::attr(id)`) — that streams as described above. But it may also be its
+whole **subtree** (`li:last-child ::text`, `div:has(a) ::text`) or a **descendant's**
+(`li:last-child b::text`, `div:has(a) a::attr(href)`), and neither can stream: the engine would have to
+buffer a whole subtree per candidate until resolution, which is exactly the retention the no-tree design
+exists to avoid. So those **backtrack** instead — the candidate carries only its raw span `(start, end)`,
+and a winner's values are recovered afterwards by re-scanning that span (`split_deferred` picks the tail
+schema; `resolve_tail_spans` runs it). Three things make this work:
+
+- *The span is self-contained.* An end tag inside it that matched an ancestor would have ENDED the span,
+  and one discarded by table scope behaves identically standalone — the same re-parse-equivalence the
+  differential already proves for outer-HTML node queries.
+- *The re-scan runs the real engine.* The tail is a compiled sub-schema — `* ::text` / `* ::attr(name)`
+  for a subtree terminal, or the selector's own compounds after the deferred one for a descendant value,
+  with `strict_desc` set so the span's root is excluded (`div:has(a) div::text` means a *proper*
+  descendant). It therefore inherits dropped-end-tag coalescing, table scope and implied close rather
+  than re-deriving them; a hand-rolled collector here would silently re-introduce the split-text bug. An
+  unsupported tail marks the entry dead, so the audit keeps reporting the selector unsupported instead of
+  the column quietly coming back empty. Only a DESCENDANT step into the tail is expressible this way — a
+  child anchor (`div:has(a) > p`) would need "depth exactly 1 in the fragment", the same limit that makes
+  grouped sub-fields reject `./x`.
+- *Winners nest*, so a contained span's values are a subset of its container's. Element spans only nest
+  or are disjoint, so keeping the MAXIMAL spans de-duplicates exactly — and that also bounds the cost:
+  nested winners collapse to one span, so the re-scan is a single bounded extra pass (~2× a plain
+  subtree query, flat in nesting depth) rather than depth-multiplied.
+
+Retention per candidate is therefore two integers, and the streaming path is untouched.
+
+That "single bounded extra pass" is **per selector**, though: each deferred tail is its own sub-schema, so
+N tail-bearing fields over the same outer subtree re-scan it N times, losing the multi-selector scan
+sharing the main pass has. Measured on a 200 KB product listing (`bench_matrix`'s `TAIL_POOL`): one tail
+field costs ~2.6× a plain one and eight cost ~4.3×, i.e. the penalty grows with FIELD COUNT. Left as is
+deliberately — the absolute cost is milliseconds and no real schema is tail-heavy yet — but it is now in
+the benchmark so the decision is revisitable. The fix, if it ever matters, is merging tails that share a
+deferred prefix into one sub-schema (their winner spans are identical by construction).
+
+For contrast, the other suspected hot spot in this tier was **rejected by measurement**: `sub_hits` with a
+subtree terminal loops `seg_match` over `floor..=top`, which looks like O(depth² × compounds) per text
+node, but a grouped subtree sub-field measures ~1.0× an attached one from nesting depth 2 to 40. Per the
+repo's rule, that stays unoptimised until a workload shows a win.
 
 **`:has()`** rides the same discipline, but resolves at the element's *own* close (its descendants are
 all known then) rather than the parent's. A provisional structural subject match at open starts

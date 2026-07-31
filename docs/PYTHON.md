@@ -222,8 +222,9 @@ report.raise_for_status()   # raises frostwork.UnsupportedSelector unless ok
 The primitive and both page-object layers validate by default:
 
 ```python
-# frostwork.Page  (`li:last-child::text` IS supported; the DETACHED subtree form below is not)
-page = Page().field("title", "h1::text").field("bad", "li:last-child ::text")
+# frostwork.Page  (a reverse position IS supported — attached, subtree, or a descendant value; a CHILD
+# step into that value tail is not, so `bad` below is the unsupported one)
+page = Page().field("title", "h1::text").field("bad", "li:last-child > b::text")
 page.check()                      # -> SchemaReport
 page.extract(html)                # raises UnsupportedSelector before scanning
 page.extract(html, strict=False)  # permissive: `bad` is empty

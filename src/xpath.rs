@@ -39,9 +39,15 @@ fn valid_name(s: &str) -> bool {
     // here so the query is unsupported (empty column, matching the oracle) instead of case-insensitively
     // over-matching via the matcher's `eq_ignore_ascii_case`. CSS is unaffected (cssselect lowercases,
     // so uppercase CSS names are meant to match). Non-ASCII attribute *values* are handled downstream.
-    !s.is_empty()
-        && s.bytes()
-            .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b':' | b'.'))
+    // A NAMESPACE PREFIX (`svg:rect`, `@x:y`) needs a prefix->URI binding, and there is no API to supply
+    // one, so lxml raises "undefined namespace prefix" - `//div/@x:y` used to RETURN the attribute value
+    // for an expression the oracle refuses to run. Reject the colon until bindings exist.
+    // A leading digit / hyphen / dot is not a valid XML name start either (lxml: invalid expression).
+    let ok_chars = |s: &str| {
+        s.bytes().all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.'))
+    };
+    let starts_ok = matches!(s.as_bytes().first(), Some(b'a'..=b'z' | b'_'));
+    !s.is_empty() && starts_ok && ok_chars(s)
 }
 
 /// Cap on how many members one query may expand to (union parts × per-step `or` alternatives). Real
@@ -860,5 +866,31 @@ mod tests {
         assert!(ok(".//div//text()"));
         assert!(ok(".//a/@href"));
         assert!(ok(".//div/h3/text()")); // only the LEADING anchor is the issue; inner `/` is enforced
+    }
+}
+
+#[cfg(test)]
+mod support_boundary_tests {
+    use super::*;
+
+    /// An expression lxml REJECTS must be unsupported here, not answered. `//div/@x:y` was the worst
+    /// case: lxml raises "undefined namespace prefix" and we returned the attribute's value — a wrong
+    /// value from an expression the oracle refuses to run.
+    #[test]
+    fn expressions_lxml_rejects_are_unsupported() {
+        for q in [
+            "//div/@1",            // attribute name starting with a digit -> lxml: invalid expression
+            "//1div/text()",       // element name starting with a digit
+            "//svg:rect/text()",   // namespace prefix, no bindings -> lxml: undefined prefix
+            "//div/@x:y",          // prefixed attribute -> lxml: undefined prefix
+            "//a:b/@c:d",
+            "//div/@-1",
+        ] {
+            assert!(compile(q).is_none(), "lxml rejects {q:?}, so it must be unsupported here");
+        }
+        // ...and the valid neighbours must keep working
+        for q in ["//div/@data-x", "//div/text()", "//div/@x", "//x-y/text()", "//div/@_x"] {
+            assert!(compile(q).is_some(), "{q:?} is valid and must stay supported");
+        }
     }
 }

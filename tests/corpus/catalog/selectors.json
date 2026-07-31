@@ -1,0 +1,13 @@
+{
+  "titles": "li.card > h3.title::text",
+  "title_text": "li.card h3 ::text",
+  "prices": "li.card > span.price::text",
+  "links": "li.card > a::attr(href)",
+  "ruby_reading": "ruby > rt::text",
+  "sort_groups": "select > optgroup::attr(label)",
+  "group_options": "select > optgroup > option::attr(value)",
+  "all_options": "select option::text",
+  "spec_cell": "div.spec td::text",
+  "last_card_price": "li.card:last-child span.price::text",
+  "cards_with_links": "li:has(a) h3::text"
+}
