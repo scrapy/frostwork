@@ -37,13 +37,33 @@ SMOKE = False
 # Deferred-TAIL selectors: their values come from a re-scan of each winner's span rather than the
 # streaming pass (see docs/DESIGN.md), so each one costs its own extra pass over the matched subtrees and
 # they do NOT share the scan the way pool selectors do. Measured on an 800-card page: one tail field is
-# ~2.1x a plain field and eight are ~4.2x, i.e. the cost grows with FIELD COUNT. Kept as a separate pool
+# ~2.6x a plain field and eight are ~4.2x, i.e. the cost grows with FIELD COUNT. Kept as a separate pool
 # so that stays visible instead of being invisible in the headline numbers.
 TAIL_POOL = [
     "div:has(a) a::attr(href)", "div:has(a) p::text", ".product:has(img) .price::text",
     ".product:has(a) .title::text", "div:has(p) a::text", ".product:has(.price) img::attr(src)",
     "li:last-child a::attr(href)", "div:has(a) ::text",
 ]
+
+# CLASS-LED, high field count — the regime where the matcher's per-(element, selector) STRING work
+# dominates: every class-led compound asks the element for its `class=` and looks for its own token,
+# so a utility-CSS page (many class tokens per element) times that work N_selectors x N_elements.
+# The tag-led POOL above barely exercises it (a tag test is one memcmp), so a matcher change that
+# targets class/id comparison is invisible there — this table is the one that can show it, in either
+# direction. Most fields deliberately DON'T match: a real schema is written for one site's template
+# and its misses still cost a test per element.
+CLASS_POOL = [
+    ".price::text", ".title::text", ".desc::text", ".thumb::attr(src)", ".link::attr(href)",
+    ".card .price::text", ".card .title::text", ".product-card .desc::text",
+    ".badge::text", ".rating::text", ".sku::text", ".stock-label::text",
+    ".card .badge .value::text", ".breadcrumb a::attr(href)", ".pagination .next::attr(href)",
+    ".facet .label::text", ".swatch::attr(data-color)", ".promo .text-xl::text",
+    ".review .author::text", ".review .body::text", ".seller-name::text", ".shipping-note::text",
+    ".card .price-was::text", ".card .price-now::text", ".gallery img::attr(src)",
+    ".spec-table .name::text", ".spec-table .value::text", ".qty-input::attr(value)",
+    ".wishlist::attr(href)", ".compare::attr(href)", ".variant .title::text", ".tag-list a::text",
+]
+CLASS_COUNTS = [4, 8, 16, 32]
 
 
 # ---- page generators (deterministic, ~size bytes) ----
@@ -73,6 +93,24 @@ def table(size):
     while n < size:
         body.append(row); n += len(row)
     return f'<!DOCTYPE html><html><head><title>Data</title></head><body><table><tbody>{"".join(body)}</tbody></table></body></html>'.encode()
+
+
+def class_heavy(size):
+    """Utility-CSS markup: every element carries a handful of class tokens (the shape Tailwind-style
+    sites produce), so a class-led selector's token search is real work rather than a 1-token hit."""
+    card = ('<div class="card product-card flex flex-col rounded-lg shadow-sm p-4 mb-2">'
+            '<h3 class="title text-lg font-semibold leading-tight truncate">Widget Pro</h3>'
+            '<span class="price text-xl font-bold text-green-700">$19.99</span>'
+            '<a class="link btn btn-primary inline-block mt-2" href="/p/123">view</a>'
+            '<img class="thumb rounded object-cover w-full" src="/img/w.jpg" alt="w">'
+            '<p class="desc text-sm text-gray-600 leading-snug">A useful widget for many tasks.</p>'
+            '</div>')
+    body, n = [], 0
+    while n < size:
+        body.append(card); n += len(card)
+    return ('<!DOCTYPE html><html><head><title>Shop</title></head>'
+            f'<body><div class="grid grid-cols-3 gap-4 px-6">{"".join(body)}</div>'
+            '</body></html>').encode()
 
 
 def deep_nested(size):
@@ -145,24 +183,50 @@ def parsel_bench(html_bytes, sels):
     return (time.perf_counter() - t) / iters * 1e6
 
 
-def run_table(name, html_bytes, counts=COUNTS):
+def run_table(name, html_bytes, counts=COUNTS, pool=None, engine_only=False):
+    pool = pool or POOL
     kb = len(html_bytes) / 1024
     print(f"\n### {name}  ({kb:.0f} KB)")
-    print(f"  {'sels':>4} | {'engine µs':>10} {'MB/s':>7} {'vals':>6} | {'parsel µs':>10} | {'speedup':>7}")
-    print("  " + "-" * 60)
+    cols = f"  {'sels':>4} | {'engine µs':>10} {'MB/s':>7} {'vals':>6}"
+    print(cols if engine_only else f"{cols} | {'parsel µs':>10} | {'speedup':>7}")
+    print("  " + "-" * (34 if engine_only else 60))
     for c in counts:
-        sels = POOL[:c]
+        sels = pool[:c]
         eus, embs, vals = engine_bench(html_bytes, sels)
+        row = f"  {c:>4} | {eus:>10.1f} {embs:>7.0f} {vals:>6}"
+        if engine_only:
+            print(row)
+            continue
         pus = parsel_bench(html_bytes, sels)
-        print(f"  {c:>4} | {eus:>10.1f} {embs:>7.0f} {vals:>6} | {pus:>10.1f} | {pus/eus:>6.1f}x")
+        print(f"{row} | {pus:>10.1f} | {pus/eus:>6.1f}x")
+
+
+def class_led_table():
+    """The class-led, high-field-count sweep — see CLASS_POOL. Also runs the tag-led POOL over the same
+    page, so a matcher change's effect on class work can be read against its effect on tag work. That
+    contrast is engine-vs-engine, so it skips Parsel (which costs minutes per cell at 32 selectors)."""
+    html = class_heavy(200_000)
+    run_table("class-led — utility-CSS page, N class selectors", html, CLASS_COUNTS, CLASS_POOL)
+    run_table(
+        "class-led page, tag-led selectors (same page, engine only, for contrast)",
+        html, CLASS_COUNTS, POOL, engine_only=True,
+    )
 
 
 def main():
     global SMOKE
     ap = argparse.ArgumentParser()
     ap.add_argument("--smoke", action="store_true", help="quick article/deep check at 8 and 32 selectors")
+    ap.add_argument("--class-led", action="store_true",
+                    help="only the class-led high-field-count table (the matcher string-work regime)")
     args = ap.parse_args()
     SMOKE = args.smoke
+    if args.class_led:
+        print("=" * 64)
+        print("CLASS-LED SCHEMA x FIELD COUNT  (engine vs Parsel, µs/page)")
+        print("=" * 64)
+        class_led_table()
+        return
     med = 200_000
     pages = (
         [("article (text-heavy)", article(med)), ("deep-nested", deep_nested(med))]
@@ -188,6 +252,8 @@ def main():
 
     if args.smoke:
         return
+
+    class_led_table()
 
     # grouped (Many/One): one `.product` container × {1,3,5} subs vs Parsel's per-container loop.
     # This measures the single-pass per-instance × per-sub on-demand evaluation the grouped path adds.

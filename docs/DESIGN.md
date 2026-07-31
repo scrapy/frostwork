@@ -35,6 +35,16 @@ bytes ─▶ tokenizer (TokenSink: start/text/end) ─▶ corrected-stack matche
   feasible position, right to left. Greedy is sound because a deeper placement leaves strictly more room
   above (exchange argument), and grouping `>`-runs is what makes it sound: greedy on individual compounds
   gets `a > b c` against `<a><b><b><c>` wrong. Searching combinations instead was exponential.
+  Before any of that runs, each `(element, compound)` pair meets a **one-sided signature filter**
+  (`matcher/sig.rs`, the shape of WebKit/Blink's `SelectorFilter`): at open, an element hashes its tag
+  name, `id` and each `class` token to two bits each of a `u64`; each compiled compound carries the same
+  bits for its own positive tag/id/classes; `compound_matches` opens with `el.sig & c.req != c.req →
+  false`. One AND rejects most pairs before a string is touched. A set bit is **necessary, never
+  sufficient** — collisions produce false positives, which cost only the exact comparisons that always
+  ran, while a false negative would be a silently dropped value. So the hash must mirror each
+  predicate's own equality: the tag is ASCII-folded on both sides (`eq_ignore_ascii_case`), `id` and
+  class tokens are hashed verbatim (`==`), and nothing is contributed by `:not()` (inverted), `:is()`
+  (an OR), attribute predicates, or positions.
 - **Selectors** — `selector.rs` parses the CSS subset; `xpath.rs` compiles the **downward** XPath
   subset to the *same* `Selector` model (so XPath and CSS share matching + performance).
 
@@ -194,12 +204,32 @@ descendant's emission and stays an empty column.
   the parse cost per *schema*, not per *page*. The per-page recompile it removes is negligible against
   a large page's scan, but on small pages it dominates: ~3× fewer µs/page on a 244-byte page with 8
   selectors. `extract`/`extract_grouped` remain as one-shot convenience (a throwaway `Plan`).
+- **One-sided signature filter** (`matcher/sig.rs`, described under *Pipeline*) — the matcher's cost is
+  `selectors × elements`, and before this every pair paid string work: a `memcmp` per tag test, and per
+  class test an `attrs` scan plus a fresh `split_whitespace` of `class=`. The filter answers "could this
+  compound match at all?" in one AND. It is where the *class-led, high-field-count* schema — the shape
+  real page objects have — gets most of its time back; measured against the pre-filter build on the
+  class-heavy page (`tools/bench_matrix.py --class-led`): −18% at 4 class-led fields, −31% at 8, −50% at
+  16, −63% at 32; on the product listing −16% at 8 and −31% at 32; and −2% to −28% on the tag-led pools,
+  which use the filter far less (a tag test is one `memcmp`). Signatures are built per start tag, so each
+  KIND of bit is included only for a schema that performs at least two tests of that kind
+  (`sig::BITS_MIN`) — below that the bits leave both sides, because hashing every element's class list to
+  save one comparison is a loss (measured: −11% before this rule, ±1% after). Compile pays ~0.4 µs more
+  per schema (11 selectors), which the `Plan` reuse model amortizes to nothing but a one-shot `extract`
+  on a ~1 KB page can still see as a percent or two.
 - **Rejected by measurement (do not re-attempt without a workload that shows a win):** a SIMD
-  structural index (the base scan is per-*element* bound, not per-byte; memchr already bulk-skips text)
-  and a subject-tag dispatch index (real selectors are class-led, so it can't bucket them).
+  structural index (the base scan is per-*element* bound, not per-byte; memchr already bulk-skips text);
+  a subject-tag dispatch index (real selectors are class-led, so it can't bucket them); **caching each
+  element's split `class=` tokens** on the open-element stack (inline `(start, len)` ranges, no
+  allocation) — on its own it was worth −27% to −51% on class-led schemas, but on top of the signature
+  filter it added only ~3% at 8+ class fields while taxing every other workload ~8–11% for the 40 bytes
+  it added to each stack element, so it was reverted; and an **eight-bytes-per-multiply hash** for the
+  signature (word load + whole-word case fold), which measured no faster than byte-at-a-time FNV-1a
+  because short tokens pay a variable-length copy per word.
 
-Result: ~12–20× Parsel on realistic pages at typical field counts, up to ~40–54× on rich schemas — the
-one-pass advantage grows with field count. Numbers + methodology: [BENCHMARKS.md](BENCHMARKS.md).
+Result: ~11–20× Parsel on realistic pages at typical field counts, up to ~50–61× on rich schemas — the
+one-pass advantage grows with field count, and a one-field schema is the weak case (3–6×). Numbers +
+methodology: [BENCHMARKS.md](BENCHMARKS.md).
 
 ## Page-object layer
 

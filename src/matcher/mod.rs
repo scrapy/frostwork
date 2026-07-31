@@ -32,6 +32,7 @@ mod decode;
 mod compile;
 mod deferred;
 mod matching;
+mod sig;
 
 use compile::{
     any_has, any_reverse, any_text_pred, deferrable_has, deferrable_reverse,
@@ -94,6 +95,17 @@ pub struct OpenElem<'a> {
     /// an open `<b>` but not an open `<em>`, and both are `tag::OTHER`.
     scid: u8,
     attrs: Vec<(&'a [u8], Cow<'a, str>)>, // only "interesting" attrs; value entity-decoded (lazy Cow)
+    /// This element's identity signature: the Bloom bits of its tag, `id`, and class tokens, built
+    /// once at open and ANDed against each compound's `req` before any string comparison (see [`sig`]).
+    /// 0 when the schema requires no bits at all (`!wants.any()`), which makes the test a no-op.
+    ///
+    /// INVARIANT: this is built from the MATERIALIZED `attrs`, which hold only the schema's
+    /// "interesting" set — so it can carry class/id bits only for a schema that asked for those
+    /// attributes. `collect_interesting` adds `class`/`id` whenever ANY compiled compound references
+    /// them, and a `req` can only carry class/id bits if some compound did, so whenever a `req` demands
+    /// them this signature was built from the same data. Materializing fewer attributes than the
+    /// compounds reference would turn this filter into silently dropped values.
+    pub(super) sig: u64,
     matched: u128, // bit k: this element is a subject match for member-selector k (≤128 members)
     matched_tree: u128, // OR of `matched` over this element and its open ancestors
     text_cols: u128, // flat output columns that want a text event directly under this element
@@ -128,22 +140,28 @@ pub struct OpenElem<'a> {
 }
 
 impl<'a> OpenElem<'a> {
-    /// A bare element for matching-kernel tests: a tag, no attributes, no bookkeeping. Only the
-    /// `matching` unit tests build elements directly; the scan always goes through `start_tag`.
-    #[cfg(test)]
-    pub(super) fn for_test(tag: &'a [u8]) -> Self {
-        OpenElem {
+    /// A freshly opened element: the tokenizer's facts, plus the signature DERIVED from the
+    /// materialized `attrs`. The only constructor — the scan and the unit-test builders both go through
+    /// it, so a derived field cannot be set at one site and forgotten at the other. `wants` is what the
+    /// schema's compounds require (see [`sig::Wants`]); when they require nothing, every `req` is 0 and
+    /// the signature would filter nothing, so it isn't built.
+    fn open(
+        tag: &'a [u8], tid: u8, scid: u8, attrs: Vec<(&'a [u8], Cow<'a, str>)>, start: usize,
+        wants: sig::Wants,
+    ) -> Self {
+        let mut e = OpenElem {
             tag,
-            tid: 0,
-            scid: 0,
-            attrs: Vec::new(),
+            tid,
+            scid,
+            attrs,
+            sig: 0,
             matched: 0,
             matched_tree: 0,
             text_cols: 0,
             seen: 0,
             prev: 0,
             anchor: 0,
-            start: 0,
+            start,
             cap_cols: 0,
             insts: 0,
             gcaps: Vec::new(),
@@ -158,7 +176,53 @@ impl<'a> OpenElem<'a> {
             txt_subj: 0,
             txt_states: Vec::new(),
             txt_emit: Vec::new(),
+        };
+        if wants.any() {
+            e.sig = e.signature(wants);
         }
+        e
+    }
+
+    /// This element's Bloom signature, over exactly the sources `compound_matches` compares
+    /// positively — and only the KINDS of source some compound requires (see [`sig::Wants`]: a schema
+    /// with no class-led compound must not pay to hash every element's class list).
+    ///
+    /// Built through the element's OWN accessors (`attr`, `each_class`) rather than by re-reading
+    /// `attrs`, so "which `id`, which `class` attribute, which tokens" cannot answer differently here
+    /// than in the predicate the filter guards — including for markup that repeats the attribute, where
+    /// both sides take the first.
+    fn signature(&self, wants: sig::Wants) -> u64 {
+        let mut s = if wants.tag { sig::tag_bits(self.tag) } else { 0 };
+        if wants.id {
+            if let Some(id) = self.attr("id") {
+                s |= sig::id_bits(id.as_bytes());
+            }
+        }
+        if wants.class {
+            self.each_class(|cls| s |= sig::class_bits(cls.as_bytes()));
+        }
+        s
+    }
+
+    /// A bare element for matching-kernel tests: a tag, no attributes, no bookkeeping. Only the
+    /// `matching` unit tests build elements directly; the scan always goes through `start_tag`.
+    #[cfg(test)]
+    pub(super) fn for_test(tag: &'a [u8]) -> Self {
+        Self::open(tag, 0, 0, Vec::new(), 0, sig::Wants::all())
+    }
+
+    /// A test element WITH attributes (`&'static str` values, borrowed like the scan's clean-UTF-8
+    /// case), so the class/id-dependent predicates and the signature can be exercised directly.
+    #[cfg(test)]
+    pub(super) fn for_test_attrs(tag: &'a [u8], attrs: &[(&'a [u8], &'a str)]) -> Self {
+        Self::open(
+            tag,
+            0,
+            0,
+            attrs.iter().map(|&(n, v)| (n, Cow::Borrowed(v))).collect(),
+            0,
+            sig::Wants::all(),
+        )
     }
 
     pub(super) fn attr(&self, name: &str) -> Option<&str> {
@@ -169,6 +233,12 @@ impl<'a> OpenElem<'a> {
     }
     pub(super) fn has_class(&self, cls: &str) -> bool {
         self.attr("class").is_some_and(|v| v.split_whitespace().any(|t| t == cls))
+    }
+    /// Every `class=` token of this element, in source order — what [`Self::signature`] needs, as
+    /// opposed to `has_class`'s membership test. Both read `attr("class")` and split it the same way, so
+    /// the tokens the signature hashes are exactly the tokens the predicate compares.
+    fn each_class(&self, f: impl FnMut(&str)) {
+        self.attr("class").into_iter().flat_map(str::split_whitespace).for_each(f);
     }
 }
 
@@ -498,6 +568,11 @@ pub struct CompiledSchema {
     // deferred (preceding-sibling-predicate) boundary fires only at its `C`'s close, not at open. All
     // ones when no Case-B selector is compiled — the hot sibling path is then unchanged.
     trig_immediate_mask: u64,
+    // What the compiled compounds require of an element signature (see `sig::Wants`) — derived by the
+    // same walk that fills the `req`s, so the two cannot disagree. That is the whole safety argument
+    // for letting the scan build LESS than a full signature: a kind of bit no `req` asks for can be
+    // left out, but one that is asked for must always be present.
+    wants: sig::Wants,
 }
 
 /// Per-page scan state, borrowing a compiled [`CompiledSchema`] and the document bytes. One is built,
@@ -924,6 +999,58 @@ impl CompiledSchema {
         let has_ns_element = entries
             .iter()
             .any(|cs| matches!(&cs.terminal, Terminal::NormalizeSpace(inner) if matches!(**inner, Terminal::OuterHtml)));
+
+        // Signature requirements (see `sig`): ONE pass over every tier that holds compiled compounds,
+        // filling each `Compound::req` and accumulating what the scan must build (`sig::Wants`). Both
+        // jobs in the same walk on purpose — a tier missing here keeps `req == 0` (its filter is a
+        // no-op) and adds nothing to `wants`, so an omission costs speed and can never drop a match.
+        // Tail schemas are themselves `CompiledSchema`s, already finalized by their own `compile` call.
+        fn seg_reqs(seg: &mut Segment, o: sig::Opts, w: &mut sig::Wants) {
+            for c in &mut seg.parts {
+                sig::set_req(c, o, w);
+            }
+        }
+        // Are tag / class bits worth their per-element hash for THIS schema (see `sig::BITS_MIN`)? The
+        // count is over the source selectors, which is a superset of what compiles — a cost estimate,
+        // not a correctness input: `opts` drives the element signature and every `req` alike, so a
+        // miscount can only buy or forgo the optimization.
+        let (tag_tests, class_tests) = queries
+            .iter()
+            .flatten()
+            .chain(groups.iter().flat_map(|(c, subs)| c.iter().chain(subs.iter().flatten())))
+            .flat_map(|sel| sel.parts.iter())
+            .map(sig::tests)
+            .fold((0, 0), |(t, c), (dt, dc)| (t + dt, c + dc));
+        let opts = sig::Opts {
+            tag: tag_tests >= sig::BITS_MIN,
+            class: class_tests >= sig::BITS_MIN,
+        };
+        let mut wants = sig::Wants::default();
+        for cs in &mut entries {
+            for seg in &mut cs.segments {
+                seg_reqs(seg, opts, &mut wants);
+            }
+        }
+        for g in &mut group_specs {
+            for sub in &mut g.subs {
+                if let Some(seg) = &mut sub.seg {
+                    seg_reqs(seg, opts, &mut wants);
+                }
+            }
+        }
+        for re in &mut reverse_entries {
+            seg_reqs(&mut re.seg, opts, &mut wants);
+        }
+        for he in &mut has_entries {
+            seg_reqs(&mut he.seg, opts, &mut wants);
+            // the `:has()` inner compound is matched by its own `compound_matches` call, against
+            // descendants, so it is a filterable question in its own right
+            sig::set_req(&mut he.has.inner, opts, &mut wants);
+        }
+        for te in &mut text_entries {
+            seg_reqs(&mut te.seg, opts, &mut wants);
+        }
+
         CompiledSchema {
             n_flat_cols: queries.len(),
             n_groups: group_specs.len(),
@@ -945,6 +1072,7 @@ impl CompiledSchema {
             text_entries,
             tail_schemas,
             trig_immediate_mask,
+            wants,
         }
     }
 
@@ -1740,33 +1868,18 @@ impl<'a> TokenSink<'a> for Matcher<'a> {
                 attrs.push((an, decode_attr(av, self.enc)));
             }
         }
-        self.stack.push(OpenElem {
-            tag: name,
+        // The element's signature is built from the MATERIALIZED attributes only. That is sound because
+        // `collect_interesting` adds `class`/`id` to the interesting set whenever any compiled compound
+        // references them, so a `req` carrying class/id bits implies this element's `sig` saw the same
+        // attributes; a schema referencing neither leaves both at 0 and the filter idle.
+        self.stack.push(OpenElem::open(
+            name,
             tid,
             scid,
             attrs,
-            matched: 0,
-            matched_tree: 0,
-            text_cols: 0,
-            seen: 0,
-            prev: 0,
-            anchor: 0,
-            start: span_start,
-            cap_cols: 0,
-            insts: 0,
-            gcaps: Vec::new(),
-            child_index: 0,
-            of_type_index: 0,
-            rev_subj: 0,
-            rev_buf: Vec::new(),
-            rev_pending: Vec::new(),
-            has_subj: 0,
-            has_done: 0,
-            has_buf: Vec::new(),
-            txt_subj: 0,
-            txt_states: Vec::new(),
-            txt_emit: Vec::new(),
-        });
+            span_start,
+            self.schema.wants,
+        ));
         let top = self.stack.len() - 1;
         // Assign this element's 1-based sibling positions from its parent's running counts, BEFORE
         // `eval` (positional compounds read them). Only when the schema uses positions.
@@ -2062,5 +2175,103 @@ mod deferred_state_tests {
         assert!(state.holds(&pred));
         state.update(&pred, "!", false);
         assert!(!state.holds(&pred));
+    }
+}
+
+#[cfg(test)]
+mod sig_wants_tests {
+    use super::*;
+
+    fn wants(queries: &[&str]) -> sig::Wants {
+        let members: Vec<Vec<Selector>> =
+            queries.iter().map(|q| crate::selector::parse_list(q)).collect();
+        CompiledSchema::compile(&members, &[]).wants
+    }
+
+    /// `wants` decides how much of an element signature the scan builds, so it must be live for the
+    /// schemas that can use one and idle for the schemas that cannot. It is derived from the same walk
+    /// that sets the `req`s, so this also witnesses that the walk reaches each tier: a tier it skipped
+    /// would leave a schema that clearly requires bits reporting nothing wanted.
+    #[test]
+    fn wants_is_live_exactly_when_some_compound_requires_bits() {
+        assert!(wants(&[".price::text", ".title::text"]).any());
+        assert!(wants(&["div::text", "p::text"]).any());
+        assert!(wants(&["#main a::attr(href)"]).any());
+        assert!(wants(&["li.card:last-child span.price::text"]).any()); // deferred reverse tier
+        assert!(wants(&["div.box:has(a.deep)::text"]).any()); // deferred `:has` tier
+        // a universal selector requires nothing, so the whole signature machinery stays off
+        assert!(!wants(&["*::text"]).any());
+        assert!(!wants(&["::text"]).any());
+        assert!(!wants(&[]).any());
+    }
+
+    /// The per-KIND flags are the licence to leave bits out of an element's signature, so each must be
+    /// set whenever ANY compound — including one nested in `:not()`/`:is()`, or a `:has()` inner, or a
+    /// grouped sub-field — could ask `has_class`/`attr("id")` about it. A flag that is off while some
+    /// `req` carries that kind of bit is the one way this filter drops a value. Cases meant to be ON
+    /// carry two tests of their kind, so `sig::BITS_MIN` isn't what they measure — the two cases that DO
+    /// measure it say so.
+    #[test]
+    fn per_kind_flags_cover_every_compound_that_asks() {
+        assert!(!wants(&["div::text", "p::text"]).class);
+        assert!(!wants(&["div::text", "p::text"]).id);
+        assert!(wants(&["div::text", "p::text"]).tag);
+        // one test of a kind can't amortize hashing it (`sig::BITS_MIN`), so that kind stays off
+        assert!(!wants(&["div::text"]).tag);
+        assert!(!wants(&[".price::text"]).class);
+        assert!(wants(&[".price::text", ".title::text"]).class);
+        assert!(wants(&["#main::text"]).id);
+        assert!(wants(&["div:not(.skip).x::text"]).class); // negated class: still asked at match time
+        assert!(wants(&["div:is(.a, .b)::text"]).class);
+        assert!(wants(&["div:not(#skip)::text"]).id);
+        assert!(wants(&["div.x:has(.deep)::text"]).class); // `:has` inner, matched against descendants
+        assert!(wants(&["li:last-child.price.sale::text"]).class); // deferred reverse tier
+    }
+
+    /// The class bits are a COST trade (`sig::BITS_MIN`), and turning them off must turn them off
+    /// on BOTH sides — that is the whole reason it is sound. So a schema below the threshold must report
+    /// `class == false` AND leave every compiled `req` free of class bits; if the two ever disagreed, the
+    /// class-led compound would be filtered against a signature that never saw a class.
+    #[test]
+    fn below_the_cost_threshold_class_bits_leave_both_sides() {
+        let one = CompiledSchema::compile(&[crate::selector::parse_list(".price::text")], &[]);
+        assert!(!one.wants.class);
+        assert_eq!(one.entries[0].segments[0].parts[0].req, 0, "req kept class bits the sig lacks");
+        // the same compound in a schema that asks about classes twice: bits on, on both sides
+        let two = CompiledSchema::compile(
+            &[crate::selector::parse_list(".price::text"), crate::selector::parse_list(".title::text")],
+            &[],
+        );
+        assert!(two.wants.class);
+        assert_ne!(two.entries[0].segments[0].parts[0].req, 0);
+    }
+
+    /// A deferred entry whose value comes from a DESCENDANT splits into a prefix (matched in the main
+    /// scan) and a TAIL sub-schema (run over the winner's span). The class-led part of
+    /// `li:last-child span.price.sale::text` lives in the tail, so the main schema legitimately wants no
+    /// class bits — but the tail must want them, since it is the schema whose compounds ask `has_class`.
+    /// Each tail is compiled in its own right, which is what makes that automatic.
+    #[test]
+    fn a_deferred_tail_carries_its_own_wants() {
+        let members = crate::selector::parse_list("li:last-child span.price.sale::text");
+        let schema = CompiledSchema::compile(&[members], &[]);
+        assert!(schema.wants.any() && !schema.wants.class, "prefix is `li:last-child`, no class");
+        let tail = &schema.tail_schemas[0].schema;
+        assert!(tail.wants.class, "the tail's `.price.sale` compound would never be filtered");
+        assert_ne!(tail.entries[0].segments[0].parts[0].req, 0);
+    }
+
+    /// Grouped containers and sub-fields are their own tier; a sub-field's compounds are matched by the
+    /// same `compound_matches`, so they must be walked too.
+    #[test]
+    fn grouped_tier_is_walked() {
+        let subs = vec![Some(crate::selector::parse_list(".price::text").remove(0))];
+        let container = Some(crate::selector::parse_list("div.card").remove(0));
+        let schema = CompiledSchema::compile(&[], &[(container, subs)]);
+        assert!(schema.wants.any());
+        assert!(schema.wants.class, "a grouped sub-field's class token was not accounted for");
+        let sub_seg = schema.groups[0].subs[0].seg.as_ref().expect("single-segment sub");
+        assert_ne!(sub_seg.parts[0].req, 0, "sub-field compound never got its req");
+        assert_ne!(schema.entries[0].segments[0].parts[0].req, 0, "container never got its req");
     }
 }

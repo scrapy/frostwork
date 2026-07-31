@@ -960,6 +960,41 @@ mod tests {
     fn class_and_id() {
         assert_eq!(ex("<div class=\"c\"><span id=\"x\">s</span></div>", ".c #x::text"), v(&["s"]));
     }
+    /// End to end through the signature filter (see `matcher::sig`), which hashes the tag folded and the
+    /// id/class tokens verbatim because that is how the predicates compare them: a mixed-case TAG must
+    /// still match, a wrong-case class or id must still not. Getting either backwards in the hash is a
+    /// silently dropped value, and only a case-MISMATCHED vector can see it.
+    #[test]
+    fn class_and_id_case_rules_survive_the_signature_filter() {
+        let h = "<DIV class=\"Foo bar\" id=\"Bar\"><p>x</p></DIV>";
+        // Selectors with TWO class tests are above the filter's class-bit cost threshold, so these are
+        // the ones that exercise class hashing; the single-class forms below cover the other regime.
+        for hit in ["div.Foo.bar#Bar", "DIV.Foo.bar", ".bar.Foo", "div.Foo#Bar", "dIv.Foo", "#Bar", ".Foo"] {
+            assert_eq!(ex(h, &format!("{hit} p::text")), v(&["x"]), "{hit}");
+        }
+        for miss in
+            ["div.foo.bar", "div.Foo.BAR", "DIV.FOO.bar", "div.foo", "div.FOO", "div#bar", "#BAR", ".foo"]
+        {
+            assert_eq!(ex(h, &format!("{miss} p::text")), v(&[]), "{miss}");
+        }
+    }
+    /// A utility-CSS class list, end to end. Every token of an element's `class=` is hashed into its
+    /// signature, so a long list must still match on ANY of them — early, late, or last — and must not
+    /// match a prefix or suffix of one. Run in both regimes: one class test (signature filters on the tag
+    /// alone) and two (class bits live), since only the second reaches the class hashing.
+    #[test]
+    fn long_class_list_matches_any_token() {
+        let h = "<div class=\"card product-card flex flex-col rounded-lg shadow-sm p-4 mb-2 last\">\
+                 <p class=\"one\">x</p></div>";
+        for hit in ["card", "flex-col", "mb-2", "last", "shadow-sm"] {
+            assert_eq!(ex(h, &format!(".{hit} p::text")), v(&["x"]), "class {hit}");
+            assert_eq!(ex(h, &format!(".card.{hit} p::text")), v(&["x"]), "class .card.{hit}");
+        }
+        for miss in ["car", "flex-", "ast", "p-", "card2"] {
+            assert_eq!(ex(h, &format!(".{miss} p::text")), v(&[]), "class {miss}");
+            assert_eq!(ex(h, &format!(".card.{miss} p::text")), v(&[]), "class .card.{miss}");
+        }
+    }
     #[test]
     fn attr_self() {
         assert_eq!(ex("<a href=\"/p?a=1&amp;b=2\">t</a>", "a::attr(href)"), v(&["/p?a=1&b=2"]));

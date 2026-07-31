@@ -40,7 +40,30 @@ pub(super) fn reverse_matches(rev: &ReversePos, idx: u32, total: u32) -> bool {
 }
 
 /// Does compound `c` (tag / id / classes / attribute predicates / `:not()`) match element `el`?
+///
+/// Opens with the one-sided signature filter (see [`super::sig`]): one AND and one compare reject most
+/// (element, compound) pairs before any string is touched. A pair that survives falls through to the
+/// exact comparisons, unchanged — the filter is never allowed to answer `true`.
 pub(super) fn compound_matches(c: &Compound, el: &OpenElem) -> bool {
+    compound_matches_impl::<true>(c, el)
+}
+
+/// [`compound_matches`] with the signature filter switched OFF at every level — the reference the
+/// filtered path is proven equal to (`filter_never_rejects_a_match`). `FILTER` is a const generic
+/// rather than a copy of the body so the two paths cannot drift: there is one predicate here, and the
+/// only difference between the shipped and reference forms is whether the pre-filter runs.
+#[cfg(test)]
+pub(super) fn compound_matches_unfiltered(c: &Compound, el: &OpenElem) -> bool {
+    compound_matches_impl::<false>(c, el)
+}
+
+fn compound_matches_impl<const FILTER: bool>(c: &Compound, el: &OpenElem) -> bool {
+    // One-sided: a `req` bit the element lacks proves no match, so this can only turn a `false` into a
+    // faster `false`. `req` covers only the compound's own positive tag/id/classes — `:not()` args and
+    // `:is()` alternatives contribute nothing here and are filtered by their own recursive call below.
+    if FILTER && el.sig & c.req != c.req {
+        return false;
+    }
     if let Some(t) = &c.tag {
         if t != "*" && !el.tag.eq_ignore_ascii_case(t.as_bytes()) {
             return false;
@@ -78,14 +101,14 @@ pub(super) fn compound_matches(c: &Compound, el: &OpenElem) -> bool {
     }
     // `:not(<compound>)` — excluded if the element matches any negation arg
     for neg in &c.negations {
-        if compound_matches(neg, el) {
+        if compound_matches_impl::<FILTER>(neg, el) {
             return false;
         }
     }
     // `:is(...)`/`:where(...)` — for each group the element must match at least one alternative (OR
     // within a group, AND across groups). Alternatives are plain compounds (no positional/deferred).
     for group in &c.is_groups {
-        if !group.iter().any(|alt| compound_matches(alt, el)) {
+        if !group.iter().any(|alt| compound_matches_impl::<FILTER>(alt, el)) {
             return false;
         }
     }
@@ -308,8 +331,12 @@ mod seg_match_tests {
         go(&seg.parts, &seg.combs, seg.parts.len() - 1, stack, si, floor, anchor_bit, seg.strict)
     }
 
+    /// Compounds go through the compile step's `set_req`, exactly as the matcher's do — otherwise this
+    /// whole sweep would run with `req == 0` and never exercise the signature filter at all.
     fn compound(tag: &str) -> Compound {
-        Compound { tag: Some(tag.to_string()), ..Default::default() }
+        let mut c = Compound { tag: Some(tag.to_string()), ..Default::default() };
+        crate::matcher::sig::set_req_for_test(&mut c);
+        c
     }
 
     /// A stack of single-letter tags; `anchor` bit 0 is set on elements whose letter is uppercase, so
@@ -434,5 +461,176 @@ mod seg_match_tests {
         }
         // the old walk needed ~28 s for ONE subject at depth 40; this whole sweep is milliseconds
         assert!(t.elapsed().as_secs() < 2, "took {:?}", t.elapsed());
+    }
+}
+
+#[cfg(test)]
+mod sig_filter_tests {
+    use super::*;
+    use crate::matcher::sig;
+    use crate::selector::Compound;
+
+    /// A compound built the way the compile step builds one: fields set, then `set_req`.
+    fn cmp(tag: Option<&str>, id: Option<&str>, classes: &[&str]) -> Compound {
+        let mut c = Compound {
+            tag: tag.map(str::to_string),
+            id: id.map(str::to_string),
+            classes: classes.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        };
+        sig::set_req_for_test(&mut c);
+        c
+    }
+
+    fn el(tag: &'static [u8], attrs: &[(&'static [u8], &'static str)]) -> OpenElem<'static> {
+        OpenElem::for_test_attrs(tag, attrs)
+    }
+
+    /// The whole ballgame: the filter may only ever turn a `false` into a faster `false`. Over a spread
+    /// of elements and compounds — every combination of tag / id / class-set on both sides, plus
+    /// `:not()` and `:is()` wrappers whose bits must NOT be required — the filtered predicate must
+    /// agree with the same predicate run with the filter off. Wired like
+    /// `equivalent_to_reference_exhaustively`: the unfiltered path stays reachable as the oracle, so
+    /// this is a sweep rather than a handful of vectors that happen to hash the right way.
+    #[test]
+    fn filter_never_rejects_a_match() {
+        // element side: tag case, id case/absence, class lists that overlap the compound side
+        let tags: [&'static [u8]; 5] = [b"div", b"DIV", b"Div", b"span", b"a"];
+        let ids = [None, Some("Bar"), Some("bar"), Some("BAR"), Some("")];
+        let class_sets = [
+            None,
+            Some(""),
+            Some("Foo"),
+            Some("foo"),
+            Some("FOO"),
+            Some("Foo bar"),
+            Some("bar Foo baz"),
+            Some("foo Bar"),
+            Some("c1 c2 c3 c4 c5 c6 c7 c8 c9"), // a long utility-CSS-style list
+            // The signature hashes the tokens `split_whitespace` produces and `has_class` compares the
+            // tokens `split_whitespace` produces, so odd separators must not be able to pull them apart.
+            Some("  Foo   bar  "),
+            Some("Foo\tbar\nbaz\r\nqux"),
+            Some("Foo\u{a0}bar"), // NBSP: `split_whitespace` splits on it (Unicode, not the HTML set)
+            Some("café Foo"),
+        ];
+        // compound side: the same universe, so hits and misses both occur
+        let c_tags = [None, Some("*"), Some("div"), Some("DIV"), Some("span")];
+        let c_ids = [None, Some("Bar"), Some("bar"), Some("")];
+        let c_classes: [&[&str]; 7] =
+            [&[], &["Foo"], &["foo"], &["FOO"], &["Foo", "bar"], &["bar", "Foo"], &["café"]];
+
+        let mut compounds: Vec<Compound> = Vec::new();
+        for t in c_tags {
+            for i in c_ids {
+                for cl in c_classes {
+                    let base = cmp(t, i, cl);
+                    // `:not(<the same compound>)` — requiring its bits would invert the answer
+                    let mut neg = cmp(t, None, &[]);
+                    neg.negations.push(base.clone());
+                    sig::set_req_for_test(&mut neg);
+                    // `:is(a, b)` — an OR, so neither alternative's bits may be required
+                    let mut isg = cmp(t, None, &[]);
+                    isg.is_groups.push(vec![base.clone(), cmp(Some("span"), None, &["nope"])]);
+                    sig::set_req_for_test(&mut isg);
+                    compounds.extend([base, neg, isg]);
+                }
+            }
+        }
+
+        let mut checked = 0u64;
+        let mut filtered_out = 0u64;
+        for tag in tags {
+            for id in ids {
+                for cs in class_sets {
+                    let mut attrs: Vec<(&'static [u8], &'static str)> = Vec::new();
+                    if let Some(i) = id {
+                        attrs.push((b"id", i));
+                    }
+                    if let Some(c) = cs {
+                        attrs.push((b"class", c));
+                    }
+                    let e = el(tag, &attrs);
+                    for c in &compounds {
+                        let want = compound_matches_unfiltered(c, &e);
+                        assert_eq!(
+                            compound_matches(c, &e),
+                            want,
+                            "filter changed the answer: tag={:?} id={id:?} class={cs:?} req={:#x} \
+                             sig={:#x} compound={c:?}",
+                            std::str::from_utf8(tag),
+                            c.req,
+                            e.sig,
+                        );
+                        if !want && e.sig & c.req != c.req {
+                            filtered_out += 1;
+                        }
+                        checked += 1;
+                    }
+                }
+            }
+        }
+        // A filter that rejects nothing would pass the equality above trivially, so assert it is
+        // actually doing the work this change exists for.
+        assert!(checked > 10_000, "expected a real sweep, ran {checked}");
+        assert!(
+            filtered_out * 3 > checked,
+            "the filter rejected only {filtered_out}/{checked} pairs before any string compare"
+        );
+    }
+
+    /// The exact-comparison semantics the hash has to mirror: the TAG is case-insensitive, while `id`
+    /// and class tokens are case-SENSITIVE. Folding the wrong one of those is the false negative that
+    /// silently drops values, and it is invisible in any vector whose cases already agree.
+    #[test]
+    fn case_sensitivity_mirrors_the_predicates() {
+        let e = el(b"DIV", &[(b"class", "Foo"), (b"id", "Bar")]);
+        // mixed-case tag still matches, either way round
+        assert!(compound_matches(&cmp(Some("div"), Some("Bar"), &["Foo"]), &e));
+        assert!(compound_matches(&cmp(Some("DIV"), Some("Bar"), &["Foo"]), &e));
+        assert!(compound_matches(&cmp(Some("Div"), None, &[]), &e));
+        // wrong-case class / id still does NOT match
+        assert!(!compound_matches(&cmp(Some("DIV"), None, &["foo"]), &e));
+        assert!(!compound_matches(&cmp(Some("div"), None, &["FOO"]), &e));
+        assert!(!compound_matches(&cmp(Some("div"), Some("bar"), &[]), &e));
+        assert!(!compound_matches(&cmp(None, Some("BAR"), &[]), &e));
+        // and the signature itself must be what rejects the wrong-case cases (not just the string
+        // compare downstream) — otherwise the case rule could be wrong in the hash and never show
+        let wrong_class = cmp(Some("div"), None, &["foo"]);
+        let wrong_id = cmp(Some("div"), Some("bar"), &[]);
+        assert_ne!(e.sig & wrong_class.req, wrong_class.req);
+        assert_ne!(e.sig & wrong_id.req, wrong_id.req);
+        // the case-insensitive tag, in contrast, must NOT be rejected by the signature
+        let tag_only = cmp(Some("dIv"), None, &[]);
+        assert_eq!(e.sig & tag_only.req, tag_only.req);
+    }
+
+    /// `req` must come only from the compound's own positive tag/id/classes. `*` contributes nothing,
+    /// and neither do the parts of the compound whose semantics the filter cannot represent.
+    #[test]
+    fn req_covers_only_positive_identity() {
+        use crate::selector::AttrPred;
+        const ALL_ON: sig::Opts = sig::Opts { tag: true, class: true };
+        assert_eq!(cmp(None, None, &[]).req, 0);
+        assert_eq!(cmp(Some("*"), None, &[]).req, 0);
+        assert_ne!(cmp(Some("div"), None, &[]).req, 0);
+
+        // `:not(.x)` / `:is(.x)` / `[href^=/]` on a universal compound: nothing to require
+        let mut neg = cmp(Some("*"), None, &[]);
+        neg.negations.push(cmp(None, None, &["x"]));
+        assert_eq!(sig::compound_req(&neg, ALL_ON), 0);
+        let mut isg = cmp(Some("*"), None, &[]);
+        isg.is_groups.push(vec![cmp(None, None, &["x"]), cmp(None, None, &["y"])]);
+        assert_eq!(sig::compound_req(&isg, ALL_ON), 0);
+        let mut at = cmp(Some("*"), None, &[]);
+        at.attrs.push(AttrPred::Prefix("href".into(), "/".into()));
+        assert_eq!(sig::compound_req(&at, ALL_ON), 0);
+
+        // ...but a nested compound still gets its OWN req, for its own recursive call
+        let mut neg2 = cmp(Some("*"), None, &[]);
+        neg2.negations.push(cmp(None, None, &["x"]));
+        sig::set_req_for_test(&mut neg2);
+        assert_eq!(neg2.req, 0);
+        assert_ne!(neg2.negations[0].req, 0);
     }
 }

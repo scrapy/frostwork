@@ -9,10 +9,12 @@ in a subtree — `div:has(a) a::attr(href)` — re-reads just that element's spa
 on the workload, so each one below names its own; [docs/BENCHMARKS.md](docs/BENCHMARKS.md) is the
 canonical source and the only place they are maintained:
 
-- **12–20×** faster than Parsel on realistic synthetic pages at typical field counts, up to **40–54×**
-  on selector-rich schemas (the Rust benchmark matrix).
+- **11–20×** faster than Parsel on realistic synthetic pages at typical field counts, up to **50–61×**
+  on selector-rich schemas (the Rust benchmark matrix). A single-field schema is the weak case (3–6×):
+  the advantage comes from answering a whole schema in one pass.
 - **10.5×** median (12.4× aggregate) on Zyte's production-selector corpus — 788 real pages, each with
-  its own production selectors, through the Python binding.
+  its own production selectors, through the Python binding (measured before the matcher's signature
+  filter landed, so a floor).
 
 Working memory stays small because Frostwork retains parser state and pending matches, not a tree
 containing the whole page.

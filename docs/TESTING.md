@@ -40,6 +40,17 @@ family (`li`/`p`/`td`/`tr`/`dt`/`dd`/`option`) × {closed, omitted}; void/self-c
 combinators, `:not()`, comma groups; encoding resolution; XPath compilation; the `Page` layer; budget
 safety; and a regression vector for every bug the fuzzers have found.
 
+**Kernel equivalence sweeps** (`src/matcher/matching.rs`). Where a matcher optimization is supposed to
+be *invisible*, the unfiltered/previous form is kept reachable as a reference oracle and the two are
+compared over a generated sweep rather than hand-picked vectors — hand-picked vectors pass exactly when
+the author already understood the failure. Two run today: the anchored-glob ancestor walk against the
+original recursive walk (every pattern ≤ 4 compounds × every stack ≤ depth 5 × every
+subject/floor/strict/anchor), and the one-sided signature filter against the same predicate with the
+filter compiled out (`filter_never_rejects_a_match`, every combination of tag/id/class-set on both sides
+plus `:not()`/`:is()` wrappers, which must contribute no required bits). The filter sweep also asserts
+that it *rejects* a third of the pairs — an equivalence test alone would pass a filter that had been
+accidentally disabled.
+
 **Tokenizer conformance** (`src/tokenizer.rs`, `cargo test tokenizer`). The states that would cause a
 *global* offset desync must be exact. A recording `TokenSink` pins the event stream for each: RAWTEXT
 (`<script>` keeping `</b>` as text), RCDATA (`<title>`), comment close boundaries (incl. `<!-->` /

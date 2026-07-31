@@ -14,7 +14,7 @@
 #   make gate-mutate-full  every cell (~2,200 mutants, ~15 min with the fast gates) — nightly
 #   make soak        multi-million differential/fuzz soak across independent seeds
 #   make py          rebuild the extension (maturin --release), Python suite + tree-rule audit
-#   make bench       full throughput matrix vs Parsel (minutes; for release notes)
+#   make bench       full throughput matrix vs Parsel (~1 h — Parsel dominates it; for release notes)
 #   make bench-smoke quick article/deep-nesting performance check
 #   make ci          test + gate + gate-corpus + fuzz-smoke + py — minimum pre-release check
 #

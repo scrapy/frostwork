@@ -68,7 +68,9 @@ Two limits of that gate are worth knowing before trusting a "100% parity" number
   `matcher/` — **the real logic**: `mod.rs` (corrected-stack matcher: `CompiledSchema` compile +
   `Matcher` streaming execute), `compile.rs` (routing eligibility: which selector shapes execute
   faithfully vs. stay unsupported), `matching.rs` (pure read-only match predicates), `deferred.rs`
-  (bounded state machines for deferred-close predicates), `decode.rs` (value decoding).
+  (bounded state machines for deferred-close predicates), `decode.rs` (value decoding),
+  `sig.rs` (the ONE-SIDED element/compound Bloom signatures `compound_matches` opens with — a set bit
+  is necessary, never sufficient; read its header before touching the hash).
   `selector.rs` (CSS parse), `xpath.rs` (downward XPath → `Selector`), `diagnostics.rs`
   (advisory unsupported-reason classifier for the audit API), `implied_close.rs` (libxml2
   tree-construction rules), `encoding.rs`, `entities.rs`, `mutate.rs` (an identity function unless built
