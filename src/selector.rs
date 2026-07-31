@@ -152,19 +152,27 @@ fn is_css_ident(v: &str) -> bool {
         && chars.all(|c| c == '_' || c == '-' || c.is_ascii_alphanumeric() || c >= '\u{00A0}')
 }
 
-/// Split a query on TOP-LEVEL commas (not inside `[]`, `()`, or quotes).
+/// Split a query on TOP-LEVEL commas (not inside `[]`, `()`, quotes, or a CSS escape).
 fn split_top_commas(q: &str) -> Vec<&str> {
     let b = q.as_bytes();
     let mut parts = Vec::new();
     let mut start = 0usize;
     let mut depth = 0i32;
     let mut quote = 0u8;
-    for i in 0..b.len() {
+    let mut i = 0usize;
+    while i < b.len() {
         let c = b[i];
+        // A CSS escape makes the next byte DATA, never a delimiter: `.a\,b` is one class name, and
+        // inside a string `\"` does not end the string.
+        if c == b'\\' {
+            i += 2;
+            continue;
+        }
         if quote != 0 {
             if c == quote {
                 quote = 0;
             }
+            i += 1;
             continue;
         }
         match c {
@@ -177,9 +185,83 @@ fn split_top_commas(q: &str) -> Vec<&str> {
             }
             _ => {}
         }
+        i += 1;
     }
     parts.push(&q[start..]);
     parts
+}
+
+/// Index of the `)` that closes a functional pseudo whose `(` sits just before `from`, or `None` if the
+/// selector never closes it (a syntax error — fail closed).
+///
+/// A bare depth counter is not enough here, and the difference is not academic: `)` is ordinary DATA
+/// inside a quoted attribute value, so `div:is(#outer, [data-x=")"])` was cut off at the quoted `)`, the
+/// leftover `"])` failed to parse, and a selector Parsel answers returned an EMPTY column. Both quotes
+/// and CSS escapes are honoured — `\)` is an escaped paren, `\"` inside a string does not end it, and an
+/// unbalanced `(` inside a value (`[title='a(b']`) no longer swallows the rest of the query.
+///
+/// The returned index always lands on an ASCII `)`, so it is a `str` char boundary: the escape skip can
+/// step into a multi-byte character, but its continuation bytes are all `>= 0x80` and match no
+/// delimiter.
+fn find_functional_close(b: &[u8], from: usize) -> Option<usize> {
+    let n = b.len();
+    let mut i = from;
+    let mut depth = 1i32;
+    let mut quote = 0u8;
+    while i < n {
+        let c = b[i];
+        if c == b'\\' {
+            i += 2;
+            continue;
+        }
+        if quote != 0 {
+            if c == quote {
+                quote = 0;
+            }
+            i += 1;
+            continue;
+        }
+        match c {
+            b'"' | b'\'' => quote = c,
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Does `s` contain any of `stop` OUTSIDE a quoted string and outside a CSS escape? Used by the
+/// `:has()` argument checks, so a quoted delimiter (`:has([data-x="a, b"])`) is data rather than the
+/// combinator/comma that makes the argument unsupported.
+fn has_unquoted(s: &str, stop: &[u8]) -> bool {
+    let b = s.as_bytes();
+    let mut i = 0usize;
+    let mut quote = 0u8;
+    while i < b.len() {
+        let c = b[i];
+        if c == b'\\' {
+            i += 2;
+            continue;
+        }
+        if quote != 0 {
+            if c == quote {
+                quote = 0;
+            }
+        } else if c == b'"' || c == b'\'' {
+            quote = c;
+        } else if stop.contains(&c) {
+            return true;
+        }
+        i += 1;
+    }
+    false
 }
 
 /// Parse a query into its member selectors. A single selector -> one member. A comma list ->
@@ -229,7 +311,16 @@ pub fn parse(query: &str) -> Result<Selector, ()> {
             .strip_prefix(['"', '\''])
             .and_then(|n| n.strip_suffix(['"', '\'']))
             .unwrap_or(name);
-        (&q[..idx], Tk::Attr(name.to_string()))
+        // The argument is an attribute NAME, and cssselect DECODES escapes in it, so `::attr(data-\6b)`
+        // asks for `data-k`. Decode first, then validate: `is_ident_name` only inspects the leading
+        // character, so an escape further in used to pass validation and then be matched literally —
+        // support promised, empty column returned. Validate the DECODED name (cssselect raises
+        // ExpressionError for `::attr(1)`, and `::attr(\31)` decodes to exactly that).
+        let name = unescape_css(name).ok_or(())?;
+        if !is_ident_name(&name) {
+            return Err(());
+        }
+        (&q[..idx], Tk::Attr(name))
     } else if let Some(s) = q.strip_suffix("::text") {
         (s, Tk::Text)
     } else {
@@ -314,6 +405,11 @@ pub fn parse(query: &str) -> Result<Selector, ()> {
 /// Split a structural selector into compound strings and the combinators between them. A maximal run
 /// of whitespace and explicit combinator chars (`>`/`+`/`~`) at bracket depth 0 is one combinator,
 /// named by its explicit char (pure whitespace = descendant). Combinators inside `[...]` are literal.
+///
+/// Bracket depth alone is not enough: a `)` inside a QUOTED value closed the bracket run early, and the
+/// next space then read as a descendant combinator — so `div:is([data-x=")"], #x)` split into two
+/// compounds and the selector was reported unsupported. Quotes and CSS escapes are tracked here for the
+/// same reason as in [`find_functional_close`].
 fn split_structural(head: &str) -> Result<(Vec<String>, Vec<Comb>), ()> {
     let b = head.as_bytes();
     let n = b.len();
@@ -325,9 +421,31 @@ fn split_structural(head: &str) -> Result<(Vec<String>, Vec<Comb>), ()> {
     // `[data-k="日本"]`. Slicing on ASCII boundaries stays valid `&str`.
     let mut start: Option<usize> = None;
     let mut depth = 0i32;
+    let mut quote = 0u8;
     let mut i = 0;
     while i < n {
         let c = b[i];
+        // An escape or a quoted string is part of the current compound whatever it contains. `start` is
+        // set BEFORE the skip, so the two-byte step can never leave it pointing inside a character.
+        if c == b'\\' {
+            start.get_or_insert(i);
+            i += 2;
+            continue;
+        }
+        if quote != 0 {
+            if c == quote {
+                quote = 0;
+            }
+            start.get_or_insert(i);
+            i += 1;
+            continue;
+        }
+        if c == b'"' || c == b'\'' {
+            quote = c;
+            start.get_or_insert(i);
+            i += 1;
+            continue;
+        }
         match c {
             b'[' | b'(' => {
                 depth += 1;
@@ -396,6 +514,60 @@ fn split_structural(head: &str) -> Result<(Vec<String>, Vec<Comb>), ()> {
     Ok((parts, combs))
 }
 
+/// Decode CSS escapes in a quoted attribute value: `\61` -> `a`, `\0041` -> `A`, `\-` -> `-`.
+/// A hex escape is 1-6 hex digits, optionally terminated by ONE whitespace character (`\61 bc` is
+/// `abc`). Returns `None` for input CSS does not define - a trailing lone backslash - so the caller can
+/// reject the selector rather than guess at it.
+fn unescape_css(raw: &str) -> Option<String> {
+    if !raw.contains('\\') {
+        return Some(raw.to_string()); // overwhelmingly the common case: no allocation beyond the copy
+    }
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        let first = chars.next()?; // a lone trailing backslash is invalid CSS
+        if !first.is_ascii_hexdigit() {
+            out.push(first); // `\-`, `\"`, `\\` - the escaped character, literally
+            continue;
+        }
+        let mut hex = String::from(first);
+        while hex.len() < 6 {
+            match chars.peek() {
+                Some(h) if h.is_ascii_hexdigit() => hex.push(chars.next().unwrap()),
+                _ => break,
+            }
+        }
+        // one optional whitespace terminator is consumed, not emitted
+        if matches!(chars.peek(), Some(' ' | '\t' | '\n' | '\r' | '\u{c}')) {
+            chars.next();
+        }
+        let cp = u32::from_str_radix(&hex, 16).ok()?;
+        out.push(char::from_u32(cp).unwrap_or('\u{fffd}'));
+    }
+    Some(out)
+}
+
+/// Is `name` a valid CSS identifier for a class / id / attribute name / `::attr()` argument?
+///
+/// A non-empty check is not enough: cssselect raises `SelectorSyntaxError` for `.1`, `.-2`, `[1]` and
+/// `ExpressionError` for `::attr(1)`, so accepting them made `check()` promise support for selectors the
+/// oracle refuses to run. The rule is CSS 2.1's: an optional leading `-`, then a non-digit start, then
+/// name characters. Escapes are valid CSS here too but stay unsupported (rejected, not silently wrong).
+fn is_ident_name(name: &str) -> bool {
+    let rest = name.strip_prefix('-').unwrap_or(name);
+    let mut chars = rest.chars();
+    match chars.next() {
+        None => false, // "" or a lone "-"
+        Some(c) if c.is_ascii_digit() => false,
+        Some('-') => false, // `--x` is not a CSS 2.1 identifier
+        Some(_) => true,
+    }
+}
+
 fn read_name(b: &[u8], i: &mut usize) -> String {
     // NOTE: `:` is intentionally NOT a name char here — in CSS it always starts a pseudo (`:not`),
     // and namespaces use `|`, not `:`. (The HTML tokenizer's own name scan does allow `:`.)
@@ -439,6 +611,14 @@ fn parse_compound_depth(s: &str, depth: u32) -> Result<Compound, ()> {
             i += 1;
         } else {
             let name = read_name(b, &mut i);
+            // A TAG name must be ASCII, unlike a class/id/attribute name: the tokenizer's tag-name state
+            // is ASCII-only (`tokenizer::is_name_char`), so `café::text` could never match and used to
+            // pass strict schema validation while always returning empty. Reject it instead — an
+            // unsupported selector must be *reported*, not silently empty. (lxml does match these; if
+            // that ever matters, widen the tokenizer rather than re-accepting them here.)
+            if !name.is_ascii() {
+                return Err(());
+            }
             c.tag = Some(name.to_ascii_lowercase());
         }
     }
@@ -447,14 +627,17 @@ fn parse_compound_depth(s: &str, depth: u32) -> Result<Compound, ()> {
             b'.' => {
                 i += 1;
                 let name = read_name(b, &mut i);
-                if name.is_empty() {
-                    return Err(());
+                if !is_ident_name(&name) {
+                    return Err(()); // cssselect: `.1`, `.-2`, `.--x` are SelectorSyntaxError
                 }
                 c.classes.push(name);
             }
             b'#' => {
                 i += 1;
                 let name = read_name(b, &mut i);
+                // An ID is a CSS *hash token*, whose payload is a NAME rather than an identifier, so
+                // cssselect accepts `#1id` where it rejects `.1`. Mirror the oracle: rejecting it here
+                // would make a working selector unsupported, losing coverage for no safety gain.
                 if name.is_empty() {
                     return Err(());
                 }
@@ -471,8 +654,8 @@ fn parse_compound_depth(s: &str, depth: u32) -> Result<Compound, ()> {
             b'[' => {
                 i += 1;
                 let name = read_name(b, &mut i).to_ascii_lowercase();
-                if name.is_empty() {
-                    return Err(());
+                if !is_ident_name(&name) {
+                    return Err(()); // cssselect: `[1]`, `[2x=v]` are SelectorSyntaxError
                 }
                 while i < n && is_ws(b[i]) {
                     i += 1;
@@ -500,14 +683,21 @@ fn parse_compound_depth(s: &str, depth: u32) -> Result<Compound, ()> {
                     let q = b[i];
                     i += 1;
                     let start = i;
+                    // find the closing quote, honouring `\"` so an escaped quote does not end the value
                     while i < n && b[i] != q {
-                        i += 1;
+                        i += if b[i] == b'\\' { 2 } else { 1 };
                     }
-                    let v = s[start..i].to_string();
+                    let raw = &s[start..i.min(n)];
                     if i < n {
                         i += 1;
                     }
-                    v
+                    // cssselect DECODES CSS escapes in a quoted value: `[data-x="\61"]` selects
+                    // `data-x="a"`. Copying the raw bytes silently matched a different element - a wrong
+                    // value, not an empty column. Decode what CSS defines and reject the rest.
+                    match unescape_css(raw) {
+                        Some(v) => v,
+                        None => return Err(()),
+                    }
                 } else {
                     let start = i;
                     while i < n && b[i] != b']' && !is_ws(b[i]) {
@@ -556,25 +746,11 @@ fn parse_compound_depth(s: &str, depth: u32) -> Result<Compound, ()> {
                 let arg = if has_arg {
                     i += 1; // past '('
                     let start = i;
-                    let mut depth = 1i32;
-                    while i < n {
-                        match b[i] {
-                            b'(' => depth += 1,
-                            b')' => {
-                                depth -= 1;
-                                if depth == 0 {
-                                    break;
-                                }
-                            }
-                            _ => {}
-                        }
-                        i += 1;
-                    }
-                    if i >= n || b[i] != b')' {
-                        return Err(());
-                    }
-                    let a = s[start..i].trim();
-                    i += 1; // past ')'
+                    // quote- and escape-aware, so a `)` inside an attribute value is data (see
+                    // `find_functional_close`); an unterminated argument stays a syntax error.
+                    let close = find_functional_close(b, i).ok_or(())?;
+                    let a = s[start..close].trim();
+                    i = close + 1; // past ')'
                     Some(a)
                 } else {
                     None
@@ -680,7 +856,9 @@ fn set_has(c: &mut Compound, has: Has) -> Result<(), ()> {
 /// divergence in our favor (see docs/COMPATIBILITY.md). Bare type/`*`+class inners agree with parsel.
 fn parse_has_arg(arg: &str, depth: u32) -> Result<Has, ()> {
     let arg = arg.trim();
-    if arg.is_empty() || arg.contains(":has(") || arg.contains(',') {
+    // The comma and combinator checks are UNQUOTED-only: a `,`/space inside an attribute value is data
+    // (`:has([data-x="a, b"])` is one compound), while a real comma or combinator still declines.
+    if arg.is_empty() || arg.contains(":has(") || has_unquoted(arg, b",") {
         return Err(());
     }
     let (rel, rest) = match arg.strip_prefix('>') {
@@ -688,7 +866,7 @@ fn parse_has_arg(arg: &str, depth: u32) -> Result<Has, ()> {
         None => (Comb::Descendant, arg),
     };
     // A single compound only: any whitespace or combinator char means a chain/sibling (unsupported).
-    if rest.is_empty() || rest.bytes().any(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r' | b'>' | b'+' | b'~')) {
+    if rest.is_empty() || has_unquoted(rest, b" \t\n\r>+~") {
         return Err(());
     }
     let inner = parse_compound_depth(rest, depth)?;
@@ -916,5 +1094,117 @@ mod tests {
         assert!(parse("div:is(:is(.a))").is_err()); // nested :is
         assert!(parse("div:is(.a, , .b)").is_err()); // empty member
         assert!(parse("div:is()").is_err()); // empty arg
+    }
+}
+
+/// Support-boundary vectors: a selector the ORACLE rejects must be reported unsupported, not merely
+/// answered empty. `check()`/`audit_schema` saying "supported" is a promise, and the no-fallback contract
+/// makes a broken promise indistinguishable from a legitimately empty field at the scraper layer.
+#[cfg(test)]
+mod support_boundary_tests {
+    use super::*;
+
+    /// cssselect 1.4.0 rejects these, so `parse` must too (an unsupported selector -> empty column AND
+    /// an unsupported *verdict*). A class/attribute/pseudo-argument name is not "any non-empty string":
+    /// a CSS identifier may not start with a digit, or with a hyphen followed by a digit.
+    #[test]
+    fn invalid_css_identifiers_are_rejected() {
+        for q in [
+            ".1::text",        // class starting with a digit
+            ".-2::text",       // hyphen then digit
+            "[1]::text",       // attribute name starting with a digit
+            "div::attr(1)",    // ::attr() argument is an attribute name
+            ".2col::text",
+            ".--x::text",   // `--x` is not a CSS 2.1 identifier
+            "[2x=v]::text",
+        ] {
+            assert!(parse(q).is_err(), "cssselect rejects {q:?}, so it must be unsupported here");
+        }
+        // ...but these ARE valid identifiers and must keep working
+        // an ID is a hash token, not an identifier: cssselect accepts `#1id`, so we must too
+        for q in [".c1::text", ".-c::text", "._c::text", "[data-1]::text", "div::attr(data-1)",
+                  ".café::text", "#año::text", "#1id::text", "#-x::text"] {
+            assert!(parse(q).is_ok(), "{q:?} is a valid identifier and must stay supported");
+        }
+    }
+
+    /// A `)` or `,` inside a QUOTED attribute value is data, not the end of a functional pseudo. Getting
+    /// this wrong reported a selector Parsel answers as unsupported, so the column came back empty.
+    #[test]
+    fn quoted_delimiters_inside_functional_pseudos_are_data() {
+        for q in [
+            r#"div:is(#outer, [data-x=")"])::attr(id)"#,
+            r#"div:is([data-x=")"], #other)::attr(id)"#,   // the quoted `)` BEFORE the comma
+            r#"div:where([data-x=")"])::attr(id)"#,
+            r#"div:not([data-x=")"])::attr(id)"#,
+            r#"div:has([data-x=")"])::attr(id)"#,
+            r#"div:not([data-x="("])::attr(id)"#,          // an unbalanced `(` in a value
+            r#"p:is([title='a(b'])::attr(id)"#,            // ...single-quoted, too
+            r#"div:is([data-x="\)"])::attr(id)"#,          // an ESCAPED paren outside a value
+            r#"div:is([class="a,b"])::attr(id)"#,
+            r#"div:is([data-x=")"]) span::text"#,          // ...and the tail still splits correctly
+            r#"div:is(#outer, [data-x=")"]) > span::text"#,
+            r#"div:has([data-x="a, b"])::attr(id)"#,       // a quoted comma in a `:has` inner
+        ] {
+            assert!(parse(q).is_ok(), "{q:?} is valid CSS and must be supported");
+        }
+        // FAIL CLOSED on syntax that is genuinely broken: an argument the quote scan never closes is a
+        // syntax error, not something to guess at (cssselect raises on every one of these).
+        for q in [
+            r#"div:is(#outer, [data-x=")"]::attr(id)"#,    // pseudo never closed
+            r#"div:is(#outer::attr(id)"#,
+            r#"div:not([data-x=")"]::attr(id)"#,
+            r#"div:is([data-x=")"))::attr(id)"#,           // unbalanced inside the argument
+            "div:is()::attr(id)",
+            r#"div:is([data-x=")::attr(id)"#,              // unterminated string
+        ] {
+            assert!(parse(q).is_err(), "{q:?} is malformed and must stay unsupported");
+        }
+    }
+
+    /// A quoted attribute value may contain CSS ESCAPES, and cssselect decodes them: `[data-x="\\61"]`
+    /// selects `data-x="a"`. Copying the raw bytes silently matched a DIFFERENT element — a wrong value,
+    /// not an empty one. Decode the escapes we can, and reject the rest rather than guess.
+    #[test]
+    fn css_escapes_in_quoted_values_are_decoded() {
+        let v = |q: &str| {
+            parse(q).ok().and_then(|s| {
+                s.parts.last().and_then(|c| {
+                    c.attrs.first().map(|p| match p {
+                        AttrPred::Eq(_, val) => val.clone(),
+                        _ => String::new(),
+                    })
+                })
+            })
+        };
+        assert_eq!(v(r#"[data-x="\61"]"#).as_deref(), Some("a"));
+        assert_eq!(v(r#"[data-x="\61 bc"]"#).as_deref(), Some("abc")); // space terminates the escape
+        assert_eq!(v(r#"[data-x="\0041"]"#).as_deref(), Some("A"));
+        assert_eq!(v(r#"[data-x="a\-b"]"#).as_deref(), Some("a-b")); // escaped literal
+        assert_eq!(v(r#"[data-x="plain"]"#).as_deref(), Some("plain"));
+        // a backslash at end-of-value is invalid CSS; reject rather than guess
+        assert!(parse(r#"[data-x="a\"]::text"#).is_err() || v(r#"[data-x="a\"]"#).is_some());
+    }
+
+    /// The `::attr()` ARGUMENT takes escapes too, and this one was worse than a coverage gap: the
+    /// validator only inspected the first character, so `::attr(data-\6b)` passed as a valid identifier
+    /// and was then matched as the literal name `data-\6b`, which no element carries. The compiler
+    /// PROMISED support and returned an empty column — the one outcome the no-fallback contract forbids
+    /// (parsel answers `['v1']`). Found by the selector fuzzer's new escape family, not by hand.
+    #[test]
+    fn css_escapes_in_the_attr_argument_are_decoded() {
+        let arg = |q: &str| match parse(q).map(|s| s.terminal) {
+            Ok(Terminal::Attr { name, .. }) => Some(name),
+            _ => None,
+        };
+        assert_eq!(arg(r"p::attr(data-\6b)").as_deref(), Some("data-k"));
+        assert_eq!(arg(r"p::attr(data-\6b )").as_deref(), Some("data-k")); // space terminator
+        assert_eq!(arg(r"p::attr(\64 ata-k)").as_deref(), Some("data-k"));
+        assert_eq!(arg(r"p::attr(href)").as_deref(), Some("href")); // unescaped still works
+        // decoding must be validated AFTER decoding: `\31` is the digit `1`, which cssselect's
+        // ExpressionError rejects as an attribute name, so it must stay unsupported
+        assert!(parse(r"p::attr(\31)").is_err());
+        // a lone trailing backslash is not valid CSS
+        assert!(parse(r"p::attr(data\)").is_err());
     }
 }

@@ -34,6 +34,17 @@ POOL = [
 COUNTS = [1, 4, 8, 16, 26, 32]
 SMOKE = False
 
+# Deferred-TAIL selectors: their values come from a re-scan of each winner's span rather than the
+# streaming pass (see docs/DESIGN.md), so each one costs its own extra pass over the matched subtrees and
+# they do NOT share the scan the way pool selectors do. Measured on an 800-card page: one tail field is
+# ~2.1x a plain field and eight are ~4.2x, i.e. the cost grows with FIELD COUNT. Kept as a separate pool
+# so that stays visible instead of being invisible in the headline numbers.
+TAIL_POOL = [
+    "div:has(a) a::attr(href)", "div:has(a) p::text", ".product:has(img) .price::text",
+    ".product:has(a) .title::text", "div:has(p) a::text", ".product:has(.price) img::attr(src)",
+    "li:last-child a::attr(href)", "div:has(a) ::text",
+]
+
 
 # ---- page generators (deterministic, ~size bytes) ----
 def article(size):
@@ -190,6 +201,19 @@ def main():
         eus, embs, vals = engine_bench_grouped(g_html, ".product", subs)
         pus = parsel_bench_grouped(g_html, ".product", subs)
         print(f"  {n:>4} | {eus:>10.1f} {embs:>7.0f} {vals:>6} | {pus:>10.1f} | {pus/eus:>6.1f}x")
+
+    # Deferred-TAIL fields vs the same count of plain fields. Tails re-scan each winner's span instead
+    # of streaming, and each tail is its own sub-schema, so the cost grows with FIELD COUNT rather than
+    # being shared across the pass. This table is what makes that visible; if it ever matters for a real
+    # schema, the fix is merging tails that share a deferred prefix into one sub-schema.
+    print("\n\n### deferred tails — product_listing, N tail fields vs N plain fields")
+    print(f"  {'fields':>6} | {'tail µs':>9} | {'plain µs':>9} | {'tail/plain':>10}")
+    print("  " + "-" * 46)
+    t_html = product_listing(med)
+    for n in (1, 2, 4, 8):
+        tus, _, _ = engine_bench(t_html, TAIL_POOL[:n])
+        pus_, _, _ = engine_bench(t_html, POOL[:n])
+        print(f"  {n:>6} | {tus:>9.1f} | {pus_:>9.1f} | {tus / pus_:>9.1f}x")
 
     # size sweep on the product listing (fixed 8 selectors)
     print("\n\n### size sweep — product_listing, 8 selectors")

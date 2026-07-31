@@ -1,0 +1,13 @@
+{
+  "caption": "table.report > caption::text",
+  "colgroup_classes": "table.report > colgroup > col::attr(class)",
+  "head_cells": "table.report > thead th::text",
+  "body_cells": "table.report > tbody td::text",
+  "foot_cells": "table.report > tfoot td::text",
+  "first_col": "tbody tr > td:first-child::text",
+  "last_col": "tbody tr > td:last-child::text",
+  "rows": "table.report > tbody > tr::attr(class)",
+  "plain_cells": "table.plain td::text",
+  "all_cells": "td::text",
+  "totals": "tfoot td:last-child::text"
+}

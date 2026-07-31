@@ -866,8 +866,14 @@ def test_positional_matches_parsel():
         assert frostwork.extract(body, [q])[0] == sel.css(q).getall(), q
     for q in ["//li[last()]/text()", "//li[last()-1]/text()", "//ul/*[last()]/text()"]:
         assert frostwork.extract(body, [q])[0] == sel.xpath(q).getall(), q
-    # Permissive mode exposes the engine's safe empty-column contract for unsupported forms.
-    assert frostwork.extract(body, ["li:last-child ::text"], strict=False)[0] == []
+    # SUBTREE reverse terminals are supported too (values recovered by re-scanning the winner's span)
+    for q in ["li:last-child ::text", "li:nth-last-child(2) ::text", "li:only-child ::text"]:
+        assert frostwork.extract(body, [q])[0] == sel.css(q).getall(), q
+    for q in ["//li[last()]//text()", "//li[last()-1]//text()"]:
+        assert frostwork.extract(body, [q])[0] == sel.xpath(q).getall(), q
+    # Permissive mode exposes the engine's safe empty-column contract for the forms still out of tier
+    # (a reverse position on a non-subject/ancestor compound).
+    assert frostwork.extract(body, ["li:last-child b::text"], strict=False)[0] == []
     for q in xp:
         # last() is unsupported -> frostwork empty (allowed gap); the rest match exactly
         mine = frostwork.extract(body, [q])[0]
@@ -900,10 +906,11 @@ def test_check_reason_matches_parsel_supported_boundary():
     # The DECISION must agree with the engine: a query parsel accepts but Frostwork doesn't support
     # is reported unsupported; a supported one is reported supported and yields the same column.
     parsel = _oracle()
-    html = b"<ul><li class=x>a</li><li>b</li></ul>"
-    # a reverse position IS now supported in the attached ::text form; the detached subtree form isn't
-    supported = "li:last-child::text"
-    unsupported = "li:last-child ::text"
+    html = b"<ul><li class=x>a</li><li><b>b</b></li></ul>"
+    # a reverse position is supported on any ONE compound, with the value being the element's own, its
+    # subtree, or a DESCENDANT's; a CHILD step into that value tail still isn't (see COMPATIBILITY)
+    supported = "li:last-child b::text"
+    unsupported = "li:last-child > b::text"
     r = frostwork.check([supported, unsupported])
     assert r.fields[0].supported and not r.fields[1].supported
     # supported one: frostwork column == parsel
@@ -1336,3 +1343,361 @@ def test_schema_audit_rejects_multiple_targets(tmp_path, capsys):
     a = _write(tmp_path, "from frostwork import Page\np = Page().field('t', 'h1::text')\n")
     assert main([a, a]) == 2
     assert "ONE module target" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------- support-boundary parity vs the oracle
+# The no-fallback contract has TWO halves and only one was tested. "An unsupported selector returns an
+# empty column" was covered; "a selector the ORACLE rejects is REPORTED unsupported" was not — so the
+# engine could accept `.1::text`, answer empty, and still call itself supported. That is a broken promise
+# the scraper layer cannot distinguish from a legitimately empty field.
+# NB `#1id` is NOT here: cssselect accepts it (a hash token's payload is a NAME, not an identifier), so
+# rejecting it would make us narrower than the oracle. The precondition assert below catches exactly this
+# kind of wrong assumption — it caught this one.
+ORACLE_REJECTS_CSS = [".1::text", ".-2::text", "[1]::text", "div::attr(1)", ".2col::text", ".--x::text"]
+ORACLE_REJECTS_XPATH = ["//div/@1", "//svg:rect/text()", "//div/@x:y", "//1div/text()"]
+
+
+def test_selectors_the_oracle_rejects_are_reported_unsupported():
+    parsel = _oracle()
+    for sel in ORACLE_REJECTS_CSS + ORACLE_REJECTS_XPATH:
+        s = parsel.Selector(text="<div class='1' data-1='v'><p>T</p></div>")
+        try:
+            (s.xpath(sel) if sel.startswith("/") else s.css(sel)).getall()
+        except Exception:
+            pass  # the oracle refuses it, which is the precondition for this assertion
+        else:
+            raise AssertionError(f"{sel!r} was expected to be oracle-invalid; fixture needs updating")
+        assert not frostwork.check([sel]).fields[0].supported, (
+            f"{sel!r} is rejected by the oracle, so check() must report it unsupported"
+        )
+
+
+def test_css_escapes_in_quoted_values_match_parsel():
+    """`[data-x="\\61"]` selects `data-x="a"` in cssselect. Copying the raw bytes matched a DIFFERENT
+    element — a wrong value, the one thing no-fallback rules out."""
+    parsel = _oracle()
+    html = b'<html><body><i data-x="a">ESCAPED</i><i data-x="\\61">RAW</i></body></html>'
+    for sel in ['[data-x="\\61"]::text', '[data-x="a"]::text', '[data-x="\\0041"]::text']:
+        want = parsel.Selector(body=html, encoding="utf-8").css(sel).getall()
+        assert frostwork.check([sel]).fields[0].supported, sel  # not a conditional: it MUST stay supported
+        assert frostwork.extract(html, [sel])[0] == want, sel
+
+
+def test_the_whole_css_escape_surface_obeys_the_contract():
+    """Escapes appear in five places, and the contract is the same in all of them: **supported means
+    parity, unsupported means empty**. Never supported-and-empty, never non-empty-and-wrong.
+
+    Worth stating as one sweep rather than per-form vectors, because the bug that motivated it was
+    invisible per-form: `::attr(data-\\6b)` was reported SUPPORTED (the identifier validator only read the
+    first character) and then matched the literal name, so it returned an empty column for a selector
+    parsel answers. A per-form test that asserted "empty" would have passed. Only checking the pair
+    (support verdict, values) against parsel catches it.
+
+    Escapes in a class / id / attribute name / type name are an honest UNSUPPORTED gap today — this test
+    pins the gap as empty-not-wrong, and will start demanding parity the moment one is claimed supported.
+    """
+    parsel = _oracle()
+    html = (b'<html><body><p class="shared">A</p><p class="shared1">B</p>'
+            b'<p id="i1">D</p><p data-k="v1">C</p></body></html>')
+    surface = [
+        r"[data-k]::attr(data-\6b)",     # ::attr() argument      -> data-k
+        r'[data-k="\76 1"]::text',       # quoted value           -> v1
+        r'[data-k^="\76"]::text',        # quoted value, prefix op -> v
+        r".shared\31::text",             # class name             -> shared1
+        r"#i\31::text",                  # id                     -> i1
+        r".\73 hared::text",             # class, leading escape  -> shared
+        r"\70::text",                    # type name              -> p
+        r"[data-\6b]::text",             # attribute name         -> data-k
+        r".shared\ ::text",              # escaped space in a class name
+    ]
+    for sel in surface:
+        try:
+            want = parsel.Selector(body=html, encoding="utf-8").css(sel).getall()
+        except Exception:
+            want = None  # the oracle rejects it: we may not answer at all
+        got = frostwork.extract(html, [sel], strict=False)[0]
+        supported = frostwork.check([sel]).fields[0].supported
+        if want is None:
+            assert not got, f"{sel!r}: parsel rejects this, so answering it is a no-fallback violation"
+        elif supported:
+            assert got == want, f"{sel!r}: claimed supported, so it must equal parsel ({want!r})"
+        else:
+            assert not got, f"{sel!r}: unsupported must be EMPTY, got {got!r}"
+
+
+def test_quoted_delimiters_in_functional_pseudos_are_supported():
+    """A `)` or `,` inside a QUOTED attribute value is data, not the end of `:is()`/`:not()`/`:where()`.
+
+    This is the half of the contract that goes red: the no-fallback rule *permits* an unsupported
+    selector to return empty, so a parser that ends the pseudo at the quoted `)` fails no value gate —
+    `tools/sel_fuzz.py`'s quoted family simply moves ~250 pairs per seed into the UNSUPPORTED bucket and
+    passes. What must be asserted is the SUPPORT verdict: these are valid CSS that parsel answers, so
+    claiming them unsupported is the regression. (Same lesson as docs/TESTING.md's `if supported: assert
+    parity` note — assert the verdict too, or the test passes the moment support disappears.)
+    """
+    parsel = _oracle()
+    html = (b'<html><body><div id="outer" data-x=")" class="a,b"><span id="in">S</span></div>'
+            b'<div id="plain" data-x="q"><span id="in2">T</span></div>'
+            b'<p id="p1" title="a(b">P</p></body></html>')
+    supported = [
+        'div:is(#outer, [data-x=")"])::attr(id)',
+        'div:is([data-x=")"], #other)::attr(id)',      # the quoted `)` BEFORE the comma
+        'div:where([data-x=")"])::attr(id)',
+        'div:not([data-x=")"])::attr(id)',
+        'div:not([data-x="("])::attr(id)',             # an unbalanced `(` in a value
+        "p:is([title='a(b'])::attr(id)",               # single-quoted, unbalanced
+        r'div:is([data-x="\)"])::attr(id)',            # the same paren as a CSS escape
+        'div:is([class="a,b"])::attr(id)',
+        'div:is(#outer, [data-x=")"]) span::text',     # ...and the tail still splits correctly
+        'div:is(#outer, [data-x=")"]) > span::text',
+    ]
+    for sel in supported:
+        want = parsel.Selector(body=html, encoding="utf-8").css(sel).getall()
+        assert frostwork.check([sel]).fields[0].supported, f"{sel!r} is valid CSS parsel answers"
+        assert frostwork.extract(html, [sel])[0] == want, sel
+    # FAIL CLOSED on syntax that is genuinely broken. parsel raises on all of these, so any non-empty
+    # column would be the OVERMATCH the selector fuzzer gates.
+    for sel in [
+        'div:is(#outer, [data-x=")"]::attr(id)',
+        'div:not([data-x=")"]::attr(id)',
+        'div:is([data-x=")::attr(id)',
+        'div:is()::attr(id)',
+    ]:
+        with pytest.raises(Exception):
+            parsel.Selector(body=html, encoding="utf-8").css(sel).getall()
+        assert not frostwork.extract(html, [sel], strict=False)[0], sel
+        assert not frostwork.check([sel]).fields[0].supported, sel
+
+
+def test_selector_grammar_surface_obeys_the_contract():
+    """The same sweep over the REST of the grammar the fuzzer does not write.
+
+    The escape hole was found by asking "what syntax does no generator emit?", so the rest of that list is
+    worth pinning rather than re-deriving: single quotes (the fuzzer only writes double), a quote of the
+    other kind inside a value, namespace prefixes, tabs/newlines between combinators, CSS comments, and
+    tight combinators. All of these are correct today — two as parity, two as an honest unsupported gap —
+    and the test states which, so a change that turns a gap into a WRONG answer fails here.
+    """
+    parsel = _oracle()
+    html = (b'<html><body><p class="shared" data-k="v1" title="it\'s">A</p>'
+            b'<p class="shared1">B</p><div><p id="i1">D</p></div></body></html>')
+    for sel in [
+        "[data-k='v1']::text", "[title='it\\'s']::text", '[title="it\'s"]::text',  # single quotes
+        "*|p::text", "|p::text", "html|p::text",                                   # namespace prefixes
+        "div  >  p::text", "div\t>\tp::text", "div\n p::text", "  p::text  ",      # internal whitespace
+        "p/*c*/::text", "div/*x*/ p::text",                                        # CSS comments
+        "div>p::text", "div+p::text", "div~p::text",                               # no space around combs
+        '[data-k="V1" i]::text',                                                   # case-insensitive flag
+    ]:
+        try:
+            want = parsel.Selector(body=html, encoding="utf-8").css(sel).getall()
+        except Exception:
+            want = None
+        got = frostwork.extract(html, [sel], strict=False)[0]
+        if want is None:
+            assert not got, f"{sel!r}: parsel rejects this, so answering it is a no-fallback violation"
+        elif frostwork.check([sel]).fields[0].supported:
+            assert got == want, f"{sel!r}: claimed supported, so it must equal parsel ({want!r})"
+        else:
+            assert not got, f"{sel!r}: unsupported must be EMPTY, got {got!r}"
+
+
+def test_xpath_grammar_surface_obeys_the_contract():
+    """The XPath analogue of the CSS grammar sweep: 50 shapes, one contract.
+
+    Supported means parity with lxml; unsupported means EMPTY. The interesting half is the shapes no
+    generator writes — `position()`, `last()`, `not()`, `!=`, unions of terminals, axes, `string()`,
+    `count()`, bare node tests, `//@attr`, `@*`, chained predicates, non-literal operands. That last
+    family is what this branch set out to reject, so it is worth a standing check that rejecting them
+    stayed *empty* rather than drifting into a wrong answer.
+    """
+    parsel = _oracle()
+    html = (b'<html><body><div id="d1" class="a b"><p class="x" data-k="v1">one</p>'
+            b'<p class="y">two</p><a href="/p1" title="t">link</a><span>s1</span>'
+            b'<ul><li>l1</li><li>l2</li><li>l3</li></ul>'
+            b'<table><tr><td>c1</td><td>c2</td></tr></table>'
+            b'<em>e</em><b>bb</b></div><div id="d2"><p>three</p></div></body></html>')
+    for q in [
+        "//p/text()", "//p[@class]/text()", '//p[@class="x"]/text()', "//div/p/text()", "//a/@href",
+        "//li[2]/text()", "//div[@id='d1']//text()", "//p[1]/text()", "//li[last()]/text()",
+        "//li[position()=2]/text()", "//li[position()>1]/text()", "//p[contains(@class,'x')]/text()",
+        "//p[contains(text(),'one')]/text()", "//p[starts-with(@class,'x')]/text()",
+        "//p[not(@data-k)]/text()", "//p[@class and @data-k]/text()", "//p[@class or @data-k]/text()",
+        "//p[@class!='x']/text()", "//*[@id]/@id", "//div/*/text()", "//p | //span",
+        "//p/text() | //span/text()", "normalize-space(//p)", "string(//p)", "count(//p)",
+        "//p/following-sibling::p/text()", "//p/parent::div/@id", "//p/ancestor::div/@id",
+        "//div//p[@class='y']/text()", "//td/text()", "//p[@data-k=@class]/text()",
+        "//p[text()=@class]/text()", "//p[contains(@class,@data-k)]/text()",
+        "//p[@class=concat('x','')]/text()", "//p[.='one']/text()", "//p[./text()='one']/text()",
+        "//p[@class='x'][@data-k='v1']/text()", "(//p)[1]/text()", "//node()", "//text()",
+        "//comment()", "//@href", "//p/@*", "//P/text()", "//p[@CLASS='x']/text()",
+        "/html/body/div/p/text()", "./div/p/text()", ".//p/text()",
+        "//p[string-length(@class)>0]/text()", "//p[@class='x']/../@id",
+    ]:
+        try:
+            want = parsel.Selector(body=html, encoding="utf-8").xpath(q).getall()
+        except Exception:
+            want = None
+        got = frostwork.extract(html, [q], strict=False)[0]
+        if want is None:
+            assert not got, f"{q!r}: lxml rejects this, so answering it is a no-fallback violation"
+        elif frostwork.check([q]).fields[0].supported:
+            assert got == want, f"{q!r}: claimed supported, so it must equal lxml ({want!r})"
+        else:
+            assert not got, f"{q!r}: unsupported must be EMPTY, got {got!r}"
+
+
+def test_scanner_finds_selector_literals_in_every_source_shape():
+    """The scanner's failure mode is a SILENT MISS: it exists so a migration can see un-ported selectors,
+    and a selector it does not report is one nobody knows to port.
+
+    So this sweeps the source shapes a hand-written test set does not think of — chained calls, subscripts,
+    multiline and triple-quoted arguments, comprehensions, `try`/`with`/`async def`/lambda/decorator
+    contexts, processors after the selector, tuple and list kwargs. Dynamic selectors must be REPORTED as
+    skipped rather than dropped, which is a different thing from being found.
+    """
+    from frostwork.scan import scan_source
+
+    TRIPLE = "r.css(" + '"""' + ".a::text" + '"""' + ")\n"
+
+    def found(src):
+        return {s.selector for s in scan_source(src, "t.py") if s.selector}
+
+    cases = [
+        ("def p(r):\n    return r.css('.a::text').get() or r.css('.b::text').get()\n",
+         {".a::text", ".b::text"}),
+        ("r.css('.a').css('.b::text')\n", {".a", ".b::text"}),
+        ("r.css('.a::text')[0]\n", {".a::text"}),
+        ("r.css(\n    '.a::text'\n)\n", {".a::text"}),
+        (TRIPLE, {".a::text"}),
+        ("async def p(r):\n    return r.css('.a::text').get()\n", {".a::text"}),
+        ("class S:\n    def parse(self, r):\n        return r.css('.a::text')\n", {".a::text"}),
+        ("def p(r):\n    try:\n        return r.css('.a::text')\n    except E:\n        return r.css('.b')\n",
+         {".a::text", ".b"}),
+        ("def p(r):\n    for x in r.css('.row'):\n        yield x.css('.c::text').get()\n",
+         {".row", ".c::text"}),
+        ("l.add_xpath('n', '//p/text()', MapCompose(str.strip))\n", {"//p/text()"}),
+        ("LinkExtractor(restrict_xpaths=['//a/@href', '//b/@href'])\n", {"//a/@href", "//b/@href"}),
+        ("LinkExtractor(allow=(), restrict_css=('.a', '.b'))\n", {".a", ".b"}),
+        ("r.css('.a::text').re(r'\\d+')\n", {".a::text"}),
+        ("lambda r: r.css('.a::text')\n", {".a::text"}),
+        ("@decorator(r.css('.a'))\ndef f():\n    pass\n", {".a"}),
+        ("r.css('.a, .b::text')\n", {".a, .b::text"}),
+        ("def p(r):\n    with open('f') as fh:\n        return r.css('.a::text')\n", {".a::text"}),
+        ("d = {'f': r.css('.a::text')}\n", {".a::text"}),
+        ("sel.get_css('.a::text')\n", {".a::text"}),
+    ]
+    for src, want in cases:
+        assert found(src) == want, f"scanner missed/invented a selector in {src!r}"
+
+    # dynamic selectors: a SITE must still be reported, with no selector — silently dropping them would
+    # under-report a migration and read as "nothing left to port"
+    for src in ["x = [r.css(s) for s in ['.a', '.b']]\n", "r.css('.a::text' if x else '.b')\n",
+                "q = '.a' + '::text'\nr.css(q)\n", "r.css(f'.a{n}::text')\n"]:
+        sites = scan_source(src, "t.py")
+        assert sites and not any(s.selector for s in sites), \
+            f"a dynamic selector must be reported as skipped, not dropped: {src!r}"
+
+
+def test_deferred_predicates_are_unsupported_in_grouped_extraction():
+    """Deferred-close matching is unsupported both AS a grouped container and INSIDE a grouped sub-field.
+
+    That is a real limit (docs/PYTHON.md), and the thing worth pinning is that it is REPORTED rather than
+    silently empty: a probe that only compared values against Parsel here would report hundreds of
+    "divergences" that are really the no-fallback contract working. Each verdict must name its reason.
+    """
+    groups = [
+        ("div:has(a)", [("h", "a::attr(href)")]),
+        ("li:last-child", [("t", "::text")]),
+        ("div.c1", [("h", "a::attr(href)")]),
+        ("div", [("last", "li:last-child::text")]),
+        ("div", [("hasa", "p:has(a) a::attr(href)")]),
+    ]
+    rep = frostwork.check([], groups)
+    verdicts = [(g.container.supported, [f.supported for f in g.subfields]) for g in rep.groups]
+    assert verdicts == [(False, [True]), (False, [True]), (True, [True]),
+                        (True, [False]), (True, [False])], verdicts
+    for g in rep.groups:
+        if not g.container.supported:
+            assert "grouped container" in (g.container.reason or ""), g.container.reason
+        for f in g.subfields:
+            if not f.supported:
+                assert "grouped sub-field" in (f.reason or ""), f.reason
+
+
+def test_deferred_predicate_combinations_match_parsel():
+    """`:has()`, reverse positionals and XPath text-predicates all resolve at a local close, and the
+    interesting cases are the ones where candidate spans NEST and OVERLAP — what the maximal-span de-dup
+    and the tail re-scan exist for, which a single-predicate vector never exercises.
+
+    The generator is CONTENT-MODEL CONFORMANT on purpose (`<p>` holds inline only, `<li>` only inside
+    `<ul>`). A first version emitted `<div>` inside `<p>` and li-in-li, and its 9 "failures" were all the
+    DOCUMENTED deep-`p`/misnest divergences — the probe was measuring the wrong thing. On conformant input
+    the corrected stack equals lxml's tree, so any divergence here is a real bug.
+    """
+    parsel = _oracle()
+    import random
+    rng = random.Random(11)
+    INLINE = ['<a href="/h">A</a>', '<span>S</span>', '<b>B</b>', 'txt', '<i>I</i>']
+
+    def inline_run():
+        return "".join(rng.choice(INLINE) for _ in range(rng.randint(1, 3)))
+
+    def flow(d):
+        if d == 0:
+            return inline_run()
+        r, cls = rng.random(), rng.choice(["c1", "c2", "c1 c2", ""])
+        if r < 0.30:
+            return f'<p class="{cls}">{inline_run()}</p>'
+        if r < 0.50:
+            items = "".join(f'<li class="{rng.choice(["c1", "c2", ""])}">'
+                            f'{inline_run() if rng.random() < 0.6 else flow(d - 1)}</li>'
+                            for _ in range(rng.randint(1, 3)))
+            return f"<ul>{items}</ul>"
+        tag = "div" if r < 0.78 else "section"
+        kids = "".join(flow(d - 1) for _ in range(rng.randint(1, 3)))
+        return f'<{tag} class="{cls}">{kids}</{tag}>'
+
+    basket = [
+        "div:has(a)::text", "div:has(a) a::attr(href)", "div:has(> a) a::attr(href)",
+        "li:has(span)::text", "li:has(.c1) a::attr(href)", "div:has(b) span::text",
+        "div:has(a):has(span) a::attr(href)", "li:last-child::text", "li:only-child::text",
+        "div:last-child a::attr(href)", "li:last-of-type::text", "div:nth-last-child(2)::text",
+        "div:has(a) li:last-child::text", "li:last-child:has(a) a::attr(href)",
+        "//div[a]/text()", "//li[span]//text()", "//div[contains(., 'A')]/@class",
+        "div:has(a) b::text", "section:has(i) span::text", "p:has(a) a::attr(href)",
+        "ul:has(li.c1) li::text",
+    ]
+    sup = [f.supported for f in frostwork.check(basket).fields]
+    for _ in range(60):
+        body = "".join(flow(rng.randint(2, 4)) for _ in range(rng.randint(2, 4)))
+        html = ("<html><body>" + body + "</body></html>").encode()
+        mine = frostwork.extract(html, basket, strict=False)
+        sel = parsel.Selector(body=html, encoding="utf-8")
+        for i, q in enumerate(basket):
+            want = (sel.xpath if q.startswith("/") else sel.css)(q).getall()
+            if sup[i]:
+                assert [v for v in mine[i] if v.strip()] == [v for v in want if v.strip()], \
+                    f"{q!r} diverges on {html!r}"
+            else:
+                assert not mine[i], f"{q!r} is unsupported but returned {mine[i]!r}"
+
+
+def test_scanner_handles_keyword_builder_forms():
+    """Migration reports are only useful if they see every selector literal. The arity checks lost the
+    all-keyword form entirely (silently 'clean') and audited a FIELD NAME as a selector in the
+    keyword-selector form (noise that fails the audit)."""
+    from frostwork.scan import scan_source
+
+    def sites(expr):
+        return sorted(s.selector for s in scan_source(
+            f"from frostwork import Page\nclass P(Page):\n    x = {expr}\n", "x.py"))
+
+    assert sites('Page.many("cards", ".card", {"t": ".t::text"})') == [".card", ".t::text"]
+    assert sites('Page.many(name="cards", container=".card", subfields={"t": ".t::text"})') == \
+        [".card", ".t::text"]
+    assert sites('Page.many("cards", container=".card", subfields={"t": ".t::text"})') == \
+        [".card", ".t::text"]
+    assert sites('Page.field("title", "h1::text")') == ["h1::text"]
+    assert sites('Page.field("title", selector="h1::text")') == ["h1::text"]
+    assert sites('Page.field(name="title", selector="h1::text")') == ["h1::text"]

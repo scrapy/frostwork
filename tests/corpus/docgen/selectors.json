@@ -1,0 +1,14 @@
+{
+  "title": "h1::text",
+  "section_text": "div.section::text",
+  "paras": "div.section > p::text",
+  "note": ".admonition p::text",
+  "terms": "dl > dt::text",
+  "term_names": "dl > dt .name::text",
+  "defs": "dl > dd p::text",
+  "code": "pre code::text",
+  "anchors": "a.headerlink::attr(href)",
+  "script": "script::text",
+  "first_para": "div.section > p:first-child::text",
+  "last_term": "dl > dt:last-child .name::text"
+}
