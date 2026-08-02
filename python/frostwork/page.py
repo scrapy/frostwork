@@ -492,9 +492,14 @@ class Page:
         self._queries.append(selector)
         self._cards.append(card)
         self._transforms.append(transforms)
-        self._plan = None  # schema changed -> invalidate the compiled plan
-        self._validated = False
+        self._invalidate()
         return self
+
+    def _invalidate(self) -> None:
+        """The schema changed: drop the compiled plan and the cached strict-validation result, so
+        neither an old plan nor an old green verdict can outlive the selectors they were built from."""
+        self._plan = None
+        self._validated = False
 
     def _ensure_new_name(self, name: str) -> None:
         """Reject ambiguous flat/group collisions before they can overwrite in ``Item.to_dict``."""
@@ -540,21 +545,18 @@ class Page:
 
             .many("offers", ".offer", {"price": ".p::text", "tags": (".tag::text", "all")})
         """
-        self._ensure_new_name(name)
-        subs = {sn: _sub_spec(spec) for sn, spec in subfields.items()}
-        self._groups.append({"name": name, "container": container, "subfields": subs, "one": False})
-        self._plan = None  # schema changed -> invalidate the compiled plan
-        self._validated = False
-        return self
+        return self._add_group(name, container, subfields, one=False)
 
     def one(self, name: str, container: str, subfields: dict) -> "Page":
         """Like :meth:`many`, but :meth:`Item.value` returns the **first** container's ``dict`` row, or
         ``None`` if none match. Same rich sub-specs as :meth:`many`."""
+        return self._add_group(name, container, subfields, one=True)
+
+    def _add_group(self, name: str, container: str, subfields: dict, *, one: bool) -> "Page":
         self._ensure_new_name(name)
         subs = {sn: _sub_spec(spec) for sn, spec in subfields.items()}
-        self._groups.append({"name": name, "container": container, "subfields": subs, "one": True})
-        self._plan = None  # schema changed -> invalidate the compiled plan
-        self._validated = False
+        self._groups.append({"name": name, "container": container, "subfields": subs, "one": one})
+        self._invalidate()
         return self
 
     @property

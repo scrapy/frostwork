@@ -14,6 +14,14 @@ fn check_budget(queries: &[String], groups: &[crate::GroupQuery]) -> PyResult<()
     budget_error(crate::budget_usage(queries, groups))
 }
 
+/// The `(container, [(name, selector)])` tuples Python passes, as the engine's `GroupQuery` list.
+fn group_queries(groups: Vec<(String, Vec<(String, String)>)>) -> Vec<crate::GroupQuery> {
+    groups
+        .into_iter()
+        .map(|(container, subfields)| crate::GroupQuery { container, subfields })
+        .collect()
+}
+
 /// Raise `ValueError` if a schema's `(members, sibling-bits)` demand exceeds the fixed-width budget.
 fn budget_error((members, sib): (usize, usize)) -> PyResult<()> {
     if members > crate::MAX_MEMBERS {
@@ -49,11 +57,7 @@ impl Plan {
     #[new]
     #[pyo3(signature = (flat_queries, groups))]
     fn new(flat_queries: Vec<String>, groups: Vec<(String, Vec<(String, String)>)>) -> PyResult<Self> {
-        let gq: Vec<crate::GroupQuery> = groups
-            .into_iter()
-            .map(|(container, subfields)| crate::GroupQuery { container, subfields })
-            .collect();
-        let inner = crate::Plan::compile(&flat_queries, &gq);
+        let inner = crate::Plan::compile(&flat_queries, &group_queries(groups));
         budget_error(inner.budget_usage())?;
         Ok(Plan { inner })
     }
@@ -113,10 +117,7 @@ fn extract_grouped(
     groups: Vec<(String, Vec<(String, String)>)>,
     encoding: Option<&str>,
 ) -> PyResult<(Vec<Vec<String>>, Vec<Vec<Vec<Vec<String>>>>)> {
-    let gq: Vec<crate::GroupQuery> = groups
-        .into_iter()
-        .map(|(container, subfields)| crate::GroupQuery { container, subfields })
-        .collect();
+    let gq = group_queries(groups);
     check_budget(&flat_queries, &gq)?;
     Ok(py.detach(|| crate::extract_grouped(html, &flat_queries, &gq, encoding)))
 }
@@ -154,11 +155,7 @@ fn audit_schema(
     Vec<((bool, Option<String>), Vec<(bool, Option<String>)>)>,
     (usize, usize, usize, usize),
 ) {
-    let gq: Vec<crate::GroupQuery> = groups
-        .into_iter()
-        .map(|(container, subfields)| crate::GroupQuery { container, subfields })
-        .collect();
-    let a = crate::audit_schema(&flat_queries, &gq);
+    let a = crate::audit_schema(&flat_queries, &group_queries(groups));
     let flat = a.flat.iter().map(support_tuple).collect();
     let grouped = a
         .groups

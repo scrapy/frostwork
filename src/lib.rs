@@ -33,10 +33,11 @@ pub type GroupRows = Vec<Vec<Vec<String>>>;
 /// Extract each query's values in one streaming pass. Unsupported queries yield an empty column
 /// (there is no fallback — that is the whole point of Frostwork). Values match Parsel's per-text-node,
 /// whitespace-kept, entity-decoded semantics on the supported subset.
-/// Extract each query's values. `encoding` is an optional caller/HTTP charset label (as Scrapy
-/// passes); when `None` the encoding is sniffed (BOM -> `<meta>` -> UTF-8). Structural tokenization
-/// runs on raw bytes for every ASCII-compatible encoding; only the small emitted values are decoded
-/// with the resolved encoding. UTF-16LE/BE are transcoded to UTF-8 up front (rare).
+///
+/// `encoding` is an optional caller/HTTP charset label (as Scrapy passes); when `None` the encoding is
+/// sniffed (BOM -> `<meta>` -> UTF-8). Structural tokenization runs on raw bytes for every
+/// ASCII-compatible encoding; only the small emitted values are decoded with the resolved encoding.
+/// UTF-16LE/BE are transcoded to UTF-8 up front (rare).
 pub fn extract(html: &[u8], queries: &[String], encoding: Option<&str>) -> Vec<Vec<String>> {
     extract_grouped(html, queries, &[], encoding).0
 }
@@ -51,8 +52,9 @@ pub struct GroupQuery {
 }
 
 /// Is `qt` an XPath query (absolute/`.`-rooted path, or a `normalize-space(...)` wrapper) rather than
-/// CSS? The shared routing rule for [`compile_query`] / [`compile_one`].
-fn is_xpath(qt: &str) -> bool {
+/// CSS? The one routing rule, shared by [`compile_query`] / [`compile_one`] and by [`diagnostics`] —
+/// an explainer that classified a query differently from the compiler would name the wrong cause.
+pub(crate) fn is_xpath(qt: &str) -> bool {
     qt.starts_with('/') || qt.starts_with("./") || qt.starts_with("normalize-space(")
 }
 
@@ -91,16 +93,30 @@ fn compile_query(q: &str) -> Vec<Selector> {
     }
 }
 
+/// Lower a whole schema's query strings to the matcher's inputs. Every entry point that reasons about
+/// a schema — [`budget_usage`], [`audit_schema`], [`Plan::compile`] — goes through here, so all three
+/// necessarily agree on which selectors compiled: an audit that routed a query differently from the
+/// `Plan` that runs it would promise support for a column that comes back empty.
+fn compile_schema(
+    queries: &[String],
+    groups: &[GroupQuery],
+) -> (Vec<Vec<Selector>>, Vec<matcher::GroupInput>) {
+    let flat = queries.iter().map(|q| compile_query(q)).collect();
+    let grouped = groups
+        .iter()
+        .map(|g| {
+            (compile_one(&g.container), g.subfields.iter().map(|(_, sel)| compile_one(sel)).collect())
+        })
+        .collect();
+    (flat, grouped)
+}
+
 /// The `(member-selector, sibling-bit)` demand of a schema. A caller
 /// that would rather fail loud than get silently-empty columns compares this against
 /// [`MAX_MEMBERS`] / [`MAX_SIB_BITS`]; the Python binding raises `ValueError`.
 pub fn budget_usage(queries: &[String], groups: &[GroupQuery]) -> (usize, usize) {
-    let queries_sel: Vec<Vec<Selector>> = queries.iter().map(|q| compile_query(q)).collect();
-    let compiled_groups: Vec<matcher::GroupInput> = groups
-        .iter()
-        .map(|g| (compile_one(&g.container), g.subfields.iter().map(|(_, sel)| compile_one(sel)).collect()))
-        .collect();
-    matcher::budget_usage(&queries_sel, &compiled_groups)
+    let (flat, grouped) = compile_schema(queries, groups);
+    matcher::budget_usage(&flat, &grouped)
 }
 
 // ---------------------------------------------------------------- schema audit (no-fallback safety)
@@ -235,13 +251,9 @@ pub fn audit_schema(queries: &[String], groups: &[GroupQuery]) -> SchemaAudit {
     // Compile ONCE and derive every support verdict from the exact routes extraction will use. This
     // prevents the audit/strict-mode logic from drifting from matcher eligibility rules (notably the
     // deferred `:has` / text-predicate exclusions in grouped containers and sub-fields).
-    let queries_sel: Vec<Vec<Selector>> = queries.iter().map(|q| compile_query(q)).collect();
-    let compiled_groups: Vec<matcher::GroupInput> = groups
-        .iter()
-        .map(|g| (compile_one(&g.container), g.subfields.iter().map(|(_, sel)| compile_one(sel)).collect()))
-        .collect();
-    let (members, sib_bits) = matcher::budget_usage(&queries_sel, &compiled_groups);
-    let schema = matcher::CompiledSchema::compile(&queries_sel, &compiled_groups);
+    let (flat_sel, grouped_sel) = compile_schema(queries, groups);
+    let (members, sib_bits) = matcher::budget_usage(&flat_sel, &grouped_sel);
+    let schema = matcher::CompiledSchema::compile(&flat_sel, &grouped_sel);
     SchemaAudit {
         flat: queries
             .iter()
@@ -346,15 +358,9 @@ pub struct Plan {
 impl Plan {
     /// Compile `queries` + `groups` (the same shapes [`extract_grouped`] accepts) once for reuse.
     pub fn compile(queries: &[String], groups: &[GroupQuery]) -> Plan {
-        let queries_sel: Vec<Vec<Selector>> = queries.iter().map(|q| compile_query(q)).collect();
-        let compiled_groups: Vec<matcher::GroupInput> = groups
-            .iter()
-            .map(|g| {
-                (compile_one(&g.container), g.subfields.iter().map(|(_, sel)| compile_one(sel)).collect())
-            })
-            .collect();
-        let budget = matcher::budget_usage(&queries_sel, &compiled_groups);
-        Plan { schema: matcher::CompiledSchema::compile(&queries_sel, &compiled_groups), budget }
+        let (flat, grouped) = compile_schema(queries, groups);
+        let budget = matcher::budget_usage(&flat, &grouped);
+        Plan { schema: matcher::CompiledSchema::compile(&flat, &grouped), budget }
     }
 
     /// The `(member, sibling-bit)` budget demand of this plan — see [`budget_usage`]. Computed at

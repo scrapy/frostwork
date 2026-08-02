@@ -8,28 +8,26 @@ use crate::selector::{Comb, Compound, Selector, Terminal};
 
 use super::to_segments;
 
-fn compound_any_reverse(c: &Compound) -> bool {
-    c.reverse.is_some() || c.negations.iter().any(compound_any_reverse)
+/// Does any compound of `sel` carry this deferred predicate, INCLUDING inside a `:not()`? The
+/// recursion is the point: a tier that ignored a nested one would route a selector as streamable and
+/// then silently drop the constraint.
+fn any_compound(sel: &Selector, carries: fn(&Compound) -> bool) -> bool {
+    fn walk(c: &Compound, carries: fn(&Compound) -> bool) -> bool {
+        carries(c) || c.negations.iter().any(|n| walk(n, carries))
+    }
+    sel.parts.iter().any(|c| walk(c, carries))
 }
 
 pub(super) fn any_reverse(sel: &Selector) -> bool {
-    sel.parts.iter().any(compound_any_reverse)
-}
-
-fn compound_any_has(c: &Compound) -> bool {
-    c.has.is_some() || c.negations.iter().any(compound_any_has)
+    any_compound(sel, |c| c.reverse.is_some())
 }
 
 pub(super) fn any_has(sel: &Selector) -> bool {
-    sel.parts.iter().any(compound_any_has)
-}
-
-fn compound_any_text_pred(c: &Compound) -> bool {
-    c.text_pred.is_some() || c.negations.iter().any(compound_any_text_pred)
+    any_compound(sel, |c| c.has.is_some())
 }
 
 pub(super) fn any_text_pred(sel: &Selector) -> bool {
-    sel.parts.iter().any(compound_any_text_pred)
+    any_compound(sel, |c| c.text_pred.is_some())
 }
 
 /// Shared shape check for all three deferred tiers: exactly one compound carries the predicate (at any
