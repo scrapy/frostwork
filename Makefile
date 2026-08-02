@@ -27,7 +27,7 @@ MATURIN ?= .venv/bin/maturin
 FUZZ_ITERS ?= 6000
 
 .DEFAULT_GOAL := help
-.PHONY: help bootstrap test build gate gate-corpus corpus-real gate-mutate gate-mutate-full \
+.PHONY: help bootstrap test build gate gate-corpus gate-seq corpus-real gate-mutate gate-mutate-full \
 	fuzz-smoke soak py bench bench-smoke ci
 
 help:
@@ -70,6 +70,13 @@ corpus-real: build
 	$(PY) tools/corpus_fetch.py --out $(REALWEB)
 	$(PY) tools/bench_corpus.py $(REALWEB) --gate
 
+# Tag SEQUENCES, exhaustively, compared on the whole TREE rather than a few selector values. The rule
+# sweeps are two-dimensional and the crawl corpus is luck; this is the surface where the state at token N
+# depends on tokens 1..N-1, which is where six of the last bugs lived. depth 4 = ~292k documents, ~30s.
+SEQ_DEPTH ?= 4
+gate-seq:
+	$(PY) tools/seq_sweep.py --depth $(SEQ_DEPTH) --random 20000 --length 8 --gate
+
 # "Is every rule cell RIGHT?" is what tools/audit_tree_rules.py answers. This answers "if a cell were
 # WRONG, would any gate notice?" — the only check here that finds blind spots without a human guessing
 # where they are. Needs the `mutate` feature (one build serves every mutant); puts the normal build back
@@ -107,5 +114,5 @@ bench: build
 bench-smoke: build
 	$(PY) tools/bench_matrix.py --smoke
 
-ci: test gate gate-corpus fuzz-smoke py
+ci: test gate gate-corpus gate-seq fuzz-smoke py
 	@echo "frostwork: all local gates passed"

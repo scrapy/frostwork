@@ -296,11 +296,19 @@ pub fn audit_schema(queries: &[String], groups: &[GroupQuery]) -> SchemaAudit {
     }
 }
 
-/// Resolve the page encoding and yield `(bytes_to_tokenize, value_encoding)`. UTF-16 (the only
-/// non-ASCII-compatible family) is transcoded to a fresh UTF-8 `Vec` once (owned `Cow`); everything
-/// else borrows the input, with a document-leading UTF-8 BOM stripped — libxml2 strips ONLY the
-/// leading BOM (a U+FEFF elsewhere is real content), and per-value decoding must not re-strip it (see
-/// `matcher::finalize`), so it is handled here, once per page.
+/// Resolve the page encoding and yield `(bytes_to_tokenize, value_encoding)`. A non-ASCII-compatible
+/// encoding is transcoded to a fresh UTF-8 `Vec` once (owned `Cow`); everything else borrows the input,
+/// with a document-leading UTF-8 BOM stripped — libxml2 strips ONLY the leading BOM (a U+FEFF elsewhere
+/// is real content), and per-value decoding must not re-strip it (see `matcher::finalize`), so it is
+/// handled here, once per page.
+///
+/// **The transcode set is asked of `encoding_rs`, not listed here**, and that is the whole point: it was
+/// listed here, as "UTF-16, the only non-ASCII-compatible family", and it was wrong. ISO-2022-JP is not
+/// ASCII-compatible either — inside `ESC $ B` mode a JIS pair is two bytes below 0x80, and `社` is
+/// literally `<R`. A crawled Japanese page tokenized as raw bytes therefore grew a `<r>` start tag out
+/// of the middle of a word and dropped the character; every value downstream of it was wrong. The
+/// predicate covers `replacement` too (the label for HZ-GB-2312 and friends), whose whole purpose is
+/// that browsers refuse to decode such a document at all — one U+FFFD and nothing else.
 ///
 /// Raw NUL is deleted here too, for the whole document (see [`strip_nul`]).
 fn prepare_bytes<'h>(
@@ -308,21 +316,70 @@ fn prepare_bytes<'h>(
     encoding: Option<&str>,
 ) -> (Cow<'h, [u8]>, &'static encoding_rs::Encoding) {
     let enc = encoding::resolve(html, encoding);
-    if enc == encoding_rs::UTF_16LE || enc == encoding_rs::UTF_16BE {
+    if !enc.is_ascii_compatible() {
         // Transcode FIRST: in UTF-16 every ASCII character carries a 0x00 byte, so deleting NUL bytes
         // from the raw input would shred the document. What must go is the U+0000 CHARACTER, which only
         // exists once the code units have been decoded. (Parsel deletes NUL from the raw bytes instead,
         // which is why it cannot read a UTF-16 page at all — a divergence in our favour, already
         // documented under Encoding in docs/COMPATIBILITY.md.)
-        let utf8 = enc.decode(html).0.into_owned().into_bytes();
+        let mut utf8 = enc.decode(html).0.into_owned().into_bytes();
+        utf8.truncate(document_end(&utf8));
+        let start = document_start(&utf8);
+        if start > 0 {
+            utf8.drain(..start);
+        }
         return (Cow::Owned(strip_nul(Cow::Owned(utf8)).into_owned()), encoding_rs::UTF_8);
     }
-    let bytes = if enc == encoding_rs::UTF_8 && html.starts_with(&[0xEF, 0xBB, 0xBF]) {
-        &html[3..]
+    let bytes = if enc == encoding_rs::UTF_8 {
+        &html[document_start(html)..]
     } else {
         html
     };
+    let bytes = &bytes[..document_end(bytes)];
     (strip_nul(Cow::Borrowed(bytes)), enc)
+}
+
+/// Where the document's text starts: past a leading UTF-8 BOM, and past any ASCII whitespace written
+/// BEFORE it. Returns 0 when there is no BOM, so an ordinary page keeps every offset it arrived with.
+///
+/// The whitespace half is Parsel's rule, not libxml2's, and it is the same call as deleting raw NUL
+/// (see [`strip_nul`]): `Selector(text=...)` parses `text.strip()`, so on a page that INDENTS its
+/// doctype — `"    \u{FEFF}<!DOCTYPE HTML>"` — the U+FEFF is promoted to offset 0, where libxml2 then
+/// eats it as a BOM. Read the bytes as they arrive and that U+FEFF is instead a character, and a
+/// character before the frame opens the `<body>`: the page's `<head>`, `<title>` and even the
+/// attributes of its own `<html>` tag (redundant once a body is open) are all lost, so `head
+/// title::text` and `html::attr(xmlns)` come back silently EMPTY. libxml2 on the raw bytes and
+/// html5lib both agree with the raw reading — this is Parsel normalizing its input, and matching what
+/// a scraper actually sees is the point. Four pages in one 10000-page crawl sample were shaped this
+/// way, between them 71 divergent columns.
+///
+/// Gated on UTF-8 by the caller: in windows-1252 those three bytes are `ï»¿`, three real characters,
+/// and Parsel's own decode agrees.
+/// Where the document's text ends: before any trailing ASCII whitespace, which is the other half of
+/// Parsel's `text.strip()` (see [`document_start`]).
+///
+/// This one can only ever move whitespace-only text, so it never changes a value a scraper reads — but
+/// it does change how many values come back. A page ending `…<option class="c3">\n` gives the last
+/// option a text node here and none under Parsel, so `option::text` returned one extra row. Not gated
+/// on UTF-8: no ASCII-compatible encoding can carry these bytes inside a multi-byte character, and a
+/// non-ASCII-compatible one has already been transcoded.
+fn document_end(bytes: &[u8]) -> usize {
+    bytes
+        .iter()
+        .rposition(|b| !b.is_ascii_whitespace())
+        .map_or(0, |i| i + 1)
+}
+
+fn document_start(bytes: &[u8]) -> usize {
+    let ws = bytes
+        .iter()
+        .position(|b| !b.is_ascii_whitespace())
+        .unwrap_or(bytes.len());
+    if bytes[ws..].starts_with(&[0xEF, 0xBB, 0xBF]) {
+        ws + 3
+    } else {
+        0
+    }
 }
 
 /// Delete every raw NUL byte from the document, as Parsel/w3lib do before handing bytes to lxml
@@ -795,8 +852,8 @@ mod tests {
         );
     }
     // libxml2 2.14 NESTS a same-tag dt/dd repeat instead of auto-closing it (unlike `li`/`td`/`option`
-    // above), and never auto-closes ruby annotations at all. The ported rule table asserted the HTML5
-    // behavior for both and over-closed. See `implied_close::implies_close_id`.
+    // above), and never auto-closes ruby annotations at all. The ported rule table that used to sit
+    // alongside `start_closes` asserted the HTML5 behavior for both and over-closed.
     #[test]
     fn dt_dd_same_tag_repeat_nests() {
         assert_eq!(ex("<dl><dt>a<dt>b</dl>", "dl > dt::text"), v(&["a"]));
@@ -832,7 +889,8 @@ mod tests {
     ///
     /// This is a different rule from the implied-close cross product, at a finer granularity than the
     /// engine's tag ids: it closes an open `<b>` for an incoming `<td>` but NOT an open `<em>`, and an
-    /// open `<h1>` for an incoming `<table>` but NOT an open `<div>` — pairs that share a `tag::` id.
+    /// open `<h1>` for an incoming `<table>` but NOT an open `<div>` — pairs a coarser id space lumps
+    /// together.
     /// Every case here was read off libxml2 2.14 first; `tools/audit_tree_rules.py` re-checks all
     /// 11,543 (open x incoming) cells, and `tools/mutate_rules.py` checks that flipping one is noticed.
     #[test]
@@ -844,14 +902,14 @@ mod tests {
         assert_eq!(ex("<div><b>x<p>y</div>", "div > p::text"), v(&["y"]));
         assert_eq!(ex("<div><u>x<p>y</div>", "div > p::text"), v(&["y"]));
         assert_eq!(ex("<div><small>x<p>y</div>", "div > p::text"), v(&["y"]));
-        // ...but NOT an open <em>/<strong>, which are the same `tag::OTHER` id as <b>
+        // ...but NOT an open <em>/<strong>, which a coarser id space would lump in with <b>
         assert_eq!(ex("<div><em>x<p>y</div>", "div > p::text"), v(&[]));
         // a cell closes an open inline element, an anchor closes an anchor, a form closes a form
         assert_eq!(ex("<div><span>x<td>y</div>", "div > td::text"), v(&["y"]));
         assert_eq!(ex("<div><font>x<td>y</div>", "div > td::text"), v(&["y"]));
         assert_eq!(ex("<div><a>x<a>y</div>", "div > a::text"), v(&["x", "y"]));
         assert_eq!(ex("<div><form>a<form>b</div>", "div > form::text"), v(&["a", "b"]));
-        // <table> closes an open heading, but not an open <div> (both `tag::BLOCK`)
+        // <table> closes an open heading, but not an open <div> (one coarse "block" id would lump them)
         assert_eq!(ex("<div><h1>T<table><tr><td>c</table></div>", "div > table td::text"), v(&["c"]));
         // list/definition starts close an open <pre> or <address>
         assert_eq!(ex("<div><pre>a<li>b</div>", "div > li::text"), v(&["b"]));
@@ -903,7 +961,7 @@ mod tests {
         assert_eq!(ex(real, "a::attr(href)"), v(&["/"])); // lxml/Parsel: empty
     }
 
-    // TABLE SCOPE: libxml2 will not unwind a table for an ordinary end tag, so a stray `</div>` inside
+    // END-TAG SCOPE: libxml2 will not unwind a table for an ordinary end tag, so a stray `</div>` inside
     // a cell is discarded and the cell's text stays whole. Unbalanced `<div>`s around tables are a
     // common real-world malformation. See `implied_close::blocks_end_tag`.
     #[test]
@@ -923,6 +981,31 @@ mod tests {
         // a non-table container does NOT block, and a </div> matched inside a cell is honoured
         assert_eq!(ex("<div><ul><li>A</div>B", "li::text"), v(&["A"]));
         assert_eq!(ex("<table><tr><td><div>A</div>B</td></tr></table>", "td::text"), v(&["B"]));
+    }
+
+    /// A table-family end tag is scoped too, because the rule is a PRIORITY comparison rather than a
+    /// "the table blocks everything, its row machinery blocks nothing" split: a `<tbody>` open above a
+    /// `<tr>` out-ranks it, so the `</tr>` is discarded and the row keeps what follows.
+    ///
+    /// From a crawled page whose table generator emits `<tr><strong><tbody>` rows: the engine closed each
+    /// row and LOST the cells. The `<strong>` matters — with nothing between them the `<tbody>` start tag
+    /// closes the row itself, and then the end tag has no match either way.
+    #[test]
+    fn end_tag_does_not_unwind_a_higher_priority_element() {
+        let row = "<table><tr><strong><tbody></tr><td>A</td></table>";
+        assert_eq!(ex(row, "tr td::text"), v(&["A"]));
+        // `<thead>` does not close a row either, so it too can sit above one and swallow the next row
+        let two = "<table><tr><td>A</td><thead></tr><tr><td>B</td></tr></table>";
+        assert_eq!(ex(two, "tr tr td::text"), v(&["B"]));
+        // `<body>` out-ranks the whole table machinery, which only matters where one can be open ABOVE
+        // a match: a `<body>` written after `</body>`. A crawled page put one inside a `<td>` and the
+        // `</td>` under it has to be discarded, or the rest of the page leaves the cell.
+        assert_eq!(ex("<body></body><td><body>X</td>Y", "td > body::text"), v(&["XY"]));
+        assert_eq!(ex("<body></body><td><body>X</td>Y", "td::text"), Vec::<String>::new());
+        // ...and the comparison runs the other way too: a LOWER-priority row and cell above the match do
+        // not block, so `</tbody>` unwinds both and the text after it is the table's own.
+        assert_eq!(ex("<table><tbody><tr><td>A</tbody>B</table>", "td::text"), v(&["A"]));
+        assert_eq!(ex("<table><tbody><tr><td>A</tbody>B</table>", "table::text"), v(&["B"]));
     }
 
     #[test]
@@ -1058,6 +1141,31 @@ mod tests {
     #[test]
     fn class_and_id() {
         assert_eq!(ex("<div class=\"c\"><span id=\"x\">s</span></div>", ".c #x::text"), v(&["s"]));
+    }
+    /// A class list splits on ASCII whitespace, not on Unicode whitespace — see `OpenElem::has_class`.
+    /// `[rel~=x]` tokenizes identically, so both are checked here.
+    #[test]
+    fn class_lists_split_on_ascii_whitespace_only() {
+        // separators HTML recognizes: the two classes are distinct
+        for sep in [" ", "\t", "\n", "\r", "\u{0C}"] {
+            let doc = format!("<div class=\"a fadein{sep}clearfix\">x</div>");
+            assert_eq!(ex(&doc, ".fadein::text"), v(&["x"]), "{sep:?}");
+            assert_eq!(ex(&doc, "[class~=clearfix]::text"), v(&["x"]), "{sep:?}");
+        }
+        // ...and the ones it does not: ONE token, so neither name matches. U+3000 is the one that
+        // fired on a real Japanese page; U+000B is ASCII but not ASCII WHITESPACE.
+        for sep in ["\u{3000}", "\u{A0}", "\u{2003}", "\u{0B}"] {
+            let doc = format!("<div class=\"a fadein{sep}clearfix\">x</div>");
+            assert_eq!(ex(&doc, ".fadein::text"), Vec::<String>::new(), "{sep:?}");
+            assert_eq!(ex(&doc, ".clearfix::text"), Vec::<String>::new(), "{sep:?}");
+            assert_eq!(ex(&doc, "[class~=clearfix]::text"), Vec::<String>::new(), "{sep:?}");
+            // the whole run IS a token, so asking for it by its real name still works — except for
+            // U+000B, which cssselect rejects INSIDE a selector (`SelectorSyntaxError`), so an empty
+            // column is the right no-fallback answer there
+            let by_name = ex(&doc, &format!(".fadein{sep}clearfix::text"));
+            let expected = if sep == "\u{0B}" { Vec::new() } else { v(&["x"]) };
+            assert_eq!(by_name, expected, "{sep:?}");
+        }
     }
     #[test]
     fn attr_self() {
@@ -1399,6 +1507,26 @@ mod tests {
             v(&["café"])
         );
     }
+    /// ISO-2022-JP is NOT ASCII-compatible, so it has to be transcoded before tokenizing — see
+    /// [`prepare_bytes`]. In `ESC $ B` mode a JIS pair is two bytes below 0x80: `社` is `<R`, which a
+    /// byte tokenizer reads as a start tag, swallowing the character AND opening an `<r>` element that
+    /// is not in the document. That is a FALSE POSITIVE — an element a scraper can match — which is the
+    /// outcome no-fallback exists to prevent.
+    #[test]
+    fn encoding_iso_2022_jp_is_transcoded_not_byte_scanned() {
+        // 株式会社 = ESC $ B 3t <0 2q <R ESC ( B  — note the two `<` bytes inside the word
+        let body = b"<p>\x1b$B3t<02q<R\x1b(B</p><div>after</div>";
+        assert!(body.windows(2).any(|w| w == b"<R"), "vector must contain the ambiguous pair");
+        assert_eq!(
+            extract(body, &["p::text".into()], Some("iso-2022-jp"))[0],
+            v(&["株式会社"])
+        );
+        // and nothing downstream was reshaped by the phantom tag
+        assert_eq!(
+            extract(body, &["div::text".into(), "r::text".into()], Some("iso-2022-jp")),
+            vec![v(&["after"]), v(&[])]
+        );
+    }
     #[test]
     fn encoding_utf16_bom_transcode() {
         let mut body = vec![0xFF, 0xFE]; // UTF-16LE BOM
@@ -1524,9 +1652,48 @@ mod tests {
                    Vec::<String>::new());
         // ...but its implied closes still run: `<body>` closes an open `<p>`, so `y` is p's SIBLING
         assert_eq!(ex("<html><body><p>x<body>y", "p::text"), v(&["x"]));
-        // and the end tag matching an ignored start tag pops that phantom, not the document
+        // and an end tag matching an ignored start tag pops that phantom, not the document
         assert_eq!(ex("<html><body><div><body>x</body>tail</div>", "div::text"), v(&["xtail"]));
         assert_eq!(ex("<html><body><div><body>x</div></body>tail", "div::text"), v(&["x"]));
+        // ...whichever of the three names each of them is. libxml2 keeps a stack SLOT for the tag it
+        // merged away, not a named token, so any frame end tag pops any frame phantom — a stray `<html>`
+        // in the body makes the document's own `</body>` a no-op. Counting phantoms per name matched
+        // only 2 of the 6 combinations.
+        for stray in ["html", "head", "body"] {
+            for closer in ["body", "html"] {
+                let doc = format!("<html><body>x<{stray}>y</{closer}>tail");
+                assert_eq!(ex(&doc, "body::text"), v(&["xytail"]),
+                           "a stray <{stray}> must absorb the following </{closer}>");
+            }
+        }
+    }
+
+    /// ...but written SELF-CLOSING, that same redundant tag closes the element it sits in — see
+    /// `Matcher::self_close_with_no_element_of_its_own`. Reading `<html/>` as "ignored, like `<html>`"
+    /// left a crawled page's stray `<strong>` open around its whole document.
+    #[test]
+    fn a_self_closed_redundant_frame_tag_closes_its_enclosing_element() {
+        for f in ["html", "head", "body"] {
+            // one level, and only one: the `<div>` outside survives
+            let doc = format!("<div><b>x<{f}/>y<i>S</i>");
+            assert_eq!(ex(&doc, "b::text"), v(&["x"]), "<{f}/> must end the <b>");
+            assert_eq!(ex(&doc, "div::text"), v(&["y"]), "<{f}/> must not end the <div>");
+            assert_eq!(ex(&doc, "div > i::text"), v(&["S"]));
+            // it pops what is CURRENT, whatever that is — including a table cell
+            assert_eq!(ex(&format!("<table><tr><td>x<{f}/>y"), "td::text"), v(&["x"]));
+            // after the implied closes this tag runs, not instead of them — which is visible in the
+            // split between the three names: `<head>`/`<body>` close an open `<p>` and `<html>` does
+            // not, so the extra pop lands one level further out for those two.
+            let implied = format!("<div>d<p>x<{f}/>y");
+            let outer = if f == "html" { v(&["d", "y"]) } else { v(&["d"]) };
+            assert_eq!(ex(&implied, "div::text"), outer);
+            // and the phantom it leaves still absorbs a later frame end tag — which is exactly what
+            // separates it from `<html></html>`, where the written end tag pops the phantom instead
+            assert_eq!(ex(&format!("<div><b>x<{f}/>y</body>z"), "div::text"), v(&["yz"]));
+            assert_eq!(ex(&format!("<div><b>x<{f}/>y</body></body>z"), "div::text"), v(&["y"]));
+        }
+        // a non-frame self-closing tag is unaffected: it has an element of its own to close
+        assert_eq!(ex("<div><b>x<zz/>y", "b::text"), v(&["x", "y"]));
     }
 
     /// A document that writes no `<html>`/`<head>`/`<body>` still HAS them: libxml2 synthesizes the
@@ -1574,10 +1741,94 @@ mod tests {
         // head content NESTED in body content stays where it is
         assert_eq!(ex("<div><meta id=M></div>", "body div > meta::attr(id)"), v(&["M"]));
 
-        // a frameset document has no body at all
+        // a frameset document has no body at all — including when the `<frameset>` is written INSIDE the
+        // head, where it ends the head like any other non-head content but must NOT start a body. A real
+        // frameset page does exactly that, and wrapping it in an invented body put the whole frameset
+        // (and the `<body>` written after it) somewhere libxml2 never puts them.
+        assert_eq!(ex("<html><head><frameset id=F><frame src=a></frameset></head><body>y</body>",
+                      "html > frameset::attr(id)"), v(&["F"]));
+        assert_eq!(ex("<html><head><frameset><frame src=a></frameset></head><body>y</body>",
+                      "frameset + body::text"), v(&["y"]));
+        assert_eq!(ex("<html><head><title>t</title><frameset id=F><frame src=a></frameset>",
+                      "html > frameset::attr(id)"), v(&["F"]));
+        // ...while an ordinary tag that ends the head still starts one
+        assert_eq!(ex("<html><head><title>t</title><div>d</div>", "body div::text"), v(&["d"]));
         assert_eq!(ex("<frameset><frame src=a></frameset>", "html > frameset > frame::attr(src)"),
                    v(&["a"]));
         assert_eq!(ex("<frameset><frame src=a></frameset>", "body frame::attr(src)"),
+                   Vec::<String>::new());
+        // ...unless it WRITES one for its no-frames fallback, which libxml2 inserts: a written `<body>`
+        // is ignored only while one is already OPEN, not merely because something else is. Two crawled
+        // pages needed this — a frameset fallback, and a `<body>` after a `</body>` inside a table cell,
+        // where ignoring it left a whole trailing table nested in the earlier cell.
+        assert_eq!(ex("<frameset><body><p>gb</p></body></frameset>", "body > p::text"), v(&["gb"]));
+        assert_eq!(ex("<frameset><frameset><body><p>gb</p></frameset></frameset>", "body p::text"),
+                   v(&["gb"]));
+        assert_eq!(ex("<body id=1></body><td><body id=2>x", "//body/@id"), v(&["1", "2"]));
+        assert_eq!(ex("<body id=1></body><div><body id=2>x", "//body/@id"), v(&["1", "2"]));
+        // ...and while one IS open it is ignored, however deep
+        assert_eq!(ex("<body id=1><div><body id=2>x</div>", "//body/@id"), v(&["1"]));
+        assert_eq!(ex("<td><body id=Z>y", "body::attr(id)"), Vec::<String>::new());
+        // `<head>` has the other rule — it belongs to the phase before any body content, so anything
+        // else being open ends it whether or not a head is currently open.
+        assert_eq!(ex("<frameset><head id=Z><title>t</title></frameset>", "head::attr(id)"),
+                   Vec::<String>::new());
+        assert_eq!(ex("<head id=1></head><div><head id=2>x", "//head/@id"), v(&["1"]));
+        // Character data ends an open head even when there is no body to move it into: a `<head>`
+        // written after `</body>` keeps nothing but its elements.
+        assert_eq!(ex("<body id=0></body><head>y</head>", "head::text"), Vec::<String>::new());
+        assert_eq!(ex("<body id=0></body><head><title>t</title>y</head>", "head > title::text"),
+                   v(&["t"]));
+
+        // A page whose FIRST tag is `<head>` or `<body>` writes no `<html>` — and still gets one. The
+        // frame tags used to build only their own part, so the head sat at the root with no parent and a
+        // second `<html>` was built for whatever followed `</head>`: `html > head`, `html > body` and
+        // `head + script` were all empty while the values under them looked right.
+        assert_eq!(ex("<head id=H><title>t</title></head><p>y</p>", "html > head::attr(id)"),
+                   v(&["H"]));
+        assert_eq!(ex("<body id=B><p>y</p></body>", "html > body::attr(id)"), v(&["B"]));
+        assert_eq!(ex("<head id=H></head><body id=B><p>y</p>", "html > head + body::attr(id)"),
+                   v(&["B"]));
+        // libxml2 leaves what follows an explicit `</head>` at `<html>` level (html5lib puts it back in
+        // the head; the oracle here is libxml2), so the script is the head's SIBLING.
+        assert_eq!(ex("<head><meta id=M></head><script>s</script><p>y</p>", "head + script::text"),
+                   v(&["s"]));
+
+        // A second `<html>` after the first has CLOSED gets its own element, because libxml2 builds a
+        // second ROOT for it — verified on a crawled page that self-closes `<html/>` inside a
+        // downlevel-revealed conditional comment, whose lxml tree has two roots both carrying the
+        // attributes. Browsers keep one element instead, which is why parsel's own CSS (scoped to the
+        // first root) and XPath disagree on such a document; the TREE is the oracle here.
+        assert_eq!(ex("<html a=1 /><html a=2><p>x</p>", "//html/@a"), v(&["1", "2"]));
+        assert_eq!(ex("<html a=1></html><html a=2><p>x</p>", "//html/@a"), v(&["1", "2"]));
+        // ...and the tail still gets a parent, so the values under it stay reachable
+        assert_eq!(ex("<html a=1></html><p>x</p>", "html > body > p::text"), v(&["x"]));
+        // Head content inside an open `<frameset>` has no head to go in, so libxml2 opens a BODY for it —
+        // the same one it opens for ordinary content there. Exactly the six `FrameContent::Head` names
+        // change answer inside a frameset; found by `tools/seq_sweep.py`, then derived over the universe.
+        for head_content in ["title", "meta", "style", "link", "base", "script"] {
+            let doc = format!("<frameset><{head_content} id=Z>y");
+            assert_eq!(ex(&doc, "//body//*/@id"), v(&["Z"]),
+                       "<{head_content}> in a frameset belongs to a body");
+            assert_eq!(ex(&doc, "//head//*/@id"), Vec::<String>::new());
+        }
+        // `</head>` is an unconditional closer like `</body>`/`</html>`: libxml2 gives it the same end
+        // priority, so no open element out-ranks it. With `head` left at priority 0 an open `<tr>` blocked
+        // it and everything after the `</head>` stayed inside the head.
+        assert_eq!(ex("<head id=0><tr id=1></head><div id=3>", "//*[@id=\"0\"]//*/@id"), v(&["1"]));
+        assert_eq!(ex("<head id=0><td id=1></head><div id=3>", "//*[@id=\"0\"]//*/@id"), v(&["1"]));
+        // Text after `</html>` needs the second root too, or it is dropped outright: with the stack empty
+        // there is nothing to attach it to.
+        assert_eq!(ex("<div id=0></html>x", "//html/text()"), v(&["x"]));
+        assert_eq!(ex("<html><body>y</body></html>tail", "//html/text()"), v(&["tail"]));
+
+        // Content after `</html>` gets a SECOND ROOT `<html>` — the same shape libxml2 builds — and no
+        // body, because one was already established. A crawled page's trailing `<script>` was reachable
+        // as `//script` but not as `//html/script` until the tail had that frame.
+        assert_eq!(ex("<html><body>x</body></html><script>s</script>", "//html/script/text()"),
+                   v(&["s"]));
+        assert_eq!(ex("<html><body>x</body></html><p>y</p>", "//html/p/text()"), v(&["y"]));
+        assert_eq!(ex("<html><body>x</body></html><p>y</p>", "//html/body/p/text()"),
                    Vec::<String>::new());
 
         // an explicit frame is still used as written — nothing is invented on top of it
@@ -1682,6 +1933,33 @@ mod tests {
         assert_eq!(ex("<p>a < b and 3<4</p>", "p::text"), v(&["a < b and 3<4"]));
     }
 
+    /// HTML5's END-TAG-OPEN state: only an ASCII alpha starts an end tag.
+    ///
+    /// The engine collapsed all three branches into "scan a name, skip to `>`", and `is_name_char`
+    /// accepts `%`/`1`/`-`, so `</%>` became an end tag named `%` — dropped as unmatched, JOINING the
+    /// text either side, where libxml2 keeps a bogus-comment node that SPLITS it. A real page's
+    /// `Copyright 1991-2026</%> VECMAR Corporation` came back as one text node instead of two. `</>` was
+    /// the same bug the other way round: no event at all, so the runs were left un-joined where libxml2
+    /// ignores the whole thing and keeps ONE node.
+    #[test]
+    fn end_tag_open_only_starts_a_tag_on_a_letter() {
+        // a BOGUS COMMENT is a node, so it splits the run
+        for bogus in ["</%>", "</1>", "</-x>", "</ >", "</%%%>"] {
+            let doc = format!("<span>a{bogus}b</span>");
+            assert_eq!(ex(&doc, "span::text"), v(&["a", "b"]), "{bogus} must split the text node");
+        }
+        // ...and it runs to the first `>`, quotes and all, so this is a LOCAL difference and not an
+        // offset desync: both engines resume at the same byte
+        assert_eq!(ex("<span>a</% x=\">\">b</span>", "span::text"), v(&["a", "\">b"]));
+        // `</>` is ignored entirely — no node, so the runs are ONE
+        assert_eq!(ex("<span>a</>b</span>", "span::text"), v(&["ab"]));
+        // a real end tag still behaves like one, matched or not
+        assert_eq!(ex("<span>a</p>b</span>", "span::text"), v(&["ab"]));
+        assert_eq!(ex("<span>a</span>b", "span::text"), v(&["a"]));
+        // EOF right after `</`: character data, joined to the run before it
+        assert_eq!(ex("<span>a</", "span::text"), v(&["a</"]));
+    }
+
     /// A DOCTYPE is invisible to the text node around it; every other declaration form breaks it.
     ///
     /// Measured against the oracle rather than assumed: `<!foo>`, `<![CDATA[…]]>`, `<?x?>` and `<!>`
@@ -1727,6 +2005,85 @@ mod tests {
         // and in an attribute value
         let attr = "<a title=\"\u{FEFF}hi\">t</a>".as_bytes();
         assert_eq!(extract(attr, &["a::attr(title)".into()], None)[0], v(&["\u{FEFF}hi"]));
+    }
+    /// An INDENTED BOM still counts as the document BOM, because Parsel parses `text.strip()` — see
+    /// [`document_start`]. What makes this worth a test rather than a footnote is the size of the
+    /// silence when it is missed: the U+FEFF is a character, a character before the frame opens the
+    /// `<body>`, and from there the page's whole head is outside `head` and its `<html>` tag is a
+    /// redundant duplicate whose attributes are dropped.
+    #[test]
+    fn indented_bom_is_still_the_document_bom() {
+        let q: Vec<String> = ["head title::text", "html::attr(xmlns)", "body::text"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let doc = b"  \t\n\xEF\xBB\xBF<!DOCTYPE HTML><html xmlns=\"x\"><head><title>T</title></head><body>b";
+        assert_eq!(extract(doc, &q, None), vec![v(&["T"]), v(&["x"]), v(&["b"])]);
+        // ...but only whitespace may precede it: after anything else the frame is already open, so the
+        // U+FEFF is content — libxml2 keeps it and so does Parsel, whose strip cannot reach it.
+        let after = b"z\xEF\xBB\xBF<!DOCTYPE HTML><html xmlns=\"x\"><head><title>T</title></head><body>b";
+        assert_eq!(
+            extract(after, &q, None),
+            vec![v(&[]), v(&[]), v(&["z\u{FEFF}", "b"])]
+        );
+        // and a non-UTF-8 page decodes those three bytes as three characters, exactly as Parsel does
+        let cp1252 = b"  \xEF\xBB\xBF<html><head><title>T</title></head><body>b";
+        assert_eq!(
+            extract(cp1252, &q, Some("windows-1252"))[0],
+            v(&[]),
+            "EF BB BF is not a BOM outside UTF-8"
+        );
+    }
+    /// A stray `=` where an attribute name should start is that name's first character, not a
+    /// separator — so the attribute AFTER it is still parsed. Reading it as a separator dropped the
+    /// real attribute (empty name) and swallowed the next one as its value.
+    #[test]
+    fn a_stray_equals_before_an_attribute_name_does_not_eat_the_next_attribute() {
+        assert_eq!(ex("<div = class='x'>y</div>", "div::attr(class)"), v(&["x"]));
+        assert_eq!(ex("<div = class='x'>y</div>", "div[class]::text"), v(&["y"]));
+        // ...including after a real attribute, and with the id still readable
+        let both = "<div id=q = class='x'>y</div>";
+        assert_eq!(ex(both, "div::attr(class)"), v(&["x"]));
+        assert_eq!(ex(both, "div::attr(id)"), v(&["q"]));
+        // the `=` itself is part of the name that follows it, so it consumes no real attribute
+        assert_eq!(ex("<div =foo class=c>y</div>", "div::attr(class)"), v(&["c"]));
+        // and `==x` is one attribute named `=` with value `x` — the next attribute still parses
+        assert_eq!(ex("<div ==x class=c>y</div>", "div::attr(class)"), v(&["c"]));
+    }
+
+    /// A start tag the response ends inside is DROPPED, whole — libxml2 and html5lib agree, and the
+    /// engine used to keep whatever it had scanned. That is the false-positive direction: an element,
+    /// with an attribute value holding the rest of the document, that no other parser reports.
+    #[test]
+    fn a_start_tag_cut_off_by_eof_is_dropped() {
+        for tail in ["<a", "<a ", "<a href", "<a href=", "<a href=\"x", "<a href='x", "<a href=x"] {
+            let doc = format!("<p>t</p>{tail}");
+            assert_eq!(ex(&doc, "a::attr(href)"), Vec::<String>::new(), "{tail}");
+            assert_eq!(ex(&doc, "a"), Vec::<String>::new(), "{tail} must not exist at all");
+            // the text before it is untouched, and does not gain the dropped bytes
+            assert_eq!(ex(&doc, "p::text"), v(&["t"]), "{tail}");
+        }
+        // the real shape: an unterminated quoted value swallowing the document tail
+        let real = "<p>t<a href=\"login.?>login</a>]</td></table></body>\n</html>";
+        assert_eq!(ex(real, "a::attr(href)"), Vec::<String>::new());
+        assert_eq!(ex(real, "p::text"), v(&["t"]));
+        // a tag that IS terminated keeps working, closing `>` or `/>`
+        assert_eq!(ex("<p>t</p><a href=\"x\">y", "a::attr(href)"), v(&["x"]));
+        assert_eq!(ex("<p>t</p><img src=\"x\"/>", "img::attr(src)"), v(&["x"]));
+    }
+
+    /// The other half of that same `text.strip()`: trailing whitespace is not a text node, because
+    /// Parsel removed it before libxml2 ever saw it — see [`document_end`]. Whitespace-only, so it
+    /// changes no value, but it does change the ROW COUNT of a `::text` column.
+    #[test]
+    fn trailing_whitespace_is_not_a_text_node() {
+        let doc = b"<select><option>a<option class=c>\n\t ";
+        assert_eq!(extract(doc, &["option::text".into()], None)[0], v(&["a"]));
+        // ...and a document that is nothing but whitespace has no content at all
+        assert_eq!(extract(b"  \n ", &["p::text".into()], None)[0], v(&[]));
+        // non-whitespace at the end is untouched, trailing whitespace INSIDE it too
+        let kept = b"<p>a </p>\n";
+        assert_eq!(extract(kept, &["p::text".into()], None)[0], v(&["a "]));
     }
     #[test]
     fn lt_not_a_tag_is_text() {

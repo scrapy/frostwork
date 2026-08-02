@@ -61,7 +61,10 @@ each pair gets a verdict:
 - **conformant** (`tools/conformant.py`) — random *content-model-valid* trees. On such input the
   corrected stack equals lxml's tree, so this must be byte-identical (the safety invariant).
 - **families** (`tools/families.py`) — optional-end-tag constructs tagged SHOULD/SKIP/CONTROL, so a
-  divergence auto-classifies as bug vs documented SKIP.
+  divergence auto-classifies as bug vs documented SKIP. A family only finds bugs in the syntax it emits:
+  `table-scope` emitted only an ORDINARY end tag crossing a table, so the half of the rule that scopes a
+  table-family end tag (`end-tag-priority`, added after a crawl sample found it) had no page at all — the
+  new family finds 19 divergences in 160 pairs against the pre-fix engine where `table-scope` finds 0.
 - **foreign** (`tools/foreign.py`) — `<svg>`/`<math>`/`<template>` subtrees (self-closing leaves,
   camelCase names, rawtext in foreign content).
 - **grouped** — single-pass `Many`/`One` vs Parsel's per-container loop.
@@ -77,19 +80,34 @@ w3lib surfaced that the two sides do not even use the same DECODER. Frostwork de
 (the WHATWG standard, what browsers use); Parsel uses Python's stdlib codecs via w3lib, which also
 translates labels (`big5`→`big5hkscs`, `shift_jis`→`cp932`). A WHATWG index is **total**, Python's codecs
 are not, so they disagree on bytes no ordinary vector contains. The difference is now measured and
-enumerated rather than assumed away — 5 bytes for windows-1252/iso-8859-1, 11 assigned two-byte sequences
-for big5, full parity on validly encoded text elsewhere — and gated in both directions, so a divergence
-outside the list fails and a listed one that starts agreeing fails too. See
-[COMPATIBILITY.md](COMPATIBILITY.md) for the contract. The lesson is the same one the CSS escapes taught:
-**vectors made of realistic content only test the middle of the input space.**
+enumerated rather than assumed away — and over **every** two-byte sequence per legacy label, not the ones
+Python happens to decode. That filter was itself a hole: enumerating "assigned" sequences from the PYTHON
+codec skipped the whole class where the WHATWG index assigns a real character and Python assigns none, so
+the sweep read full parity while `euc_jp` returned U+FFFD for 457 sequences — including `AD A1`, the `①`
+of ordinary Japanese prose, which a crawled page hit. The four ways the two decoders can disagree are now
+counted and gated separately: real-character disagreements (named one by one — 11 big5, 6 euc-jp, 20
+gb18030), WHATWG-assigned/Python-unassigned, Parsel-private-use where WHATWG is unassigned, and
+"both replaced, different number of U+FFFD" (WHATWG replaces per maximal subpart, Python per byte). Gated
+in both directions, so a divergence outside the list fails and a listed one that starts agreeing fails
+too. See [COMPATIBILITY.md](COMPATIBILITY.md) for the contract. The lesson is the same one the CSS escapes
+taught: **vectors made of realistic content only test the middle of the input space** — and so does a
+sweep that enumerates over one side's idea of what is valid.
 
 **Differential fuzzing** (the malformed-input surface):
 - `tools/diff_fuzz.py` — mutates conformant/foreign pages and the fuzz corpus into *malformed* HTML,
   then diffs against lxml. Catches tokenizer desync the well-formed gate can't reach. `CRASH` is gated
-  absolutely. Raw `DIVERGE` is expected here, so each one is **attributed** to the documented construct
-  that explains it (foster, misnest, deep-`p`, head-in-body, fragment, outer-HTML, truncated-tag);
-  whatever no construct explains is reported as **NOVEL** and gated on a *rate*
-  (`--novel-budget`, default 0.05% of pairs).
+  absolutely. Raw `DIVERGE` is expected here in principle, so each one is **attributed** to the documented
+  construct that explains it (foster, misnest, deep-`p`, head-in-body, fragment, outer-HTML); whatever no
+  construct explains is reported as **NOVEL** and gated on a *rate* (`--novel-budget`, default 0.05% of
+  pairs).
+
+  As of the EOF-truncated-tag fix it reports **no divergence at all** — read that as a floor to defend,
+  not as proof the attribution works, because the attribution is what hid that bug. Every one of the 426
+  divergences this tool used to report was that single tokenizer bug, credited to foster-parenting or
+  misnesting because those constructs happened to be on the same page: attribution asks "does this PAGE
+  contain the construct", never "did it cause this". **A documented bucket that never empties is a place
+  to look, not a result.** `truncated-tag` was dropped from `DOCUMENTED` when the fix landed, so a
+  regression surfaces as NOVEL rather than being excused.
 
   A construct leaves that list the moment it is IMPLEMENTED, or it becomes an excuse: `nested-form` was
   documented until `<form>` closing an open `<form>` came in with libxml2's start-close table, and leaving
@@ -126,10 +144,15 @@ outside the list fails and a listed one that starts agreeing fails too. See
   over several seeds, not a property to assume from one red run.
 
 **Generated rule tables — `tools/gen_tree_rules.py --check` (in `make py`).** This tool asks libxml2 for
-the whole (open × incoming) start-close relation, the void set and the per-element data mode over a fixed
-element universe. The first two are then RENDERED as Rust: it partitions the names into behaviour classes
-and writes `sc`/`sc_id`/`start_closes`/`is_void` into the generated block of `src/implied_close.rs`, so
-those tables are derived rather than written. `--check` fails if source and oracle have drifted;
+the whole (open × incoming) start-close relation, the (open × closing) END-TAG SCOPE relation, the void set
+and the per-element data mode over a fixed element universe. All but the last are then RENDERED as Rust: it
+partitions the names into behaviour classes and writes
+`sc`/`sc_id`/`start_closes`/`is_void`/`end_priority` into `src/implied_close/generated.rs` — a whole
+file rather than a marked-off region of a hand-written one, so
+those tables are derived rather than written. The end-scope relation is emitted as a single priority number
+per name, and only after the derivation has proved that every observable cell follows from one
+`priority(open) > priority(closing)` comparison — if it ever stops holding, the generator raises instead of
+rendering a table that contradicts its own measurements. `--check` fails if source and oracle have drifted;
 `--write` regenerates; `--report` prints the derivation (universe size, observable vs unobservable cells,
 the classes and what each closes). The data-mode table in `src/tokenizer.rs` stays hand-written — it is
 nine names — but the derivation is what the audit checks it against, name by name over the whole
@@ -143,6 +166,33 @@ wrapper the other cells use) and was therefore missing entirely. And it proves i
 of both the engine's names and an outside element index, which is the containment the audit's earlier
 hand-written lists kept failing.
 
+**Tag-sequence sweep — `tools/seq_sweep.py` (`make gate-seq`).** The rule sweeps are two-DIMENSIONAL
+(open × incoming, open × closing) and the crawl corpus is luck. Six of the bugs found in three crawl
+samples were in neither surface: they were wrong SEQUENCES, where the state at token N depends on tokens
+1..N−1 — `<frameset>` inside `<head>`, `<body>` after `</body>`, content after `</html>`, `</%>` between
+two text runs, `<tbody>` between a row and its `</tr>`. No 2-D sweep can reach that, and a page corpus
+reaches it only if the web happens to contain it.
+
+Sequence space over a curated alphabet is small enough to enumerate outright, so this does: ~23 tokens,
+one per behaviour class the engine special-cases, and **every** sequence up to `--depth` (4 = 292,560
+documents, ~30 s), plus random longer ones for the shapes only depth reaches.
+
+The other half is what it compares. Everything else here grades a few `::text` columns, which notice a
+wrong tree only when a value happens to move — a document can be reshaped completely and still answer
+`p::text` identically. This gives every generated element a unique id and compares the whole TREE:
+document order, each element's descendant set, each element's own text, and placement relative to the
+synthesized frame. Same trees ⇒ same fingerprint, and a difference names the element it is at.
+
+Two details are load-bearing. The probes are **XPath, not CSS**: parsel's `.css()` evaluates from the
+first root element, so on any document with content after `</html>` (where libxml2 builds a second root)
+it cannot see half the tree and reports the engine as inventing elements. And every probe form is checked
+SUPPORTED first, or the no-fallback contract reads as a tree difference.
+
+Its first run found three bugs the whole rest of the suite had missed, and each was one root cause behind
+dozens of shapes: head content inside an open `<frameset>` belongs to a `<body>` (50 shapes at depth 3),
+`</head>` is an unconditional closer like `</body>` so an open `<tr>` must not block it (33 shapes at
+depth 4), and character data after `</html>` was dropped outright for want of a frame to hold it.
+
 **Tree-rule audit — `tools/audit_tree_rules.py` (in `make py`).** Coverage of *pages* is not coverage of
 *rules*. The differential proves parity on the pages it generates, so a rule no generated page exercises
 is asserted, not tested — and that is precisely where bugs were found: the `dd`/`dt` and `rt`/`rp`
@@ -151,8 +201,8 @@ missing table-scope rule**, all in regions no generated page reached (`optgroup`
 `caption`, and `<p>` followed by a non-closer) — and widening the audit's universe afterwards found 12
 more (`colgroup` had no rule at all, and `caption` was wrongly a scope boundary). So this walks the rule
 tables *directly* — the start-close relation, the void set, the per-element data mode, the `<p>`-closing
-set, table scope, the document frame — and asks lxml about every cell, printing the cell count it covered.
-It is fast and deterministic (tens of thousands of cells in about two seconds), so it gates.
+set, end-tag scope, the document frame — and asks lxml about every cell, printing the cell count it
+covered. It is fast and deterministic (over a hundred thousand cells in about three seconds), so it gates.
 
 ### The universe is the thing that keeps being wrong
 
@@ -165,8 +215,29 @@ names omitted something, and a rule with no name to probe cannot fail a gate.**
 | 2 | 16 tag NAMES vs the engine's 19 tag IDS | 87 pairs of libxml2's `htmlStartClose` |
 | 3 | the one name `s`, "covered by a representative" | 93 unprobed cells |
 | 4 | `head`, `listing`, `xmp`, `plaintext` | whole missing rows/columns: `<body>` nested inside `<head>`, `<dd>` inside `<listing>`, `<iframe>`/`<xmp>` content parsed as markup |
+| 5 | end-tag scope had TWO hand-picked lists (which names can be in the way; which end tags can be discarded) and no table-family name on the closing side | that the rule is a PRIORITY comparison: `</tr>` may not unwind an open `<tbody>`, so a crawled page's table lost every cell after its first row |
+| 6 | the document-frame probes asked about ONE wrapper (`<div>`) and skipped the three frame names themselves; the end-scope derivation excluded them as "never open" | three rules at once: a page whose first tag is `<head>` got no `<html>`, a `<body>` written after `</body>` was ignored (so a trailing table stayed nested in an earlier cell), and `<body>` was missing from the priority order it tops |
 
-Round 4 is the one that ended the pattern, because the answer stopped being "add the names we forgot":
+Round 6 is the same shape a third time, and its lesson is about EXCLUSIONS rather than lists: both
+misses came from a name being ruled out of a sweep on reasoning ("the frame tags are the frame, so asking
+where they nest is meaningless"; "nothing can be open above the document frame") rather than measured. The
+frame sweep now crosses the whole element universe with "is a body open", and the end-scope probe decides
+observability by CHECKING whether the stack it describes can be built — including with a `</body>` in
+front, which is the only way a `<body>` becomes the open element inside a cell.
+
+Round 5 is the same mistake one relation over, and worth reading as such: the start-close table had
+already been moved to a generated derivation, while end-tag scope stayed two `matches!` arms with two
+hand-written probe lists — so it kept exactly the coverage those lists could express. It is now derived
+the same way (`Oracle.end_scope` / `end_levels`), and the derivation is only allowed to emit a priority
+number if every observed cell really does follow from one comparison. Two probe-design details earned
+their place there: the observable set has to include pairs that need a SPACER between them (`<tbody>`
+directly inside `<tr>` closes the row, so the interesting stack only exists with something in between —
+and skipping those as "unobservable" is what dropped the cell libxml2 answers `blocked`), and the cells
+that do NOT block are constraints too (using only the blocking half floats `thead` above `tbody` and
+renders a table contradicting the very cells it came from).
+
+Round 4 is the one that ended the pattern for the START-CLOSE relation, because the answer stopped being
+"add the names we forgot":
 
 - there is now **one** universe (`tools/gen_tree_rules.ELEMENTS`), read by the generator, the audit and the
   mutation sweep, so there is no second list to forget a name in;
@@ -178,10 +249,12 @@ Round 4 is the one that ended the pattern, because the answer stopped being "add
   (`tools/gen_tree_rules.py --check` gates on drift), so "complete" is a property the build checks rather
   than a claim in a comment.
 
-Two probe-design lessons are also baked in. Each element's scope contribution is tested **bare**:
-wrapping every candidate in `<table>` masked their own behaviour, because the table blocks regardless,
-which is how a wrong `caption` scope entry survived. And the wrapper is an unknown element, since a
-`<div>` wrapper confounds every cell whose open element is also a div.
+Two probe-design lessons are also baked in. Each cell is measured DIFFERENTIALLY, against the same
+document without the tag under test, rather than against an expected shape: an element's own scope
+contribution is invisible when a `<table>` wrapper blocks regardless (which is how a wrong `caption`
+entry survived), and foster-parenting moves the probe marker in ways a fixed expectation reads as a rule.
+And the wrapper is an unknown element, since a `<div>` wrapper confounds every cell whose open element is
+also a div.
 
 **When you add a tree-construction rule, add a row to that audit.** A rule with no row is a rule on
 trust, and a family that "looks covered" because a sibling tag is generated is the exact trap here.
@@ -233,9 +306,11 @@ reading code and thinking "hold on, nothing covers that", which had already miss
 rounds running.
 
 **Mutate the ANSWER, not a table.** The first version flipped cells in one rule table at a time, and 51
-mutants survived every gate while the behaviour was in fact protected: two tables feed the close decision
-(`implies_close_id` over tag ids, `start_closes` over libxml2's finer name pairs) and the matcher ORs
-them, so mutating either alone is masked wherever the other closes the same pair. A survivor list padded
+mutants survived every gate while the behaviour was in fact protected: two tables fed the close decision
+back then (a hand-written tag-id table ORed with `start_closes`, libxml2's finer name pairs), so mutating
+either alone was masked wherever the other closed the same pair. The id table has since been deleted —
+the generated relation closed every pair it did and 163 more — but hooking the answer is still the right
+shape, because it costs nothing and cannot be masked if a second table ever returns. A survivor list padded
 with false alarms is worse than no list — it trains you to skim the one output that matters. So the hook
 now inverts the *effective* close decision for a tag-name pair. Nothing can mask it, and the only
 exclusion left is provable: a VOID element is never the open element, so `close:<any>,<void>` is
@@ -325,8 +400,9 @@ Three probe-design lessons are baked into the tools, each of which cost a wrong 
 ### Proving a regression test discriminates
 
 "Add a test" is not the same as "add a test that could fail", and the difference has bitten here more than
-once. The mutation hook doubles as the cheap way to check: a `close:`/`void:`/`mode:` mutant reintroduces
-exactly one shipped bug, so `FROSTWORK_MUTATE=<spec> cargo test --features mutate` must go red. Where no
+once. The mutation hook doubles as the cheap way to check: a `close:`/`void:`/`mode:`/`prio:` mutant
+reintroduces exactly one shipped bug, so `FROSTWORK_MUTATE=<spec> cargo test --features mutate` must go
+red. Where no
 hook exists, the equivalent is to disable the fix in place, run the one test, and restore. Both were done
 for every fix in this round, and one test failed to discriminate and had to be rewritten: the UTF-16 NUL
 vector put its NUL in an attribute *value*, which the value decoder strips anyway, so it passed with
@@ -337,7 +413,9 @@ document-level NUL deletion disabled. Moving the NUL into the tag name made it a
 | data modes (`iframe`/`noembed`/`xmp`/`plaintext`) | `mode:iframe`, `mode:plaintext`, `mode:xmp` mutants |
 | void set (`basefont`/`frame`/`isindex`) | `void:basefont`, `void:frame`, `void:isindex` mutants |
 | start-close (`listing`, `title`, `body`→`head`) | `close:dd,listing`, `close:title,p`, `close:body,head` mutants |
-| document-frame ignore + phantom end tag | `frame_tag_is_redundant` stubbed to `false` |
+| end-tag scope as a priority comparison | the audit sweep goes red (34 cells) and the new `end-tag-priority` differential family 19-of-160 against the pre-fix engine; `prio:<name>` mutants per name (117 of 117 caught) |
+| document-frame rules (`<html>` wrapper, `<body>` after `</body>`, `<body>`'s priority, late-head text) | the widened frame sweep goes red on 483 cells against the pre-fix engine (474 `frame-in-element`, 9 `frame-first-tag`) |
+| document-frame ignore + phantom end tag | `frame::tag_is_redundant` stubbed to `false` |
 | raw NUL before tokenization | `strip_nul` stubbed to the identity |
 | quoted delimiters in functional pseudos | the quote/escape branches removed from both scanners (the *support verdict* is what goes red — see below) |
 | encoding: XML declaration, BOM-less UTF-16, `x-user-defined` | each of the three removed from `resolve`/`prescan_label` independently |

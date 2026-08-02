@@ -333,7 +333,31 @@ INDEX_DIVERGENCE = {
 # euc-kr -> cp949) — used to enumerate which sequences are assigned in the first place.
 PY_CODEC = {"big5": "big5hkscs", "shift_jis": "cp932", "euc-jp": "euc_jp",
             "euc-kr": "cp949", "gb18030": "gb18030"}
-PUA_UNASSIGNED = {"big5": 0, "shift_jis": 582, "euc-jp": 0, "euc-kr": 0, "gb18030": 0}
+PUA_UNASSIGNED = {"big5": 0, "shift_jis": 762, "euc-jp": 0, "euc-kr": 0, "gb18030": 0}
+# WHATWG's index assigns a REAL character and the Python codec assigns nothing (Parsel gets U+FFFD).
+# This class was structurally invisible until the sweep stopped enumerating over the sequences PYTHON
+# calls assigned: `euc_jp` is strict JIS X 0208 and has no NEC row 13, so `AD A1` — the `①` that shows up
+# in ordinary Japanese prose — decoded to U+FFFD for the oracle and `①` here, and a crawled page hit it.
+# Browsers use the WHATWG index, so the ENGINE is right and this is an oracle limitation, counted rather
+# than named: it is hundreds of sequences (row 13 plus the IBM extension rows), not a handful.
+WHATWG_ONLY = {"big5": 192, "shift_jis": 0, "euc-jp": 457, "euc-kr": 0, "gb18030": 0}
+# Both sides replace an INVALID sequence; only the SHAPE differs — WHATWG's decoder emits one U+FFFD per
+# maximal subpart (encoding_rs implements it), while Python's `errors="replace"` replaces per byte. No
+# real character disagrees, so this is also a count rather than a list.
+REPLACEMENT_SHAPE = {"big5": 4950, "shift_jis": 1304, "euc-jp": 4793, "euc-kr": 2560, "gb18030": 0}
+
+
+def _classify(mine, theirs):
+    """Which of the four ways these two decoders can disagree about one byte sequence is this?"""
+    if mine == theirs:
+        return "agree"
+    if _pua_for_unassigned(mine, theirs):
+        return "pua"
+    if "�" not in mine and "�" in theirs:
+        return "whatwg_only"
+    if "�" in mine and "�" in theirs:
+        return "replacement_shape"
+    return "real"  # a real character disagrees — small enough to name one by one
 
 
 def _pua_for_unassigned(mine, theirs):
@@ -350,20 +374,15 @@ def _pua_for_unassigned(mine, theirs):
 
 
 for _label, _expected in INDEX_DIVERGENCE.items():
-    _assigned = []
-    for _l in range(0x81, 0xFF):
-        for _t in range(0x40, 0xFF):
-            _b = bytes([_l, _t])
-            if _l in b"<>&" or _t in b"<>&\r\n\t \x00":
-                continue
-            try:
-                _b.decode(PY_CODEC[_label])
-            except Exception:
-                continue
-            _assigned.append(_b)
-    _diff, _pua = {}, 0
-    for _i in range(0, len(_assigned), 4000):
-        _part = _assigned[_i:_i + 4000]
+    # EVERY two-byte sequence, not the ones Python happens to decode. Filtering on the Python codec is how
+    # this sweep read "full parity" while `euc_jp` was returning U+FFFD for hundreds of assigned
+    # characters: a sequence it rejects was simply skipped, so the whole `WHATWG_ONLY` class below could
+    # not be counted, let alone gated.
+    _probe = [bytes([_l, _t]) for _l in range(0x81, 0xFF) for _t in range(0x40, 0xFF)
+              if _l not in b"<>&" and _t not in b"<>&\r\n\t \x00"]
+    _diff, _counts = {}, {"pua": 0, "whatwg_only": 0, "replacement_shape": 0}
+    for _i in range(0, len(_probe), 4000):
+        _part = _probe[_i:_i + 4000]
         _ps = b"".join(b'<p class="c">' + _s + b"</p>" for _s in _part)
         _doc = (b'<html><head><meta charset="' + _label.encode() + b'"></head><body>'
                 + _ps + b"</body></html>")
@@ -371,12 +390,11 @@ for _label, _expected in INDEX_DIVERGENCE.items():
         _, _txt = html_to_unicode(None, _doc, auto_detect_fun=None, default_encoding="utf8")
         _theirs = PS(text=_txt).css("p.c::text").getall()
         for _s, _m, _t in zip(_part, _mine, _theirs):
-            if _m == _t:
-                continue
-            if _pua_for_unassigned(_m, _t):
-                _pua += 1        # WHATWG-unassigned vs a vendor private-use extension
-            else:
+            _kind = _classify(_m, _t)
+            if _kind == "real":
                 _diff[_s] = (_m, _t)
+            elif _kind != "agree":
+                _counts[_kind] += 1
     for _s in sorted(set(_diff) - set(_expected)):
         fails.append(("decoder", f"{_label} {_s.hex()} diverges and is not a listed index difference",
                       [_diff[_s][0]], [_diff[_s][1]]))
@@ -386,14 +404,21 @@ for _label, _expected in INDEX_DIVERGENCE.items():
     for _s, _pair in _expected.items():
         if _s in _diff and _diff[_s] != _pair:
             fails.append(("decoder", f"{_label} {_s.hex()} maps differently now", [_diff[_s]], [_pair]))
-    if _pua != PUA_UNASSIGNED[_label]:
-        fails.append(("decoder", f"{_label}: {_pua} sequences are Parsel-private-use where the WHATWG "
-                                 f"index is unassigned, not the {PUA_UNASSIGNED[_label]} recorded",
-                      _pua, PUA_UNASSIGNED[_label]))
-    _ok = (not set(_diff) ^ set(_expected)) and _pua == PUA_UNASSIGNED[_label]
-    print(f"decoder [{_label} index]: {len(_diff)} of {len(_assigned)} ASSIGNED sequences differ on a "
-          f"real character (expected {len(_expected)}), {_pua} more are Parsel-PUA where WHATWG is "
-          f"unassigned (expected {PUA_UNASSIGNED[_label]}) -> {'OK' if _ok else 'MISMATCH'}")
+    for _kind, _want in (("pua", PUA_UNASSIGNED[_label]),
+                         ("whatwg_only", WHATWG_ONLY[_label]),
+                         ("replacement_shape", REPLACEMENT_SHAPE[_label])):
+        if _counts[_kind] != _want:
+            fails.append(("decoder", f"{_label}: {_counts[_kind]} sequences in the {_kind} class, not "
+                                     f"the {_want} recorded", _counts[_kind], _want))
+    _ok = not (set(_diff) ^ set(_expected)) and all(
+        _counts[_k] == _w for _k, _w in (("pua", PUA_UNASSIGNED[_label]),
+                                         ("whatwg_only", WHATWG_ONLY[_label]),
+                                         ("replacement_shape", REPLACEMENT_SHAPE[_label])))
+    print(f"decoder [{_label} index]: all {len(_probe)} two-byte sequences: {len(_diff)} disagree on a "
+          f"real character (expected {len(_expected)}), {_counts['whatwg_only']} are WHATWG-assigned and "
+          f"Python-unassigned (expected {WHATWG_ONLY[_label]}), {_counts['pua']} Parsel-PUA (expected "
+          f"{PUA_UNASSIGNED[_label]}), {_counts['replacement_shape']} differ only in replacement shape "
+          f"(expected {REPLACEMENT_SHAPE[_label]}) -> {'OK' if _ok else 'MISMATCH'}")
 
 # THE GATE: any mismatch above is an encoding regression. Without this the target printed MISMATCH and
 # still exited 0, so `make gate` and hosted CI stayed green through an encoding bug.

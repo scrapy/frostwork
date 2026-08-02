@@ -109,7 +109,7 @@ column (the container still yields a row). See [PYTHON.md](PYTHON.md) for the `M
 
 The engine runs the HTML5 *tokenizer* plus a minimal, **libxml2-matching** implied-close reshape (no
 DOM, no full tree construction). These rules were derived empirically against libxml2 2.14 (see
-`src/implied_close.rs`):
+`src/implied_close/`):
 
 - **Implied end tags** (auto-close to siblings) are NOT uniform per family — every cell below is
   verified individually against libxml2 2.14.6, because the families disagree with each other and with
@@ -157,13 +157,26 @@ DOM, no full tree construction). These rules were derived empirically against li
   the engine's own names and an independent element index, and regenerates the Rust table; `--check`
   fails on drift. `tools/audit_tree_rules.py` then re-checks the ENGINE against every pair by value, and
   `tools/mutate_rules.py` verifies that flipping a cell is noticed by a gate.
-- **`<html>`, `<head>` and `<body>` are accepted only as the document frame.** Anywhere else libxml2
-  ignores the start tag (merging its attributes onto the element that already exists), so the engine
-  inserts nothing: `<div>d<html>y</div>` is one text node `dy` under the div, not a div containing a
-  spurious `html`. The implied closes still run first — `<body>` closes an open `<p>` and an open
-  `<head>` — and an end tag matching such an ignored start tag pops that phantom instead of closing the
-  document, so `<div><body>x</body>tail</div>` keeps `xtail` inside the div. This is about a frame tag
-  written in the wrong PLACE; a frame the page omits entirely is built for it by the next entry.
+- **`<html>`, `<head>` and `<body>` are accepted only where the frame admits them**, and each has its own
+  rule — swept over the whole element universe crossed with "is a body open" (`frame-in-element` in
+  `tools/audit_tree_rules.py`), because reading them as one rule got two of the three wrong:
+  - a **`<head>`** belongs to the phase before any body content, so anything else already open ends that
+    phase and the tag is ignored;
+  - a **`<body>`** is ignored only while one is OPEN. After a `</body>`, libxml2 starts a second body
+    wherever the next `<body>` is written — inside a `<td>`, a `<div>`, or a `<frameset>` (whose document
+    never had one, which is how a frameset page writes its no-frames fallback);
+  - a **`<html>`** is ignored while one is open, but a second one *after* the first has closed gets its
+    own ROOT element, because that is what libxml2 builds. Browsers keep a single `<html>` instead, so
+    parsel's own CSS and XPath disagree about such a document — `.css('html')` is scoped to the first
+    root and reports one, `//html` reports both. The tree is the oracle here, so `//html/@x` is right and
+    the CSS side of such a page is a parsel scoping artifact.
+
+  An ignored start tag inserts nothing (`<div>d<html>y</div>` is one text node `dy` under the div) and its
+  implied closes still run first (`<body>` closes an open `<p>` and an open `<head>`) — but libxml2 keeps
+  a stack SLOT for the tag it merged away, so the next frame END tag pops that phantom instead of closing
+  the document. `<div><body>x</body>tail</div>` keeps `xtail` inside the div, and it is a slot rather than
+  a named token: **any** of the three end tags pops a phantom left by **any** of the three, so a stray
+  `<html>` in the body makes the document's own `</body>` a no-op.
 - **The document frame is SYNTHESIZED when the page omits it.** `<html>`, `<head>` and `<body>` all have
   optional start *and* end tags, so a conformant document may contain none of them — and libxml2 builds
   the frame regardless, so the engine does too. `<!DOCTYPE html><title>T</title><h1>a</h1><p>b</p>`
@@ -174,7 +187,19 @@ DOM, no full tree construction). These rules were derived empirically against li
   only `base`/`link`/`meta`/`script`/`style`/`title` open a `<head>`, while `input`/`noscript`/
   `template`/`basefont`/`bgsound`/`object` survive inside a head that is already open and open none.
   Whitespace before the frame starts is not content and starts nothing. A frame the page *does* write is
-  used as written; nothing is invented on top of it.
+  used as written; nothing is invented on top of it — but a page whose FIRST tag is `<head>` or `<body>`
+  has still omitted its `<html>`, and gets one. (Without that the head sat at the root with no parent and
+  a second `<html>` was built for whatever followed `</head>`, so `html > head`, `html > body` and
+  `head + script` were empty while the values under them looked right.)
+- **What ends the head does not always START a body.** The usual case does — that is the rule above —
+  but `<frameset>`, `<frame>` and `<noframes>` open neither part (a frameset document has no `<body>` at
+  all), and a `<frameset>` written INSIDE the `<head>` ends the head like any other non-head content. It
+  then belongs to `<html>`, not to an invented body: a real frameset page put its whole frameset, and
+  the `<body>` written after it, somewhere libxml2 never does. Which part a name opens is
+  `implied_close::frame_content`, derived from the oracle; only the head-pop path was not asking it.
+- **Character data ends an open `<head>` even when it cannot start a body.** The usual case moves the
+  text and everything after it into the body it opens; when a body already exists — only reachable by
+  writing a `<head>` after `</body>` — libxml2 still pops the head and leaves the text at `<html>` level.
 - **A `<!DOCTYPE …>` does not break a text node**, and is the only declaration form that does not:
   `<div>a<!doctype html>b</div>` is the single node `ab`, while `<!foo>`, `<![CDATA[…]]>`, `<?x?>` and
   `<!>` all split the run in both engines. libxml2 matches the seven-letter prefix case-insensitively
@@ -187,23 +212,40 @@ DOM, no full tree construction). These rules were derived empirically against li
   <body>` in `tools/audit_tree_rules.py`) rather than a list of names, because the elements that *end*
   the head are not the same set as the ones that would *open* a body after an explicit `</head>` —
   `input`, `noscript`, `template`, `basefont`, `bgsound` and `object` are in one and not the other.
-- **An end tag never unwinds a table** ("table scope"). With a table-scoped element (`table`, `thead`,
-  `tbody`, `tfoot`, `tr`, `td`, `th` — **not** `caption` or `colgroup`) open above its match, an ordinary
-  end tag is *discarded*:
-  in `<div><table><tr><td>A</div>B`, the `</div>` is dropped and the cell keeps `AB` as one text node.
-  Table-family end tags (`</tr>`, `</tbody>`, …) may unwind row/cell machinery in the same table, but
-  cannot cross a nested `<table>` to reach an outer match. `</body>`/`</html>` still close the document.
-  Unbalanced `<div>`s around tables are a common real-world malformation, so this path matters.
-- **An open `<div>` is also an end-tag scope boundary.** An ordinary end tag aimed at an ancestor is
-  discarded while a `<div>` remains open above that ancestor: `<nav><div>A</nav>B` keeps `AB` inside
-  the div. This is name-specific in libxml2; a peer block such as `<blockquote>` does not establish the
-  same boundary.
+- **An end tag cannot unwind anything that OUT-RANKS it** ("end-tag scope"). libxml2 gives each element
+  name an *end priority* and discards a misplaced end tag while something higher-priority is still open
+  above its match. The order is
+  `body` > `table` > `thead`/`tbody`/`tfoot` > `tr` > `td`/`th` > `div` > everything else (`caption` and
+  `colgroup` are **not** boundaries; nor is a peer block such as `<blockquote>`), so:
+  - `<div><table><tr><td>A</div>B` drops the `</div>` and the cell keeps `AB` as one text node —
+    unbalanced `<div>`s around tables are a common real-world malformation;
+  - `<nav><div>A</nav>B` keeps `AB` inside the div;
+  - `<tr><strong><tbody></tr>` keeps the ROW open, because `</tr>` cannot unwind the `<tbody>` above it;
+  - equal priority never blocks, so `</tbody>` still unwinds an open `<tr>`/`<td>`, and a nested
+    `<table>` does not shield an outer `</table>`;
+  - `<body>` out-ranks the whole table machinery, which matters wherever one can be open ABOVE a match —
+    a `<body>` written after `</body>`, which a crawled page put inside a `<td>`.
+
+  `</body>`/`</html>` close the document whatever is open. This is one comparison, not a set of boundary
+  elements: it is derived and verified as such by `tools/gen_tree_rules.py` over every (open × closing)
+  pair in the element universe, and `tools/audit_tree_rules.py` re-checks every pair through the engine
+  by value. Reading it as a set is what cost a crawled page its table cells — the two coarsest cells were
+  right and the order inside the table machinery was missing.
 - **An end tag with no open element to match is DROPPED, and does not split the text node.** libxml2
   discards it and keeps the character data either side as ONE text node, so `<div>A</p>B</div>` yields
   `AB`, not `A` + `B`. Only source-adjacency across the dropped tag is re-joined: a comment, CDATA, PI,
   void element or real child in the gap is a node in libxml2 too, and still splits the run. Doc
   generators emit this (Sphinx: `</p>\n</p>`), and a split would silently *truncate* a `One`-cardinality
   field rather than empty it — the one failure mode no-fallback is meant to exclude.
+- **Only an ASCII letter after `</` starts an end tag** (HTML5's end-tag-open state, which libxml2
+  follows exactly). The other two branches are not end tags and each affects the text node differently:
+  `</%>`, `</1>`, `</-x>` are **bogus comments** — a node, so they SPLIT the run — while `</>` is
+  "missing end tag name" and is ignored entirely, so it does **not** split it. A bogus comment runs to
+  the next `>` regardless of quoting, and both engines resume at the same byte, so this is a local
+  difference and never an offset desync. `</` at end of input is character data. Reading all three as
+  "scan a name, skip to `>`" merged a real page's `Copyright 1991-2026</%> VECMAR Corporation` into one
+  text node where libxml2 has two, and was also the largest single source of unattributed divergences in
+  the malformed-HTML fuzzer.
 - **`<p>`-closing block set** is the HTML4 block list (`div`, `p`, `h1`–`h6`, `ul`, `ol`, `dl`, `menu`,
   `dir`, `center`, `address`, `blockquote`, `fieldset`, `form`, `pre`, `table`, `hr`) — **not** the
   HTML5 sectioning elements (`section`, `article`, `header`, `footer`, `nav`, `main`, `figure`,
@@ -233,12 +275,37 @@ DOM, no full tree construction). These rules were derived empirically against li
     `tools/audit_tree_rules.py`, so the set is no longer "the names we thought of".
 - **Character references**: libxml2/Parsel-compatible — legacy semicolon-less names, numeric edge
   cases (`&#00`→U+FFFD, win-1252 remap).
+- **A stray `=` where an attribute NAME should start is part of that name**, not a separator —
+  `<div = class='x'>` has the class, exactly as libxml2 and html5lib read it (HTML5 calls this
+  `unexpected-equals-sign-before-attribute-name`; html5lib names the attribute `U0003D`). Reading it as
+  a separator gave that attribute an empty name, dropped it, and swallowed the real `class` after it as
+  its *value*, so a crawled page's `div::attr(class)` came back a row short.
+- **A start tag the response ends inside is dropped, whole** — `…<a href="/p2" class="` yields no
+  element and no text, and the text before it is untouched. libxml2 and html5lib agree for every shape
+  (`<a`, `<a href`, `<a href=`, `<a href="x`). This used to be a documented divergence in the other
+  direction — the engine kept the attributes it had already scanned — which reported an `<a>` with an
+  `href` holding the rest of the document that no other parser sees. Truncated responses are not rare in
+  a crawl: one such page cost 6 divergent columns, and the shape was the largest remaining group in
+  `tools/diff_fuzz.py`.
 - **Raw NUL is deleted from the whole document before tokenizing**, exactly as Parsel/w3lib do
   (`body.replace(b"\x00", b"")`). It has to happen before parsing, not at value-emit time: a NUL inside a
   tag or attribute *name* is invisible to lxml (`<di\0v>` is a `div`), so dropping it only from emitted
   values made the two sides disagree about the document's structure and `div::text` came back empty. For
   UTF-16 input the deletion is applied to the DECODED text, since in UTF-16 every ASCII character carries
   a 0x00 byte. A character *reference* to NUL (`&#0;`) is a different thing and still becomes U+FFFD.
+- **A leading BOM may be INDENTED**, for the same reason and by the same rule: `Selector(text=...)`
+  parses `text.strip()`, so on a page that indents its doctype — `"    ﻿<!DOCTYPE HTML>"` — the
+  U+FEFF is promoted to offset 0, where libxml2 eats it as a BOM. Read the bytes as they arrive and that
+  U+FEFF is a *character* instead, and a character before the frame opens the `<body>`: the page's
+  `<head>`, its `<title>` and even the attributes of its own `<html>` tag (redundant once a body is
+  open) are all lost, so `head title::text` and `html::attr(xmlns)` come back silently **empty**. libxml2
+  on the raw bytes and html5lib both agree with the raw reading — this is Parsel normalizing its input,
+  and matching what a scraper sees is the point. Only ASCII whitespace may precede it, and only in
+  UTF-8: in windows-1252 those three bytes are `ï»¿`, three real characters, and Parsel's decode agrees.
+- **Trailing whitespace is not a text node**, the other half of that same `strip()`. It can only ever
+  move whitespace, so it changes no value — but it changes how many a column returns: a page ending
+  `…<option class="c3">\n` gives that option a text node here and none under Parsel. Matching it took
+  the malformed-HTML fuzzer's unexplained-divergence bucket from 22 to 7.
 
 ## Value semantics
 
@@ -293,10 +360,23 @@ next bug will be:
 - **Nested `<form>`** — libxml2 *ignores* a `<form>` start tag while another `<form>` is open; the
   engine nests it, so the inner content sits one level deeper (`<div><form><form>x` → `div > *::text`
   is `x` in lxml, empty here).
-- **A tag left unterminated by EOF** — on a response cut off mid-tag (`…<a href="/p2" class="`),
-  libxml2 discards the incomplete tag; the engine has already read its attributes and keeps them.
-  Only reachable on truncated input.
+- **Names longer than 100 characters — a divergence *in our favor*, and one that can still cost a port.**
+  libxml2 parses element and attribute names into a fixed 100-byte buffer and silently keeps the first
+  100 characters; html5lib (and every browser) keeps the whole name, and so does Frostwork. Found on a
+  crawled page whose templating had run away and emitted `data-wp-` eleven times in front of
+  `oncontextmenu`. The catch is the direction: a spider written against lxml copies the **truncated**
+  name out of the tree it can see, and that selector then matches nothing here — an empty column, the
+  one failure mode worth naming. Selectors are matched as written; the fix is to use the real name from
+  the page source. Emulating a parser's buffer size would mean reporting a name that is not in the
+  document, which is the trade this project refuses everywhere else.
 - **Outer-HTML serialization** (raw source vs reflow — above).
+- **A FORM FEED between class names — a divergence *in our favour*, one cell wide.** A class list is
+  split on HTML's ASCII whitespace (space, tab, LF, **FF**, CR); lxml's `.x` goes through cssselect's
+  `normalize-space(@class)`, which is XML whitespace and has no FF. So `class="a&#12;b"` is two classes
+  here and one there. Everything else about the split now agrees, which is the point of naming this:
+  the engine used to split on *Unicode* whitespace, so a real Japanese page whose
+  `class="ctsListWrap fadein　clearfix"` uses an IDEOGRAPHIC SPACE (U+3000) matched both `.fadein` and
+  `.clearfix` — classes it does not have. `[attr~=v]` tokenizes identically and had the same bug.
 - **Frameset documents.** `<frameset>`/`<frame>`/`<noframes>` sit directly under `<html>` and such a
   document has no `<body>` at all — matched, but a rare enough shape that it is called out rather than
   assumed. Everything else about the frame is now built (see the synthesis entry in the supported list).
@@ -352,8 +432,15 @@ next bug will be:
   |---|---|---|---|
   | unscoped (`div::text`, `#after::text`) | ∅ empty | ✅ finds it | ✅ finds it |
   | ancestor-scoped (`body div::text`, `body ::text`) | ∅ empty | ∅ empty | ✅ finds it |
+  | `html`-scoped (`//html/script`, `html > div`) | ✅ finds it | ✅ finds it | ✅ finds it |
 
   So an unscoped selector is browser-equivalent, while a `body`-scoped one agrees with lxml instead.
+
+  The last row is why the tail is not left bare: libxml2 does not simply discard it, it starts a
+  **second root `<html>`** and puts the tail in that (the same shape it builds for a second `<html>`
+  START tag — see the frame entry above). Frostwork synthesizes the same second root, so an
+  `html`-scoped selector agrees. Leaving the tail parentless instead made `//html/script` miss a real
+  page's trailing script that `//script` found — the values were all present, only the frame was not.
 
   **Migration caveat.** This is an *extra*-value divergence, the one direction that can surprise a
   port: a `Many` field whose selector also matches trailing injected markup gains rows it did not have
@@ -389,9 +476,14 @@ Resolution order (`src/encoding.rs`):
    the page then decoded as UTF-8 with a U+FFFD in every value.
 5. **UTF-8** default.
 
-Structural tokenization runs on raw bytes for every ASCII-compatible encoding (all HTML delimiters are
-`< 0x40`); only the small emitted values are decoded with the resolved encoding (`encoding_rs`).
-UTF-16LE/BE are transcoded to UTF-8 up front.
+Structural tokenization runs on raw bytes for every ASCII-compatible encoding — a byte below 0x80 *is*
+that ASCII character there, so the delimiters are unambiguous — and only the small emitted values are
+decoded with the resolved encoding (`encoding_rs`). Everything else is transcoded to UTF-8 up front, and
+which encodings those are is asked of `Encoding::is_ascii_compatible` rather than listed: UTF-16LE/BE,
+**ISO-2022-JP**, and `replacement` (the label WHATWG gives HZ-GB-2312 and friends, which browsers refuse
+to decode at all — one U+FFFD for the whole document). ISO-2022-JP is the one that bites: inside its
+`ESC $ B` mode a JIS pair is two bytes below 0x80, so `社` is the pair `<R`, and a crawled Japanese page
+tokenized as raw bytes grew an `<r>` start tag out of the middle of a word.
 
 ### Deliberate differences from w3lib
 
@@ -490,9 +582,9 @@ measured and bucketed, not assumed (full methodology: [TESTING.md](TESTING.md)):
 - **Unit**: hand-written vectors incl. tokenizer conformance (`cargo test` prints the count).
 - **Rule audit** (`tools/audit_tree_rules.py --gate`): every tree-construction rule cell against lxml,
   over the whole element universe — the start-close relation, the void set, the data modes, `<p>`-closing,
-  table scope and the document frame. **0 disagreements** is the gate.
-- **Generated-table check** (`tools/gen_tree_rules.py --check`): the Rust start-close/void tables still
-  equal what libxml2 says, over that same universe.
+  end-tag scope (every open × closing pair) and the document frame. **0 disagreements** is the gate.
+- **Generated-table check** (`tools/gen_tree_rules.py --check`): the Rust start-close/void/end-priority
+  tables still equal what libxml2 says, over that same universe.
 
 To audit a specific query, use `frostwork.check` or run it through `tools/diff_lxml.py`'s verdict
 logic. In permissive Python mode, an unsupported query yields `[]`.

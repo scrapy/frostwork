@@ -19,16 +19,17 @@
 //! ```text
 //!   close:<inc_name>,<open_name>   invert the EFFECTIVE "does this start tag close that open element?"
 //!                                 answer for exactly that tag-name pair
-//!   scope:<tag_id>                flip is_table_scoped for that id
+//!   prio:<name>                   flip that name's end_priority between 0 and "out-ranks everything"
 //!   void:<name>                   flip is_void for that name
 //!   mode:<name>                   flip data_mode for that name (Normal <-> Rawtext)
 //! ```
 //!
-//! `close:` deliberately hooks the COMPOSITE decision rather than one table. Two tables feed it —
-//! `implies_close_id` (tag ids) and `start_closes` (libxml2's finer name-pair list) — and they overlap,
-//! so mutating either one alone is MASKED wherever the other closes the same pair: 51 such mutants
-//! survived every gate while the behaviour was in fact protected. Mutating the answer instead of an
-//! implementation detail makes every cell observable and needs no equivalence bookkeeping.
+//! `close:` hooks the EFFECTIVE answer rather than a table, and that is worth keeping even now that only
+//! one table feeds it. Two used to — a hand-written tag-id table ORed with `start_closes` — and they
+//! overlapped, so mutating either alone was MASKED wherever the other closed the same pair: 51 such
+//! mutants survived every gate while the behaviour was in fact protected. (The id table has since been
+//! deleted: the generated relation closed every pair it did.) Mutating the answer costs nothing extra and
+//! keeps the sweep honest if a second table ever reappears.
 //!
 //! Driven by `tools/mutate_rules.py`; see docs/TESTING.md.
 
@@ -41,7 +42,7 @@ mod imp {
         v
     }
     #[inline(always)]
-    pub fn scope(_tid: u8, v: bool) -> bool {
+    pub fn end_priority(_name: &str, v: u8) -> u8 {
         v
     }
     #[inline(always)]
@@ -63,7 +64,7 @@ mod imp {
     enum Spec {
         None,
         Close(String, String),
-        Scope(u8),
+        Prio(String),
         Void(String),
         Mode(String),
     }
@@ -86,7 +87,7 @@ mod imp {
                         .unwrap_or_else(|| panic!("FROSTWORK_MUTATE close: expected `inc,open`"));
                     Spec::Close(a.trim().to_ascii_lowercase(), b.trim().to_ascii_lowercase())
                 }
-                "scope" => Spec::Scope(arg.trim().parse().unwrap()),
+                "prio" => Spec::Prio(arg.trim().to_ascii_lowercase()),
                 "void" => Spec::Void(arg.trim().to_ascii_lowercase()),
                 "mode" => Spec::Mode(arg.trim().to_ascii_lowercase()),
                 other => panic!("FROSTWORK_MUTATE: unknown kind {other:?}"),
@@ -105,9 +106,14 @@ mod imp {
         }
     }
 
-    pub fn scope(tid: u8, v: bool) -> bool {
+    /// Move a name to the other end of the end-tag priority order. Both directions are real mistakes:
+    /// a name that wrongly out-ranks everything makes every stray end tag near it disappear, and one
+    /// that wrongly out-ranks nothing lets a stray `</div>` unwind a whole table. One mutant per NAME is
+    /// enough here, unlike `close:`, because a single table feeds this answer — there is no second rule
+    /// to mask the flip.
+    pub fn end_priority(name: &str, v: u8) -> u8 {
         match spec() {
-            Spec::Scope(t) if *t == tid => !v,
+            Spec::Prio(n) if n == name => if v == 0 { u8::MAX } else { 0 },
             _ => v,
         }
     }

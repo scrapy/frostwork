@@ -45,34 +45,45 @@ bytes ─▶ tokenizer (TokenSink: start/text/end) ─▶ corrected-stack matche
 ## Semantics: match libxml2 2.14, not the HTML5 spec
 
 Frostwork runs the HTML5 *tokenizer* faithfully but not the HTML5 *tree-construction* algorithm.
-Instead it applies the small set of implied-close rules libxml2 actually uses (`implied_close.rs`).
+Instead it applies the small set of implied-close rules libxml2 actually uses (`implied_close/`).
 **The rules themselves are enumerated once**, under "Tree-construction contract" in
 [COMPATIBILITY.md](COMPATIBILITY.md). What follows is why they take the shape they do:
 
 - **The tables are DERIVED, not written.** `tools/gen_tree_rules.py` measures the whole (open ×
-  incoming) start-close relation, the void set and the per-element data mode against libxml2 over a
-  fixed element universe, and *generates* the Rust. Three successive hand-written ports each omitted
-  names, and with them whole rules — a code-generation problem, not a diligence problem. So the source
-  of truth is the oracle, the generated block in `implied_close.rs` is its output, and a prose list of
-  tag names anywhere else is a fourth copy waiting to go stale.
+  incoming) start-close relation, the end-tag scope priorities, the void set and the per-element data
+  mode against libxml2 over a fixed element universe, and *generates* the Rust. Three successive
+  hand-written ports each omitted names, and with them whole rules — a code-generation problem, not a
+  diligence problem. So the source of truth is the oracle, `implied_close/generated.rs` is its output
+  (rewritten whole, `--check` gates on drift), and a prose list of tag names anywhere else is a fourth
+  copy waiting to go stale. `implied_close/mod.rs` is the hand-written half, kept in a separate file so
+  the boundary is a file boundary.
 - **No rule is uniform per family**, which is why generation matters more here than it looks. A same-tag
   repeat auto-closes for some list/table elements and *nests* for others; `<tbody>` closes an open row
-  and `<thead>` does not; libxml2's start-close relation is over tag *names* and is finer than the
-  engine's tag ids, so two elements that share an id behave differently. Any grouping you would
-  reach for by intuition is wrong somewhere.
-- **Two tables feed one answer.** `implies_close_id` (over tag ids) and `start_closes` (over libxml2's
-  name pairs) are OR-ed by the matcher. That composition is why `tools/mutate_rules.py` mutates the
-  *effective* close decision rather than a cell in either table — mutating one alone is masked wherever
-  the other closes the same pair.
+  and `<thead>` does not; libxml2's start-close relation is over tag *names* and is finer than any
+  grouping the engine might impose, so two elements that look interchangeable behave differently. Any
+  grouping you would reach for by intuition is wrong somewhere. The engine used to carry a second,
+  coarser close table over tag *ids* and OR the two; deriving the name relation made it redundant, and
+  proving that (every id-pair answer already implied by the generated table) let it be deleted.
+- **Mutation targets the ANSWER, not a cell.** `tools/mutate_rules.py` flips the *effective* close
+  decision for a name pair — and, separately, the data mode for a name — rather than one table entry,
+  because a cell whose answer is also reachable another way is masked and the sweep then reports it
+  protected.
 - **The document frame is built when the page omits it, and ignored when the page misplaces it.** Both
   halves are needed and they are different mechanisms: `<html>`/`<head>`/`<body>` all have optional
   start *and* end tags, so a conformant document may contain none of them and libxml2 frames it anyway
   (`Matcher::ensure_frame` over the oracle-derived `frame_content`) — while a frame tag written in the
   *wrong place* is ignored, with a phantom-entry counter so its matching end tag pops the ignored tag
-  instead of closing the document.
-- **Scope is what keeps a malformed page local.** An ordinary end tag never unwinds a table, and an open
-  `<div>` is a boundary too, so unbalanced markup around a table truncates one field instead of
-  desynchronizing the rest of the document.
+  instead of closing the document. The state and the questions the rules ask about it live in
+  `matcher/frame.rs`, each named once: four crawl-found frame bugs were a rule asking a *proxy* question
+  ("is this tag a frame tag") instead of the real one ("is anything open to hold what follows").
+- **Scope is what keeps a malformed page local, and it is an ORDER rather than a set.** libxml2 discards
+  a misplaced end tag while anything out-ranking it is still open above its match, so unbalanced markup
+  around a table truncates one field instead of desynchronizing the rest of the document. Reading it as
+  a set of boundary elements is what lost a crawled page its table cells: the two coarsest answers (a
+  table blocks an ordinary end tag; so does an open `<div>`) were right, and the order *inside* the
+  table machinery was simply absent — from the engine, the audit's probe list and the mutation sweep
+  alike. When a rule turns out to be coarser than reality, widen the derivation first; a sweep over the
+  wrong shape is a green light for the wrong thing.
 - None of these arms had differential coverage until `tools/audit_tree_rules.py` enumerated them cell by
   cell against lxml. Add a row there when you add a rule; docs/TESTING.md has what that turned up.
 
@@ -129,12 +140,12 @@ and a winner's values are recovered afterwards by re-scanning that span (`split_
 schema; `resolve_tail_spans` runs it). Three things make this work:
 
 - *The span is self-contained.* An end tag inside it that matched an ancestor would have ENDED the span,
-  and one discarded by table scope behaves identically standalone — the same re-parse-equivalence the
+  and one discarded by end-tag scope behaves identically standalone — the same re-parse-equivalence the
   differential already proves for outer-HTML node queries.
 - *The re-scan runs the real engine.* The tail is a compiled sub-schema — `* ::text` / `* ::attr(name)`
   for a subtree terminal, or the selector's own compounds after the deferred one for a descendant value,
   with `strict_desc` set so the span's root is excluded (`div:has(a) div::text` means a *proper*
-  descendant). It therefore inherits dropped-end-tag coalescing, table scope and implied close rather
+  descendant). It therefore inherits dropped-end-tag coalescing, end-tag scope and implied close rather
   than re-deriving them; a hand-rolled collector here would silently re-introduce the split-text bug. An
   unsupported tail marks the entry dead, so the audit keeps reporting the selector unsupported instead of
   the column quietly coming back empty. Only a DESCENDANT step into the tail is expressible this way — a

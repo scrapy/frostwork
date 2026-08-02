@@ -27,11 +27,14 @@ pub trait TokenSink<'a> {
     /// to detect two runs separated by nothing but a DROPPED end tag (which libxml2 coalesces into a
     /// single text node; see `Matcher::text`). A run is NOT always a text node on its own.
     fn text(&mut self, text: &'a [u8], allows_entities: bool, start: usize);
-    /// A `<!DOCTYPE …>` was skipped over `[from, to)`. libxml2 keeps no node for it and — unlike a
-    /// comment, a CDATA section, a PI or a bogus `<!foo>`, all of which DO end the run — does not end
-    /// the surrounding text node either: `<div>a<!doctype html>b</div>` is the single text node `ab`.
-    /// The sink is told so it can re-join across it, exactly as it does across a dropped end tag.
-    fn doctype(&mut self, from: usize, to: usize) {
+    /// Markup over `[from, to)` that libxml2 keeps NO node for and that does not end the surrounding
+    /// text node either, so `<div>a…b</div>` is the single text node `ab`. The sink is told so it can
+    /// re-join across it, exactly as it does across a dropped end tag.
+    ///
+    /// Two constructs qualify, and only two: `<!DOCTYPE …>` and `</>` (HTML5's "missing end tag name",
+    /// where the whole thing is ignored). A comment, a CDATA section, a PI, a bogus `<!foo>` and a
+    /// BOGUS COMMENT such as `</%>` are all nodes and DO end the run — measured against the oracle.
+    fn invisible_markup(&mut self, from: usize, to: usize) {
         let _ = (from, to);
     }
 }
@@ -310,25 +313,50 @@ fn handle_markup<'a, S: TokenSink<'a>>(
                 // oracle: `<!foo>`, `<![CDATA[…]]>`, `<?x?>` and `<!>` all break the run, a doctype
                 // does not). Case-insensitive, and the name has to be complete.
                 if b[p..].len() > 9 && b[p + 2..p + 9].eq_ignore_ascii_case(b"doctype") {
-                    sink.doctype(p, after);
+                    sink.invisible_markup(p, after);
                 }
                 after
             }
         }
         Markup::Bogus => skip_to_gt(b, p),
         Markup::End => {
-            let n = b.len();
-            let mut i = p + 2;
-            let start = i;
-            while i < n && is_name_char(b[i]) {
-                i += 1;
+            // HTML5's end-tag-open state, which libxml2 follows exactly (verified case by case). Only
+            // an ASCII ALPHA starts an end tag; the other two branches are not end tags at all, and
+            // collapsing all three into "scan a name, skip to `>`" got both of them wrong:
+            //
+            //   `</%>`, `</1>`, `</-x>` -> a BOGUS COMMENT. libxml2 keeps a comment node, so it SPLITS
+            //      the text either side. The engine read `%` as a tag name (`is_name_char` accepts it),
+            //      dropped it as unmatched and JOINED the runs instead — a real page's copyright line
+            //      came back as one node where lxml has two.
+            //   `</>` -> "missing end tag name": the whole thing is ignored, and being no node at all it
+            //      does NOT split the run. The engine emitted no event, which left the runs
+            //      un-joined — the same bug the other way round.
+            //   `</` at EOF -> character data.
+            match b.get(p + 2) {
+                Some(&c) if c.is_ascii_alphabetic() => {
+                    let n = b.len();
+                    let mut i = p + 2;
+                    let start = i;
+                    while i < n && is_name_char(b[i]) {
+                        i += 1;
+                    }
+                    let after = skip_to_gt(b, i);
+                    sink.end_tag(&b[start..i], p, after); // p = '<' of the end tag
+                    after
+                }
+                Some(b'>') => {
+                    sink.invisible_markup(p, p + 3);
+                    p + 3
+                }
+                // EOF right after `</`: those two bytes are CHARACTER DATA, and adjoin the run before
+                // them (`<span>a</` is the single node `a</` in libxml2). The one shape of truncated
+                // input where the engine LOST a value rather than keeping an extra one.
+                None => {
+                    sink.text(&b[p..], true, p);
+                    b.len()
+                }
+                _ => skip_to_gt(b, p),
             }
-            let name = &b[start..i];
-            let after = skip_to_gt(b, i);
-            if !name.is_empty() {
-                sink.end_tag(name, p, after); // p = '<' of the end tag
-            }
-            after
         }
         Markup::Start => handle_start(b, p, sink, attr_buf),
     }
@@ -350,6 +378,7 @@ fn handle_start<'a, S: TokenSink<'a>>(
 
     attr_buf.clear();
     let mut self_closing = false;
+    let mut terminated = false;
     loop {
         while i < n && is_ws(b[i]) {
             i += 1;
@@ -359,18 +388,30 @@ fn handle_start<'a, S: TokenSink<'a>>(
         }
         if b[i] == b'>' {
             i += 1;
+            terminated = true;
             break;
         }
         if b[i] == b'/' {
             if b.get(i + 1) == Some(&b'>') {
                 self_closing = true;
                 i += 2;
+                terminated = true;
                 break;
             }
             i += 1;
             continue;
         }
         let as_ = i;
+        // An `=` where an attribute NAME should start is the first character of that name, not a
+        // separator (HTML5 calls this `unexpected-equals-sign-before-attribute-name`; libxml2 and
+        // html5lib agree, the latter naming the attribute `U0003D`). Reading it as a separator gave the
+        // attribute an EMPTY name, which is dropped — and swallowed the real attribute after it as its
+        // value: a crawled page's `<div = class='background-bg-internas'>` lost its class entirely, so
+        // `div::attr(class)` came back one row short. Only reachable here, since whitespace, `>` and `/`
+        // were all consumed above.
+        if b[i] == b'=' {
+            i += 1;
+        }
         while i < n && !is_ws(b[i]) && b[i] != b'=' && b[i] != b'>' && b[i] != b'/' {
             i += 1;
         }
@@ -408,6 +449,18 @@ fn handle_start<'a, S: TokenSink<'a>>(
         if !aname.is_empty() {
             attr_buf.push((aname, aval));
         }
+    }
+
+    if !terminated {
+        // EOF before the closing `>`: the tag is DROPPED, whole. Not emitted, and not turned back into
+        // text either — libxml2 and html5lib agree on that for every shape (`<a`, `<a href`, `<a href=`,
+        // `<a href="x`), and the text before it is untouched. The engine used to emit whatever it had
+        // scanned, which is the FALSE-POSITIVE direction: on a crawled page cut off inside
+        // `<a href="login.…` it reported an `<a>` element, with an `href` holding the rest of the
+        // document, that no other parser sees at all. Truncated responses are not a rare shape in a
+        // crawl — this was 6 divergent columns on one page and the largest remaining group in the
+        // malformed-HTML fuzzer.
+        return n;
     }
 
     let mode = data_mode(name);
@@ -484,6 +537,30 @@ mod tests {
         let mut r = Rec::default();
         tokenize(html, &mut r);
         r.ev
+    }
+
+    /// HTML5's END-TAG-OPEN state, pinned at the TOKEN layer where it belongs.
+    ///
+    /// This costs no oracle and no tree: the question "is `</%>` an end tag?" is answerable from the
+    /// event stream alone, and at this layer the three branches are three lines instead of a tree-shape
+    /// diff. The bug that motivated it (`</%>` scanned as an end tag named `%`) reached production
+    /// because every check above this one goes through selector VALUES, where it showed up only as two
+    /// text nodes becoming one on a page that happened to contain it.
+    #[test]
+    fn end_tag_open_only_starts_a_tag_on_a_letter() {
+        // an ASCII letter starts an end tag
+        assert_eq!(toks(b"a</p>b"), ["T:a", "E:p", "T:b"]);
+        // anything else is a BOGUS COMMENT: no end tag, and it consumes to the first `>` — note the two
+        // text runs stay SEPARATE events, which is what makes libxml2's comment node split the text
+        for bogus in [&b"a</%>b"[..], &b"a</1>b"[..], &b"a</-x>b"[..], &b"a</ >b"[..]] {
+            assert_eq!(toks(bogus), ["T:a", "T:b"], "{}", String::from_utf8_lossy(bogus));
+        }
+        // ...to the FIRST `>`, quotes and all — the same span libxml2 consumes, so no offset desync
+        assert_eq!(toks(br#"a</% x=">">b"#), ["T:a", "T:\">b"]);
+        // `</>` is ignored entirely: no end tag, and the surrounding runs are re-joinable
+        assert_eq!(toks(b"a</>b"), ["T:a", "T:b"]);
+        // EOF right after `</` is character data
+        assert_eq!(toks(b"a</"), ["T:a", "T:</"]);
     }
 
     #[test]

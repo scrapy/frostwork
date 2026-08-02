@@ -65,8 +65,10 @@ pub(super) fn compound_matches(c: &Compound, el: &OpenElem) -> bool {
             AttrPred::Prefix(n, v) => !v.is_empty() && el.attr(n).is_some_and(|a| a.starts_with(v.as_str())),
             AttrPred::Suffix(n, v) => !v.is_empty() && el.attr(n).is_some_and(|a| a.ends_with(v.as_str())),
             AttrPred::Substr(n, v) => !v.is_empty() && el.attr(n).is_some_and(|a| a.contains(v.as_str())),
+            // ASCII whitespace only, for the reason spelled out on `OpenElem::has_class` — `[rel~=x]`
+            // tokenizes the same way `.x` does, so a U+3000 in the value must not separate tokens.
             AttrPred::Includes(n, v) => {
-                !v.is_empty() && el.attr(n).is_some_and(|a| a.split_whitespace().any(|t| t == v))
+                !v.is_empty() && el.attr(n).is_some_and(|a| a.split_ascii_whitespace().any(|t| t == v))
             }
             AttrPred::DashMatch(n, v) => el.attr(n).is_some_and(|a| {
                 a == v || (a.len() > v.len() && a.starts_with(v.as_str()) && a.as_bytes()[v.len()] == b'-')

@@ -74,23 +74,34 @@ def _check_encoding(html: Bytesish, encoding: Optional[str]) -> Optional[str]:
     """Validate a caller charset label instead of letting the engine silently ignore it.
 
     The engine accepts WHATWG charset labels; Python codec spellings (``latin-1``, ``utf_8``) are
-    normalized through :mod:`codecs`. An unrecognized label raises rather than silently falling
-    through to BOM/``<meta>`` sniffing, and a non-UTF-8 label combined with already-decoded ``str``
-    input raises rather than silently double-transcoding.
+    normalized through :mod:`codecs`. A label that names no encoding at all raises rather than
+    silently falling through to BOM/``<meta>`` sniffing, and a non-UTF-8 label combined with
+    already-decoded ``str`` input raises rather than silently double-transcoding.
+
+    A label that IS a real encoding but not a WHATWG one is a third case, and it must not raise: the
+    documented input here is what Scrapy passes from ``Content-Type``, i.e. whatever
+    ``w3lib.encoding.resolve_encoding`` returned, and that resolves against Python's codec set — which
+    has ``utf-7`` and ``utf-32`` where WHATWG deliberately does not. A crawled page whose HTTP header
+    said ``charset=UTF-7`` (its own ``<meta>`` said UTF-8) therefore made ``extract`` raise on
+    documented usage. WHATWG's rule for such a label is *failure, continue* — ignore it and go on
+    sniffing, which is what browsers do, what the Rust core already did, and what reads this page
+    correctly. Raising on publisher-controlled input is the one thing the no-fallback contract rules
+    out: never an error, never a wrong value.
     """
     if encoding is None:
         return None
     canonical = _resolve_label(encoding)
     if canonical is None:
         try:
-            canonical = _resolve_label(codecs.lookup(encoding).name)
+            python_name = codecs.lookup(encoding).name
         except LookupError:
-            canonical = None
-    if canonical is None:
-        raise ValueError(
-            f"frostwork: unknown encoding label {encoding!r} — pass a WHATWG charset label "
-            "(e.g. 'utf-8', 'windows-1252', 'shift_jis') or None to sniff from BOM/<meta>"
-        )
+            raise ValueError(
+                f"frostwork: unknown encoding label {encoding!r} — pass a WHATWG charset label "
+                "(e.g. 'utf-8', 'windows-1252', 'shift_jis') or None to sniff from BOM/<meta>"
+            ) from None
+        canonical = _resolve_label(python_name)
+        if canonical is None:
+            return None  # real encoding, not a WHATWG one -> failure, continue (sniff)
     if isinstance(html, str) and canonical != "UTF-8":
         raise ValueError(
             f"frostwork: `html` is already-decoded str (tokenized as UTF-8), but "
