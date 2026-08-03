@@ -169,6 +169,15 @@ BROWSER_DIFFERENCES = [
      + W1252 + b"</body></html>",
      ["café"], ["caf�"],
      "WHATWG: an unsupported label is 'failure, continue'; w3lib stops at its first regex hit"),
+    ("a stray quote is PART of an unquoted charset value, so the label is invalid",
+     b'<html><head><meta http-equiv="content-type" content="text/html" charset=big5" />'
+     b'<meta charset="windows-1252"></head><body>' + W1252 + b"</body></html>",
+     ["café"], ["caf�"],
+     "found on a crawled page that writes `content=\"text/html\" charset=iso-8859-1\" />` — a BARE charset "
+     "attribute with the quote misplaced. In the prescan's `get an attribute`, an unquoted value ends only "
+     "at whitespace or `>`, so the value is `big5\"`, which resolves to nothing and the scan CONTINUES; "
+     "html5lib agrees (it reports windows-1252 here, i.e. it ignored the declaration). w3lib's regex stops "
+     "the value at the quote and honours `big5` instead, which no browser does"),
     ("<meta charset=utf-16> is read as UTF-8",
      b'<html><head><meta charset="utf-16"></head><body>' + U8 + b"</body></html>",
      ["café"], [],

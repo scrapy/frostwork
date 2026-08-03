@@ -196,9 +196,9 @@ a way it has read 100% while the engine was wrong:
 - Pick the oracle per subsystem: values = Parsel/lxml, selector ACCEPTANCE = cssselect/lxml's parser,
   encoding SNIFFING = w3lib **for the cases browsers and w3lib agree on**. Parsel does not sniff
   `<meta>`, so it cannot oracle the prescan at all; but w3lib is not the *target* either — the intended
-  policy is browser/WHATWG correctness, and w3lib differs from browsers in nine named places (prescan
-  window, `<body>`, comments, an invalid label, UTF-32, `utf-16`/`x-user-defined` declarations, BOM-less
-  UTF-16, XML-declaration position). Those are asserted as differences in `tools/enc_check.py`, not
+  policy is browser/WHATWG correctness, and w3lib differs from browsers in ten named places (prescan
+  window, `<body>`, comments, an invalid label, a stray quote inside an unquoted charset value, UTF-32,
+  `utf-16`/`x-user-defined` declarations, BOM-less UTF-16, XML-declaration position). Those are asserted as differences in `tools/enc_check.py`, not
   chased. Adding a w3lib parity case without checking which side is browser-correct is how a bug becomes
   a requirement. The same split applies to the DECODERS: Python's legacy codecs are not the WHATWG
   indexes, so `enc_check` sweeps every two-byte sequence per label and gates four disagreement classes by
