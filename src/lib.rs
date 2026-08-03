@@ -310,7 +310,7 @@ pub fn audit_schema(queries: &[String], groups: &[GroupQuery]) -> SchemaAudit {
 /// predicate covers `replacement` too (the label for HZ-GB-2312 and friends), whose whole purpose is
 /// that browsers refuse to decode such a document at all — one U+FFFD and nothing else.
 ///
-/// Raw NUL is deleted here too, for the whole document (see [`strip_nul`]).
+/// Whitespace stripping and NUL deletion happen here too, for the whole document (see [`normalize`]).
 fn prepare_bytes<'h>(
     html: &'h [u8],
     encoding: Option<&str>,
@@ -322,64 +322,79 @@ fn prepare_bytes<'h>(
         // exists once the code units have been decoded. (Parsel deletes NUL from the raw bytes instead,
         // which is why it cannot read a UTF-16 page at all — a divergence in our favour, already
         // documented under Encoding in docs/COMPATIBILITY.md.)
-        let mut utf8 = enc.decode(html).0.into_owned().into_bytes();
-        utf8.truncate(document_end(&utf8));
-        let start = document_start(&utf8);
-        if start > 0 {
-            utf8.drain(..start);
+        let utf8 = enc.decode(html).0.into_owned().into_bytes();
+        return (normalize(Cow::Owned(utf8), true), encoding_rs::UTF_8);
+    }
+    (normalize(Cow::Borrowed(html), enc == encoding_rs::UTF_8), enc)
+}
+
+/// Parsel's own input normalization, applied ONCE to the whole document before it is tokenized:
+/// `text.strip().replace("\x00", "")` — trim the ends, then delete NUL, **in that order**.
+///
+/// The order is not incidental and must not be "tidied" into recomputing the ends afterwards. Parsel's
+/// two entry points disagree about it — `Selector(text=…)` strips first, `Selector(body=…)` deletes
+/// first — and this engine matches the TEXT one, because that is the path a scraper is on: Scrapy's
+/// `response.selector` and web-poet's `HttpResponse` both build their selector from `response.text`.
+/// The two answers differ only when a NUL sits at a document edge, and there they differ visibly:
+/// `b"<option>x \x00"` keeps its trailing space (so `option::text` is `"x "`, not `"x"`), and in
+/// `b"\x00 \xEF\xBB\xBF<html …>"` the NUL blocks the strip, so the U+FEFF is never promoted to offset 0
+/// and stays a character rather than becoming a BOM. Deleting first would match `body=` and diverge
+/// from every Scrapy scraper.
+fn normalize(bytes: Cow<'_, [u8]>, utf8: bool) -> Cow<'_, [u8]> {
+    let (start, end) = document_bounds(&bytes, utf8);
+    let trimmed = match bytes {
+        Cow::Borrowed(b) => Cow::Borrowed(&b[start..end]),
+        Cow::Owned(mut v) => {
+            v.truncate(end);
+            v.drain(..start);
+            Cow::Owned(v)
         }
-        return (Cow::Owned(strip_nul(Cow::Owned(utf8)).into_owned()), encoding_rs::UTF_8);
-    }
-    let bytes = if enc == encoding_rs::UTF_8 {
-        &html[document_start(html)..]
-    } else {
-        html
     };
-    let bytes = &bytes[..document_end(bytes)];
-    (strip_nul(Cow::Borrowed(bytes)), enc)
+    strip_nul(trimmed)
 }
 
-/// Where the document's text starts: past a leading UTF-8 BOM, and past any ASCII whitespace written
-/// BEFORE it. Returns 0 when there is no BOM, so an ordinary page keeps every offset it arrived with.
+/// The byte range Parsel's `text.strip()` leaves for libxml2: past a leading UTF-8 BOM and the
+/// whitespace written before it, and short of any trailing whitespace.
 ///
-/// The whitespace half is Parsel's rule, not libxml2's, and it is the same call as deleting raw NUL
-/// (see [`strip_nul`]): `Selector(text=...)` parses `text.strip()`, so on a page that INDENTS its
-/// doctype — `"    \u{FEFF}<!DOCTYPE HTML>"` — the U+FEFF is promoted to offset 0, where libxml2 then
-/// eats it as a BOM. Read the bytes as they arrive and that U+FEFF is instead a character, and a
-/// character before the frame opens the `<body>`: the page's `<head>`, `<title>` and even the
-/// attributes of its own `<html>` tag (redundant once a body is open) are all lost, so `head
-/// title::text` and `html::attr(xmlns)` come back silently EMPTY. libxml2 on the raw bytes and
-/// html5lib both agree with the raw reading — this is Parsel normalizing its input, and matching what
-/// a scraper actually sees is the point. Four pages in one 10000-page crawl sample were shaped this
-/// way, between them 71 divergent columns.
+/// **Leading.** On a page that INDENTS its doctype — `"    \u{FEFF}<!DOCTYPE HTML>"` — the strip
+/// promotes the U+FEFF to offset 0, where libxml2 then eats it as a BOM. Read the bytes as they arrive
+/// and that U+FEFF is instead a character, and a character before the frame opens the `<body>`: the
+/// page's `<head>`, `<title>` and even the attributes of its own `<html>` tag (redundant once a body is
+/// open) are all lost, so `head title::text` and `html::attr(xmlns)` come back silently EMPTY. libxml2
+/// on the raw bytes and html5lib both agree with the raw reading — this is Parsel normalizing its
+/// input, and matching what a scraper actually sees is the point. Four pages in one 10000-page crawl
+/// sample were shaped this way, between them 71 divergent columns.
 ///
-/// Gated on UTF-8 by the caller: in windows-1252 those three bytes are `ï»¿`, three real characters,
-/// and Parsel's own decode agrees.
-/// Where the document's text ends: before any trailing ASCII whitespace, which is the other half of
-/// Parsel's `text.strip()` (see [`document_start`]).
+/// **Trailing.** This half can only ever move whitespace-only text, so it never changes a value a
+/// scraper reads — but it does change how many values come back. A page ending `…<option class="c3">\n`
+/// gives the last option a text node here and none under Parsel, so `option::text` returned one extra
+/// row.
 ///
-/// This one can only ever move whitespace-only text, so it never changes a value a scraper reads — but
-/// it does change how many values come back. A page ending `…<option class="c3">\n` gives the last
-/// option a text node here and none under Parsel, so `option::text` returned one extra row. Not gated
-/// on UTF-8: no ASCII-compatible encoding can carry these bytes inside a multi-byte character, and a
-/// non-ASCII-compatible one has already been transcoded.
-fn document_end(bytes: &[u8]) -> usize {
-    bytes
-        .iter()
-        .rposition(|b| !b.is_ascii_whitespace())
-        .map_or(0, |i| i + 1)
-}
-
-fn document_start(bytes: &[u8]) -> usize {
-    let ws = bytes
-        .iter()
-        .position(|b| !b.is_ascii_whitespace())
-        .unwrap_or(bytes.len());
-    if bytes[ws..].starts_with(&[0xEF, 0xBB, 0xBF]) {
-        ws + 3
-    } else {
-        0
+/// Only the BOM is gated on UTF-8 (`utf8`): in windows-1252 those three bytes are `ï»¿`, three real
+/// characters, and Parsel's own decode agrees. The whitespace trim applies whatever the label says,
+/// because Parsel strips the DECODED text and no ASCII-compatible encoding can carry these bytes inside
+/// a multi-byte character — a non-ASCII-compatible one has already been transcoded.
+fn document_bounds(bytes: &[u8], utf8: bool) -> (usize, usize) {
+    const BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
+    let end = bytes.iter().rposition(|&b| !is_strip_ws(b)).map_or(0, |i| i + 1);
+    let mut start = bytes[..end].iter().position(|&b| !is_strip_ws(b)).unwrap_or(end);
+    if utf8 && bytes[start..end].starts_with(BOM) {
+        start += BOM.len();
     }
+    (start, end)
+}
+
+/// The bytes Python's `strip()` removes from a document's ends — ASCII whitespace **including vertical
+/// tab**, which is the whole reason this is written out rather than deferred to
+/// `u8::is_ascii_whitespace` (that set omits `0x0b`).
+///
+/// It is also deliberately NOT `tokenizer::is_ws`, which is HTML whitespace and correctly *excludes*
+/// `0x0b`: inside a document a vertical tab is ordinary character data. The two sets only look alike.
+/// Missing this cost a page its whole head — `b"\x0b<html a=1><head><title>T</title>…"` strips to
+/// `<html …>` for Parsel, while an un-stripped `0x0b` is a character before the frame and opens the
+/// `<body>`, so `head title::text` and `html::attr(a)` came back empty.
+const fn is_strip_ws(b: u8) -> bool {
+    matches!(b, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
 }
 
 /// Delete every raw NUL byte from the document, as Parsel/w3lib do before handing bytes to lxml
@@ -2028,7 +2043,7 @@ mod tests {
         assert_eq!(extract(attr, &["a::attr(title)".into()], None)[0], v(&["\u{FEFF}hi"]));
     }
     /// An INDENTED BOM still counts as the document BOM, because Parsel parses `text.strip()` — see
-    /// [`document_start`]. What makes this worth a test rather than a footnote is the size of the
+    /// [`document_bounds`]. What makes this worth a test rather than a footnote is the size of the
     /// silence when it is missed: the U+FEFF is a character, a character before the frame opens the
     /// `<body>`, and from there the page's whole head is outside `head` and its `<html>` tag is a
     /// redundant duplicate whose attributes are dropped.
@@ -2094,7 +2109,7 @@ mod tests {
     }
 
     /// The other half of that same `text.strip()`: trailing whitespace is not a text node, because
-    /// Parsel removed it before libxml2 ever saw it — see [`document_end`]. Whitespace-only, so it
+    /// Parsel removed it before libxml2 ever saw it — see [`document_bounds`]. Whitespace-only, so it
     /// changes no value, but it does change the ROW COUNT of a `::text` column.
     #[test]
     fn trailing_whitespace_is_not_a_text_node() {
@@ -2105,6 +2120,50 @@ mod tests {
         // non-whitespace at the end is untouched, trailing whitespace INSIDE it too
         let kept = b"<p>a </p>\n";
         assert_eq!(extract(kept, &["p::text".into()], None)[0], v(&["a "]));
+    }
+
+    /// VERTICAL TAB is in Python's strip set and not in Rust's `is_ascii_whitespace`, and the gap was a
+    /// whole missing head: leading `0x0b` is stripped for Parsel, while an un-stripped one is character
+    /// data before the frame and opens the `<body>`. See [`is_strip_ws`].
+    #[test]
+    fn vertical_tab_is_stripped_like_python_does() {
+        let q: Vec<String> = ["head title::text", "html::attr(a)"].iter().map(|s| s.to_string()).collect();
+        let want = vec![v(&["T"]), v(&["1"])];
+        let page = |lead: &str| format!("{lead}<html a=1><head><title>T</title></head><body><p>p</p>");
+        for lead in ["\u{0b}", " \u{0b}\n", "\u{0c}"] {
+            assert_eq!(extract(page(lead).as_bytes(), &q, None), want, "lead {lead:?}");
+            // ...in a single-byte encoding too: Parsel strips the DECODED text, so the label is
+            // irrelevant to this half — only the BOM below is UTF-8-gated.
+            assert_eq!(extract(page(lead).as_bytes(), &q, Some("windows-1252")), want, "cp1252 {lead:?}");
+        }
+        // stripping a vertical tab can expose the BOM, exactly as stripping a space can
+        assert_eq!(extract(page("\u{0b}\u{feff}").as_bytes(), &q, None), want);
+        // trailing, the other end of the same strip: no text node for the last option
+        let doc = b"<select><option>a<option class=c>\x0b";
+        assert_eq!(extract(doc, &["option::text".into()], None)[0], v(&["a"]));
+        // ...but a vertical tab INSIDE the document is ordinary character data, not whitespace to
+        // strip and not HTML whitespace either — it must survive in the value verbatim.
+        assert_eq!(ex("<p>a\u{0b}b</p>", "p::text"), v(&["a\u{0b}b"]));
+    }
+
+    /// NUL is deleted AFTER the ends are trimmed, matching `Selector(text=…)` — the path Scrapy and
+    /// web-poet are on. Recomputing the bounds afterwards would match `Selector(body=…)` instead and
+    /// diverge from every Scrapy scraper; see [`normalize`].
+    #[test]
+    fn nul_is_deleted_after_the_ends_are_trimmed() {
+        // the NUL is the last byte, so it blocks the strip and the space before it survives
+        assert_eq!(extract(b"<option>x \x00", &["option::text".into()], None)[0], v(&["x "]));
+        // and here it blocks the strip that would otherwise promote the U+FEFF to offset 0, leaving it
+        // a character — which opens the body, so the head is gone
+        let doc = b"\x00 \xEF\xBB\xBF<html a=1><head><title>T</title></head><body><p>p</p>";
+        let q: Vec<String> = ["head title::text", "html::attr(a)", "p::text"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(extract(doc, &q, None), vec![v(&[]), v(&[]), v(&["p"])]);
+        // without the NUL the same page strips down to the BOM and keeps its head
+        let stripped = b" \xEF\xBB\xBF<html a=1><head><title>T</title></head><body><p>p</p>";
+        assert_eq!(extract(stripped, &q, None), vec![v(&["T"]), v(&["1"]), v(&["p"])]);
     }
     #[test]
     fn lt_not_a_tag_is_text() {

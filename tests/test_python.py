@@ -653,6 +653,47 @@ def test_matches_parsel_across_selectors():
         assert got == expected, f"{query}: frostwork={got} parsel={expected}"
 
 
+# The bytes Parsel deletes before libxml2 ever sees them, at the document EDGES — where the engine reads
+# raw bytes and Parsel reads `text.strip().replace("\x00", "")`. Every case here is a page shape that
+# returned a silently EMPTY column, so each is graded against the oracle rather than against a literal.
+_FRAME = b"<html a=1><head><title>T</title></head><body><p>p</p></body></html>"
+_EDGE_CASES = [
+    # a NUL is not whitespace, so it BLOCKS the strip: the space before it survives ...
+    ("nul blocks the trailing strip", b"<option>x \x00", None),
+    # ... and so does the U+FEFF it keeps away from offset 0, which is then a character, not a BOM
+    ("nul blocks the leading strip", b"\x00 \xEF\xBB\xBF" + _FRAME, None),
+    # VERTICAL TAB is in Python's strip set and not in Rust's `is_ascii_whitespace`
+    ("vertical tab exposes the bom", b"\x0b\xEF\xBB\xBF" + _FRAME, None),
+    ("vertical tab alone", b"\x0b" + _FRAME, None),
+    ("vertical tab among spaces", b" \x0b\n" + _FRAME, None),
+    ("form feed", b"\x0c" + _FRAME, None),
+    # the whitespace half of the strip is not UTF-8-gated (Parsel strips the DECODED text) ...
+    ("vertical tab, windows-1252", b"\x0b" + _FRAME, "windows-1252"),
+    # ... while the BOM half is: in windows-1252 those three bytes are three real characters
+    ("bom bytes are content in cp1252", b"\x0b\xEF\xBB\xBF" + _FRAME, "windows-1252"),
+    ("trailing vertical tab", b"<select><option>a<option class=c>\x0b", None),
+    ("vertical tab inside is content", b"<p>a\x0bb</p>", None),
+]
+
+
+@pytest.mark.parametrize("label,body,encoding", _EDGE_CASES, ids=[c[0] for c in _EDGE_CASES])
+def test_input_edges_match_parsel(label, body, encoding):
+    """Parsel's own input normalization, at the document edges, against `Selector(text=…)`.
+
+    That path and not `Selector(body=…)`, and the two are NOT interchangeable here: parsel strips before
+    deleting NUL for `text=` and after it for `body=`, so they disagree on the first two cases above. The
+    text path is what Scrapy's `response.selector` and web-poet's `HttpResponse` are on, so it is the one
+    a scraper compares against.
+    """
+    parsel = _oracle()
+    sels = ["option::text", "head title::text", "html::attr(a)", "p::text"]
+    text = body.decode(encoding or "utf-8", "replace")
+    theirs = [parsel.Selector(text=text, type="html").css(s).getall() for s in sels]
+    mine = frostwork.extract(body, sels, encoding)
+    for sel, got, want in zip(sels, mine, theirs):
+        assert got == want, f"{label}: {sel}: frostwork={got} parsel={want}"
+
+
 # --------------------------------------------------------------------------- schema audit / strict
 
 
