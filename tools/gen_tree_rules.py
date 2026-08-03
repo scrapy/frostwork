@@ -605,26 +605,44 @@ def _wrap_arm(pattern: str, body: str) -> list[str]:
 
 
 # ---------------------------------------------------------------------------- universe integrity
-def engine_names() -> set[str]:
-    """Every element name the ENGINE mentions in a tree-construction rule.
+def rule_sources() -> list[str]:
+    """Every Rust source in the engine — the files `engine_names` scans.
 
-    GLOBBED, not listed: this used to name `src/implied_close.rs` and `src/tokenizer.rs` outright, and
-    splitting the generated tables into their own file under `src/implied_close/` would have quietly
-    stopped scanning them — weakening the containment check that is the whole point of the universe. A
-    pattern picks up the next file too.
+    THE WHOLE TREE, not the files that happen to hold rule tables today. Narrowing it is how this check
+    has been weakened twice: it first named `src/implied_close.rs` and `src/tokenizer.rs` outright (so
+    splitting the tables into `src/implied_close/` would have stopped scanning them), and a glob over
+    those two paths still missed `src/matcher/frame.rs` and `src/matcher/mod.rs` when the document-frame
+    rules moved there — a rule can name a tag from anywhere, and the frame rules name four.
+
+    The cost of over-reading is nil: the scan is a regex over string literals, so a wider net picks up
+    attribute names and doc prose, and `check_universe` only reports a candidate libxml2 actually
+    special-cases. The cost of under-reading is a rule with no name to probe.
     """
     import glob
 
-    sources = sorted(glob.glob(os.path.join(ROOT, "src", "implied_close", "*.rs"))
-                     + [os.path.join(ROOT, "src", "tokenizer.rs")])
-    if len(sources) < 2:
-        raise SystemExit(f"engine_names: expected the rule sources, found {sources}")
+    sources = sorted(glob.glob(os.path.join(ROOT, "src", "**", "*.rs"), recursive=True))
+    # a glob that silently matches nothing would make the containment check vacuous
+    need = {os.path.join("src", p) for p in ("lib.rs", "tokenizer.rs", os.path.join("matcher", "mod.rs"))}
+    have = {os.path.relpath(s, ROOT) for s in sources}
+    if not need <= have:
+        raise SystemExit(f"rule_sources: the engine sources are not where expected: missing {need - have}")
+    return sources
+
+
+def names_in(sources: list[str]) -> set[str]:
+    """Every lowercase ASCII string literal in `sources` that could be an element name."""
     names: set[str] = set()
     for rel in sources:
         src = open(rel).read()
         names |= {m.lower() for m in re.findall(r'"([a-z][a-z0-9]{0,10})"', src)}
         names |= {m.lower() for m in re.findall(r'b"([a-z][a-z0-9]{0,10})"', src)}
     return names
+
+
+def engine_names() -> set[str]:
+    """Every element name the ENGINE mentions anywhere — tree-construction rule, frame rule, tokenizer
+    mode or matcher special case."""
+    return names_in(rule_sources())
 
 
 def independent_names() -> set[str]:

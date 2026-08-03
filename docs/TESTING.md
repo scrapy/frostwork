@@ -356,7 +356,7 @@ point at which "add the names we forgot" stopped being the fix: the universe is 
 superset and the table is generated from it (see the round-by-round table above). The sweep's own name
 list is no longer written either — the close dimension takes **one representative per oracle-derived
 behaviour class** (a full name-pair sweep would be 142² mutants, about 13 hours), which is sound because the
-classes come from the measurement and the AUDIT probes all 142 names individually. Two dimensions were
+classes come from the measurement and the AUDIT probes every name individually. Two dimensions were
 added at the same time: `void:` covers the derived void set plus the four names libxml2 deliberately keeps
 open, and `mode:` covers the DATA MODE of every name in the universe — because "the raw-text set is the
 four names we remembered" was the same bug in a different table.

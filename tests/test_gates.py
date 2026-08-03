@@ -244,7 +244,7 @@ def test_mutation_sweep_enumerates_every_rule_table():
     A full name-pair sweep would be 142² mutants (about 13 hours), so the close dimension runs ONE
     REPRESENTATIVE PER ORACLE-DERIVED BEHAVIOUR CLASS. That compression is only sound if (a) the classes
     come from the measurement rather than from memory, and (b) every name is in some class — which is what
-    this test pins. Per-name coverage is carried by the rule AUDIT, which probes all 142 names.
+    this test pins. Per-name coverage is carried by the rule AUDIT, which probes every name.
     """
     import mutate_rules
     from gen_tree_rules import ELEMENTS, Oracle, classify
@@ -336,6 +336,47 @@ def test_the_mutation_sweep_refuses_to_run_against_an_inert_build():
     # the canary itself must be a mutation a gate really covers, not an arbitrary spec
     assert mutate_rules.CANARY_SPEC in dict(mutate_rules.mutants())
     assert mutate_rules.CANARY_EVERY > 0, "a start-only canary cannot catch a mid-run rebuild"
+
+
+def test_the_element_universe_sees_every_engine_owned_name():
+    """A rule can name a tag from anywhere in the engine, and the universe must contain every such name —
+    a rule with no name to probe cannot fail a gate.
+
+    The scan behind that invariant has been too narrow twice. It first NAMED `src/implied_close.rs` and
+    `src/tokenizer.rs`, so moving the tables into `src/implied_close/` would have stopped scanning them;
+    a glob over those two paths then missed `src/matcher/frame.rs` and `src/matcher/mod.rs` when the
+    document-frame rules moved there — four element names decided by rules no scan was reading. It now
+    reads the whole tree, which is the only version that cannot go stale as files move.
+    """
+    import glob
+
+    import gen_tree_rules as G
+
+    root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+    every = {os.path.realpath(p) for p in glob.glob(os.path.join(root, "src", "**", "*.rs"),
+                                                    recursive=True)}
+    assert every, "no Rust sources found — this test is not looking where it thinks it is"
+    assert {os.path.realpath(p) for p in G.rule_sources()} == every, \
+        "the universe check does not read every engine source"
+
+    # ...and that is not a formality: names live outside the rule tables. Derived, not listed, so the
+    # test keeps discriminating as code moves.
+    tables = [p for p in every if "implied_close" in p or p.endswith("tokenizer.rs")]
+    elsewhere = [p for p in every if p not in tables]
+    only_elsewhere = (G.names_in(elsewhere) & set(G.ELEMENTS)) - G.names_in(tables)
+    assert only_elsewhere, "every element name is in the rule tables — this test no longer discriminates"
+    assert only_elsewhere <= G.engine_names(), f"unscanned engine names: {only_elsewhere}"
+
+    # and the invariant can go RED: drop a frame name the engine decides rules with, and the check that
+    # gates `--write`/`--check` must report it.
+    full = list(G.ELEMENTS)
+    try:
+        G.ELEMENTS[:] = [e for e in full if e != "body"]
+        assert "body" in G.check_universe(), \
+            "a name the engine mentions and the universe omits must fail the universe check"
+    finally:
+        G.ELEMENTS[:] = full
+    assert not G.check_universe(), "the real universe must be a superset"
 
 
 def test_the_known_start_close_gap_may_shrink_but_never_grow():

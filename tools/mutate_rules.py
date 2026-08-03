@@ -60,7 +60,7 @@ PY = os.path.join(ROOT, ".venv", "bin", "python")
 # So the names come from `tools/gen_tree_rules`, which partitions the WHOLE element universe by measured
 # behaviour: one representative per class. That is a real compression rather than a hopeful one — two
 # names in a class are indistinguishable to every rule table by construction — and the per-name residual
-# risk is covered because the rule AUDIT (this sweep's strongest detector) probes all 142 names, not the
+# risk is covered because the rule AUDIT (this sweep's strongest detector) probes every name, not the
 # representatives. A full name-pair sweep would be 142² mutants; at ~2.3s each that is about 13 hours.
 def _derived_universe() -> tuple[list[str], list[str], list[str], list[str]]:
     from gen_tree_rules import ELEMENTS, Oracle, classify
