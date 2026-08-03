@@ -174,9 +174,10 @@ samples were in neither surface: they were wrong SEQUENCES, where the state at t
 two text runs, `<tbody>` between a row and its `</tr>`. No 2-D sweep can reach that, and a page corpus
 reaches it only if the web happens to contain it.
 
-Sequence space over a curated alphabet is small enough to enumerate outright, so this does: ~23 tokens,
-one per behaviour class the engine special-cases, and **every** sequence up to `--depth` (4 = 292,560
-documents, ~30 s), plus random longer ones for the shapes only depth reaches.
+Sequence space over a curated alphabet is small enough to enumerate outright, so this does: one token per
+behaviour class the engine special-cases, and **every** sequence up to `--depth` (4 is the CI form, tens
+of seconds), plus random longer ones for the shapes only depth reaches. The document count is exponential
+in the alphabet, so the run prints it rather than this page.
 
 The other half is what it compares. Everything else here grades a few `::text` columns, which notice a
 wrong tree only when a value happens to move — a document can be reshaped completely and still answer
@@ -465,9 +466,15 @@ regenerated locally.
 ## Wiring
 
 The engine builds a `differ` binary that reads hex-framed cases and emits NDJSON, so the Python
-generators/oracle (which own lxml) drive it without a PyO3 build. CI runs the unit tests, clippy, the
-differential gate, encoding parity, both differential fuzzers (crash-gated), and the Python suite on
-every change; the coverage-guided `cargo-fuzz` target is run locally/nightly.
+generators/oracle (which own lxml) drive it without a PyO3 build. The coverage-guided `cargo-fuzz` target
+is run locally/nightly; everything else runs on every change.
+
+**Hosted CI invokes MAKE TARGETS, not its own copies of the commands** (`make test`, then `gate`,
+`fuzz-smoke`, `py`, `gate-corpus`, `gate-seq`). That is a correctness property of the wiring rather than a
+style choice: the workflow used to inline the same commands and it DRIFTED — `make ci` grew the sequence
+sweep and the generated-table drift check, hosted CI ran neither, and the checks a contributor is told are
+mandatory were not the checks a pull request had to pass. Add a gate to the `Makefile` and it lands in CI
+with it.
 
 **The abi3 floor is a separate job.** The wheel is `abi3-py39`, but the pinned toolchain cannot be
 installed on Python 3.9 at all — `parsel`, `web-poet` *and* `pytest` each require ≥ 3.10 — so the floor

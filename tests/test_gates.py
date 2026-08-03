@@ -426,6 +426,42 @@ def test_the_element_universe_sees_every_engine_owned_name():
     assert not G.check_universe(), "the real universe must be a superset"
 
 
+def test_the_sequence_gate_fails_on_a_tree_difference():
+    """`gate-seq` compares whole TREES over enumerated token sequences, and its failure mode is grading
+    nothing: an alphabet that generates no documents, or a fingerprint that cannot see a reshaped tree,
+    both read as PASS. Seed a tree difference into the comparison and require the verdict to go red.
+
+    The fingerprint half is the part worth pinning. Three of the bugs this gate found move an element
+    without moving any `::text` value, so a comparison of a few columns would have passed on all three —
+    which is what every other differential here does.
+    """
+    import seq_sweep
+
+    # the alphabet must cover the shapes the sweep exists for, or "0 differing shapes" means nothing
+    assert len(seq_sweep.ALPHABET) > 15
+    for token in ("<html{}>", "</html>", "<head{}>", "<body{}>", "</body>", "</%>", "</>", "x"):
+        assert token in seq_sweep.ALPHABET, f"{token} is the shape of a real bug and is not enumerated"
+
+    frostwork = pytest.importorskip("frostwork")
+
+    # a real document, its real fingerprint, and a tree RESHAPED the way the bugs this gate found were:
+    # the span stops being the div's child while every text node stays exactly where it was.
+    doc, ids = seq_sweep.build(("<div{}>", "<span{}>", "x"))
+    sels = seq_sweep.fingerprint_selectors(ids)
+    mine = frostwork.extract(doc, sels, "utf-8")
+    assert seq_sweep.compare(sels, mine, mine) is None, "identical answers are not a difference"
+
+    nested = sels.index('//*[@id="0"]//*/@id')
+    assert mine[nested] == ["1"], f"the fingerprint must read placement: {doc!r} -> {mine[nested]}"
+    reshaped = [list(c) for c in mine]
+    reshaped[nested] = []
+    diff = seq_sweep.compare(sels, mine, reshaped)
+    assert diff and diff[0] == sels[nested], "a moved element must be a difference"
+    # ...and it is invisible to the text columns, which is why this gate compares the whole tree
+    texts = [i for i, s in enumerate(sels) if s.endswith("/text()")]
+    assert texts and all(mine[i] == reshaped[i] for i in texts)
+
+
 def test_the_rule_audit_has_no_bypass_for_a_start_close_divergence():
     """A disagreeing start-close cell must fail the audit outright.
 
