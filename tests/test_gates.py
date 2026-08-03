@@ -214,21 +214,68 @@ def test_the_decoder_sweep_is_exhaustive_not_sampled():
     frostwork = pytest.importorskip("frostwork")
     html_to_unicode = pytest.importorskip("w3lib.encoding").html_to_unicode
     parsel = pytest.importorskip("parsel")
-    src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
-                            "tools", "enc_check.py")).read()
-    assert "INDEX_DIVERGENCE" in src, "the decoder gate must enumerate its index differences"
-    for label in ("big5", "euc-jp", "euc-kr", "gb18030", "shift_jis"):
-        assert f'"{label}"' in src, f"{label} is not swept — a label with no row is not 'full parity'"
-    assert "PUA_UNASSIGNED" in src, \
-        "the vendor private-use class must be COUNTED, or it hides real divergences in bulk"
+    import decoder_sweep as D
 
-    # the real-page witness, both sides. EUC-JP A1 C1.
-    doc = b'<html><head><meta charset="euc-jp"></head><body><p class="c">\xa1\xc1</p></body></html>'
-    _, txt = html_to_unicode(None, doc, auto_detect_fun=None, default_encoding="utf8")
-    assert parsel.Selector(text=txt).css("p.c::text").getall() == ["〜"], \
-        "Parsel now decodes euc-jp A1C1 as something else — that INDEX_DIVERGENCE row is stale"
-    assert frostwork.extract(doc, ["p.c::text"], strict=False)[0] == ["～"], \
-        "euc-jp A1C1 must be U+FF5E (the WHATWG index, what browsers show)"
+    # ---- the ENUMERATION. Its failure mode is narrowing, so pin the boundaries, not a count.
+    cand = D.candidates()
+    assert len(cand) == len(D.LEAD) * len(D.TRAIL) == 24066
+    assert min(s[0] for s in cand) == 0x81 and max(s[0] for s in cand) == 0xFE
+    assert min(s[1] for s in cand) == 0x40 and max(s[1] for s in cand) == 0xFE
+    # no candidate can carry a byte that would break the `<p class="c">…</p>` wrapper, which is a
+    # property of the ranges — the filter that used to say so was dead code below 0x40
+    assert not [s for s in cand if any(b in D.MARKUP_BYTES for b in s)]
+    # it must not be a function of any PYTHON CODEC: filtering on what `euc_jp` calls assigned is exactly
+    # how the WHATWG-only class stayed invisible. Both witnesses have to be in it.
+    assert b"\xad\xa1" in cand, "AD A1 (the `①` euc_jp has no mapping for) must be swept"
+    assert b"\xa1\xc1" in cand, "A1 C1 (the crawled wave dash) must be swept"
+    assert D.LABELS == ("big5", "euc-jp", "gb18030", "euc-kr", "shift_jis"), \
+        "a label with no row is not evidence of parity"
+
+    # ---- the CLASSIFIER. Every class must be reachable and none may swallow another. (The private-use
+    # characters are written as escapes on purpose: a literal one is invisible in a source file.)
+    pua, fffd = "\ue794", "\ufffd"
+    assert D.classify("x", "x") == "agree"
+    assert D.classify("\uff5e", "\u301c") == "real"      # index divergence: the wave dash
+    assert D.classify(fffd, pua) == "pua"               # Parsel private-use, WHATWG nothing at all
+    assert D.classify(fffd + "\uff89", pua + "\uff89") == "pua"  # ...position-wise, mid-string
+    assert D.classify("\u2460", fffd) == "whatwg_only"   # AD A1's class: WHATWG has it, Python does not
+    assert D.classify(fffd, fffd * 2) == "replacement_shape"
+    # a real character opposite a PUA one is NOT the pua class — that would hide a mapping difference
+    assert D.classify("\u3000", pua) == "real"
+
+    # ---- the VERDICT. Each class must be able to go red, in both directions.
+    label = "euc-jp"
+    clean = dict(D.INDEX_DIVERGENCE[label])
+    counts = D.expected_counts(label)
+    assert D.verify(label, clean, counts) == [], "the recorded state must be clean"
+    assert D.verify(label, {**clean, b"\xff\xff": ("a", "b")}, counts), "a NEW pair must fail"
+    assert D.verify(label, {}, counts), "a pair that stops diverging must fail as stale"
+    assert D.verify(label, {**clean, b"\xa1\xc1": ("x", "y")}, counts), \
+        "a pair that maps differently must fail"
+    # the three BULK classes are gated by count, so each needs a label where it is actually populated —
+    # zeroing a class that is already zero proves nothing, and every class must be reachable somewhere
+    for kind in D.BULK:
+        where = [lab for lab in D.LABELS if D.expected_counts(lab)[kind]]
+        assert where, f"no label populates the {kind} class — it is gated by a count of nothing"
+        for lab in where:
+            want = D.expected_counts(lab)
+            assert D.verify(lab, D.INDEX_DIVERGENCE[lab], want) == [], lab
+            assert D.verify(lab, D.INDEX_DIVERGENCE[lab], {**want, kind: want[kind] + 1}), \
+                f"a drift in {lab}'s {kind} count must fail"
+            assert D.verify(lab, D.INDEX_DIVERGENCE[lab], {**want, kind: 0}), \
+                f"{lab}'s {kind} class emptying must fail too — silence is not parity"
+
+    # ---- and the two real-page witnesses, both sides, so a row cannot rot into a silent agreement. The
+    # AD A1 row is the load-bearing one: Parsel gets U+FFFD PER BYTE for a character `euc_jp` has no
+    # mapping for, which is why enumerating over "what Python calls assigned" could never have seen it.
+    for seq, theirs, mine in ((b"\xa1\xc1", "〜", "～"), (b"\xad\xa1", "��", "①")):
+        doc = (b'<html><head><meta charset="euc-jp"></head><body><p class="c">'
+               + seq + b"</p></body></html>")
+        _, txt = html_to_unicode(None, doc, auto_detect_fun=None, default_encoding="utf8")
+        assert parsel.Selector(text=txt).css("p.c::text").getall() == [theirs], \
+            f"Parsel now decodes euc-jp {seq.hex()} differently — that row is stale"
+        assert frostwork.extract(doc, ["p.c::text"], strict=False)[0] == [mine], \
+            f"euc-jp {seq.hex()} must follow the WHATWG index, which is what browsers show"
 
 
 # ------------------------------------------------------- rule-table mutation sweep (mutate_rules.py)

@@ -546,30 +546,35 @@ An XML declaration **at** offset 0 *is* honoured, by both, including its precede
     `charset=iso-8859-1` and writes its en dashes as the single byte `0x96`, which is `–` here and in
     Scrapy and `U+0096` under raw Parsel. A harness that grades against raw Parsel is measuring its own
     oracle construction, not Frostwork.
-  - **`big5`: exactly 11 assigned two-byte sequences** (of ~18,400) where WHATWG's index resolves a
+  - **`big5`: exactly 11 two-byte sequences** where WHATWG's index resolves a
     duplicate pointer differently from `big5hkscs` — `A145` → U+2027 not U+2022, `A244`/`A246`/`A247` →
     the fullwidth ￥/￠/￡ not the halfwidth ¥/¢/£, and seven more.
-  - **`euc-jp`: exactly 6** (of ~6,900) — the JIS-vs-CP932 round-trip family. `A1C1` is the wave dash:
+  - **`euc-jp`: exactly 6** — the JIS-vs-CP932 round-trip family. `A1C1` is the wave dash:
     U+FF5E here (what CP932, WHATWG and every browser say) and U+301C in Python's `euc_jp`. The others
     are `A1C2` ∥, `A1DD` －, `A1F1` ￠, `A1F2` ￡, `A2CC` ￢ — fullwidth here, the JIS forms there.
-  - **`gb18030`: exactly 20** (of ~23,900), and here it is *Parsel* that loses the character: GB18030-2005
+  - **`gb18030`: exactly 20**, and here it is *Parsel* that loses the character: GB18030-2005
     moved these out of the private use area, WHATWG's index is the newer revision and Python's is the
     older one, so `A3A0` is U+3000 (ideographic space) here and U+E5E5 there.
-  - **`euc-kr`: full parity** across all ~17,000 assigned sequences. **`shift_jis`: full parity** on
-    every real character; its only differences (582) are cp932's *user-defined area*, which the WHATWG
-    index leaves unassigned — private-use code points there, U+FFFD here, and not text with a meaning.
-  - Each list is enumerated over **every assigned two-byte sequence** and gated in both directions by
-    `tools/enc_check.py`. An earlier version of that gate sampled 800 characters per label and reported
-    "full parity" for all of them; a crawled EUC-JP wiki containing one `A1C1` is what disproved it, so
-    the sampling is gone.
-  - Over **unassigned** byte sequences the two differ much more widely (8–22% of all two-byte
-    combinations, depending on label). That is inherent to total-vs-partial indexes and is not text any
-    real page contains.
+  - **`euc-kr`: full parity** on every real character. **`shift_jis`: full parity** too; its only
+    differences (762 sequences) are cp932's *user-defined area*, which the WHATWG index leaves
+    unassigned — private-use code points there, U+FFFD here, and not text with a meaning.
+  - **And a class where the engine has a character Parsel does not: 457 sequences in `euc-jp`, 192 in
+    `big5`.** WHATWG's index assigns them and the Python codec does not, so Parsel returns U+FFFD —
+    `AD A1` is the `①` of ordinary Japanese prose, which `euc_jp` (strict JIS X 0208, no NEC row 13) has
+    no mapping for. Browsers use the WHATWG index, so this is an oracle limitation rather than a
+    divergence to fix; it is counted rather than listed because it runs to hundreds of sequences.
+  - Every label is swept over **every two-byte sequence in the legacy lead/trail space**, not over the
+    sequences the Python codec calls assigned — that filter is shaped like the oracle's own limitations
+    and is exactly what hid the class above. Two earlier versions of this gate were weaker: one sampled
+    800 characters per label and reported "full parity" for all of them (a crawled EUC-JP wiki containing
+    one `A1C1` disproved it), and the next enumerated by assignment. `tools/decoder_sweep.py` holds the
+    enumeration, the four disagreement classes and the expected counts; `tools/enc_check.py` gates every
+    one of them in both directions, so neither a new divergence nor one that quietly disappears can pass.
+  - Sequences **neither** index assigns differ only in how many U+FFFD come back (WHATWG replaces per
+    maximal subpart, Python per byte). Counted, not listed: it is not text any real page contains.
 
-  Both enumerated lists are gated in `tools/enc_check.py` in both directions: a divergence outside the
-  list fails, and a listed one that starts agreeing fails too, so the list cannot rot. The 35 ordinary
-  parity vectors never touch these bytes, which is why nothing caught this until the decoders were
-  compared byte by byte.
+  The ordinary parity vectors never touch these bytes, which is why nothing caught any of it until the
+  decoders were compared sequence by sequence.
 - ✅ **UTF-16** (LE/BE; BOM, label, or the BOM-less `<?` prefix) decodes correctly, matching the
   decode-first result Scrapy uses.
   (Note: lxml's HTML parser can't parse UTF-16 *bytes* — `Selector(body=…, encoding="utf-16")` returns
