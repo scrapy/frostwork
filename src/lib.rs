@@ -1466,6 +1466,27 @@ mod tests {
         assert_eq!(ex("<ul><li>a<li>b</ul>", "ul > li"), v(&["<li>a", "<li>b"]));
     }
 
+    /// Raw source is raw about MARKUP, not about newlines: `\r\n` and lone `\r` become `\n` in HTML's
+    /// input stream before anything parses, so libxml2 and html5lib both serialize `\n` whatever the
+    /// bytes said. Text and attribute values already normalized and only the outer-HTML path did not —
+    /// a CRLF-authored crawled page put `\r` in all eight of its node columns.
+    #[test]
+    fn outer_html_normalizes_newlines_like_the_input_stream() {
+        assert_eq!(ex("<div>a\r\nb</div>", "div"), v(&["<div>a\nb</div>"]));
+        assert_eq!(ex("<div>a\rb</div>", "div"), v(&["<div>a\nb</div>"]));
+        assert_eq!(
+            ex("<div>\r\n<p>x</p>\r\n</div>", "div"),
+            v(&["<div>\n<p>x</p>\n</div>"])
+        );
+        // inside an attribute value of the captured span, too
+        assert_eq!(
+            ex("<div title=\"a\r\nb\">y</div>", "div"),
+            v(&["<div title=\"a\nb\">y</div>"])
+        );
+        // and it does NOT entity-decode: that is what keeps the span raw
+        assert_eq!(ex("<div>a&amp;b\r\nc</div>", "div"), v(&["<div>a&amp;b\nc</div>"]));
+    }
+
     #[test]
     fn xpath_downward() {
         let h = "<html><body><div class=\"c\"><a href=\"/1\">A</a><a href=\"/2\">B</a></div><p>x</p></body></html>";

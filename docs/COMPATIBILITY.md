@@ -319,6 +319,13 @@ DOM, no full tree construction). These rules were derived empirically against li
   it yields the same node set + non-whitespace text as lxml). Boundaries come from the corrected stack,
   so an unclosed `<li>` captures `<li>…` up to its implied close.
 
+  **Newlines are normalized, and that is not a compromise of "raw":** HTML turns `\r\n` and lone `\r`
+  into `\n` in the *input stream*, before anything parses, so every node libxml2 or html5lib serializes
+  carries `\n` whatever the bytes said. Text and attribute values were already normalized and only this
+  path was not — an inconsistency, not a divergence, and a CRLF-authored crawled page put `\r` in all
+  eight of its node columns. What stays divergent is RE-SERIALIZATION (attribute order and quoting,
+  minimized booleans, entity escaping), because there is no tree to re-serialize from.
+
   **One exception to "raw":** NUL deletion happens before tokenizing (above), so the raw source is the
   source *after* that deletion — `<di\0v id=x>t</div>` yields `<div id=x>t</div>`. It has to be this way
   round: the offsets that bound the span come from the normalized buffer, and a NUL inside a tag name is

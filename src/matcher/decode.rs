@@ -43,6 +43,20 @@ pub(super) fn finalize(bytes: &[u8], allows_entities: bool, enc: &'static Encodi
     }
 }
 
+/// Finalize a captured RAW-SOURCE span (an outer-HTML value): decode, and CRLF-normalize but do NOT
+/// entity-decode — `&amp;` stays as written, which is the whole point of raw source.
+///
+/// The newline normalization is not a compromise of "raw", it is the one part of raw that both oracles
+/// also do: HTML normalizes `\r\n` and lone `\r` to `\n` in the INPUT STREAM, before any parsing, so
+/// every node libxml2 or html5lib serializes carries `\n` no matter what the bytes said. The engine
+/// already normalized text and attribute values ([`finalize`]) and only this path did not, which is an
+/// inconsistency rather than a divergence — one CRLF-authored crawled page put `\r\n` in all eight of
+/// its node columns. What stays divergent here is RE-SERIALIZATION (attribute order and quoting,
+/// minimized booleans, entity escaping), because the engine has no tree to re-serialize from.
+pub(super) fn raw_source(bytes: &[u8], enc: &'static Encoding) -> String {
+    normalize_crlf(enc.decode_without_bom_handling(bytes).0).into_owned()
+}
+
 /// XPath `normalize-space`: collapse each run of ASCII whitespace (space, tab, CR, LF) to a single
 /// space and trim leading/trailing. Used for the `normalize-space(...)` value terminal.
 pub(super) fn normalize_space(s: &str) -> String {

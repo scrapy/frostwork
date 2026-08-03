@@ -1214,7 +1214,7 @@ impl<'a> Matcher<'a> {
                     // value lives in this element's subtree (`div:has(a) ::text`, `div:has(a) a::attr(..)`)
                     self.tail_spans.push((slot, e.start, end));
                 } else if matches!(he.terminal, Terminal::OuterHtml) {
-                    let val = self.enc.decode_without_bom_handling(&self.input[e.start..end]).0.into_owned();
+                    let val = decode::raw_source(&self.input[e.start..end], self.enc);
                     self.pending.push((he.col, e.start, val));
                 } else {
                     for (eh, off, v) in &e.has_buf {
@@ -1258,8 +1258,7 @@ impl<'a> Matcher<'a> {
                 }
                 match te.terminal {
                     Terminal::OuterHtml => {
-                        let val =
-                            self.enc.decode_without_bom_handling(&self.input[e.start..end]).0.into_owned();
+                        let val = decode::raw_source(&self.input[e.start..end], self.enc);
                         self.pending.push((te.col, e.start, val));
                     }
                     Terminal::Attr { .. } | Terminal::Text { .. } => {
@@ -1346,7 +1345,7 @@ impl<'a> Matcher<'a> {
             // pop order is inner-first, so sort by start before scattering.
             self.captures.sort_by_key(|&(start, _, _)| start);
             for (start, end, dest) in std::mem::take(&mut self.captures) {
-                let val = self.enc.decode_without_bom_handling(&self.input[start..end]).0.into_owned();
+                let val = decode::raw_source(&self.input[start..end], self.enc);
                 match dest {
                     Dest::Flat(col) => self.results[col].push(val),
                     Dest::Grouped { seq, sub } => {
