@@ -379,48 +379,31 @@ def test_the_element_universe_sees_every_engine_owned_name():
     assert not G.check_universe(), "the real universe must be a superset"
 
 
-def test_the_known_start_close_gap_may_shrink_but_never_grow():
-    """The cheapest way to make the rule audit green is to append to `KNOWN_START_CLOSE_GAP`.
+def test_the_rule_audit_has_no_bypass_for_a_start_close_divergence():
+    """A disagreeing start-close cell must fail the audit outright.
 
-    It held 87 pairs, and the fix was to port libxml2's table rather than live with them, so the list is
-    now EMPTY and this test keeps it that way: appending an entry is appending a divergence.
+    It did not have to. Every cell was graded through an allow-list (`KNOWN_START_CLOSE_GAP` plus a
+    `check_gap` that recorded a failure only for UNLISTED pairs), which held 87 entries, then zero — and
+    an empty allow-list is not a safeguard, it is a documented way to make this gate green. Deriving the
+    table from the oracle removed the reason for it, so the mechanism is gone; this pins that nothing
+    grew back, and that the audit really does record a divergence rather than absorb it.
     """
-    from audit_tree_rules import KNOWN_START_CLOSE_GAP
-
-    total = sum(len(v) for v in KNOWN_START_CLOSE_GAP.values())
-    assert total == 0, (f"the known start-close gap is {total}, expected 0 — it was closed by porting "
-                        f"libxml2's htmlStartClose table into implied_close::start_closes. A new entry "
-                        f"here is a NEW divergence and needs to be a deliberate, reviewed decision.")
-    # every entry must name real tags (a typo would silently mask a real divergence forever)
-    for inc, opens in KNOWN_START_CLOSE_GAP.items():
-        assert inc.isalnum() and opens, (inc, opens)
-        assert len(set(opens)) == len(opens), f"duplicate open tags for <{inc}>: {opens}"
-
-
-def test_the_rule_audit_notices_a_stale_gap_entry():
-    """A pair that stops diverging must fail, or the allow-list outlives the bug it documents.
-
-    Seed a KNOWN-GAP entry for a pair that actually AGREES (`<td>` does not close an open `<em>`) and check
-    the audit records a failure. Without this the list could accumulate entries for divergences that were
-    fixed years earlier, each one a hole where a REGRESSION would now pass.
-    """
-    pytest.importorskip("frostwork")
     import audit_tree_rules as A
 
-    original = A.KNOWN_START_CLOSE_GAP
-    try:
-        A.KNOWN_START_CLOSE_GAP = dict(original, td=list(original.get("td", [])) + ["em"])
-        audit = A.Audit(verbose=False)
-        A.audit_start_close_pairs(audit)
-        stale = [f for f in audit.fails if "now AGREE" in str(f[1])]
-        assert stale, "a KNOWN_START_CLOSE_GAP entry that agrees must be reported as stale"
-    finally:
-        A.KNOWN_START_CLOSE_GAP = original
-
-    # and with the real list, that section is clean
+    assert not hasattr(A, "KNOWN_START_CLOSE_GAP"), "the start-close allow-list is back"
+    assert not hasattr(A.Audit, "check_gap"), "the divergence-tolerating check is back"
+    # every cell disagreeing must produce fails, not a tolerated gap. Stubbed rather than run for real:
+    # the honest 142x142 sweep is `tools/audit_tree_rules.py --gate` (in `make py` and hosted CI), and
+    # what this owns is the VERDICT, which no engine is needed to exercise.
     audit = A.Audit(verbose=False)
-    A.audit_start_close_pairs(audit)
-    assert not audit.fails, audit.fails[:3]
+    real = A.both_multi
+    A.both_multi = lambda html, sels: ([["lxml"]] * len(sels), [["engine"]] * len(sels))
+    try:
+        A.audit_start_close_pairs(audit)
+    finally:
+        A.both_multi = real
+    assert audit.checked and len(audit.fails) == audit.checked, \
+        f"{len(audit.fails)} of {audit.checked} disagreeing cells reported"
 
 
 def test_the_oracle_version_guard_actually_rejects_an_old_libxml2():
