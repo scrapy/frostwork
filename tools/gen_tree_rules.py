@@ -411,6 +411,11 @@ def render_rust(oracle: Oracle) -> str:
     ids = {c: i for i, c in enumerate(ordered)}
 
     out: list[str] = [HEADER]
+    # the data-mode table below answers in the tokenizer's own enum, so the tokenizer owns the type and
+    # this file owns the name list — the one direction that keeps `DataMode`'s variants documented next
+    # to the code that acts on them.
+    out.append("use crate::tokenizer::DataMode;")
+    out.append("")
     out.append("/// Start-close behaviour classes — the granularity libxml2's `htmlStartClose` pair")
     out.append("/// table actually needs. Two names share a class only if the oracle answers every")
     out.append("/// (open x incoming) cell identically for them in BOTH roles; the partition, the ids")
@@ -502,6 +507,34 @@ def render_rust(oracle: Oracle) -> str:
     out.append("    }")
     out.append("}")
     out.append("")
+    modes = oracle.modes()
+    out.append("/// How libxml2 tokenizes an element's CONTENT. Anything other than `Normal` means the")
+    out.append("/// content is character data: a `<` inside it starts no tag, so a missing name here is")
+    out.append("/// not a cosmetic gap — it invents elements that are not in the document")
+    out.append("/// (`<iframe><div>x</div></iframe>` matching `div::text`) and desynchronizes every offset")
+    out.append("/// after it.")
+    out.append("///")
+    out.append("/// Derived by `tools/gen_tree_rules.py` over the whole element universe, which is why it")
+    out.append("/// is libxml2 2.14's set and not HTML5's: `listing` and `noscript` look like they belong")
+    out.append("/// here and do not (libxml2 parses their content as markup, having scripting disabled),")
+    out.append("/// while the obsolete `xmp`/`plaintext` do belong. It was a hand-written list of nine")
+    out.append("/// names before it was derived.")
+    out.append("pub fn data_mode(name: &str) -> DataMode {")
+    out.append("    crate::mutate::data_mode(")
+    out.append("        name,")
+    out.append("        match name {")
+    for kind, arm in (("rawtext", "Rawtext"), ("rcdata", "Rcdata"), ("plaintext", "Plaintext")):
+        members = sorted(t for t in ELEMENTS if modes[t] == kind)
+        if not members:
+            continue
+        pat = " | ".join(f'"{n}"' for n in members)
+        for line in _wrap_arm(pat, f"DataMode::{arm},"):
+            out.append("    " + line)
+    out.append("            _ => DataMode::Normal,")
+    out.append("        },")
+    out.append("    )")
+    out.append("}")
+    out.append("")
     levels = oracle.end_levels()
     out.append("/// Misplaced-END-TAG scope, as libxml2's END PRIORITY per element name: a stray end tag")
     out.append("/// may only unwind elements whose priority is at most its own, so with a HIGHER-priority")
@@ -524,7 +557,10 @@ def render_rust(oracle: Oracle) -> str:
     out.append("        },")
     out.append("    )")
     out.append("}")
-    out.append("")
+    # exactly one trailing newline: the blank separators between sections used to leave a blank LINE at
+    # EOF, which `git diff --check` reports and no editor puts back.
+    while out and not out[-1]:
+        out.pop()
     return "\n".join(out) + "\n"
 
 

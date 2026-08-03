@@ -84,6 +84,15 @@ pub fn end_priority_of(name: &[u8]) -> u8 {
     lookup(name, 0, end_priority)
 }
 
+/// Case-insensitive [`data_mode`] for a raw tag name — an unrecognized name holds ordinary markup.
+///
+/// The tokenizer asks this per start tag. It lives here, next to the other generated-table lookups,
+/// because the name list is derived from the same oracle sweep over the same universe: the tokenizer's
+/// own hand-written copy of it was nine `eq_ignore_ascii_case` arms that no gate could have shown wrong.
+pub fn data_mode_of(name: &[u8]) -> crate::tokenizer::DataMode {
+    lookup(name, crate::tokenizer::DataMode::Normal, data_mode)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

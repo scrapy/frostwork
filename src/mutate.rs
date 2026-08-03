@@ -50,7 +50,7 @@ mod imp {
         v
     }
     #[inline(always)]
-    pub fn data_mode(_name: &[u8], v: DataMode) -> DataMode {
+    pub fn data_mode(_name: &str, v: DataMode) -> DataMode {
         v
     }
 }
@@ -128,9 +128,9 @@ mod imp {
     /// Flip an element's data mode between "ordinary markup" and "raw text". Both directions are real
     /// mistakes: treating `<iframe>` as markup fabricates the elements inside it, and treating
     /// `<listing>` as raw text loses every element inside it.
-    pub fn data_mode(name: &[u8], v: DataMode) -> DataMode {
+    pub fn data_mode(name: &str, v: DataMode) -> DataMode {
         match spec() {
-            Spec::Mode(n) if name.eq_ignore_ascii_case(n.as_bytes()) => match v {
+            Spec::Mode(n) if n == name => match v {
                 DataMode::Normal => DataMode::Rawtext,
                 _ => DataMode::Normal,
             },

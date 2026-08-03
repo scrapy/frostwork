@@ -154,9 +154,10 @@ per name, and only after the derivation has proved that every observable cell fo
 `priority(open) > priority(closing)` comparison — if it ever stops holding, the generator raises instead of
 rendering a table that contradicts its own measurements. `--check` fails if source and oracle have drifted;
 `--write` regenerates; `--report` prints the derivation (universe size, observable vs unobservable cells,
-the classes and what each closes). The data-mode table in `src/tokenizer.rs` stays hand-written — it is
-nine names — but the derivation is what the audit checks it against, name by name over the whole
-universe, and `mode:<name>` mutants cover every name in the mutation sweep.
+the classes and what each closes). The per-element DATA MODE is rendered too, as
+`implied_close::data_mode`, and the tokenizer looks names up there: it was nine hand-written
+`eq_ignore_ascii_case` arms in `src/tokenizer.rs`, which no gate could have shown wrong, and the enum
+itself is all that stays there now. `mode:<name>` mutants still cover every name in the mutation sweep.
 
 Three things it does that a hand-written table cannot. It reports a cell as **unobservable** rather than
 guessing — a void or raw-text element can never be the open element when a start tag arrives, so those
