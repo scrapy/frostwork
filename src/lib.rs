@@ -1733,18 +1733,13 @@ mod tests {
     }
 
     /// A document that writes no `<html>`/`<head>`/`<body>` still HAS them: libxml2 synthesizes the
-    /// frame, and so does the engine now.
+    /// frame, and so does the engine.
     ///
-    /// This was the largest documented gap. `<html>`, `<head>` and `<body>` all have optional start
-    /// *and* end tags, so `<!DOCTYPE html><title>T</title><h1>a</h1><p>b</p>` is a conformant document
-    /// with no frame in the byte stream at all — and every frame-anchored selector (`body h1`), every
-    /// top-level sibling combinator (`h1 + p`, which needs a shared parent), and all root-level text
-    /// were empty here while lxml answered.
-    ///
-    /// Which part a bare element opens is DERIVED from the oracle over the whole element universe
-    /// (`implied_close::frame_content`), because it is not the relation it looks like: only
-    /// `base`/`link`/`meta`/`script`/`style`/`title` open a `<head>`, while `input`/`noscript`/
-    /// `template`/`basefont`/`bgsound`/`object` stay inside a head that is already open but open none.
+    /// This was the largest documented gap. All three have optional start *and* end tags, so
+    /// `<!DOCTYPE html><title>T</title><h1>a</h1><p>b</p>` is a conformant document with no frame in the
+    /// byte stream at all — and every frame-anchored selector (`body h1`), every top-level sibling
+    /// combinator (`h1 + p`, which needs a shared parent), and all root-level text were empty here while
+    /// lxml answered. The rules below it are split into their own tests; this one owns the basic shape.
     #[test]
     fn the_document_frame_is_synthesized_when_the_page_omits_it() {
         // the conformant-but-frameless document from docs/COMPATIBILITY.md
@@ -1763,7 +1758,20 @@ mod tests {
         assert_eq!(ex("   \n <div>a</div>", "body > :first-child::text"), v(&["a"]));
         assert_eq!(ex("   ", "body::text"), Vec::<String>::new());
 
-        // the head is opened only by the six names that open one, and only before the body starts
+        // an explicit frame is still used as written — nothing is invented on top of it
+        assert_eq!(ex("<html><head><title>T</title></head><body><p>b</p></body></html>",
+                      "html > head > title::text"), v(&["T"]));
+        assert_eq!(ex("<html><div>d</div></html>", "html > body > div::text"), v(&["d"]));
+        assert_eq!(ex("<html>  <meta id=M>", "html > head > meta::attr(id)"), v(&["M"]));
+    }
+
+    /// WHICH part of a synthesized frame a bare element opens is DERIVED from the oracle over the whole
+    /// element universe (`implied_close::frame_content`), because it is not the relation it looks like:
+    /// only `base`/`link`/`meta`/`script`/`style`/`title` open a `<head>`, while `input`/`noscript`/
+    /// `template`/`basefont`/`bgsound`/`object` stay inside a head that is already open and open none.
+    #[test]
+    fn only_the_head_names_open_a_head() {
+        // the head is opened only by the names that open one, and only before the body starts
         assert_eq!(ex("<meta id=M><div>d</div>", "head > meta::attr(id)"), v(&["M"]));
         assert_eq!(ex("<div>d</div><meta id=M>", "body > meta::attr(id)"), v(&["M"]));
         assert_eq!(ex("<div>d</div><meta id=M>", "head > meta::attr(id)"), Vec::<String>::new());
@@ -1776,11 +1784,14 @@ mod tests {
         }
         // head content NESTED in body content stays where it is
         assert_eq!(ex("<div><meta id=M></div>", "body div > meta::attr(id)"), v(&["M"]));
+    }
 
-        // a frameset document has no body at all — including when the `<frameset>` is written INSIDE the
-        // head, where it ends the head like any other non-head content but must NOT start a body. A real
-        // frameset page does exactly that, and wrapping it in an invented body put the whole frameset
-        // (and the `<body>` written after it) somewhere libxml2 never puts them.
+    /// A frameset document has no `<body>` at all — including when the `<frameset>` is written INSIDE the
+    /// head, where it ends the head like any other non-head content but must NOT start a body. A real
+    /// frameset page does exactly that, and wrapping it in an invented body put the whole frameset (and
+    /// the `<body>` written after it) somewhere libxml2 never puts them.
+    #[test]
+    fn a_frameset_document_has_no_body() {
         assert_eq!(ex("<html><head><frameset id=F><frame src=a></frameset></head><body>y</body>",
                       "html > frameset::attr(id)"), v(&["F"]));
         assert_eq!(ex("<html><head><frameset><frame src=a></frameset></head><body>y</body>",
@@ -1793,52 +1804,6 @@ mod tests {
                    v(&["a"]));
         assert_eq!(ex("<frameset><frame src=a></frameset>", "body frame::attr(src)"),
                    Vec::<String>::new());
-        // ...unless it WRITES one for its no-frames fallback, which libxml2 inserts: a written `<body>`
-        // is ignored only while one is already OPEN, not merely because something else is. Two crawled
-        // pages needed this — a frameset fallback, and a `<body>` after a `</body>` inside a table cell,
-        // where ignoring it left a whole trailing table nested in the earlier cell.
-        assert_eq!(ex("<frameset><body><p>gb</p></body></frameset>", "body > p::text"), v(&["gb"]));
-        assert_eq!(ex("<frameset><frameset><body><p>gb</p></frameset></frameset>", "body p::text"),
-                   v(&["gb"]));
-        assert_eq!(ex("<body id=1></body><td><body id=2>x", "//body/@id"), v(&["1", "2"]));
-        assert_eq!(ex("<body id=1></body><div><body id=2>x", "//body/@id"), v(&["1", "2"]));
-        // ...and while one IS open it is ignored, however deep
-        assert_eq!(ex("<body id=1><div><body id=2>x</div>", "//body/@id"), v(&["1"]));
-        assert_eq!(ex("<td><body id=Z>y", "body::attr(id)"), Vec::<String>::new());
-        // `<head>` has the other rule — it belongs to the phase before any body content, so anything
-        // else being open ends it whether or not a head is currently open.
-        assert_eq!(ex("<frameset><head id=Z><title>t</title></frameset>", "head::attr(id)"),
-                   Vec::<String>::new());
-        assert_eq!(ex("<head id=1></head><div><head id=2>x", "//head/@id"), v(&["1"]));
-        // Character data ends an open head even when there is no body to move it into: a `<head>`
-        // written after `</body>` keeps nothing but its elements.
-        assert_eq!(ex("<body id=0></body><head>y</head>", "head::text"), Vec::<String>::new());
-        assert_eq!(ex("<body id=0></body><head><title>t</title>y</head>", "head > title::text"),
-                   v(&["t"]));
-
-        // A page whose FIRST tag is `<head>` or `<body>` writes no `<html>` — and still gets one. The
-        // frame tags used to build only their own part, so the head sat at the root with no parent and a
-        // second `<html>` was built for whatever followed `</head>`: `html > head`, `html > body` and
-        // `head + script` were all empty while the values under them looked right.
-        assert_eq!(ex("<head id=H><title>t</title></head><p>y</p>", "html > head::attr(id)"),
-                   v(&["H"]));
-        assert_eq!(ex("<body id=B><p>y</p></body>", "html > body::attr(id)"), v(&["B"]));
-        assert_eq!(ex("<head id=H></head><body id=B><p>y</p>", "html > head + body::attr(id)"),
-                   v(&["B"]));
-        // libxml2 leaves what follows an explicit `</head>` at `<html>` level (html5lib puts it back in
-        // the head; the oracle here is libxml2), so the script is the head's SIBLING.
-        assert_eq!(ex("<head><meta id=M></head><script>s</script><p>y</p>", "head + script::text"),
-                   v(&["s"]));
-
-        // A second `<html>` after the first has CLOSED gets its own element, because libxml2 builds a
-        // second ROOT for it — verified on a crawled page that self-closes `<html/>` inside a
-        // downlevel-revealed conditional comment, whose lxml tree has two roots both carrying the
-        // attributes. Browsers keep one element instead, which is why parsel's own CSS (scoped to the
-        // first root) and XPath disagree on such a document; the TREE is the oracle here.
-        assert_eq!(ex("<html a=1 /><html a=2><p>x</p>", "//html/@a"), v(&["1", "2"]));
-        assert_eq!(ex("<html a=1></html><html a=2><p>x</p>", "//html/@a"), v(&["1", "2"]));
-        // ...and the tail still gets a parent, so the values under it stay reachable
-        assert_eq!(ex("<html a=1></html><p>x</p>", "html > body > p::text"), v(&["x"]));
         // Head content inside an open `<frameset>` has no head to go in, so libxml2 opens a BODY for it —
         // the same one it opens for ordinary content there. Exactly the six `FrameContent::Head` names
         // change answer inside a frameset; found by `tools/seq_sweep.py`, then derived over the universe.
@@ -1848,30 +1813,82 @@ mod tests {
                        "<{head_content}> in a frameset belongs to a body");
             assert_eq!(ex(&doc, "//head//*/@id"), Vec::<String>::new());
         }
-        // `</head>` is an unconditional closer like `</body>`/`</html>`: libxml2 gives it the same end
-        // priority, so no open element out-ranks it. With `head` left at priority 0 an open `<tr>` blocked
-        // it and everything after the `</head>` stayed inside the head.
-        assert_eq!(ex("<head id=0><tr id=1></head><div id=3>", "//*[@id=\"0\"]//*/@id"), v(&["1"]));
-        assert_eq!(ex("<head id=0><td id=1></head><div id=3>", "//*[@id=\"0\"]//*/@id"), v(&["1"]));
-        // Text after `</html>` needs the second root too, or it is dropped outright: with the stack empty
-        // there is nothing to attach it to.
+    }
+
+    /// A written `<body>` is redundant only while one is OPEN — not merely because something else is.
+    /// Two crawled pages needed this: a frameset writing its no-frames fallback, and a `<body>` after a
+    /// `</body>` inside a table cell, where ignoring it left a whole trailing table nested in the earlier
+    /// cell. `<head>` has the OTHER rule — it belongs to the phase before any body content, so anything
+    /// else being open ends it whether or not a head is currently open.
+    #[test]
+    fn a_written_body_is_redundant_only_while_one_is_open() {
+        assert_eq!(ex("<frameset><body><p>gb</p></body></frameset>", "body > p::text"), v(&["gb"]));
+        assert_eq!(ex("<frameset><frameset><body><p>gb</p></frameset></frameset>", "body p::text"),
+                   v(&["gb"]));
+        assert_eq!(ex("<body id=1></body><td><body id=2>x", "//body/@id"), v(&["1", "2"]));
+        assert_eq!(ex("<body id=1></body><div><body id=2>x", "//body/@id"), v(&["1", "2"]));
+        // ...and while one IS open it is ignored, however deep
+        assert_eq!(ex("<body id=1><div><body id=2>x</div>", "//body/@id"), v(&["1"]));
+        assert_eq!(ex("<td><body id=Z>y", "body::attr(id)"), Vec::<String>::new());
+        // the `<head>` rule
+        assert_eq!(ex("<frameset><head id=Z><title>t</title></frameset>", "head::attr(id)"),
+                   Vec::<String>::new());
+        assert_eq!(ex("<head id=1></head><div><head id=2>x", "//head/@id"), v(&["1"]));
+        // Character data ends an open head even when there is no body to move it into: a `<head>`
+        // written after `</body>` keeps nothing but its elements.
+        assert_eq!(ex("<body id=0></body><head>y</head>", "head::text"), Vec::<String>::new());
+        assert_eq!(ex("<body id=0></body><head><title>t</title>y</head>", "head > title::text"),
+                   v(&["t"]));
+    }
+
+    /// A page whose FIRST tag is `<head>` or `<body>` writes no `<html>` — and still gets one. The frame
+    /// tags used to build only their own part, so the head sat at the root with no parent and a second
+    /// `<html>` was built for whatever followed `</head>`: `html > head`, `html > body` and
+    /// `head + script` were all empty while the values under them looked right.
+    #[test]
+    fn a_page_whose_first_tag_is_a_frame_part_still_gets_an_html() {
+        assert_eq!(ex("<head id=H><title>t</title></head><p>y</p>", "html > head::attr(id)"),
+                   v(&["H"]));
+        assert_eq!(ex("<body id=B><p>y</p></body>", "html > body::attr(id)"), v(&["B"]));
+        assert_eq!(ex("<head id=H></head><body id=B><p>y</p>", "html > head + body::attr(id)"),
+                   v(&["B"]));
+        // libxml2 leaves what follows an explicit `</head>` at `<html>` level (html5lib puts it back in
+        // the head; the oracle here is libxml2), so the script is the head's SIBLING.
+        assert_eq!(ex("<head><meta id=M></head><script>s</script><p>y</p>", "head + script::text"),
+                   v(&["s"]));
+    }
+
+    /// Content after `</html>` gets a SECOND ROOT `<html>`, the same shape libxml2 builds, and no body —
+    /// one was already established. A crawled page's trailing `<script>` was reachable as `//script` but
+    /// not as `//html/script` until the tail had that frame, and text there was dropped outright: with
+    /// the stack empty there is nothing to attach it to.
+    ///
+    /// The second root is verified against a crawled page that self-closes `<html/>` inside a
+    /// downlevel-revealed conditional comment, whose lxml tree has two roots both carrying the
+    /// attributes. Browsers keep one element instead, which is why parsel's own CSS (scoped to the first
+    /// root) and XPath disagree on such a document; the TREE is the oracle here.
+    #[test]
+    fn content_after_the_document_closes_gets_a_second_root() {
+        assert_eq!(ex("<html a=1 /><html a=2><p>x</p>", "//html/@a"), v(&["1", "2"]));
+        assert_eq!(ex("<html a=1></html><html a=2><p>x</p>", "//html/@a"), v(&["1", "2"]));
+        // ...and the tail still gets a parent, so the values under it stay reachable
+        assert_eq!(ex("<html a=1></html><p>x</p>", "html > body > p::text"), v(&["x"]));
         assert_eq!(ex("<div id=0></html>x", "//html/text()"), v(&["x"]));
         assert_eq!(ex("<html><body>y</body></html>tail", "//html/text()"), v(&["tail"]));
-
-        // Content after `</html>` gets a SECOND ROOT `<html>` — the same shape libxml2 builds — and no
-        // body, because one was already established. A crawled page's trailing `<script>` was reachable
-        // as `//script` but not as `//html/script` until the tail had that frame.
         assert_eq!(ex("<html><body>x</body></html><script>s</script>", "//html/script/text()"),
                    v(&["s"]));
         assert_eq!(ex("<html><body>x</body></html><p>y</p>", "//html/p/text()"), v(&["y"]));
         assert_eq!(ex("<html><body>x</body></html><p>y</p>", "//html/body/p/text()"),
                    Vec::<String>::new());
+    }
 
-        // an explicit frame is still used as written — nothing is invented on top of it
-        assert_eq!(ex("<html><head><title>T</title></head><body><p>b</p></body></html>",
-                      "html > head > title::text"), v(&["T"]));
-        assert_eq!(ex("<html><div>d</div></html>", "html > body > div::text"), v(&["d"]));
-        assert_eq!(ex("<html>  <meta id=M>", "html > head > meta::attr(id)"), v(&["M"]));
+    /// `</head>` is an unconditional closer like `</body>`/`</html>`: libxml2 gives it the same end
+    /// priority, so no open element out-ranks it. With `head` left at priority 0 an open `<tr>` blocked
+    /// it and everything after the `</head>` stayed inside the head. Found by `tools/seq_sweep.py`.
+    #[test]
+    fn a_frame_end_tag_is_never_out_ranked() {
+        assert_eq!(ex("<head id=0><tr id=1></head><div id=3>", "//*[@id=\"0\"]//*/@id"), v(&["1"]));
+        assert_eq!(ex("<head id=0><td id=1></head><div id=3>", "//*[@id=\"0\"]//*/@id"), v(&["1"]));
     }
 
     /// The first thing that does not belong in `<head>` ends the head AND OPENS THE BODY, and

@@ -11,7 +11,7 @@
 //! `dd`/`dt` arm, the missing `colgroup` rule, escapes in selectors. This one enumerates.
 //!
 //! Cost is why it is a runtime hook rather than a source rewrite: reading the mutation from the
-//! environment means ONE build serves all ~400 mutants, instead of ~400 rebuild-and-relink cycles.
+//! environment means ONE build serves every mutant, instead of a rebuild-and-relink per cell.
 //! Under the default feature set every function below is an `#[inline(always)]` identity, so the
 //! production binary is byte-for-byte what it would be without the hook.
 //!

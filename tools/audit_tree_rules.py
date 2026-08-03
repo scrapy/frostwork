@@ -482,7 +482,7 @@ def audit_implied_body(a: Audit):
     have encoded whichever of those the author happened to try. Only the implicit end is asserted here —
     after an explicit `</head>` libxml2 and html5lib disagree, and the engine keeps libxml2's shape.
     """
-    with a.section(f"implied <body> (whole universe: does what ends the head start it?)"):
+    with a.section("implied <body> (whole universe: does what ends the head start it?)"):
         for t in ELEMENTS:
             if t in ("html", "head", "body", "frameset", "frame"):
                 continue  # the frame itself, and frameset documents, which have no body at all

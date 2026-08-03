@@ -101,8 +101,11 @@ sweep that enumerates over one side's idea of what is valid.
   construct explains is reported as **NOVEL** and gated on a *rate* (`--novel-budget`, default 0.05% of
   pairs).
 
-  As of the EOF-truncated-tag fix it reports **no divergence at all** — read that as a floor to defend,
-  not as proof the attribution works, because the attribution is what hid that bug. Every one of the 426
+  The EOF-truncated-tag fix took it to **no divergence at all**, and the tail has since crept back to a
+  handful: seed 0 at 6000 iters currently reports one NOVEL page, an unterminated end tag followed by
+  foreign content (`…</ht<svg>ml>`) where the engine splits a text node lxml keeps whole. Read a small
+  number as a floor to defend and a place to look, not as proof the attribution works — the attribution is
+  what hid that bug. Every one of the 426
   divergences this tool used to report was that single tokenizer bug, credited to foster-parenting or
   misnesting because those constructs happened to be on the same page: attribution asks "does this PAGE
   contain the construct", never "did it cause this". **A documented bucket that never empties is a place
@@ -285,6 +288,70 @@ Read that number with its limits. It is one page per site, so it samples site va
 of any one site's templates — a real crawl is still the thing this cannot replace. The pages are also a
 moving target: re-fetching next month diffs different bytes, which is a feature for finding bugs and
 useless for bisecting one, so `MANIFEST.json` records the URL each page came from.
+
+### What sampling the real web found
+
+Every bug below was found by diffing real crawled pages while every generated gate above read 100%, and
+the SHAPES are the argument for sampling the web rather than imagining it. Kept here as one list because
+each entry is a lesson about a *kind* of blind spot, not just a fixed bug.
+
+A **1000-page Common Crawl sample**: a tag name the engine truncated (`<p<mip-img …>` reported as a `<p>`
+that is not in the document — a FALSE POSITIVE, the outcome no-fallback exists to prevent); a
+`<meta charset>` past the prescan window; two whole tree-construction rules (what ends `<head>` also
+starts `<body>`; a `<!DOCTYPE>` does not break a text node) and the missing document-frame synthesis
+behind them; a decoder sweep that had been *sampled* rather than exhaustive, so it read "full parity"
+while euc-jp differed on the wave dash; and documented divergences whose stated scope was too narrow.
+
+A **2000-page sample** found the next one down: end-tag scope is a PRIORITY comparison, not a set of
+boundary elements, so `</tr>` cannot unwind an open `<tbody>` — a table generator's rows lost their cells.
+
+A **10000-page sample** found three more, all in the document frame and all hidden by an EXCLUSION rather
+than a short list: the frame probes skipped the three frame names themselves ("asking where `<head>` nests
+is meaningless"), so a page whose first tag is `<head>` got no `<html>` at all, a `<body>` written after
+`</body>` was ignored where libxml2 starts a second one, and `<body>` — which out-ranks every end tag —
+was missing from the priority order because the derivation had ruled it "never open".
+
+**Two more 10000-page samples** found three more, and the most valuable was in the TOKENIZER rather than
+the tree: only an ASCII letter after `</` starts an end tag, so `</%>` is a bogus comment that SPLITS a
+text node while `</>` is ignored and does not. Reading both as "scan a name, skip to `>`" merged a page's
+copyright line, and was also the single largest source of unattributed divergences in the malformed-HTML
+fuzzer (NOVEL 93 → 5). The other two were the frame again: `<frameset>` ends the head but starts no body,
+and content after `</html>` gets a second ROOT `<html>` rather than no parent at all.
+
+**A third 10000-page sample** found four, and two of them were not parsing rules at all:
+
+- **Parsel does not parse the response bytes.** It parses `text.strip().replace("\x00","")`. The NUL half
+  was already matched; the missing STRIP half promotes a whitespace-preceded U+FEFF to offset 0, where
+  libxml2 eats it as a BOM. On the raw bytes it is a character, a character before the frame opens the
+  `<body>`, and a page that merely INDENTS its doctype loses its `<head>`, its `<title>` and the
+  attributes of its own `<html>` tag. (A later review found the rest of that rule: the strip set includes
+  VERTICAL TAB, which is neither HTML whitespace nor in Rust's `is_ascii_whitespace`, so a leading `0x0B`
+  cost a page its head the same way.)
+- **ISO-2022-JP is not ASCII-compatible.** `社` is the two bytes `<R`, so the byte tokenizer grew a start
+  tag out of the middle of a Japanese word. The transcode set is now `Encoding::is_ascii_compatible`'s
+  answer rather than the hand-written "UTF-16 is the only one".
+- A self-closed redundant frame tag (`<html/>`) closes the element it sits in, because libxml2's
+  `endElement` pops the CURRENT node and the ignored start tag pushed nothing.
+- A class list splits on ASCII whitespace and NOT on Unicode whitespace, so a Japanese page separating two
+  class names with an IDEOGRAPHIC SPACE matched both here and neither in lxml.
+- And **a start tag the response ends inside must be DROPPED, whole** — which carries the sharpest
+  methodological lesson in this file. It was a *documented divergence* ("libxml2 discards the incomplete
+  tag; the engine keeps the attributes it already scanned") and it was wrong on both counts: html5lib
+  discards it too, so the engine was alone, and what it kept was an element with an attribute holding the
+  rest of the document, i.e. a FALSE POSITIVE. Fixing it took the malformed-HTML fuzzer from 426
+  divergences to **zero, on 915000 pairs** — and every one of those 426 had been attributed to
+  foster-parenting, misnesting or deep-`<p>`, because attribution asks "does this PAGE contain the
+  construct", and a truncated page usually also contains a table. **Page-scoped attribution
+  over-credits**: when one documented bucket never empties, suspect the bucket, not the page.
+
+None of these are exotic; they are markup nobody thought to generate. Two habits follow from the list:
+
+- **When a divergence looks like libxml2 being odd, check html5lib before calling it a divergence.** It is
+  the HTML5 spec reference implementation and settles "is the oracle browser-correct here?" in one run: it
+  agreed with libxml2 on the head→body rule (so that was a bug to fix) and disagreed on what follows an
+  explicit `</head>` (so that stays libxml2's shape, and the fix was scoped around it).
+- **When a check samples, say so where the number is quoted** — "we measured N and it was clean" reads as
+  "it is clean".
 
 **Real-page parity, your own corpus — `make gate-corpus CORPUS=<dir>`.** `make gate` only ever sees *generated* pages,
 and a generator reproduces the malformations its author thought of: the `dd`/`dt` same-tag close and the
