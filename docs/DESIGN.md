@@ -45,35 +45,45 @@ bytes ─▶ tokenizer (TokenSink: start/text/end) ─▶ corrected-stack matche
 ## Semantics: match libxml2 2.14, not the HTML5 spec
 
 Frostwork runs the HTML5 *tokenizer* faithfully but not the HTML5 *tree-construction* algorithm.
-Instead it applies the small set of implied-close rules libxml2 actually uses (`implied_close.rs`,
-derived empirically against lxml):
+Instead it applies the small set of implied-close rules libxml2 actually uses (`implied_close/`).
+**The rules themselves are enumerated once**, under "Tree-construction contract" in
+[COMPATIBILITY.md](COMPATIBILITY.md). What follows is why they take the shape they do:
 
-- **Implied end tags** are NOT uniform per family — every cell is verified individually, because the
-  families disagree with each other and with HTML5. A same-tag repeat auto-closes for
-  `li`/`option`/`tr`/`td`/`th`/`tbody`/`p` but **nests** for `dt`/`dd`/`rt`/`rp`/`optgroup`/`thead`/
-  `tfoot`/`caption`. `<tbody>`/`<tfoot>` close an open row/cell; `<thead>` does not. `<colgroup>` is
-  closed by a section or a row, and closes an open `<caption>` or `<p>`.
-- **`<p>`-closing set** = the HTML4 block list (`div`, `p`, `h1`–`h6`, `ul`, `ol`, `dl`, `menu`, `dir`,
-  `center`, `address`, `blockquote`, `fieldset`, `form`, `pre`, `table`, `hr`) plus list/table *items*
-  (`li`, `dd`, `dt`, `tr`, `td`, `th`, `tbody`, `tfoot`, `caption`) — **not** the HTML5 sectioning
-  elements (`section`/`article`/`header`/…), and **not** `option`/`optgroup`/`thead`/`rt`/`rp`, all of
-  which libxml2 leaves nested inside the `<p>`.
-- **Table scope**: an ordinary end tag never unwinds a table. With a table-scoped element open above its
-  match, libxml2 discards the tag (`<div><table><tr><td>A</div>B` keeps `AB` in the cell). The set is
-  per element and excludes `caption`/`colgroup`, which is only visible BARE — wrapped in a `<table>`
-  the table blocks regardless, which is how a wrong `caption` entry survived the first audit.
-- **Void set** = `area base basefont br col frame hr img input isindex link meta param` — libxml2 2.14
-  treats the HTML4-only `basefont`/`frame`/`isindex` as empty and the HTML5-era
-  `embed`/`source`/`track`/`wbr` as **non-void**, so Frostwork does too.
-- **Start-close NAME pairs** (`start_closes`) are a second, finer table: libxml2 decides "does this start
-  tag close that open element?" from a hardcoded name-pair list, so `<td>` closes an open `<b>` but not
-  an `<em>`. That table is **generated** by `tools/gen_tree_rules.py` from the oracle rather than written
-  — three successive hand-written versions each omitted names (and with them whole rules), which is a
-  code-generation problem, not a diligence problem.
-- **The document frame** (`<html>`/`<head>`/`<body>`) is accepted only where it belongs and ignored
-  elsewhere, with a phantom-entry counter so the matching end tag pops the ignored tag rather than
-  closing the document. This is deliberately *not* frame synthesis: the engine never invents a frame the
-  byte stream does not contain.
+- **The tables are DERIVED, not written.** `tools/gen_tree_rules.py` measures the whole (open ×
+  incoming) start-close relation, the end-tag scope priorities, the void set and the per-element data
+  mode against libxml2 over a fixed element universe, and *generates* the Rust. Three successive
+  hand-written ports each omitted names, and with them whole rules — a code-generation problem, not a
+  diligence problem. So the source of truth is the oracle, `implied_close/generated.rs` is its output
+  (rewritten whole, `--check` gates on drift), and a prose list of tag names anywhere else is a fourth
+  copy waiting to go stale. `implied_close/mod.rs` is the hand-written half, kept in a separate file so
+  the boundary is a file boundary.
+- **No rule is uniform per family**, which is why generation matters more here than it looks. A same-tag
+  repeat auto-closes for some list/table elements and *nests* for others; `<tbody>` closes an open row
+  and `<thead>` does not; libxml2's start-close relation is over tag *names* and is finer than any
+  grouping the engine might impose, so two elements that look interchangeable behave differently. Any
+  grouping you would reach for by intuition is wrong somewhere. The engine used to carry a second,
+  coarser close table over tag *ids* and OR the two; deriving the name relation made it redundant, and
+  proving that (every id-pair answer already implied by the generated table) let it be deleted.
+- **Mutation targets the ANSWER, not a cell.** `tools/mutate_rules.py` flips the *effective* close
+  decision for a name pair — and, separately, the data mode for a name — rather than one table entry,
+  because a cell whose answer is also reachable another way is masked and the sweep then reports it
+  protected.
+- **The document frame is built when the page omits it, and ignored when the page misplaces it.** Both
+  halves are needed and they are different mechanisms: `<html>`/`<head>`/`<body>` all have optional
+  start *and* end tags, so a conformant document may contain none of them and libxml2 frames it anyway
+  (`Matcher::ensure_frame` over the oracle-derived `frame_content`) — while a frame tag written in the
+  *wrong place* is ignored, with a phantom-entry counter so its matching end tag pops the ignored tag
+  instead of closing the document. The state and the questions the rules ask about it live in
+  `matcher/frame.rs`, each named once: four crawl-found frame bugs were a rule asking a *proxy* question
+  ("is this tag a frame tag") instead of the real one ("is anything open to hold what follows").
+- **Scope is what keeps a malformed page local, and it is an ORDER rather than a set.** libxml2 discards
+  a misplaced end tag while anything out-ranking it is still open above its match, so unbalanced markup
+  around a table truncates one field instead of desynchronizing the rest of the document. Reading it as
+  a set of boundary elements is what lost a crawled page its table cells: the two coarsest answers (a
+  table blocks an ordinary end tag; so does an open `<div>`) were right, and the order *inside* the
+  table machinery was simply absent — from the engine, the audit's probe list and the mutation sweep
+  alike. When a rule turns out to be coarser than reality, widen the derivation first; a sweep over the
+  wrong shape is a green light for the wrong thing.
 - None of these arms had differential coverage until `tools/audit_tree_rules.py` enumerated them cell by
   cell against lxml. Add a row there when you add a rule; docs/TESTING.md has what that turned up.
 
@@ -84,16 +94,17 @@ adoption agency, deep-`<p>`) is accepted and documented, because libxml2 barely 
 
 ## Values
 
-- `::text` / `text()` — per text node, whitespace preserved, entities decoded (Parsel-identical).
-- `::attr(x)` / `@attr` — entity-decoded attribute value.
+`::text` and `::attr` are Parsel-identical (one value per text node, whitespace kept, entities decoded);
+COMPATIBILITY.md states that contract. The three below are *choices*, so they are argued here:
+
 - **Outer HTML** (bare element / node query) — the element's **raw source bytes**, a deliberate
   divergence from lxml's tree *reflow* (which normalizes quotes/case/whitespace and synthesizes omitted
   end tags). Raw source is cheaper, faithful, and **re-parse-equivalent**.
 - **Encoding** — resolved BOM (incl. the BOM-less UTF-16 `<?` prefix) → caller label → prescan of the
-  first 1024 bytes (`<meta charset>` and an XML declaration) → UTF-8. Tokenization stays on raw bytes for
+  document head (`<meta charset>` and an XML declaration) → UTF-8. Tokenization stays on raw bytes for
   every ASCII-compatible encoding; only emitted values are decoded (`encoding_rs`). UTF-16 is transcoded
-  up front. The target is browser/WHATWG behaviour, not w3lib parity — see COMPATIBILITY.md for the table
-  of deliberate differences.
+  up front. The target is browser/WHATWG behaviour, not w3lib parity — see COMPATIBILITY.md for the
+  prescan window (and why it is not WHATWG's 1024) and the table of deliberate differences.
 - **Raw NUL** is deleted from the whole document before tokenizing, as Parsel/w3lib do. It has to be
   before, not at emit time: a NUL inside a tag or attribute *name* is invisible to lxml, so dropping it
   only from values made the two sides disagree about the tree. One `memchr` on the ordinary path.
@@ -129,12 +140,12 @@ and a winner's values are recovered afterwards by re-scanning that span (`split_
 schema; `resolve_tail_spans` runs it). Three things make this work:
 
 - *The span is self-contained.* An end tag inside it that matched an ancestor would have ENDED the span,
-  and one discarded by table scope behaves identically standalone — the same re-parse-equivalence the
+  and one discarded by end-tag scope behaves identically standalone — the same re-parse-equivalence the
   differential already proves for outer-HTML node queries.
 - *The re-scan runs the real engine.* The tail is a compiled sub-schema — `* ::text` / `* ::attr(name)`
   for a subtree terminal, or the selector's own compounds after the deferred one for a descendant value,
   with `strict_desc` set so the span's root is excluded (`div:has(a) div::text` means a *proper*
-  descendant). It therefore inherits dropped-end-tag coalescing, table scope and implied close rather
+  descendant). It therefore inherits dropped-end-tag coalescing, end-tag scope and implied close rather
   than re-deriving them; a hand-rolled collector here would silently re-introduce the split-text bug. An
   unsupported tail marks the entry dead, so the audit keeps reporting the selector unsupported instead of
   the column quietly coming back empty. Only a DESCENDANT step into the tail is expressible this way — a
@@ -217,8 +228,9 @@ descendant's emission and stays an empty column.
   structural index (the base scan is per-*element* bound, not per-byte; memchr already bulk-skips text)
   and a subject-tag dispatch index (real selectors are class-led, so it can't bucket them).
 
-Result: ~12–20× Parsel on realistic pages at typical field counts, up to ~40–54× on rich schemas — the
-one-pass advantage grows with field count. Numbers + methodology: [BENCHMARKS.md](BENCHMARKS.md).
+The shape of the result is what the design predicts: the advantage over Parsel grows with field count,
+because the scan is paid once per page rather than once per field, and shrinks with nesting depth (the
+ancestor walk). Figures and methodology live only in [BENCHMARKS.md](BENCHMARKS.md).
 
 ## Page-object layer
 

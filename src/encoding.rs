@@ -2,9 +2,13 @@
 //! UTF-8 default. Ported from `parsel-stream-core/src/encoding.rs` (proven to match Parsel).
 //!
 //! We never transcode the whole document for ASCII-compatible encodings — the tokenizer runs on raw
-//! bytes (every HTML structural delimiter is `< 0x40`, unambiguous for every WHATWG encoding except
-//! the UTF-16 family), and the matcher decodes only emitted *values* with the resolved encoding.
-//! UTF-16LE/BE (not ASCII-compatible) are transcoded to UTF-8 up front by the caller (see lib.rs).
+//! bytes, and the matcher decodes only emitted *values* with the resolved encoding. That works because
+//! in an ASCII-compatible encoding a byte below 0x80 always IS that ASCII character, so every HTML
+//! structural delimiter is unambiguous. Where it does not hold, the caller transcodes to UTF-8 up
+//! front (see `lib.rs`) — and which encodings those are is `Encoding::is_ascii_compatible`'s answer,
+//! not a list written here. Naming the family was the bug: "the UTF-16 family" omitted ISO-2022-JP,
+//! whose `ESC $ B` mode packs `社` into the two bytes `<R`, so a crawled page grew a start tag out of
+//! the middle of a Japanese word.
 
 use encoding_rs::Encoding;
 
@@ -466,3 +470,4 @@ mod w3lib_oracle_tests {
         assert_eq!(resolve(&be32, None), encoding_rs::UTF_8);
     }
 }
+

@@ -17,8 +17,12 @@ use std::borrow::Cow;
 
 use encoding_rs::Encoding;
 
+use frame::{
+    frame_slot, frameset_is_open, head_is_current, head_is_open, nothing_open, only_html_open,
+    tag_is_redundant, DocumentFrame,
+};
 use crate::implied_close::{
-    blocks_end_tag, classify, end_tag_discardable, frame_content, implies_close_id, start_closes,
+    blocks_end_tag, classify, end_tag_discardable, frame_content, start_closes,
     FrameContent,
 };
 use crate::selector::{
@@ -31,6 +35,7 @@ use crate::{FlatColumns, GroupRows};
 
 mod decode;
 mod compile;
+mod frame;
 mod deferred;
 mod matching;
 
@@ -112,10 +117,9 @@ pub fn budget_usage(queries: &[Vec<Selector>], groups: &[GroupInput]) -> (usize,
 pub struct OpenElem<'a> {
     // `pub(super)` fields are the ones the read-only matching kernel (`matching`) reads.
     pub(super) tag: &'a [u8], // raw bytes (possibly mixed-case); matched case-insensitively
-    tid: u8,
-    /// Start-close class (`implied_close::sc`). A second, finer id space than `tid`, because libxml2's
-    /// `htmlStartClose` pair table distinguishes names `tid` deliberately lumps together — `<td>` closes
-    /// an open `<b>` but not an open `<em>`, and both are `tag::OTHER`.
+    /// Start-close class (`implied_close::sc`), the id space libxml2's `htmlStartClose` pair table
+    /// actually needs: it distinguishes names a coarser one lumps together — `<td>` closes an open
+    /// `<b>` but not an open `<em>`.
     scid: u8,
     attrs: Vec<(&'a [u8], Cow<'a, str>)>, // only "interesting" attrs; value entity-decoded (lazy Cow)
     matched: u128, // bit k: this element is a subject match for member-selector k (≤128 members)
@@ -158,7 +162,6 @@ impl<'a> OpenElem<'a> {
     pub(super) fn for_test(tag: &'a [u8]) -> Self {
         OpenElem {
             tag,
-            tid: 0,
             scid: 0,
             attrs: Vec::new(),
             matched: 0,
@@ -191,8 +194,14 @@ impl<'a> OpenElem<'a> {
             .find(|(n, _)| n.eq_ignore_ascii_case(name.as_bytes()))
             .map(|(_, v)| v.as_ref())
     }
+    /// ASCII whitespace, NOT `split_whitespace`'s Unicode set — HTML splits a class list on space, tab,
+    /// LF, FF and CR and nothing else. Splitting on the Unicode set invented classes: a crawled page
+    /// whose `class="ctsListWrap fadein　clearfix"` separates two of them with an IDEOGRAPHIC SPACE
+    /// (U+3000, ordinary in Japanese markup) has one token `fadein　clearfix`, and the engine matched
+    /// both `.fadein` and `.clearfix` on it — elements a scraper's selector should never have seen.
+    /// Same for NBSP, the em space, and U+000B, which is not ASCII whitespace in HTML.
     pub(super) fn has_class(&self, cls: &str) -> bool {
-        self.attr("class").is_some_and(|v| v.split_whitespace().any(|t| t == cls))
+        self.attr("class").is_some_and(|v| v.split_ascii_whitespace().any(|t| t == cls))
     }
 }
 
@@ -558,42 +567,16 @@ pub struct Matcher<'a> {
     // DROPPED end tags can be re-joined first (libxml2 makes it ONE text node; see `text`). Flushed by
     // the next start tag / matched end tag / EOF, so ordering vs. tag events is unchanged.
     pending_text: Option<PendingText<'a>>,
-    // Redundant `<html>`/`<head>`/`<body>` start tags seen so far, per name (see
-    // `is_document_frame_tag`). libxml2 merges such a tag away but still keeps a stack entry for it, so
-    // the MATCHING end tag pops that phantom instead of closing the document: in
-    // `<div><body>x</body>tail</div>` the `</body>` is dropped and `xtail` stays one text node inside the
-    // div. Without the counter, `</body>` closed the document early and every ancestor-scoped column
-    // lost the trailing run.
-    frame_phantoms: [u32; 3],
-    // Has a `<head>` been opened, and has a `<body>` been opened? Together they bound the only window
-    // in which an IMPLIED `<body>` can be created (see `implied_body_split` and `start_tag`): libxml2
-    // and the HTML5 spec both end the head at the first content that does not belong in it and put that
-    // content, and everything after it, in the body. Outside that window both are one bool test, so the
-    // name comparisons this gates never run on the hot path.
-    head_seen: bool,
-    body_established: bool,
+    // Everything the document-frame rules know that the stack cannot tell them, plus the questions they
+    // ask about it — see `frame.rs`, which explains why this is one owner of NAMED questions rather than
+    // the insertion-mode enum it looks like it should be.
+    frame: DocumentFrame,
 }
 
-/// `head`'s and `body`'s slots — the two that bound the implied-`<body>` window (see `start_tag`).
-const HTML_FRAME_SLOT: usize = 0;
-const HEAD_FRAME_SLOT: usize = 1;
-const BODY_FRAME_SLOT: usize = 2;
-
-/// `<html>`/`<head>`/`<body>` — the three tags libxml2 accepts only as the document frame — as an index
-/// into `Matcher::frame_phantoms`. `None` for every other name (the hot path: one length compare).
-fn frame_phantom_slot(name: &[u8]) -> Option<usize> {
-    if name.len() != 4 {
-        return None;
-    }
-    if name.eq_ignore_ascii_case(b"html") {
-        Some(0)
-    } else if name.eq_ignore_ascii_case(b"head") {
-        Some(1)
-    } else if name.eq_ignore_ascii_case(b"body") {
-        Some(2)
-    } else {
-        None
-    }
+/// The offset of the first byte that is not HTML whitespace, if any — where character data becomes
+/// CONTENT for the document-frame rules.
+fn first_non_ws(text: &[u8]) -> Option<usize> {
+    text.iter().position(|c| !matches!(c, b' ' | b'\t' | b'\n' | b'\r' | 0x0c))
 }
 
 /// A buffered text node. In the common case it is ONE borrowed run (`joined` empty, no allocation).
@@ -1075,9 +1058,7 @@ impl<'a> Matcher<'a> {
             txt_open: 0,
             tail_spans: Vec::new(),
             pending_text: None,
-            frame_phantoms: [0; 3],
-            head_seen: false,
-            body_established: false,
+            frame: DocumentFrame::default(),
         }
     }
 
@@ -1233,7 +1214,7 @@ impl<'a> Matcher<'a> {
                     // value lives in this element's subtree (`div:has(a) ::text`, `div:has(a) a::attr(..)`)
                     self.tail_spans.push((slot, e.start, end));
                 } else if matches!(he.terminal, Terminal::OuterHtml) {
-                    let val = self.enc.decode_without_bom_handling(&self.input[e.start..end]).0.into_owned();
+                    let val = decode::raw_source(&self.input[e.start..end], self.enc);
                     self.pending.push((he.col, e.start, val));
                 } else {
                     for (eh, off, v) in &e.has_buf {
@@ -1277,8 +1258,7 @@ impl<'a> Matcher<'a> {
                 }
                 match te.terminal {
                     Terminal::OuterHtml => {
-                        let val =
-                            self.enc.decode_without_bom_handling(&self.input[e.start..end]).0.into_owned();
+                        let val = decode::raw_source(&self.input[e.start..end], self.enc);
                         self.pending.push((te.col, e.start, val));
                     }
                     Terminal::Attr { .. } | Terminal::Text { .. } => {
@@ -1365,7 +1345,7 @@ impl<'a> Matcher<'a> {
             // pop order is inner-first, so sort by start before scattering.
             self.captures.sort_by_key(|&(start, _, _)| start);
             for (start, end, dest) in std::mem::take(&mut self.captures) {
-                let val = self.enc.decode_without_bom_handling(&self.input[start..end]).0.into_owned();
+                let val = decode::raw_source(&self.input[start..end], self.enc);
                 match dest {
                     Dest::Flat(col) => self.results[col].push(val),
                     Dest::Grouped { seq, sub } => {
@@ -1771,12 +1751,32 @@ impl<'a> Matcher<'a> {
             }
         }
     }
+    /// `<html/>`, `<head/>` and `<body/>` written where the frame already exists: the tag INSERTS
+    /// nothing, but the `/>` still fires a close — and it lands on the enclosing element.
+    ///
+    /// libxml2's `endElement` pops the CURRENT node by position, not by name. A redundant frame tag
+    /// pushes no element of its own, so the pop takes whatever the tag was written inside: one level,
+    /// after any implied closes this tag already ran. `<div><b>x<html/>y` is `<div><b>x</b>y</div>`,
+    /// and a second `<html/>` then takes the `<div>`. The phantom is NOT consumed — a later `</body>`
+    /// is still absorbed by it — which is what separates this from `<html></html>`, where the written
+    /// end tag pops the phantom and the enclosing element survives.
+    ///
+    /// Found on a crawled page that opens a stray `<strong>` before its doctype and then writes
+    /// `<html xmlns=… />`. libxml2 ends the `<strong>` there; leaving it open parented the page's
+    /// entire body inside it, so every `body > *` a scraper asks for was empty while `body *` was
+    /// intact — the frame wrong, not the values.
+    fn self_close_with_no_element_of_its_own(&mut self, span_start: usize) {
+        self.flush_text();
+        if let Some(e) = self.stack.pop() {
+            self.close_elem(e, span_start);
+        }
+    }
 }
 
 impl<'a> TokenSink<'a> for Matcher<'a> {
     /// A doctype leaves no node AND does not end the surrounding text node, so it is absorbed into the
     /// pending node's gap the way a dropped end tag is: the runs either side of it are ONE node.
-    fn doctype(&mut self, from: usize, to: usize) {
+    fn invisible_markup(&mut self, from: usize, to: usize) {
         if let Some(p) = &mut self.pending_text {
             if p.gap_end == from {
                 p.gap_end = to;
@@ -1792,33 +1792,35 @@ impl<'a> TokenSink<'a> for Matcher<'a> {
         span_start: usize,
         open_end: usize,
     ) {
-        let (tid, void, scid) = classify(name);
-        let frame = frame_phantom_slot(name);
+        let (void, scid) = classify(name);
+        let frame = frame_slot(name);
         // Build whatever of the document frame this tag needs and the byte stream did not write.
         self.ensure_frame(name, frame, span_start);
         // A document-frame tag that is BOTH out of place and closes nothing is completely invisible to
         // libxml2, so it must not split the text node either: absorb it into the pending node's gap the
         // way a dropped end tag is absorbed. Decided before `flush_text`, which would end the node.
-        if let Some(slot) = frame {
-            if self.frame_tag_is_redundant(name) && !self.closes_top(name, tid, scid) {
-                self.frame_phantoms[slot] += 1;
-                if let Some(p) = &mut self.pending_text {
-                    if p.gap_end == span_start {
-                        p.gap_end = open_end;
-                    }
-                }
+        if frame.is_some() && tag_is_redundant(name, &self.stack) && !self.closes_top(name, scid) {
+            self.frame.note_ignored();
+            if self_closing {
+                self.self_close_with_no_element_of_its_own(span_start);
                 return;
             }
+            if let Some(p) = &mut self.pending_text {
+                if p.gap_end == span_start {
+                    p.gap_end = open_end;
+                }
+            }
+            return;
         }
         // Any buffered text belongs to the element open BEFORE this tag reshapes the stack.
         self.flush_text();
         // inline implied-close reshape: a popped element's raw source ends where this tag begins
         let mut popped_head = false;
         while let Some(top) = self.stack.last() {
-            let closes = implies_close_id(tid, top.tid) || start_closes(scid, top.scid);
+            let closes = start_closes(scid, top.scid);
             if crate::mutate::closes(name, top.tag, closes) {
                 let e = self.stack.pop().unwrap();
-                popped_head |= self.head_seen && e.tag.eq_ignore_ascii_case(b"head");
+                popped_head |= self.frame.head_seen() && e.tag.eq_ignore_ascii_case(b"head");
                 self.close_elem(e, span_start);
             } else {
                 break;
@@ -1834,8 +1836,17 @@ impl<'a> TokenSink<'a> for Matcher<'a> {
         // keeps libxml2's shape, which is what the engine already produces.
         //
         // A real `<body>`/`<html>`/`<head>` is excluded because it opens the frame itself — and `<body>`
-        // in particular reaches here having just popped the head through the same relation.
-        if popped_head && frame.is_none() && !self.body_established {
+        // in particular reaches here having just popped the head through the same relation. So is a tag
+        // that opens NEITHER part: a frameset document has no `<body>` at all, and `<frameset>` ends the
+        // head like any other non-head content. Wrapping it in an invented body put a real page's whole
+        // frameset inside one, where libxml2 makes it a child of `<html>` — which `frame_content` already
+        // knew and only `ensure_frame` was asking.
+        if popped_head
+            && frame.is_none()
+            && !self.frame.body_established()
+            && frame_content(&String::from_utf8_lossy(name).to_ascii_lowercase())
+                == FrameContent::Body
+        {
             self.start_tag(b"body", &[], false, span_start, span_start);
         }
         // ... and once the implied closes have run, a redundant frame tag inserts NOTHING. libxml2
@@ -1846,17 +1857,16 @@ impl<'a> TokenSink<'a> for Matcher<'a> {
         // pop has happened the head still makes the tag look redundant — which swallowed the `<body>` of
         // every document that omits `</head>`.
         if let Some(slot) = frame {
-            if self.frame_tag_is_redundant(name) {
-                self.frame_phantoms[slot] += 1;
+            if tag_is_redundant(name, &self.stack) {
+                self.frame.note_ignored();
+                if self_closing {
+                    self.self_close_with_no_element_of_its_own(span_start);
+                }
                 return;
             }
             // this frame element is being INSERTED, so the window an implied `<body>` can open in either
             // begins (`<head>`) or ends (`<body>`, real or the one synthesized just above)
-            match slot {
-                HEAD_FRAME_SLOT => self.head_seen = true,
-                BODY_FRAME_SLOT => self.body_established = true,
-                _ => {}
-            }
+            self.frame.note_inserted(slot);
         }
         // materialize only the attributes some selector references, decoding lazily (borrowed Cow
         // when the value is clean valid UTF-8 — the common case, so usually zero allocation).
@@ -1875,7 +1885,6 @@ impl<'a> TokenSink<'a> for Matcher<'a> {
         }
         self.stack.push(OpenElem {
             tag: name,
-            tid,
             scid,
             attrs,
             matched: 0,
@@ -2026,27 +2035,23 @@ impl<'a> TokenSink<'a> for Matcher<'a> {
         // document: `<div><body>x</body>tail</div>` keeps `xtail` inside the div (verified against
         // libxml2, which keeps a stack entry for the start tag it merged away). Checked before the
         // stack, because a real `<body>` IS open in that shape and would otherwise close.
-        if let Some(slot) = frame_phantom_slot(name) {
-            if self.frame_phantoms[slot] > 0 {
-                self.frame_phantoms[slot] -= 1;
-                if let Some(p) = &mut self.pending_text {
-                    if p.gap_end == close_start {
-                        p.gap_end = close_end;
-                    }
+        if self.frame.absorbs_end_tag(name) {
+            if let Some(p) = &mut self.pending_text {
+                if p.gap_end == close_start {
+                    p.gap_end = close_end;
                 }
-                return;
             }
+            return;
         }
-        // Is this tag DISCARDED rather than honored? Either it matches no open element, or it would have
-        // to unwind a table — libxml2 refuses that (TABLE SCOPE), so `<td>A</div>B` keeps `AB` in the
-        // cell. Both cases leave the stack alone and extend the buffered text node's gap.
+        // Is this tag DISCARDED rather than honored? Either it matches no open element, or something
+        // still open above the match OUT-RANKS it — libxml2 refuses to unwind that (END-TAG SCOPE), so
+        // `<td>A</div>B` keeps `AB` in the cell. Both cases leave the stack alone and extend the
+        // buffered text node's gap.
         let matched = self.stack.iter().rposition(|e| e.tag.eq_ignore_ascii_case(name));
         let discarded = match matched {
             None => true,
             Some(k) => {
-                self.stack[k + 1..]
-                    .iter()
-                    .any(|e| blocks_end_tag(e.tag, e.tid, name))
+                self.stack[k + 1..].iter().any(|e| blocks_end_tag(e.tag, name))
                     && end_tag_discardable(name)
             }
         };
@@ -2099,6 +2104,26 @@ impl<'a> TokenSink<'a> for Matcher<'a> {
             self.buffer_text(&text[k..], allows_entities, start + k);
             return;
         }
+        // ...and with a body already established the head still ends here, it just has nowhere to move
+        // the text to. Popped directly rather than through `end_tag`, which would spend a `</head>`
+        // phantom left by an ignored duplicate instead of closing the real element.
+        if let Some(k) = self.late_head_text_split(text) {
+            if k > 0 {
+                self.buffer_text(&text[..k], allows_entities, start);
+            }
+            self.flush_text();
+            let head = self.stack.pop().expect("late_head_text_split checked the top");
+            self.close_elem(head, start + k);
+            self.buffer_text(&text[k..], allows_entities, start + k);
+            return;
+        }
+        // Character data after `</html>` needs the same second root a START TAG gets there, or it is
+        // lost outright: with the stack empty `emit_text` has nothing to attach it to and returns. The
+        // start-tag path builds that root in `ensure_frame`; the text path reaches neither split above
+        // once a body exists, so it has to ask for itself.
+        if nothing_open(&self.stack) && self.frame.body_established() && first_non_ws(text).is_some() {
+            self.start_tag(b"html", &[], false, start, start);
+        }
         self.buffer_text(text, allows_entities, start);
     }
 }
@@ -2115,15 +2140,27 @@ impl<'a> Matcher<'a> {
     /// Text inside a head element (`<title>T</title>`) belongs to that element, hence "head is the
     /// CURRENT open element" rather than "a head is open somewhere".
     fn body_text_split(&self, text: &[u8]) -> Option<usize> {
-        if self.body_established {
+        if self.frame.body_established() {
             return None; // the common path, once a body exists: one bool test and out
         }
-        let in_head = matches!(self.stack.last(), Some(e) if e.tag.eq_ignore_ascii_case(b"head"));
         // outside a head, only text that is not yet inside ANY element can start the frame
-        if !in_head && self.stack.iter().any(|e| frame_phantom_slot(e.tag) != Some(HTML_FRAME_SLOT)) {
+        if !head_is_current(&self.stack) && !only_html_open(&self.stack) {
             return None;
         }
-        text.iter().position(|c| !matches!(c, b' ' | b'\t' | b'\n' | b'\r' | 0x0c))
+        first_non_ws(text)
+    }
+
+    /// Where character data ends an open `<head>` that CANNOT start a body, if it does.
+    ///
+    /// The same rule as above minus its second half: character data always ends an open head, but once a
+    /// body exists there is no body to move it into, so libxml2 pops the head and leaves the text at
+    /// `<html>` level. Only a `<head>` written after `</body>` gets here — which is why it was missed:
+    /// the two halves were one function gated on `body_established()`, so the head simply kept the text.
+    fn late_head_text_split(&self, text: &[u8]) -> Option<usize> {
+        if !self.frame.body_established() || !head_is_current(&self.stack) {
+            return None;
+        }
+        first_non_ws(text)
     }
 
     /// Open whatever part of the document frame this token needs and the page did not write.
@@ -2134,25 +2171,48 @@ impl<'a> Matcher<'a> {
     /// root-level text, which is the largest divergence the contract used to list.
     ///
     /// Which part a given start tag opens is [`frame_content`], derived from the oracle over the whole
-    /// element universe. The frame tags themselves are excluded: they build the frame by being written.
+    /// element universe. The frame tags themselves open no PART — but they still need the element they
+    /// belong in: a page whose first tag is `<head>` or `<body>` writes no `<html>`, and libxml2 (and
+    /// html5lib, and every browser) still wraps it in one. Leaving that out put the `<head>` at the root
+    /// with no parent and then built a SECOND, later `<html>` for whatever followed `</head>`, so
+    /// `html > head`, `html > body` and `head + script` were all empty against lxml while the values
+    /// underneath them looked right. Real pages do this — one crawled page opens with a bare `<head>`.
     fn ensure_frame(&mut self, name: &[u8], frame: Option<usize>, at: usize) {
-        if frame.is_some() || self.body_established {
-            return; // a frame tag builds its own part; past the body there is nothing left to build
-        }
-        if self.stack.is_empty() {
+        // The `<html>` comes FIRST, before the body check: content after `</html>` still needs an element
+        // to sit in, and libxml2 gives it one — a SECOND ROOT `<html>`, which is the same shape it builds
+        // for a second `<html>` start tag. Ordering this after the `body_established` return left the
+        // tail parentless, so `//html/script` found a real page's trailing script in lxml and not here
+        // (the values were all still there; only the frame around them was missing).
+        if nothing_open(&self.stack) && !name.eq_ignore_ascii_case(b"html") {
             self.start_tag(b"html", &[], false, at, at);
+        }
+        if self.frame.body_established() {
+            return; // past the body no PART of the frame is synthesized any more
+        }
+        if frame.is_some() {
+            return; // a frame tag builds its own part, now that it has an `<html>` to sit in
         }
         // A head that is already OPEN takes everything it accepts; what it does not accept closes it
         // through the start-close relation, and the body is opened on that pop instead (see `start_tag`)
         // — which is why this is not the same question as `frame_content`.
-        if self.stack.iter().any(|e| e.tag.eq_ignore_ascii_case(b"head")) {
+        if head_is_open(&self.stack) {
             return;
         }
-        match frame_content(&String::from_utf8_lossy(name).to_ascii_lowercase()) {
+        // Inside a frameset there is no head for head content to go in, so libxml2 opens a BODY for it —
+        // the same one it opens for ordinary content there. Only the six `Head` names are affected; the
+        // rest already matched.
+        let part = frame_content(&String::from_utf8_lossy(name).to_ascii_lowercase());
+        let part = match part {
+            FrameContent::Head if frameset_is_open(&self.stack) => FrameContent::Body,
+            other => other,
+        };
+        match part {
             // ...and once a `</head>` has been seen, libxml2 does NOT reopen the head for a later
             // head-only tag: it leaves it at `<html>` level. (html5lib puts it back in the head; the
             // tree oracle here is libxml2. See docs/COMPATIBILITY.md.)
-            FrameContent::Head if !self.head_seen => self.start_tag(b"head", &[], false, at, at),
+            FrameContent::Head if !self.frame.head_seen() => {
+                self.start_tag(b"head", &[], false, at, at)
+            }
             FrameContent::Body => self.start_tag(b"body", &[], false, at, at),
             _ => {}
         }
@@ -2187,33 +2247,16 @@ impl<'a> Matcher<'a> {
 impl<'a> Matcher<'a> {
     /// Would this start tag close the CURRENT open element? A read-only peek, so the caller can decide
     /// whether an ignored tag is going to reshape the stack before committing the pending text node.
-    fn closes_top(&self, name: &[u8], tid: u8, scid: u8) -> bool {
+    fn closes_top(&self, name: &[u8], scid: u8) -> bool {
         match self.stack.last() {
             None => false,
             Some(top) => {
-                let closes = implies_close_id(tid, top.tid) || start_closes(scid, top.scid);
+                let closes = start_closes(scid, top.scid);
                 crate::mutate::closes(name, top.tag, closes)
             }
         }
     }
 
-    /// Is a `<html>`/`<head>`/`<body>` start tag REDUNDANT here — i.e. is the document frame already
-    /// established, so libxml2 would ignore the tag rather than insert an element?
-    ///
-    /// The engine has no insertion modes, so this is the byte-stream approximation of them: the three
-    /// frame elements are accepted while nothing but an `<html>` is open (which is exactly `<html>` at
-    /// the top of a document, `<head>` inside it, and `<body>` once `<head>` has closed — an implied
-    /// close handled by the start-close table, since `<body>` closes an open `<head>`), and ignored once
-    /// any other element is open. It does NOT synthesize a missing frame; a document that omits
-    /// `<html>`/`<body>` entirely still has no frame to select against (see docs/COMPATIBILITY.md).
-    fn frame_tag_is_redundant(&self, name: &[u8]) -> bool {
-        if name.eq_ignore_ascii_case(b"html") {
-            // a second <html> is redundant however shallow the stack is
-            !self.stack.is_empty()
-        } else {
-            self.stack.iter().any(|e| !e.tag.eq_ignore_ascii_case(b"html"))
-        }
-    }
 
     /// Deliver the buffered text node (if any) to every consumer. Called before any event that could
     /// observe it out of order, and at EOF.

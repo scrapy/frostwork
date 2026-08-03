@@ -166,25 +166,31 @@ def _merge_mro(cls, attr: str) -> dict:
     return out
 
 
+def _as_wp_field(name: str, getter):
+    """Wrap ``getter`` as a real ``web_poet.field`` under ``name``. The naming is load-bearing, not
+    cosmetic: web-poet keys its registration off the function's name, so a getter left called
+    ``getter`` registers every field under that one name."""
+    getter.__name__ = name
+    getter.__qualname__ = name
+    return _wp_field(getter)
+
+
 def _make_field(name: str, card: _Card, transforms: Tuple[Callable, ...]):
     """A ``web_poet.field``-decorated getter that reads its column from the shared batched extract."""
 
     def getter(self):
         return _shape(self._frostwork_columns()[name], card, transforms)
 
-    getter.__name__ = name
-    getter.__qualname__ = name
-    return _wp_field(getter)
+    return _as_wp_field(name, getter)
 
 
 def _make_group_field(name: str, grp: _FrostGroup):
     """A ``web_poet.field`` getter for a `Many`/`One`: shape each row's sub-columns (per-subfield
     cardinality + transforms), optionally build an ``item``, from the shared grouped run."""
-    subnames = list(grp.subfields)
-    subs = list(grp.subfields.values())
+    subs = list(grp.subfields.items())
 
     def build(row):
-        d = {sn: _shape(row[i], sub.card, sub.transforms) for i, (sn, sub) in enumerate(zip(subnames, subs))}
+        d = {sn: _shape(col, sub.card, sub.transforms) for (sn, sub), col in zip(subs, row)}
         return grp.item(**d) if grp.item is not None else d
 
     def getter(self):
@@ -193,9 +199,7 @@ def _make_group_field(name: str, grp: _FrostGroup):
             return build(rows[0]) if rows else None
         return [build(r) for r in rows]
 
-    getter.__name__ = name
-    getter.__qualname__ = name
-    return _wp_field(getter)
+    return _as_wp_field(name, getter)
 
 
 class FrostPage(WebPage):
@@ -230,13 +234,13 @@ class FrostPage(WebPage):
             if isinstance(val, _FrostField):
                 own[name] = (val.selector, val.card, val.transforms)
                 wp = _make_field(name, val.card, val.transforms)
-                setattr(cls, name, wp)
-                wp.__set_name__(cls, name)
             elif isinstance(val, _FrostGroup):
                 own_groups[name] = val
                 wp = _make_group_field(name, val)
-                setattr(cls, name, wp)
-                wp.__set_name__(cls, name)
+            else:
+                continue
+            setattr(cls, name, wp)
+            wp.__set_name__(cls, name)
         cls._frostwork_own_specs = own
         cls._frostwork_own_groups = own_groups
         # merge across the MRO NOW (nearest class wins, order preserved) so it is not rebuilt per page
@@ -271,12 +275,10 @@ class FrostPage(WebPage):
         any HTML: which selectors are supported, advisory reasons for those that are not, and budget
         usage. This runs automatically at class definition unless the class passes ``strict=False``.
         See :class:`frostwork.SchemaReport`."""
-        named_queries = [(n, spec[0]) for n, spec in cls._frostwork_specs.items()]
-        named_groups = [
-            (n, g.container, {sn: sf.selector for sn, sf in g.subfields.items()})
-            for n, g in cls._frostwork_groups.items()
-        ]
-        return check(named_queries, named_groups)
+        # `frost_schema()` already returns the two named-mapping shapes `check` accepts, so the schema
+        # is described in exactly one place — audit and introspection cannot report different selectors.
+        schema = cls.frost_schema()
+        return check(schema["fields"], schema["groups"])
 
     @classmethod
     def frost_schema(cls) -> dict:

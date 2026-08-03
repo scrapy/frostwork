@@ -38,7 +38,6 @@ import argparse
 import json
 import os
 import random
-import re
 import subprocess
 import sys
 import time
@@ -48,23 +47,6 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 
 PY = os.path.join(ROOT, ".venv", "bin", "python")
-
-
-def _ids(module: str) -> dict[str, int]:
-    """Read an id table straight out of the Rust source — no second copy to drift."""
-    src = open(os.path.join(ROOT, "src", "implied_close.rs")).read()
-    block = re.search(r"pub mod %s \{(.*?)\n\}" % module, src, re.S)
-    if not block:
-        raise SystemExit(f"could not find `pub mod {module}` in src/implied_close.rs")
-    ids = {m[1].lower(): int(m[2]) for m in
-           re.finditer(r"pub const (\w+): u8 = (\d+);", block.group(1))}
-    if not ids:
-        raise SystemExit(f"no ids parsed from `pub mod {module}`")
-    return ids
-
-
-def tag_ids() -> dict[str, int]:
-    return _ids("tag")
 
 
 # The name universe for close-decision cells, DERIVED from the oracle rather than remembered.
@@ -109,12 +91,26 @@ CLOSE_NAMES, VOID_SET, NONVOID_SET, UNOBSERVABLE_AS_OPEN = _derived_universe()
 # (cheap), and "the raw-text universe was the four names we already knew about" is precisely the bug
 # that let `iframe`/`noembed`/`xmp`/`plaintext` fabricate elements out of their own text content.
 DATA_MODE_NAMES = sorted(VOID_SET + NONVOID_SET)
+# Same reasoning for end-tag priority: one mutant per name, over every name that can be ON the stack when
+# a stray end tag arrives (a void or raw-text element never is, so its priority cannot matter).
+#
+# `<html>` and `<head>` are excluded on top of that, and for a different reason than the close dimension
+# keeps them: priority only matters for an element open STRICTLY ABOVE the match, and neither can be. An
+# `<html>` has nothing below it but the match `</html>`, which `end_tag_discardable` exempts outright, and
+# a misplaced `<head>` is ignored rather than inserted, so it is never on the stack at all.
+#
+# `<body>` was in this list and should not have been. The same reasoning was applied to it and it is
+# WRONG: after a `</body>` libxml2 starts a second body wherever the next one is written, so a `<body>`
+# can sit above a `</td>` — and it out-ranks every end tag there. That is a real cell on a real crawled
+# page, which is why "unobservable" has to be measured rather than argued.
+PRIORITY_UNOBSERVABLE = {"html", "head"}
+PRIORITY_NAMES = sorted(set(DATA_MODE_NAMES) - set(UNOBSERVABLE_AS_OPEN) - PRIORITY_UNOBSERVABLE)
 # `void:` mutants cover the whole void set plus the HTML5-era names libxml2 deliberately keeps OPEN,
 # since flipping one of THOSE to void is the mistake the contract exists to prevent.
 VOID_NAMES = VOID_SET + ["embed", "source", "track", "wbr"]
 
 
-def mutants(ids: dict[str, int]) -> list[tuple[str, str]]:
+def mutants() -> list[tuple[str, str]]:
     """(spec, human label) for every rule cell that can be flipped."""
     out: list[tuple[str, str]] = []
     for top in CLOSE_NAMES:
@@ -128,9 +124,13 @@ def mutants(ids: dict[str, int]) -> list[tuple[str, str]]:
             out.append((f"close:{inc},{top}", f"<{inc}> closes an open <{top}>"))
     for name in DATA_MODE_NAMES:
         out.append((f"mode:{name}", f"data_mode({name})"))
-    by_id = {v: k for k, v in ids.items()}
-    for tid in sorted(by_id):
-        out.append((f"scope:{tid}", f"table_scope({by_id[tid]})"))
+    # End-tag scope gets one mutant per NAME over the whole universe, not per pair: one table
+    # (`end_priority`) feeds the answer, so there is no second rule to mask the flip the way a hand-written
+    # id table used to mask `start_closes`. It replaced a `scope:<tag_id>` enumeration that could only
+    # reach the 19 ids the engine already had — which is how the ORDER inside the table machinery
+    # (`</tr>` may not unwind a `<tbody>`) went unprobed while this sweep reported full protection.
+    for name in PRIORITY_NAMES:
+        out.append((f"prio:{name}", f"end_priority({name})"))
     for n in VOID_NAMES:
         out.append((f"void:{n}", f"void({n})"))
     return out
@@ -222,7 +222,7 @@ def main() -> int:
                     help="real-page corpus dir for the corpus-real detector ('' to skip)")
     ap.add_argument("--with-differential", action="store_true",
                     help="also run a reduced diff_lxml per mutant (slower, more informative)")
-    ap.add_argument("--only", help="SEMICOLON-separated specs to test (e.g. 'cell:2,0;scope:3' — the "
+    ap.add_argument("--only", help="SEMICOLON-separated specs to test (e.g. 'close:dd,dt;prio:tbody' — "
                                    "separator is ';' because a cell spec already contains a comma). Use "
                                    "this to re-test the survivors after widening a gate.")
     ap.add_argument("--detectors", help="comma-separated subset to run (default: all). The `unit` "
@@ -232,7 +232,7 @@ def main() -> int:
     ap.add_argument("--json", help="write the full matrix here")
     args = ap.parse_args()
 
-    all_m = mutants(tag_ids())
+    all_m = mutants()
     rng = random.Random(args.seed)
     if args.only:
         want = [x.strip() for x in args.only.split(";") if x.strip()]

@@ -77,23 +77,24 @@ BLOCK = ("address blockquote center dir div dl fieldset form h1 h2 h3 h4 h5 h6 h
          "ul").split()
 SECTIONING = "section article aside header footer nav main figure details hgroup".split()
 INLINE = "span a b em strong small label".split()
-TABLE_SCOPED = "table caption thead tbody tfoot tr td th".split()
-# markup needed BEFORE an element for it to be in scope, derived from WRAP so adding a tag there is
-# enough (`table` needs no wrapper; a cell needs a row as well)
-SCOPE_PRE = {t: f"<{w}>{EXTRA.get(t, '')}" for t, w in WRAP.items()}
-SCOPE_PRE.update({"table": "", "p": "", "span": ""})
-# Every element whose scope contribution is a real question — the optional-end-tag set plus `table` and
-# two controls. Drawing this from TABLE_SCOPED plus a hand-picked few made it self-referential AGAIN, in a
-# subtler place than before: `dd`, `dt` and `rp` were absent, so flipping their scope entry changed the
-# engine's behaviour and NOTHING went red (found by tools/mutate_rules.py, not by reading the code).
-SCOPE_CANDIDATES = TABLE_SCOPED + ["colgroup", "li", "dd", "dt", "p", "span", "option", "optgroup",
-                                   "rt", "rp"]
+# The table-related element set, used by `tools/diff_fuzz.py` to attribute FOSTER-PARENTING divergences.
+# It is NOT the end-tag scope relation, which is a priority comparison derived from the oracle
+# (`audit_end_scope`) rather than a set of boundary names — one list used to serve both, and that is how
+# the ORDER inside the table machinery (`</tr>` may not unwind an open `<tbody>`) went unprobed.
+TABLE_RELATED = "table caption thead tbody tfoot tr td th".split()
+# End-tag SCOPE has no list here any more: it was two of them (which elements can be in the way, which
+# end tags can be discarded), each hand-picked, and between them they left out every table-family end tag
+# on the closing side. `audit_end_scope` sweeps the whole (open x closing) universe instead.
 
-# The cross product below is over TAG NAMES, but the engine's table is over 19 tag IDS, and three of
-# them are not names: OTHER (any unrecognized element), BLOCK (the <p>-closing block set) and TABLE.
-# So `<div>` closing an open `<dd>`, or `<dd>` closing an open `<span>`, was never asked — 40 such cells
-# survived every gate in the mutation sweep. `span` stands for OTHER and `div` for BLOCK; each needs a
-# wrapper that is not itself the tag under test, or the probe selector cannot tell parent from ancestor.
+# The cross product below probes the close relation in each element's NATURAL context — a `<li>` inside a
+# `<ul>`, a `<td>` inside a `<tr>` — where `audit_start_close_pairs` uses an unknown `<xwrap>` so that the
+# wrapper contributes nothing. Two scaffolds for one relation is deliberate: the unknown wrapper isolates
+# the pair, and the real one is the shape a page actually contains.
+#
+# (This block used to exist for a different reason — the engine had a second, coarse tag-id table where
+# `span` stood for "any unrecognized element" and `div` for "the block set", and 40 id-space cells went
+# unasked. That table is gone: the generated name-pair relation closed every pair it did. The probes are
+# kept for the natural-context coverage, not for the ids.)
 XPROD_WRAP = dict(WRAP, span="div", div="section")
 
 # ---------------------------------------------------------------- libxml2's start-close PAIR table
@@ -420,6 +421,81 @@ def audit_frame_synthesis(a: Audit):
                      b"<html>  <meta id=M>", ["html > head > meta::attr(id)", "body meta::attr(id)"])
 
 
+def audit_frame_in_element(a: Audit):
+    """A written `<html>`/`<head>`/`<body>` INSIDE another element — over the whole universe.
+
+    `audit_document_frame` asks this about `<div>` only, and `audit_frame_synthesis` skips the three frame
+    names entirely (`if t in ("html", "head", "body"): continue`), so the whole relation rested on one
+    probe with one wrapper. Both cells it could not see were wrong, and a 10000-page crawl sample found
+    both: libxml2 inserts a written `<body>` inside a `<frameset>` (a frameset document's no-frames
+    fallback is written that way) and nowhere else, and a page whose FIRST tag is `<head>`/`<body>` still
+    gets an `<html>` around it.
+
+    The probes read `<inner>::attr(id)` UNSCOPED as well as scoped, because parsel's CSS is rooted at the
+    first root element: on a document libxml2 gives two `<html>` roots, `.css('html')` sees one and
+    `//html` sees both, and a scoped-only probe would call the tree difference a match.
+    """
+    with a.section("written frame tag inside another element (whole universe x is-a-body-open)"):
+        never = Oracle().never_open()
+        # TWO dimensions, because the rule is not one: `<head>` is admitted while nothing but `<html>` is
+        # open, but `<body>` is admitted whenever no BODY is open — so the same wrapper answers
+        # differently before and after a `</body>`, and a one-dimensional sweep reads the rule as
+        # "anything else open means redundant" and misses every second body.
+        for prefix in ("", "<body id=0></body>"):
+            for outer in ELEMENTS:
+                if outer in never or outer in ("html", "body"):
+                    continue  # never on the stack, or the frame element itself
+                for inner in ("html", "head", "body"):
+                    html = f'<html>{prefix}<{outer}><{inner} id="Z">y</{outer}></html>'.encode()
+                    a.check_many("frame-in-element", f"{prefix}<{outer}><{inner} id=Z>", html,
+                                 [f"{inner}::attr(id)", f"//{inner}/@id",
+                                  f"{outer} > {inner}::attr(id)", f"{outer}::text"])
+        # ...and the SELF-CLOSING form of that same tag is NOT the same rule, which is why it needs its
+        # own pass over the same universe. The start tag still inserts nothing, but the `/>` fires
+        # libxml2's endElement, and with no element of its own on the stack that pop takes the ENCLOSING
+        # element: `<html/>` ends the `<strong>` a crawled page had left open around its whole document.
+        # Exactly one level (the `<div id=D>` outside must survive), and the phantom the ignored start
+        # tag leaves is NOT consumed — the tail probes below check that a later `</body>` is still
+        # absorbed, which is what separates this from `<html></html>`.
+        for outer in ELEMENTS:
+            if outer in never or outer in ("html", "head", "body"):
+                continue
+            for inner in ("html", "head", "body"):
+                shape = f"<{outer}>x<{inner}/>y<i>S</i></{outer}>"
+                a.check_many("frame-self-close", shape,
+                             f"<html><body><div id=D>{shape}</div></body></html>".encode(),
+                             [f"{outer}::text", "#D::text", "#D > i::text", f"{outer} > i::text"])
+        for inner in ("html", "head", "body"):
+            for tail in ("</body>z", "</body></body>z", "</html>z", "</head>z", "z"):
+                shape = f"<div id=D><b>x<{inner}/>y{tail}"
+                a.check_many("frame-self-close", shape, shape.encode(),
+                             ["#D::text", "b::text", "body::text", "#D > b::text"])
+        # depth matters, not just the immediate parent: the exception is "everything open is a frameset",
+        # so one ordinary element in between takes it back and a second frameset does not
+        for shape in ("<frameset><frameset><body id=Z>y</frameset></frameset>",
+                      "<frameset><div><body id=Z>y</div></frameset>",
+                      "<frameset><frame src=a><body id=Z>y</frameset>",
+                      "<div><frameset><body id=Z>y</frameset></div>",
+                      "<frameset><body><p>gb</p></body></frameset>"):
+            a.check_many("frame-in-element", shape, f"<html>{shape}</html>".encode(),
+                         ["body::attr(id)", "body > p::text", "p::text", "html > frameset > body::attr(id)"])
+        # A document whose first tag IS a frame tag writes no `<html>`, and gets one anyway.
+        for first in ("<head id=H><title>t</title></head><p>y</p>",
+                      "<body id=B><p>y</p></body>",
+                      "<head id=H></head><body id=B><p>y</p></body>",
+                      "<head id=H></head><script>s</script><p>y</p>"):
+            a.check_many("frame-first-tag", first, first.encode(),
+                         ["html > head::attr(id)", "html > body::attr(id)", "head + script::text",
+                          "head + body::attr(id)", "html > body > p::text", "p::text"])
+        # A second `<html>` once the first has closed: libxml2 builds a second ROOT element for it, so
+        # the count and the attributes are a real cell — asked through XPath, since parsel's CSS is
+        # scoped to the first root and cannot see the second.
+        for doc in ("<html a=1 /><html a=2><p>x</p>", "<html a=1></html><html a=2><p>x</p>",
+                    "<html a=1></html><p>x</p>"):
+            a.check_many("frame-second-root", doc, doc.encode(),
+                         ["//html/@a", "//html/@class", "//p/text()"])
+
+
 def audit_implied_body(a: Audit):
     """Whatever ENDS the head also STARTS the body — over the whole element universe.
 
@@ -444,6 +520,29 @@ def audit_implied_body(a: Audit):
             a.check_many("implied-body", f"<head><title><{t}>", html,
                          [f"body > {t}::attr(id)", f"head > {t}::attr(id)",
                           "head > title::text", "body > link::attr(id)", "head > link::attr(id)"])
+        # ...and what ends the head does NOT always start a body: `<frameset>` opens neither part, so a
+        # frameset document written with its frameset INSIDE the head has no body at all. Swept as its
+        # own shape because the implied-body rule fires on the head POP, which `frame_content` alone
+        # does not gate.
+        for t in ELEMENTS:
+            if t in ("html", "head", "body"):
+                continue
+            html = (f"<html><head><title>T</title><{t} id=D>X</{t}></head>"
+                    f"<body id=B>y</body></html>").encode()
+            a.check_many("implied-body", f"<head><title><{t}></head><body>", html,
+                         [f"html > {t}::attr(id)", f"body > {t}::attr(id)", "html > body::attr(id)",
+                          f"{t} + body::text", "body::text"])
+        # ...and inside a FRAMESET there is no head for head content to go in, so libxml2 opens a body
+        # for it there. Swept over the universe because the six `FrameContent::Head` names are the only
+        # ones whose answer changes, and they are exactly the names a `never_open`-filtered probe cannot
+        # see (all six are void or raw text) — so this needs its own row or the rule rests on one vector.
+        for t in ELEMENTS:
+            if t in ("html", "head", "body"):
+                continue
+            html = f'<html><frameset><{t} id="Z">A</{t}></frameset></html>'.encode()
+            a.check_many("implied-body", f"<frameset><{t} id=Z>", html,
+                         [f"body {t}::attr(id)", f"frameset > body {t}::attr(id)",
+                          f"frameset > {t}::attr(id)", f"{t}::attr(id)"])
         # character data ends it too, and splits the run at the first non-space character
         a.check_many("implied-body", "non-whitespace text ends the head",
                      b"<html><head>\n\t  TXT<meta id=M></head><body><p>P</p></body></html>",
@@ -456,44 +555,56 @@ def audit_implied_body(a: Audit):
                      ["head > title::text", "head > style::text", "body::text"])
 
 
-def audit_table_scope(a: Audit):
-    """libxml2 will not unwind a table for an ordinary end tag; it discards it instead."""
-    with a.section("table scope (end tag through an open table-scoped element)"):
-        # BARE: no wrapper, so this measures the element's OWN scope contribution. Wrapping each in
-        # `<table>` hid it (the table blocks regardless) — which is how a wrong `caption` entry survived.
-        for inner in SCOPE_CANDIDATES:
-            for outer in ("div", "ul", "span", "section"):
-                html = f"<html><body><{outer}><{inner}>AAA</{outer}>BBB</body></html>".encode()
-                a.check("table-scope-bare", f"<{outer}><{inner}>AAA</{outer}>BBB", html,
-                        f"{inner}::text")
-        for inner in SCOPE_CANDIDATES:
-            pre = SCOPE_PRE.get(inner, "")
-            for outer in ("div", "ul", "span", "section"):
-                html = f"<html><body><{outer}>{pre}<{inner}>AAA</{outer}>BBB</body></html>".encode()
-                a.check("table-scope", f"<{outer}>{pre}<{inner}>AAA</{outer}>BBB", html,
-                        f"{inner}::text")
-        # a table-scoped end tag must still unwind, and </body>/</html> must still close the document
+def audit_end_scope(a: Audit):
+    """Misplaced END-TAG scope, over EVERY (open x closing) pair in the universe.
+
+    libxml2's rule is a PRIORITY comparison — a stray end tag may only unwind elements that do not
+    out-rank it — and this audit used to ask about it with two hand-written lists: a "scope candidate"
+    set for the element in the way and four names (`div`/`ul`/`span`/`section`) for the end tag being
+    discarded. Every table-family end tag was therefore missing from the closing side, and with it the
+    whole ORDER inside the table machinery: `</tr>` cannot unwind an open `<tbody>`, and a real page
+    (`<tr><strong><tbody><td>…</strong><tbody></tr>`, from a table generator) lost its cells here while
+    lxml kept the row open. Same failure as rounds 1-4 in docs/TESTING.md, one relation later.
+
+    `<xspacer>` is why the sweep reaches the pairs that matter: `<tbody>` directly inside `<tr>` closes
+    the row, so the interesting stack only exists with something between them, and an unknown element is
+    the filler libxml2 closes for nothing.
+    """
+    with a.section(f"end-tag scope, all {len(ELEMENTS)}x{len(ELEMENTS)} pairs (libxml2 end priority)"):
+        # TWO document shapes, the same pair as the derivation uses. The second one is what makes a
+        # `<body>` the OPEN element — it is only inserted inside another element once a `</body>` has
+        # closed the first — and `<body>` tops the priority order, so without it the whole top row of the
+        # table is asserted rather than checked. The mutation sweep is what proved that: `prio:body`
+        # survived the one-shape sweep untouched.
+        shapes = (("<html><body>", "</body></html>"), ("<html><body id=0></body>", "</html>"))
+        for (open_doc, close_doc), (closing, open_) in itertools.product(
+                shapes, itertools.product(ELEMENTS, ELEMENTS)):
+            html = (f'{open_doc}<xwrap>xx<{closing}>aaa<xspacer><{open_}>bbb</{closing}>'
+                    f'<zmark id="Z">ccc</xwrap>{close_doc}').encode()
+            # Where the marker after the end tag landed says which way the rule went: a child of the
+            # wrapper means the end tag unwound everything, still inside `closing` means it was
+            # discarded. An ATTRIBUTE marker rather than text, because text inside an open table is
+            # foster-parented and would answer about that instead.
+            a.check_many("end-scope", f"{open_doc}<{closing}>aaa<xspacer><{open_}>bbb</{closing}>", html,
+                         ["xwrap > zmark::attr(id)", f"{closing} zmark::attr(id)",
+                          f"{open_} zmark::attr(id)"])
+        # ...plus the claims the contract makes in prose, which the sweep cannot state: a table-family
+        # end tag DOES unwind lower-priority row/cell machinery, and `</body>`/`</html>` close the
+        # document whatever is open above them.
         for closer, sel in [("table", "div::text"), ("tbody", "td::text"), ("tr", "td::text"),
                             ("body", "td::text"), ("html", "td::text")]:
             html = (f"<html><body><div><table><tbody><tr><td>AAA</{closer}>BBB"
                     f"</body></html>").encode()
-            a.check("table-scope", f"</{closer}> must still unwind", html, sel)
-        # A NESTED table is a fresh scope boundary even for a table-family closer. This real-page
-        # shape was absent from the original same-table probes, which therefore over-generalized
-        # "`</tr>` always unwinds" and missed an outer row being closed through an inner table.
-        a.check("table-scope-nested", "nested <table> blocks outer </tr>",
+            a.check("end-scope", f"</{closer}> must still unwind", html, sel)
+        # A NESTED table is a fresh boundary even for a table-family closer. This real-page shape was
+        # absent from the original same-table probes, which therefore over-generalized "`</tr>` always
+        # unwinds" and missed an outer row being closed through an inner table.
+        a.check("end-scope-nested", "nested <table> blocks outer </tr>",
                 b"<html><body><tr><table>AAA</tr>BBB</body></html>", "table::text")
-
-
-def audit_div_end_scope(a: Audit):
-    """An open div blocks an end tag aimed at one of its ancestors; peer block tags do not."""
-    with a.section("div end-tag scope"):
-        for outer in ("nav", "form", "ul", "span", "a"):
-            html = f"<html><body><{outer}><div>AAA</{outer}>BBB</body></html>".encode()
-            a.check("div-end-scope", f"<{outer}><div>AAA</{outer}>BBB", html, "div::text")
-        a.check("div-end-scope-control", "blockquote is not a div boundary",
-                b"<html><body><nav><blockquote>AAA</nav>BBB</body></html>",
-                "blockquote::text")
+        # and the shape the crawl sample found, end to end by value
+        a.check_many("end-scope-realpage", "<tr><strong><tbody></tr> keeps the row open",
+                     b"<html><body><table><tr><strong><tbody></tr><td>A</td></table></body></html>",
+                     ["tr td::text", "table > tr > td::text"])
 
 
 def audit_rawtext(a: Audit):
@@ -541,9 +652,9 @@ def main():
     audit_start_close_pairs(a)
     audit_document_frame(a)
     audit_frame_synthesis(a)
+    audit_frame_in_element(a)
     audit_implied_body(a)
-    audit_table_scope(a)
-    audit_div_end_scope(a)
+    audit_end_scope(a)
     audit_rawtext(a)
     audit_boolean_attrs(a)
 

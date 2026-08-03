@@ -35,7 +35,10 @@ cols = frostwork.extract(html, ["h1::text", ".price::text", "img::attr(src)", "/
 
 `extract(html, queries, encoding=None, *, strict=True)` — `html` is `bytes` (preferred; the engine
 tokenizes raw bytes) or `str` (encoded UTF-8). `encoding` is an optional charset label as Scrapy
-passes from `Content-Type`; `None` sniffs (BOM → `<meta>` → UTF-8). Unsupported queries raise
+passes from `Content-Type`; `None` sniffs (BOM → `<meta>` → UTF-8). A label naming no encoding at all
+(`"utf8x"`) raises; one naming a real encoding WHATWG excludes (`utf-7`, `utf-32` — w3lib resolves
+those against Python's codec set, so `response.encoding` can be one) is **ignored** and the page is
+sniffed instead, per WHATWG's "failure, continue". Unsupported queries raise
 `UnsupportedSelector` before the HTML is scanned. Pass `strict=False` for permissive empty columns.
 Supported selectors and value semantics are exactly the Rust engine's — see
 [COMPATIBILITY.md](COMPATIBILITY.md).

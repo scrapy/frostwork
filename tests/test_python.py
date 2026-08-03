@@ -108,9 +108,20 @@ def test_extract_rejects_bare_string_queries():
 
 
 def test_extract_unknown_encoding_label_raises():
-    # an unrecognized label must fail loudly, not silently fall through to sniffing (a wrong decode).
+    # a label that names NO encoding must fail loudly, not silently fall through to sniffing.
     with pytest.raises(ValueError, match="unknown encoding label"):
         frostwork.extract(b"<p>x</p>", ["p::text"], "not-a-real-charset")
+
+
+def test_extract_real_but_non_whatwg_label_is_ignored_not_raised():
+    # `utf-7` is a real Python codec and NOT a WHATWG label, so w3lib (and therefore Scrapy's
+    # `response.encoding`, the documented input here) can hand it to us off a `Content-Type` header.
+    # WHATWG's rule for such a label is "failure, continue" — ignore it and keep sniffing — which is
+    # what browsers do. Raising would crash a spider on publisher-controlled input; a crawled page
+    # whose header said `charset=UTF-7` while its own <meta> said UTF-8 did exactly that.
+    page = b'<meta charset="utf-8"><p>caf\xc3\xa9</p>'
+    assert frostwork.extract(page, ["p::text"], "UTF-7") == [["caf\u00e9"]]
+    assert frostwork.extract(page, ["p::text"], "UTF-7") == frostwork.extract(page, ["p::text"], None)
 
 
 def test_extract_normalizes_python_codec_spellings():

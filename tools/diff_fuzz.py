@@ -242,7 +242,7 @@ _FORMATTING = {"a", "b", "i", "em", "strong", "small", "label", "font", "u", "s"
 # listed `option`/`optgroup`/`thead` as `<p>`-closers after that was proved wrong, which silently
 # attributed every `<p>`-nesting divergence to `deep-p` and kept it out of the NOVEL bucket this gate
 # is built around.
-_TABLE_SCOPED = set(audit_tree_rules.TABLE_SCOPED)
+_TABLE_RELATED = set(audit_tree_rules.TABLE_RELATED)
 _HEAD_ONLY = {"title", "base", "meta", "link", "basefont"}
 _VOID = set(audit_tree_rules.VOID)
 # closes an open `<p>`: the block set plus list/table ITEMS — NOT option/optgroup/thead/rt/rp
@@ -256,8 +256,11 @@ _TAG_RE = re.compile(rb"<(/?)([a-zA-Z][^\s/>]*)")
 # `nested-form` is deliberately ABSENT: `<form>` closing an open `<form>` is implemented now (libxml2's
 # start-close pair table, `implied_close::start_closes`), so if a nested form ever explains a divergence
 # again that is a REGRESSION and belongs in NOVEL — the same reasoning that keeps `unmatched-end` out.
-DOCUMENTED = {"foster", "misnest", "deep-p", "head-in-body", "fragment", "outer-html",
-              "truncated-tag", "after-html"}
+# `truncated-tag` is deliberately ABSENT for the same reason: a start tag the response ends inside is
+# DROPPED now, matching libxml2 and html5lib, so if one ever explains a divergence again that is a
+# regression — and it was exactly the sort worth catching, an element the engine reported and no other
+# parser did.
+DOCUMENTED = {"foster", "misnest", "deep-p", "head-in-body", "fragment", "outer-html", "after-html"}
 
 
 def constructs(html: bytes) -> set:
@@ -295,9 +298,9 @@ def constructs(html: bytes) -> set:
             continue
         if name in _VOID:
             continue
-        if name in _TABLE_SCOPED and "table" not in stack:
+        if name in _TABLE_RELATED and "table" not in stack:
             found.add("foster")
-        if stack and stack[-1] == "table" and name not in _TABLE_SCOPED:
+        if stack and stack[-1] == "table" and name not in _TABLE_RELATED:
             found.add("foster")
         if name in _HEAD_ONLY and "body" in stack:
             found.add("head-in-body")

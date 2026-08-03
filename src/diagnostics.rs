@@ -15,9 +15,9 @@ pub fn reason(q: &str) -> String {
     if qt.is_empty() {
         return "empty selector".to_string();
     }
-    // Route exactly as the compiler does: a leading `/`, `./`, or a `normalize-space(...)` wrapper is
-    // XPath, else CSS.
-    if qt.starts_with('/') || qt.starts_with("./") || qt.starts_with("normalize-space(") {
+    // Route through the compiler's own rule, never a copy of it: an explainer that disagreed about
+    // whether a query is XPath or CSS would confidently name a cause from the wrong taxonomy.
+    if crate::is_xpath(qt) {
         xpath_reason(qt)
     } else if qt.starts_with('.') && looks_like_xpath_step(qt) {
         // `.foo` is a CSS class; but `.` / `./` / `.//` are XPath context paths. The compiler only

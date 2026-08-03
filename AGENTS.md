@@ -30,7 +30,8 @@ must NOT enable it (they'd fail to link libpython); maturin builds only the `--f
 
 The `Makefile` bundles these into one-command gates (`make help` lists them): `make ci` = `test`
 (unit + clippy) + `gate` (differential + encoding parity vs lxml) + `gate-corpus` (value parity over
-the fixture corpus) + `fuzz-smoke` + `py` — the minimum pre-release check. Individual targets run
+the fixture corpus) + `gate-seq` (every tag sequence up to length 4, compared on the whole tree) +
+`fuzz-smoke` + `py` — the minimum pre-release check. Individual targets run
 their own piece.
 
 The limits of that gate are worth knowing before trusting a "100% parity" number — each bullet below is
@@ -49,7 +50,41 @@ a way it has read 100% while the engine was wrong:
   prescan window, two whole tree-construction rules (what ends `<head>` also starts `<body>`; a `<!DOCTYPE>`
   does not break a text node) and the missing document-frame synthesis behind them, a decoder sweep that
   had been *sampled* rather than exhaustive and so read "full parity" while euc-jp differed on the wave
-  dash, and documented divergences whose stated scope was too narrow. None of them are exotic;
+  dash, and documented divergences whose stated scope was too narrow. A 2000-page sample then found the
+  next one down: end-tag scope is a PRIORITY comparison, not a set of boundary elements, so `</tr>` cannot
+  unwind an open `<tbody>` and a table generator's rows lost their cells. A 10000-page sample then found
+  three more, all in the document frame and all hidden by an EXCLUSION rather than a short list: the frame
+  probes skipped the three frame names themselves ("asking where `<head>` nests is meaningless"), so a
+  page whose first tag is `<head>` got no `<html>` at all, a `<body>` written after `</body>` was ignored
+  where libxml2 starts a second one, and `<body>` — which out-ranks every end tag — was missing from the
+  priority order because the derivation had ruled it "never open". Two more 10000-page samples then found
+  three more, and the most valuable was in the TOKENIZER rather than the tree: only an ASCII letter after
+  `</` starts an end tag, so `</%>` is a bogus comment that SPLITS a text node while `</>` is ignored and
+  does not — reading both as "scan a name, skip to `>`" merged a page's copyright line and was also the
+  single largest source of unattributed divergences in the malformed-HTML fuzzer (NOVEL 93 -> 5). The
+  other two were the frame again: `<frameset>` ends the head but starts no body, and content after
+  `</html>` gets a second ROOT `<html>` rather than no parent at all. A third 10000-page sample found four
+  more, and two of them were not parsing rules at all: **Parsel does not parse the response bytes**, it
+  parses `text.strip().replace("\x00","")` — the NUL half was already matched, and the missing STRIP half
+  promotes a whitespace-preceded U+FEFF to offset 0, where libxml2 eats it as a BOM. On the bytes it is a
+  character, a character before the frame opens the `<body>`, and a page that merely INDENTS its doctype
+  loses its `<head>`, its `<title>` and the attributes of its own `<html>` tag. **And ISO-2022-JP is not
+  ASCII-compatible** — `社` is the two bytes `<R`, so the byte tokenizer grew a start tag out of the middle
+  of a Japanese word; the transcode set is now `Encoding::is_ascii_compatible`'s answer rather than the
+  hand-written "UTF-16 is the only one". The other two: a self-closed redundant frame tag (`<html/>`)
+  closes the element it sits in, because libxml2's `endElement` pops the CURRENT node and the ignored
+  start tag pushed nothing; a class list splits on ASCII whitespace and NOT on Unicode whitespace, so a
+  Japanese page separating two class names with an IDEOGRAPHIC SPACE matched both of them here and
+  neither in lxml; and a start tag the response ends inside must be DROPPED, whole.
+  That last one carries the sharpest methodological lesson in this file. It was a *documented divergence*
+  — "libxml2 discards the incomplete tag; the engine keeps the attributes it already scanned" — and it was
+  wrong on both counts: html5lib discards it too, so the engine was alone, and what it kept was an element
+  with an attribute holding the rest of the document, i.e. a FALSE POSITIVE. Fixing it took the
+  malformed-HTML fuzzer from 426 divergences to **zero, on 915000 pairs**. Every one of those 426 had been
+  attributed to foster-parenting, misnesting or deep-`<p>` — because attribution asks "does this PAGE
+  contain the construct", and a truncated page usually also contains a table. **Page-scoped attribution
+  over-credits**: when one documented bucket never empties, suspect the bucket, not the page.
+  None of these are exotic;
   they are just markup nobody thought to generate. Sampling the real web is not optional — and when a
   check samples (800 characters, 30 pages), say so where the number is quoted, because "we measured N and
   it was clean" reads as "it is clean".
@@ -67,6 +102,12 @@ a way it has read 100% while the engine was wrong:
   the universe is one list (`tools/gen_tree_rules.ELEMENTS`), it is proven to be a superset of both the
   engine's own names and an independent element index, and the audit/mutation/generator all read it.
   **Never add a name to a rule table by hand — add it to `ELEMENTS` and regenerate.**
+- **A rule sweep is 2-D; bugs live in SEQUENCES.** Six crawl-found bugs were shapes where the state at
+  token N depends on tokens 1..N-1 (`<frameset>` in `<head>`, `<body>` after `</body>`, `</%>` between two
+  text runs), which no (open x incoming) table sweep can reach. `make gate-seq` enumerates every sequence
+  of ~23 tokens up to length 4 and compares the WHOLE TREE, not a few `::text` columns — a document can be
+  reshaped completely and still answer `p::text` identically. It found three more bugs on its first run.
+  When a bug is about ORDER, reach for that before adding another cell to a table.
 - **And a gate that cannot go red is not a gate.** Three of them couldn't. `tests/test_gates.py` seeds a
   known regression into each gate's decision function and asserts it fails; add a case there when you add
   a gate. Same question for the generators: they can only find bugs in syntax they emit — CSS escapes
@@ -84,6 +125,12 @@ a way it has read 100% while the engine was wrong:
   DATA MODE for a name) rather than a cell in one table — two tables feed the close answer and mutating
   either alone is masked wherever the other closes the same pair. Re-run the sweep after touching a rule
   table.
+  **And the sweep can only flip what the engine models as a cell.** End-tag scope was two `matches!` arms
+  and a `scope:<tag_id>` mutation over the 19 ids the engine already had, so the sweep reported it fully
+  protected while the ORDER inside the table machinery was missing from the engine, the audit's probe list
+  and the sweep alike. It is now derived like the others and mutated per NAME (`prio:<name>`) over the same
+  universe. When a rule turns out to be coarser than reality, widen the DERIVATION first — a mutation
+  sweep over the wrong shape is a green light for the wrong thing.
 
 ## Repo map
 
@@ -92,10 +139,12 @@ a way it has read 100% while the engine was wrong:
   `matcher/` — **the real logic**: `mod.rs` (corrected-stack matcher: `CompiledSchema` compile +
   `Matcher` streaming execute), `compile.rs` (routing eligibility: which selector shapes execute
   faithfully vs. stay unsupported), `matching.rs` (pure read-only match predicates), `deferred.rs`
-  (bounded state machines for deferred-close predicates), `decode.rs` (value decoding).
-  `selector.rs` (CSS parse), `xpath.rs` (downward XPath → `Selector`), `diagnostics.rs`
-  (advisory unsupported-reason classifier for the audit API), `implied_close.rs` (libxml2
-  tree-construction rules), `encoding.rs`, `entities.rs`, `mutate.rs` (an identity function unless built
+  (bounded state machines for deferred-close predicates), `frame.rs` (document-frame state and the NAMED
+  questions the frame rules ask about it — read its header before touching one), `decode.rs` (value
+  decoding). `selector.rs` (CSS parse), `xpath.rs` (downward XPath → `Selector`), `diagnostics.rs`
+  (advisory unsupported-reason classifier for the audit API), `implied_close/` (libxml2 tree-construction
+  rules: `generated.rs` is derived from the oracle, `mod.rs` is the hand-written half),
+  `encoding.rs`, `entities.rs`, `mutate.rs` (an identity function unless built
   `--features mutate`, which lets `tools/mutate_rules.py` flip one rule cell per run). `page.rs` is the declarative `Page`/`field`
   → `Item` layer over `extract` (naming + cardinality only; no matching logic), plus `CompiledPage`.
   `python.rs` (feature-gated) is the PyO3 binding — `extract`/`extract_grouped`/`audit_schema`/`Plan`.
@@ -126,7 +175,7 @@ a way it has read 100% while the engine was wrong:
   selector/feature works, run `tools/diff_lxml.py`; the gate is **0 non-whitespace DIVERGE (+ 0
   CRASH)**. An LLM converges on a *correct* parser only against the pass/fail loop, not plausibility.
 - **Close to libxml2 2.14, NOT the HTML5 spec.** Tree construction (implied end tags, void set,
-  `<p>`-closing) is matched *empirically* to libxml2 — it is the oracle. See `implied_close.rs`.
+  `<p>`-closing) is matched *empirically* to libxml2 — it is the oracle. See `implied_close/`.
 - **No fallback.** An unsupported query returns an empty column — never an error, never a wrong value.
   Widening coverage means adding it natively *and proving parity*, not routing elsewhere.
 - **Local divergence, never global desync.** Accepted divergences (foster-parenting, adoption agency,
@@ -147,15 +196,19 @@ a way it has read 100% while the engine was wrong:
 - Pick the oracle per subsystem: values = Parsel/lxml, selector ACCEPTANCE = cssselect/lxml's parser,
   encoding SNIFFING = w3lib **for the cases browsers and w3lib agree on**. Parsel does not sniff
   `<meta>`, so it cannot oracle the prescan at all; but w3lib is not the *target* either — the intended
-  policy is browser/WHATWG correctness, and w3lib differs from browsers in nine named places (prescan
-  window, `<body>`, comments, an invalid label, UTF-32, `utf-16`/`x-user-defined` declarations, BOM-less
-  UTF-16, XML-declaration position). Those are asserted as differences in `tools/enc_check.py`, not
+  policy is browser/WHATWG correctness, and w3lib differs from browsers in ten named places (prescan
+  window, `<body>`, comments, an invalid label, a stray quote inside an unquoted charset value, UTF-32,
+  `utf-16`/`x-user-defined` declarations, BOM-less UTF-16, XML-declaration position). Those are asserted as differences in `tools/enc_check.py`, not
   chased. Adding a w3lib parity case without checking which side is browser-correct is how a bug becomes
-  a requirement.
+  a requirement. The same split applies to the DECODERS: Python's legacy codecs are not the WHATWG
+  indexes, so `enc_check` sweeps every two-byte sequence per label and gates four disagreement classes by
+  count. Enumerate over the whole byte space, never over "the sequences the other side calls assigned" —
+  that filter hid 457 euc-jp characters browsers render and Python does not have.
 - Tree-construction rule tables are **generated from the oracle**, not written: `tools/gen_tree_rules.py`
-  derives the start-close relation, void set and data modes over a fixed element universe and rewrites
-  `src/implied_close.rs`'s generated block (`--check` gates on drift). Do not hand-edit that block, and
-  do not add a name to a rule table by hand — add it to `ELEMENTS` and regenerate.
+  derives the start-close relation, the end-tag scope priorities, the void set and the data modes over a
+  fixed element universe and rewrites `src/implied_close/generated.rs` WHOLE (`--check` gates on drift).
+  Do not hand-edit that block, and do not add a name to a rule table by hand — add it to `ELEMENTS` and
+  regenerate.
 - Rust: exhaustive `match`, keep `clippy` clean. Measure before optimizing (SIMD structural indexing
   and a tag-dispatch index were both prototyped and *rejected* by measurement — don't re-attempt
   without a workload that shows a win).

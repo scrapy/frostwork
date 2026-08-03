@@ -179,6 +179,29 @@ def c_table_scope(rng):
                   (".probe tr > td::text", "child-cell")]
 
 
+def c_end_tag_priority(rng):
+    """The OTHER half of end-tag scope: a TABLE-FAMILY end tag blocked by a higher-priority element.
+
+    `table_scope` above only ever emits an ordinary end tag (`</div>`, `</span>`) crossing a table, which
+    is the coarse half of the rule and the only half the engine used to implement. libxml2 compares END
+    PRIORITIES, so `</tr>` cannot unwind an open `<tbody>` either — and a real crawled page emitting
+    `<tr><strong><tbody>` rows lost every cell after its first `</tr>`. The `<strong>` is load-bearing:
+    put the section directly inside the row and its start tag closes the row itself, so the end tag has no
+    match and the shape proves nothing.
+    """
+    a, b = _w(rng), _w(rng)
+    spacer = rng.choice(["strong", "b", "em", "span", "font"])
+    section = rng.choice(["tbody", "thead", "tfoot"])
+    if rng.random() < 0.5:
+        html = f"<table><tr><{spacer}><{section}></tr><td>{a}</td><td>{b}</td></table>"
+    else:  # ...and the same for a cell end tag under an open row
+        html = f"<table><tr><td><{spacer}><tr></td>{a}<td>{b}</td></table>"
+    return html, [(".probe tr td::text", "cell-in-row"),
+                  (".probe td::text", "cell-text"),
+                  (".probe tr > td::text", "child-cell"),
+                  (".probe table::text", "table-text")]
+
+
 def c_misnest(rng):  # SKIP: misnested formatting -> adoption agency
     html = f"<div><b>{_w(rng)}<i>{_w(rng)}</b>{_w(rng)}</i></div>"
     return html, [(".probe b::text", "descendant"),
@@ -212,6 +235,7 @@ FAMILIES = [
     ("table-sections", "SHOULD", c_table_sections),
     ("p-nonclosers", "SHOULD", c_p_nonclosers),
     ("table-scope", "SHOULD", c_table_scope),
+    ("end-tag-priority", "SHOULD", c_end_tag_priority),
     ("colgroup", "SHOULD", c_colgroup),
     ("misnest-fmt", "SKIP", c_misnest),
     ("table-foster", "SKIP", c_foster),

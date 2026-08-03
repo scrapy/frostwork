@@ -249,9 +249,9 @@ def test_mutation_sweep_enumerates_every_rule_table():
     import mutate_rules
     from gen_tree_rules import ELEMENTS, Oracle, classify
 
-    specs = [s for s, _label in mutate_rules.mutants(mutate_rules.tag_ids())]
+    specs = [s for s, _label in mutate_rules.mutants()]
     kinds = {s.split(":")[0] for s in specs}
-    assert kinds == {"close", "scope", "void", "mode"}, kinds
+    assert kinds == {"close", "prio", "void", "mode"}, kinds
 
     name_class, by_class, _ = classify(Oracle())
     reps = set(mutate_rules.CLOSE_NAMES)
@@ -283,6 +283,20 @@ def test_mutation_sweep_enumerates_every_rule_table():
             assert tops & set(names), f"class {cls} has an observable name but no swept representative"
     # a void tag as the INCOMING tag is a real cell: `<col>` closes an open `<p>`
     assert "close:col,p" in specs
+    # END-TAG PRIORITY is one mutant per NAME (one table feeds the answer, so nothing can mask the flip),
+    # over the same universe rather than the engine's own ids — the `scope:<tag_id>` enumeration it
+    # replaced could only reach names the engine already treated as special, which is why the ORDER inside
+    # the table machinery (`</tr>` cannot unwind an open `<tbody>`) was never probed at all.
+    prio = {s.split(":", 1)[1] for s in specs if s.startswith("prio:")}
+    assert {"table", "tbody", "thead", "tfoot", "tr", "td", "th", "div"} <= prio, "the chain itself"
+    assert {"em", "section", "listing", "caption", "colgroup", "s"} <= prio, "and names it must NOT rank"
+    # ...minus `<html>`/`<head>`, which cannot be open above a match at all. `<body>` CAN — after a
+    # `</body>` libxml2 starts a second one, and it out-ranks every end tag there — so it must stay in the
+    # sweep. It was excluded once on exactly the reasoning that fits the other two, and a crawled page
+    # proved that reasoning wrong.
+    assert not (prio & {"html", "head"})
+    assert "body" in prio, "a <body> after </body> is a reachable open element"
+    assert not (prio & set(mutate_rules.UNOBSERVABLE_AS_OPEN)), "a void/rawtext name is never on the stack"
     # the void set is derived, so the HTML4 names libxml2 treats as empty are in it...
     for n in ("basefont", "frame", "isindex"):
         assert f"void:{n}" in specs, f"{n} missing from the void universe"
@@ -320,7 +334,7 @@ def test_the_mutation_sweep_refuses_to_run_against_an_inert_build():
     mutate_rules.check_canary([red], env, "in a test")
     mutate_rules.check_canary([green, red], env, "in a test")
     # the canary itself must be a mutation a gate really covers, not an arbitrary spec
-    assert mutate_rules.CANARY_SPEC in dict(mutate_rules.mutants(mutate_rules.tag_ids()))
+    assert mutate_rules.CANARY_SPEC in dict(mutate_rules.mutants())
     assert mutate_rules.CANARY_EVERY > 0, "a start-only canary cannot catch a mid-run rebuild"
 
 
