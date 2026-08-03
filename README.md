@@ -179,6 +179,7 @@ divergences and zero crashes against the pinned Parsel/lxml oracle.
 - Benchmarks: [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 - Parsel migration guide: [docs/MIGRATION.md](docs/MIGRATION.md).
 - Runnable examples: `cargo run --example basic` and `.venv/bin/python examples/basic.py`.
+- Conventions for contributors and coding agents: [AGENTS.md](AGENTS.md).
 
 ## Status
 

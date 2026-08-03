@@ -149,25 +149,8 @@ a way it has read 100% while the engine was wrong:
   → `Item` layer over `extract` (naming + cardinality only; no matching logic), plus `CompiledPage`.
   `python.rs` (feature-gated) is the PyO3 binding — `extract`/`extract_grouped`/`audit_schema`/`Plan`.
   `src/bin/{differ,bench}.rs` back the Python harness.
-- `python/frostwork/` — the Python package (pure Python over the `_frostwork` extension): `page.py`
-  (`extract` wrapper + `Page`/`Item`), `webpoet.py` (`FrostPage`/`field` web-poet integration, soft
-  dep), `audit.py` (`frostwork-audit` CLI: schema audit + `--scan`), `scan.py` (ast-based selector-literal
-  scan for un-ported source — inline `.css()`, ItemLoaders, LinkExtractors). `pyproject.toml` = maturin
-  build; `tests/test_python.py` = pytest suite.
-- `tools/` — Python differential/benchmark harness (needs `parsel`). `oracle.py` guards the oracle
-  toolchain (libxml2 ≥ 2.14 — a pinned lxml does *not* pin its vendored libxml2); `diff_lxml.py` is the gate;
-  `conformant.py`/`families.py`/`foreign.py` generate test pages; `enc_check.py` (encoding parity),
-  `sel_fuzz.py`/`diff_fuzz.py` (selector + malformed-HTML fuzz), `soak.py` (multi-seed soak),
-  `support_snapshot.py` (regenerates/checks `docs/SUPPORT_SNAPSHOT.md`), `abi3_smoke.py` (stdlib-only
-  floor check — the pinned toolchain can't be installed on py3.9), `bench_matrix.py`/
-  `bench_corpus.py`/`bench_mem.py` (benchmarks). Three tools own the tree-construction rules and share
-  ONE element universe: `gen_tree_rules.py` derives the rules from libxml2 and GENERATES the Rust table
-  (`--check` gates on drift, `--report` prints the derivation); `audit_tree_rules.py` asks lxml whether
-  every rule cell is RIGHT, by value, through the real engine; `mutate_rules.py` asks whether a WRONG one
-  would be noticed (flips a cell via the `mutate` cargo feature and reruns the gates). `corpus_fetch.py`
-  fetches real pages into a gitignored corpus.
-- `docs/` — `COMPATIBILITY.md` (contract), `DESIGN.md` (architecture), `PYTHON.md` (bindings),
-  `TESTING.md`, `BENCHMARKS.md`, `MIGRATION.md` (from Parsel), `SUPPORT_SNAPSHOT.md` (generated).
+- `python/frostwork/` — the Python package over the `_frostwork` extension. See `python/AGENTS.md`.
+- `tools/` — Python differential/benchmark harness (needs `parsel`). See `tools/AGENTS.md`.
 
 ## Principles to preserve
 
