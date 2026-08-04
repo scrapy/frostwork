@@ -159,7 +159,18 @@ fn skip_to_gt(b: &[u8], from: usize) -> usize {
 
 /// Scan RAWTEXT/RCDATA content for the matching `</name` end tag (case-insensitive). Returns
 /// (text_end, after_end_tag).
-fn find_raw_end(b: &[u8], from: usize, name: &[u8]) -> (usize, usize) {
+///
+/// The appropriate end tag gets a start tag's ATTRIBUTE states here too — see `scan_attrs`. Ending it
+/// at the first `>` instead was the same bug in a second place, and it is the malformed-HTML fuzzer's
+/// new `end_tag_attr` mutation that turned it up on its first run: `<title>x</title\nsrc='y:>` has no
+/// later `'`, so libxml2 reads the whole rest of the document as that attribute's value and keeps
+/// nothing, while the engine closed the title and kept the page.
+fn find_raw_end<'a>(
+    b: &'a [u8],
+    from: usize,
+    name: &[u8],
+    attr_buf: &mut Vec<(&'a [u8], Option<&'a [u8]>)>,
+) -> (usize, usize) {
     let n = b.len();
     let mut i = from;
     loop {
@@ -180,7 +191,7 @@ fn find_raw_end(b: &[u8], from: usize, name: &[u8]) -> (usize, usize) {
                         }
                     }
                     if ok && (q >= n || is_ws(b[q]) || b[q] == b'>' || b[q] == b'/') {
-                        return (p, skip_to_gt(b, q));
+                        return (p, scan_attrs(b, q, attr_buf).0);
                     }
                 }
                 i = p + 1;
@@ -210,7 +221,15 @@ fn tag_name_at(b: &[u8], p: usize, prefix: &[u8], name: &[u8]) -> Option<usize> 
 /// conditional-comment wrappers. Inside `<!-- ...`, a nested `<script>` enters double-escaped state:
 /// its first `</script>` is text (it only returns to escaped), so it must not close the outer script.
 /// Missing this state turns the remainder of a real page into markup and globally desynchronizes it.
-fn find_script_end(b: &[u8], from: usize) -> (usize, usize) {
+///
+/// The two `</script`s that CLOSE the element take a start tag's attribute states (`scan_attrs`); the
+/// double-escaped one does not, because it only returns to the escaped state — its attributes stay
+/// text, so it continues from just past the name.
+fn find_script_end<'a>(
+    b: &'a [u8],
+    from: usize,
+    attr_buf: &mut Vec<(&'a [u8], Option<&'a [u8]>)>,
+) -> (usize, usize) {
     #[derive(Clone, Copy)]
     enum State {
         Data,
@@ -239,12 +258,12 @@ fn find_script_end(b: &[u8], from: usize) -> (usize, usize) {
                     continue;
                 }
                 if let Some(q) = tag_name_at(b, i, b"</", b"script") {
-                    return (i, skip_to_gt(b, q));
+                    return (i, scan_attrs(b, q, attr_buf).0);
                 }
             }
             State::Escaped => {
                 if let Some(q) = tag_name_at(b, i, b"</", b"script") {
-                    return (i, skip_to_gt(b, q));
+                    return (i, scan_attrs(b, q, attr_buf).0);
                 }
                 if let Some(q) = tag_name_at(b, i, b"<", b"script") {
                     state = State::DoubleEscaped;
@@ -340,7 +359,11 @@ fn handle_markup<'a, S: TokenSink<'a>>(
                     while i < n && is_name_char(b[i]) {
                         i += 1;
                     }
-                    let after = skip_to_gt(b, i);
+                    // The same attribute states as a start tag, whose collected attributes an end tag
+                    // then discards — see `scan_attrs`. An unterminated end tag is still emitted (a
+                    // start tag's is dropped): every EOF shape agrees with libxml2 and html5lib either
+                    // way, since end-of-document closes the element regardless.
+                    let (after, _, _) = scan_attrs(b, i, attr_buf);
                     sink.end_tag(&b[start..i], p, after); // p = '<' of the end tag
                     after
                 }
@@ -362,20 +385,24 @@ fn handle_markup<'a, S: TokenSink<'a>>(
     }
 }
 
-fn handle_start<'a, S: TokenSink<'a>>(
+/// Scan a tag's attribute list, from just past the tag NAME to just past its `>`, collecting the
+/// attributes into `attr_buf`. Returns `(offset, terminated, self_closing)`; `terminated` is false
+/// when the input ran out before the `>`.
+///
+/// END tags come through here too, and must: HTML5 gives them the same attribute states as start
+/// tags, and only DISCARDS what they collect. The difference that matters is quoting — a `"` after
+/// `=` opens a value that runs to the next `"`, so a `>` inside it does not end the tag. Reading an
+/// end tag as "scan a name, skip to `>`" instead ended it early, and a Blogger template that emits
+/// `</img\nsrc="http:>` (unterminated, so the value runs on to the next quote 300 bytes later) then
+/// kept an `</a>`, two `</div>`s and a whole `<div id='HTML3'>` start tag that libxml2 and html5lib
+/// both swallow — reporting an element that is not in the document, the FALSE-POSITIVE direction.
+/// Two 10000-page crawl samples found it, 29 and 32 divergent columns, one page each.
+fn scan_attrs<'a>(
     b: &'a [u8],
-    p: usize,
-    sink: &mut S,
+    mut i: usize,
     attr_buf: &mut Vec<(&'a [u8], Option<&'a [u8]>)>,
-) -> usize {
+) -> (usize, bool, bool) {
     let n = b.len();
-    let mut i = p + 1;
-    let ns = i;
-    while i < n && is_name_char(b[i]) {
-        i += 1;
-    }
-    let name = &b[ns..i];
-
     attr_buf.clear();
     let mut self_closing = false;
     let mut terminated = false;
@@ -450,6 +477,25 @@ fn handle_start<'a, S: TokenSink<'a>>(
             attr_buf.push((aname, aval));
         }
     }
+    (i, terminated, self_closing)
+}
+
+fn handle_start<'a, S: TokenSink<'a>>(
+    b: &'a [u8],
+    p: usize,
+    sink: &mut S,
+    attr_buf: &mut Vec<(&'a [u8], Option<&'a [u8]>)>,
+) -> usize {
+    let n = b.len();
+    let mut i = p + 1;
+    let ns = i;
+    while i < n && is_name_char(b[i]) {
+        i += 1;
+    }
+    let name = &b[ns..i];
+
+    let (end, terminated, self_closing) = scan_attrs(b, i, attr_buf);
+    i = end;
 
     if !terminated {
         // EOF before the closing `>`: the tag is DROPPED, whole. Not emitted, and not turned back into
@@ -473,8 +519,8 @@ fn handle_start<'a, S: TokenSink<'a>>(
             DataMode::Plaintext => (n, n),
             // `script` needs the escaped/double-escaped states on top of "find the end tag"; every
             // other mode ends at the first matching end tag.
-            _ if name.eq_ignore_ascii_case(b"script") => find_script_end(b, i),
-            _ => find_raw_end(b, i, name),
+            _ if name.eq_ignore_ascii_case(b"script") => find_script_end(b, i, attr_buf),
+            _ => find_raw_end(b, i, name, attr_buf),
         };
         if text_end > i {
             sink.text(&b[i..text_end], mode == DataMode::Rcdata, i);
@@ -561,6 +607,53 @@ mod tests {
         assert_eq!(toks(b"a</>b"), ["T:a", "T:b"]);
         // EOF right after `</` is character data
         assert_eq!(toks(b"a</"), ["T:a", "T:</"]);
+    }
+
+    /// An END TAG has a start tag's ATTRIBUTE states, and only throws the attributes away.
+    ///
+    /// Contrast the `a</% x=">">b` line above: a bogus comment really does stop at the first `>`, so
+    /// the two shapes differ by one character (`%` vs a letter) and consume different spans. Reading
+    /// the end tag with the bogus-comment rule is what a real Blogger template caught.
+    #[test]
+    fn end_tag_attributes_are_scanned_then_discarded() {
+        // a quoted value carries the `>` — the end tag continues past it
+        assert_eq!(toks(br#"a</p x=">">b"#), ["T:a", "E:p", "T:b"]);
+        assert_eq!(toks(br#"a</p x='>'>b"#), ["T:a", "E:p", "T:b"]);
+        // ...and an UNTERMINATED value runs to the next matching quote, swallowing whatever markup is
+        // in between. This is the crawled shape, minimized: `</img src="http:>` eats the start tag.
+        assert_eq!(
+            toks(br#"x</img
+src="http:></a><div id='HTML3'><i>" >y"#),
+            ["T:x", "E:img", "T:y"]
+        );
+        // an unquoted value and a bare solidus end where they always did
+        assert_eq!(toks(b"a</p foo=bar>b"), ["T:a", "E:p", "T:b"]);
+        assert_eq!(toks(b"a</p/>b"), ["T:a", "E:p", "T:b"]);
+        // EOF inside an end tag still EMITS it, unlike a start tag, which is dropped whole: every EOF
+        // shape agrees with libxml2 and html5lib either way, because end-of-document closes the
+        // element anyway. Pinned so the shared scanner's `terminated` flag can't quietly change it.
+        assert_eq!(toks(br#"a</p x="y"#), ["T:a", "E:p"]);
+        assert_eq!(toks(b"a</p"), ["T:a", "E:p"]);
+    }
+
+    /// ...and the RAWTEXT/RCDATA and SCRIPT closers get those states too — three call sites, one rule.
+    /// The fuzzer's `end_tag_attr` mutation found these two on its first run, after the plain end tag
+    /// above was already fixed.
+    #[test]
+    fn rawtext_end_tag_attributes_are_scanned_too() {
+        // RCDATA: the `>` inside the quoted value does not close the title
+        assert_eq!(toks(br#"<title>t</title x=">">after"#), ["S:title[]", "T:t", "E:title", "T:after"]);
+        // RAWTEXT
+        assert_eq!(toks(br#"<style>s</style x=">">after"#), ["S:style[]", "T!:s", "E:style", "T:after"]);
+        // SCRIPT's own scanner, in both the plain and the escaped state
+        assert_eq!(toks(br#"<script>s</script x=">">after"#), ["S:script[]", "T!:s", "E:script", "T:after"]);
+        assert_eq!(
+            toks(br#"<script><!--s</script x=">">after"#),
+            ["S:script[]", "T!:<!--s", "E:script", "T:after"]
+        );
+        // an UNTERMINATED value eats the rest of the document — no later quote to close it, which is
+        // exactly the shape the fuzzer produced (`</title\nsrc='y:>`), and libxml2 keeps nothing after it
+        assert_eq!(toks(b"<title>t</title\nsrc='y:><p>gone"), ["S:title[]", "T:t", "E:title"]);
     }
 
     #[test]

@@ -246,6 +246,13 @@ DOM, no full tree construction). These rules were derived empirically against li
   "scan a name, skip to `>`" merged a real page's `Copyright 1991-2026</%> VECMAR Corporation` into one
   text node where libxml2 has two, and was also the largest single source of unattributed divergences in
   the malformed-HTML fuzzer.
+- **An end tag has a start tag's ATTRIBUTE states, and discards what they collect.** So — unlike the
+  bogus comment above — a quoted value in an end tag carries the `>`: `</p x=">">` ends at the *second*
+  `>`, and an unterminated one runs to the next matching quote or to EOF, swallowing whatever markup is
+  in between. A Blogger template that writes `</img\nsrc="http:>` had libxml2 and html5lib eat the
+  following `</a>`, two `</div>`s and a whole `<div id='HTML3'>` start tag; ending the tag at the first
+  `>` instead kept an element that is in no other parser's tree — a FALSE POSITIVE. The rule covers the
+  rawtext/RCDATA and `<script>` closers too, which are separate scanners.
 - **`<p>`-closing block set** is the HTML4 block list (`div`, `p`, `h1`–`h6`, `ul`, `ol`, `dl`, `menu`,
   `dir`, `center`, `address`, `blockquote`, `fieldset`, `form`, `pre`, `table`, `hr`) — **not** the
   HTML5 sectioning elements (`section`, `article`, `header`, `footer`, `nav`, `main`, `figure`,
