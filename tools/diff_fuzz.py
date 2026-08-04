@@ -101,6 +101,20 @@ def m_dup_attr(rng, s):
     return s[: m.start()] + m.group(1) + m.group(2) + " " + m.group(2).strip() + m.group(3) + s[m.end():]
 
 
+def m_end_tag_attr(rng, s):
+    # An END tag carrying an attribute. Nothing in this file could emit one, so the whole end-tag
+    # attribute-state surface rode on hand vectors — and a crawled Blogger template that writes
+    # `</img\nsrc="http:>` broke it: the quoted value swallows the `>` and everything up to the next
+    # quote, which libxml2 and html5lib both do and the engine did not. The unquoted form is the
+    # control: it must NOT change where the tag ends.
+    ends = list(re.finditer(r"</[a-zA-Z][^\s/>]*", s))
+    if not ends:
+        return s
+    m = rng.choice(ends)
+    attr = rng.choice([' src="http:', " src=http:", ' src="x"', "\nsrc='y:", " /", ' ="q"'])
+    return s[: m.end()] + attr + s[m.end():]
+
+
 def m_lt_in_attr(rng, s):
     vals = list(re.finditer(r'="[^"<>]*"', s))
     if not vals:
@@ -172,7 +186,7 @@ STR_MUTS = [
     ("swap_adjacent_close", m_swap_adjacent_close), ("foster", m_foster),
     ("stray_close", m_stray_close), ("dup_attr", m_dup_attr), ("lt_in_attr", m_lt_in_attr),
     ("self_close_nonvoid", m_self_close_nonvoid), ("comment_bait", m_comment_bait),
-    ("deep_nest", m_deep_nest),
+    ("deep_nest", m_deep_nest), ("end_tag_attr", m_end_tag_attr),
 ]
 BYTE_MUTS = [
     ("truncate", m_truncate), ("drop_bytes", m_drop_bytes), ("insert_bytes", m_insert_bytes),

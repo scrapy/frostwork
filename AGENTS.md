@@ -84,6 +84,17 @@ a way it has read 100% while the engine was wrong:
   attributed to foster-parenting, misnesting or deep-`<p>` — because attribution asks "does this PAGE
   contain the construct", and a truncated page usually also contains a table. **Page-scoped attribution
   over-credits**: when one documented bucket never empties, suspect the bucket, not the page.
+  Three more 10000-page samples then found ONE bug between them, and its interest is entirely in how it
+  hid: **an end tag has a start tag's attribute states**, so a quoted value in one carries the `>`. A
+  Blogger template writes `</img\nsrc="http:>`, whose unterminated value runs to the next quote 300 bytes
+  later; libxml2 and html5lib swallow the markup in between and the engine — "scan a name, skip to `>`" —
+  kept a `<div id='HTML3'>` that is in no other parser's tree. It was 63 of the 63 UNEXPLAINED columns
+  across the three samples and **the same one page shape each time**, which is what a long-tail template
+  bug looks like: three independent 10k samples, three hits, one construct. The malformed-HTML fuzzer
+  could not have found it — nothing in `diff_fuzz.py` emitted an end tag with an attribute at all, so the
+  whole surface rode on hand vectors, exactly as the CSS-escape gap did. Its new `end_tag_attr` mutation
+  then found the SAME rule broken in two more scanners (rawtext/RCDATA and `<script>`) on its first run.
+  **One fixed call site is not a fixed rule**: grep for the others before believing the gate.
   None of these are exotic;
   they are just markup nobody thought to generate. Sampling the real web is not optional — and when a
   check samples (800 characters, 30 pages), say so where the number is quoted, because "we measured N and
