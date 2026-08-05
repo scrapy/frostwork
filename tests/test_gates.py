@@ -443,3 +443,55 @@ def test_encoding_gate_exits_nonzero_on_mismatch():
     src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
                             "tools", "enc_check.py")).read()
     assert "raise SystemExit(1)" in src, "enc_check must exit nonzero on mismatch"
+
+
+# ------------------------------------------------- web-poet differential (tools/diff_webpoet.py)
+def test_webpoet_gate_flags_a_processor_receiving_a_string():
+    """The defect this gate exists for: a zyte processor gated on `isinstance(value, Selector|HtmlElement)`
+    receives Frostwork's `str`, matches nothing, and returns it UNCHANGED. No exception is ever raised, so
+    the only thing that can catch it is a value comparison against parsel — and only if the comparison
+    refuses to make a raw-source allowance on a PROCESSED field. Seed exactly that shape."""
+    from diff_webpoet import field_verdict
+
+    raw = '<nav class="crumbs"><a href="/c0">Cat 0</a></nav>'
+    processed = [{"name": "Cat 0", "url": "http://example.com/c0"}]
+    # a processed field must never be excused: same non-whitespace text, still a DIVERGE
+    assert field_verdict(raw, processed, ".crumbs", True) == "DIVERGE"
+    # ...and the str-passthrough of a str-tolerant processor that INVENTED a value from raw HTML
+    assert field_verdict(f"Brand(name={raw!r})", "Brand(name='Acme')", ".brand", True) == "DIVERGE"
+    # the same raw-source string on a NON-processor bare-element field is the documented divergence and
+    # must still be excused, or the gate would go red on shipped, correct behaviour
+    assert field_verdict(raw, raw.replace("&gt;", ">"), ".crumbs", False) in ("AGREE", "WS")
+
+
+def test_webpoet_gate_flags_a_field_that_vanished_from_the_item():
+    """Two of the five defects delete fields rather than corrupt them: `@attrs.define` drops the class's own
+    fields from the plan, and `field()` on web-poet's `BrowserPage` converts no markers at all so
+    `to_item()` returns `{}`. A per-field sweep over the keys the engine reports cannot see either. The
+    comparison must run over the UNION of both items' keys."""
+    from diff_webpoet import item_verdicts
+
+    schema = {"fields": [("name", "h1::text", None), ("price", ".price::text", None)], "cards": {}}
+    # the whole item went missing (the BrowserPage silent-{} shape)
+    v = item_verdicts({}, {"name": "Widget", "price": "$9"}, schema)
+    assert [k for k, verdict, _g, _w in v if verdict == "DIVERGE"] == ["name", "price"]
+    # one field went missing (the attrs own-fields-drop shape, when a base supplied the rest)
+    v = item_verdicts({"name": "Widget"}, {"name": "Widget", "price": "$9"}, schema)
+    assert [(k, verdict) for k, verdict, _g, _w in v] == [("name", "AGREE"), ("price", "DIVERGE")]
+    # and an extra key on OUR side is a divergence too, not a silently ignored bonus
+    v = item_verdicts({"name": "Widget", "ghost": "x"}, {"name": "Widget"}, schema)
+    assert [k for k, verdict, _g, _w in v if verdict == "DIVERGE"] == ["ghost"]
+
+
+def test_webpoet_gate_would_not_pass_vacuously():
+    """A processor that returns None on both sides proves nothing, so the gate prints how many pairs carried
+    a non-empty expected value. Guard the predicate behind that number: if it ever counted `None`/`[]` as
+    meaningful, a run with no parsable content would read as full coverage."""
+    from diff_webpoet import _expected_is_meaningful
+
+    assert not _expected_is_meaningful(None)
+    assert not _expected_is_meaningful([])
+    assert not _expected_is_meaningful("")
+    assert _expected_is_meaningful("Acme")
+    assert _expected_is_meaningful([{"name": "Cat 0"}])
+    assert _expected_is_meaningful(0.0)  # a real extracted rating of 0 is information, not absence

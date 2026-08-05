@@ -79,6 +79,11 @@ jobs:
       # Value parity over PAGES rather than rules: the fixtures are shaped like the doc-generator and
       # table markup that broke the engine while the generated gate read 100%.
       - run: .venv/bin/python tools/bench_corpus.py tests/corpus --gate
+      # The layer ABOVE the engine: does a page OBJECT return parsel's item? Every gate before this one
+      # stops at "does a selector return lxml's column", and five defects lived in that gap — three of
+      # them silent. Compared on the whole item across class shapes (plain/attrs/inherited) and response
+      # types, with the real zyte-common-items processors attached the way a base page attaches them.
+      - run: .venv/bin/python tools/diff_webpoet.py
 
   bindings:
     name: bindings (py${{ matrix.python }} / ${{ matrix.os }})

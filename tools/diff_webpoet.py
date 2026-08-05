@@ -1,0 +1,536 @@
+"""Differential gate for the **web-poet integration** — Parsel is the oracle, `to_item()` is the unit.
+
+`diff_lxml.py` gates the engine: does a selector return the same COLUMN as lxml. Nothing gated the layer
+above it, so `frostwork.webpoet` shipped five defects that the 100%-green engine gate could not see. Each
+was a hand-written list that omitted something, which is the same mistake AGENTS.md records four times in
+the engine's own rule tables ("a rule with no name to probe cannot fail a gate"):
+
+  * the universe of CLASS SHAPES a page object can have omitted `@attrs.define` — which recreates the
+    class, so `__init_subclass__` re-runs after the markers are gone and the original is not in the new
+    MRO. Own fields drop out of the plan and `to_item()` raises `KeyError`.
+  * the universe of RESPONSE INPUTS omitted `BrowserResponse` (raises) and web-poet's own `BrowserPage`
+    (silently returns `{}`, because it does not inherit `FrostPage.__init_subclass__`).
+  * the universe of VALUE TYPES a field processor accepts omitted `Selector`/`SelectorList`/`HtmlElement`.
+    web-poet attaches processors BY NAME through a nested `Processors` class, which every
+    zyte-common-items base page declares, so this fires with no `out=` written anywhere: the processor
+    receives Frostwork's `str`, matches none of its `isinstance` gates, and returns it UNCHANGED
+    ("Other inputs are returned as is"). A raw-HTML string lands in a field typed `List[Breadcrumb]`.
+
+So this gate compares the WHOLE ITEM, not a few fields. That is deliberate and load-bearing: a missing
+KEY is the failure mode of two of the three defects above, and a per-field sweep that only checks the
+fields it knows about cannot see a field that vanished. It is the same lesson as `make gate-seq`
+comparing the whole tree instead of a few `::text` columns.
+
+WHAT "EQUIVALENT" MEANS (the oracle's shape)
+--------------------------------------------
+For each generated schema this builds two page objects with identical field names, selectors and nested
+`Processors`, and diffs `await to_item()`:
+
+  * a `frostwork.webpoet.FrostPage` subclass using `field()` / `Many` / `One`
+  * a `web_poet.WebPage` subclass whose `@web_poet.field` getters call `self.css()` / `self.xpath()`
+
+The oracle getter's shape follows the field's terminal, because Frostwork's value contract does:
+
+  * `::text` / `::attr(x)`      -> parsel `.get()` / `.getall()`; compared directly.
+  * bare element, NO processor  -> parsel `.get()` / `.getall()`; Frostwork returns the element's RAW
+    SOURCE, a documented divergence from lxml's reflow, so this is compared by re-parse on non-whitespace
+    text (the same rule as `diff_lxml.verdict`, imported rather than restated).
+  * bare element, WITH processor -> parsel returns the `SelectorList` itself, because that is what a real
+    page object hands a processor. The processor consumes it and yields a normalized value (a
+    `List[Breadcrumb]`, an `AggregateRating`, cleaned HTML), so the comparison is direct equality on the
+    processed result. This column is the one that is silently wrong today.
+
+DISCRIMINATION
+--------------
+A processor that returns `None` on both sides proves nothing, so `gen_page` emits markup the zyte
+processors can actually parse (real breadcrumb trails, `"3.8 out of 5 stars"`, prices, descriptions with a
+`<script>` and a relative href to strip/resolve) and the run PRINTS how many pairs carried a non-empty
+expected value. Read that number before believing a PASS: `--show-discrimination` breaks it down per
+processor. A family whose expected values are all empty is a family that cannot go red.
+
+Run:  .venv/bin/python tools/diff_webpoet.py
+Gate: DIVERGE + CRASH = 0.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import os
+import random
+import sys
+from collections import defaultdict
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import attrs
+import oracle
+import parsel
+from diff_lxml import is_node_query
+from web_poet import (
+    BrowserHtml,
+    BrowserResponse,
+    HttpResponse,
+    HttpResponseBody,
+    HttpResponseHeaders,
+    ResponseUrl,
+    WebPage,
+)
+from web_poet import field as wp_field
+from zyte_common_items.processors import (
+    brand_processor,
+    breadcrumbs_processor,
+    description_html_processor,
+    images_processor,
+    price_processor,
+    rating_processor,
+    simple_price_processor,
+)
+
+import frostwork
+from frostwork.webpoet import FrostPage, Many, One, field
+
+URL = "http://example.com/p/1"
+
+
+# --------------------------------------------------------------------------- the processor universe
+# Keyed by the FIELD NAME web-poet looks the processor up under (`getattr(owner.Processors, name)`), which
+# is why using zyte's own names matters: this is the exact wiring a real page object gets for free by
+# inheriting `ProductPage`. `needs_node` records which ones are gated on isinstance(Selector|HtmlElement)
+# and therefore silently pass a `str` through — the defect this gate exists to catch. The str-tolerant
+# ones are kept in the sweep so a fix for the first group cannot regress them.
+PROCESSORS = {
+    "breadcrumbs": (breadcrumbs_processor, True),
+    "descriptionHtml": (description_html_processor, True),
+    "aggregateRating": (rating_processor, True),
+    "price": (price_processor, True),
+    "simplePrice": (simple_price_processor, True),
+    "brand": (brand_processor, False),
+    "images": (images_processor, False),
+}
+
+# (field name, selector, processor name or None). The node-taking processors get a BARE ELEMENT selector,
+# because a node is what they are gated on — that is the whole point of the column. `images_processor` is
+# the exception and is written as one: it takes URL STRINGS (`isinstance(value, str)` -> `[Image(url=...)]`,
+# or an iterable of them) and has no Selector branch at all, so the faithful oracle for it is
+# `::attr(src)` with `all=True`. Asking it for a node would make BOTH sides wrong and grade the harness's
+# own mistake as a defect.
+PROCESSOR_FIELDS = [
+    ("breadcrumbs", ".crumbs", "breadcrumbs"),
+    ("descriptionHtml", ".desc", "descriptionHtml"),
+    ("aggregateRating", ".rating", "aggregateRating"),
+    ("price", ".price", "price"),
+    ("simplePrice", ".price", "simplePrice"),
+    ("brand", ".brand", "brand"),
+    ("images", "img.hero::attr(src)", "images"),
+]
+
+# The processors that take URL strings rather than a node, so cardinality must stay `all=True` for them.
+LIST_INPUT_PROCESSORS = {"images"}
+
+# Plain value fields: no processor, so these exercise the terminals rather than the node handoff.
+VALUE_FIELDS = [
+    ("name", "h1::text", None),
+    ("sku", ".sku::text", None),
+    ("href", ".crumbs a::attr(href)", None),
+    ("descRaw", ".desc", None),  # bare element, no processor -> raw-source outer HTML
+    ("title", "title::text", None),
+    ("metaBrand", "//meta[@itemprop='brand']/@content", None),
+]
+
+
+# --------------------------------------------------------------------------- page generation
+def _crumbs(rng):
+    depth = rng.randint(2, 4)
+    parts = [f'<a href="/c{i}">Cat {i}</a>' for i in range(depth)]
+    parts.append("<span>Leaf item</span>")
+    sep = rng.choice([" &gt; ", " / ", " › "])
+    return f'<nav class="crumbs">{sep.join(parts)}</nav>'
+
+
+def _desc(rng):
+    # a <script> to strip, a relative href to resolve, and collapsible whitespace — all three are
+    # differences clear-html actually makes, so a str passed through instead of a node is visible.
+    bits = [
+        "<p>A   roomy   bag.</p>",
+        "<script>track({a:1});</script>",
+        '<p>See <a href="/more">more</a>.</p>',
+    ]
+    if rng.random() < 0.4:
+        bits.append("<p>Unclosed paragraph")  # implied close, in-document vs fragment
+    if rng.random() < 0.3:
+        bits.insert(1, "<style>.x{color:red}</style>")
+    return f'<div class="desc">{"".join(bits)}</div>'
+
+
+def _rating(rng):
+    v = rng.choice(["3.8", "4.5", "2.0", "5"])
+    n = rng.randint(2, 900)
+    return f'<span class="rating">{v} out of 5 stars</span><a class="reviews">See all {n} reviews</a>'
+
+
+def _cards(rng):
+    out = []
+    for i in range(rng.randint(1, 4)):
+        out.append(
+            f'<div class="card"><h3><a href="/p{i}">Item {i}</a></h3>'
+            f'<p class="price">${i + 1}.99</p><span class="sku">SKU-{i}</span></div>'
+        )
+    return "".join(out)
+
+
+def _malform(rng, body):
+    """Sprinkle the malformations that move tree construction, so the gate is not only about clean pages."""
+    r = rng.random()
+    if r < 0.25:
+        return body.replace('<div class="desc">', '<p><div class="desc">', 1)  # <div> closes the <p>
+    if r < 0.45:
+        return f'<table><tr><td>cell</td></tr>{body}</table>'  # foster-parenting around the lot
+    if r < 0.6:
+        return body.replace("</nav>", "", 1)  # dropped end tag
+    return body
+
+
+def gen_page(rng) -> bytes:
+    head = "<head><title>Product page</title>"
+    if rng.random() < 0.7:
+        head += '<meta itemprop="brand" content="Acme">'
+    head += "</head>"
+    body = (
+        "<h1>Roomy Bag</h1>"
+        + _crumbs(rng)
+        + _desc(rng)
+        + _rating(rng)
+        + f'<span class="price">${rng.randint(5, 99)}.50</span>'
+        + '<span class="brand">Acme</span>'
+        + f'<img class="hero" src="/i/{rng.randint(1, 9)}.jpg">'
+        + f'<span class="sku">SKU-{rng.randint(100, 999)}</span>'
+        + _cards(rng)
+    )
+    if rng.random() < 0.5:
+        body = _malform(rng, body)
+    return f"<html>{head}<body>{body}</body></html>".encode()
+
+
+# --------------------------------------------------------------------------- schema generation
+def gen_schema(rng) -> dict:
+    """A page-object schema: flat fields (some processor-bearing), optionally a `Many`/`One` group."""
+    n_proc = rng.randint(1, len(PROCESSOR_FIELDS))
+    n_val = rng.randint(1, len(VALUE_FIELDS))
+    fields = rng.sample(PROCESSOR_FIELDS, n_proc) + rng.sample(VALUE_FIELDS, n_val)
+    rng.shuffle(fields)
+    cards = {}
+    for name, sel, _proc in fields:
+        if _proc in LIST_INPUT_PROCESSORS:
+            cards[name] = ("all", None)  # this processor's input is a LIST of strings
+        elif _proc is not None or is_node_query(sel):
+            cards[name] = ("first", None)  # a node-taking processor takes ONE node; raw source is scalar
+        else:
+            cards[name] = rng.choice([("first", None), ("all", None), ("join", " ")])
+    group = None
+    if rng.random() < 0.4:
+        group = {
+            "name": "products",
+            "one": rng.random() < 0.3,
+            "container": ".card",
+            "subs": [("title", "h3 a::text"), ("href", "h3 a::attr(href)"), ("price", ".price::text")],
+        }
+    return {"fields": fields, "cards": cards, "group": group}
+
+
+# --------------------------------------------------------------------------- class construction
+SHAPES = ("plain", "attrs_slots", "attrs_noslots", "attrs_frozen", "inherit_plain", "inherit_attrs")
+
+
+def _processors_cls(schema):
+    ns = {name: [PROCESSORS[proc][0]] for name, _sel, proc in schema["fields"] if proc}
+    return type("Processors", (), ns) if ns else None
+
+
+def _frost_ns(fields, schema):
+    ns = {}
+    for name, sel, _proc in fields:
+        card, sep = schema["cards"][name]
+        if card == "all":
+            ns[name] = field(sel, all=True)
+        elif card == "join":
+            ns[name] = field(sel, join=sep)
+        else:
+            ns[name] = field(sel)
+    return ns
+
+
+def _group_ns(schema, frost: bool):
+    g = schema["group"]
+    if not g:
+        return {}
+    if frost:
+        maker = One if g["one"] else Many
+        return {g["name"]: maker(g["container"], **{n: field(s) for n, s in g["subs"]})}
+
+    def getter(self, g=g):
+        rows = []
+        for node in self.css(g["container"]):
+            rows.append({n: node.css(s).get() for n, s in g["subs"]})
+        return (rows[0] if rows else None) if g["one"] else rows
+
+    getter.__name__ = getter.__qualname__ = g["name"]
+    return {g["name"]: wp_field(getter)}
+
+
+def _parsel_ns(fields, schema):
+    """Oracle getters. A processor-bearing field returns the `SelectorList`/list-of-strings the processor
+    actually expects; everything else returns the value, matching Frostwork's terminal contract."""
+    ns = {}
+    for name, sel, proc in fields:
+        card, sep = schema["cards"][name]
+
+        def getter(self, sel=sel, card=card, sep=sep, proc=proc):
+            sub = self.xpath(sel) if sel.startswith(("/", "(")) else self.css(sel)
+            if proc is not None:
+                # `images_processor` consumes URL STRINGS, not nodes (see PROCESSOR_FIELDS); the
+                # node-taking processors consume the SelectorList.
+                return sub.getall() if card == "all" else sub
+            if card == "all":
+                return sub.getall()
+            if card == "join":
+                return sep.join(sub.getall())
+            return sub.get()
+
+        getter.__name__ = getter.__qualname__ = name
+        ns[name] = wp_field(getter)
+    return ns
+
+
+def _apply_shape(cls, shape):
+    if shape in ("attrs_slots", "inherit_attrs"):
+        return attrs.define(cls)
+    if shape == "attrs_noslots":
+        return attrs.define(slots=False)(cls)
+    if shape == "attrs_frozen":
+        return attrs.frozen(cls)
+    return cls
+
+
+def build_page(schema, shape, *, frost: bool):
+    """Build one side of the pair in one of the SHAPES.
+
+    The shape axis is the whole point of defect 1: the decorator runs AFTER `__init_subclass__`, so it is
+    an ORDER bug that no (field x selector) sweep can reach — the same reason `make gate-seq` exists for
+    the engine.
+
+    It is applied to BOTH sides, and that symmetry is load-bearing. `attrs.frozen` breaks the parsel
+    oracle too (web-poet's `cached_method` writes to the instance, which a frozen class forbids), so
+    decorating only the Frostwork side would file a web-poet/attrs incompatibility as a Frostwork CRASH
+    and leave a bucket that never empties — the over-attribution mistake AGENTS.md records for the
+    truncated-tag bug. With both sides decorated, a shape that fails on both is ORACLE-SKIP and a shape
+    that fails only here is a real defect."""
+    ns_maker = _frost_ns if frost else _parsel_ns
+    root = FrostPage if frost else WebPage
+    fields = schema["fields"]
+    procs = _processors_cls(schema)
+    if shape in ("inherit_plain", "inherit_attrs"):
+        split = max(1, len(fields) // 2)
+        base_ns = ns_maker(fields[:split], schema)
+        if procs is not None:
+            base_ns["Processors"] = procs
+        base = type("GenBase", (root,), base_ns)
+        ns = ns_maker(fields[split:], schema)
+        ns.update(_group_ns(schema, frost=frost))
+        return _apply_shape(type("GenPage", (base,), ns), shape)
+    ns = ns_maker(fields, schema)
+    ns.update(_group_ns(schema, frost=frost))
+    if procs is not None:
+        ns["Processors"] = procs
+    return _apply_shape(type("GenPage", (root,), ns), shape)
+
+
+# --------------------------------------------------------------------------- running a pair
+def _http(html: bytes):
+    return HttpResponse(
+        url=ResponseUrl(URL),
+        body=HttpResponseBody(html),
+        headers=HttpResponseHeaders({"Content-Type": "text/html; charset=utf-8"}),
+    )
+
+
+def _browser(html: bytes):
+    return BrowserResponse(url=ResponseUrl(URL), html=BrowserHtml(html.decode()))
+
+
+def _to_item(cls, response):
+    """`(item, None)` or `(None, "ExcName: msg")`. A raise is data here, not a harness failure: two of the
+    defects surface as an exception from `to_item()` and the gate must count them, not die."""
+    try:
+        return asyncio.run(cls(response=response).to_item()), None
+    except Exception as exc:  # noqa: BLE001 - any raise is a verdict
+        return None, f"{type(exc).__name__}: {exc}"
+
+
+# --------------------------------------------------------------------------- verdicts
+def _nonws_text(html: str):
+    """Non-whitespace text of a serialized fragment — the raw-source-vs-reflow rule from `diff_lxml`."""
+    return [t.strip() for t in parsel.Selector(text=html).xpath("//text()").getall() if t.strip()]
+
+
+def field_verdict(mine, theirs, selector: str, has_processor: bool) -> str:
+    """AGREE | WS | DIVERGE for one field. Pure and importable so `tests/test_gates.py` can seed it."""
+    if mine == theirs:
+        return "AGREE"
+    if has_processor:
+        # A processor's output is normalized (a list of items, an AggregateRating, cleaned HTML): there is
+        # no raw-source allowance to make, so any difference is real. This is the column where a `str`
+        # passing through the isinstance gates shows up.
+        return "DIVERGE"
+    if isinstance(mine, str) and isinstance(theirs, str):
+        if mine.strip() == theirs.strip():
+            return "WS"
+        if is_node_query(selector):
+            try:
+                if _nonws_text(mine) == _nonws_text(theirs):
+                    return "AGREE"  # raw source vs lxml's reflow — documented, local
+            except Exception:  # noqa: BLE001
+                return "DIVERGE"
+        return "DIVERGE"
+    if isinstance(mine, list) and isinstance(theirs, list):
+        if [x.strip() if isinstance(x, str) else x for x in mine] == [
+            x.strip() if isinstance(x, str) else x for x in theirs
+        ]:
+            return "WS"
+    return "DIVERGE"
+
+
+def item_verdicts(mine_item, theirs_item, schema) -> list:
+    """Per-field verdicts over the UNION of both items' keys, so a field that vanished from one side is a
+    DIVERGE rather than an unchecked absence. That union is what makes this a whole-item comparison."""
+    out = []
+    procs = {name: proc for name, _sel, proc in schema["fields"]}
+    sels = {name: sel for name, sel, _proc in schema["fields"]}
+    for key in sorted(set(mine_item) | set(theirs_item)):
+        if key not in mine_item or key not in theirs_item:
+            out.append((key, "DIVERGE", mine_item.get(key, "<MISSING>"), theirs_item.get(key, "<MISSING>")))
+            continue
+        v = field_verdict(mine_item[key], theirs_item[key], sels.get(key, ""), bool(procs.get(key)))
+        out.append((key, v, mine_item[key], theirs_item[key]))
+    return out
+
+
+def _expected_is_meaningful(value) -> bool:
+    """Does the ORACLE's value carry information? A column that is None/empty on both sides cannot go red."""
+    if value is None:
+        return False
+    if isinstance(value, (str, list, dict, tuple)):
+        return len(value) > 0
+    return True
+
+
+# --------------------------------------------------------------------------- main
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--schemas", type=int, default=120, help="schemas per class shape")
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--show", type=int, default=8)
+    ap.add_argument("--show-discrimination", action="store_true",
+                    help="per-processor count of pairs whose expected value was non-empty")
+    ap.add_argument("--no-browser", action="store_false", dest="browser",
+                    help="skip the BrowserResponse input (it is fed by default)")
+    oracle.add_argument(ap)
+    args = ap.parse_args()
+    oracle.require(args.allow_old_libxml2)
+    rng = random.Random(args.seed)
+
+    print(f"frostwork {frostwork.__version__ if hasattr(frostwork, '__version__') else ''} "
+          f"web-poet differential")
+    print(oracle.banner())
+
+    stat = defaultdict(int)
+    by_shape = defaultdict(lambda: defaultdict(int))
+    by_proc = defaultdict(lambda: defaultdict(int))
+    meaningful = defaultdict(int)
+    examples = []
+
+    inputs = [("http", _http)] + ([("browser", _browser)] if args.browser else [])
+
+    for shape in SHAPES:
+        for _ in range(args.schemas):
+            html = gen_page(rng)
+            schema = gen_schema(rng)
+            try:
+                oracle_cls = build_page(schema, shape, frost=False)
+            except Exception:  # noqa: BLE001 - the oracle cannot be built in this shape; not our verdict
+                stat["ORACLE-SKIP"] += 1
+                by_shape[f"{shape}/(build)"]["ORACLE-SKIP"] += 1
+                continue
+            try:
+                frost_cls = build_page(schema, shape, frost=True)
+            except Exception as exc:  # noqa: BLE001 - a schema that will not even build is a CRASH
+                stat["CRASH"] += 1
+                stat["pairs"] += 1
+                by_shape[shape]["CRASH"] += 1
+                if len(examples) < args.show:
+                    examples.append((shape, "<class construction>", f"{type(exc).__name__}: {exc}", "", ""))
+                continue
+
+            for kind, make_response in inputs:
+                mine, mine_err = _to_item(frost_cls, make_response(html))
+                theirs, theirs_err = _to_item(oracle_cls, make_response(html))
+                key = f"{shape}/{kind}"
+                if theirs_err is not None:
+                    # the oracle itself could not answer; nothing to compare (parsel has no such input)
+                    stat["ORACLE-SKIP"] += 1
+                    by_shape[key]["ORACLE-SKIP"] += 1
+                    continue
+                if mine_err is not None:
+                    stat["CRASH"] += 1
+                    stat["pairs"] += 1
+                    by_shape[key]["CRASH"] += 1
+                    if len(examples) < args.show:
+                        examples.append((key, "<to_item raised>", mine_err, "", html.decode()[:120]))
+                    continue
+                for name, v, got, want in item_verdicts(dict(mine), dict(theirs), schema):
+                    stat[v] += 1
+                    stat["pairs"] += 1
+                    by_shape[key][v] += 1
+                    proc = dict((n, p) for n, _s, p in schema["fields"]).get(name)
+                    bucket = proc or "(no processor)"
+                    by_proc[bucket][v] += 1
+                    if _expected_is_meaningful(want):
+                        meaningful[bucket] += 1
+                    if v == "DIVERGE" and len(examples) < args.show:
+                        examples.append((key, name, repr(got)[:150], repr(want)[:150], html.decode()[:120]))
+
+    print(f"\n  pairs (field comparisons) {stat['pairs']:>8}")
+    print(f"  AGREE                     {stat['AGREE']:>8}")
+    print(f"  WS (whitespace only)      {stat['WS']:>8}")
+    print(f"  ORACLE-SKIP               {stat['ORACLE-SKIP']:>8}   (parsel cannot take this input)")
+    print(f"  DIVERGE                   {stat['DIVERGE']:>8}   <-- gate: must be 0")
+    print(f"  CRASH (to_item raised)    {stat['CRASH']:>8}   <-- gate: must be 0\n")
+
+    print("  by class shape / input:    pairs   AGREE   WS  DIVERGE  CRASH  ORACLE-SKIP")
+    for key in sorted(by_shape):
+        d = by_shape[key]
+        p = d["AGREE"] + d["WS"] + d["DIVERGE"] + d["CRASH"]
+        print(f"    {key:<24}{p:>6}{d['AGREE']:>8}{d['WS']:>5}{d['DIVERGE']:>9}{d['CRASH']:>7}"
+              f"{d['ORACLE-SKIP']:>13}")
+
+    print("\n  by processor:             pairs   AGREE   WS  DIVERGE   non-empty expected")
+    for key in sorted(by_proc):
+        d = by_proc[key]
+        p = sum(d.values())
+        print(f"    {key:<24}{p:>6}{d['AGREE']:>8}{d['WS']:>5}{d['DIVERGE']:>9}{meaningful[key]:>16}")
+    total_meaningful = sum(meaningful.values())
+    print(f"\n  DISCRIMINATION: {total_meaningful} of {stat['pairs']} pairs had a non-empty expected value."
+          f" A processor row with 0 here cannot go red.")
+
+    if examples:
+        print("\n  divergences (first few):")
+        for key, name, got, want, snip in examples:
+            print(f"    [{key}] {name}\n        frostwork={got}\n        parsel   ={want}\n        html: {snip!r}")
+
+    gate = stat["DIVERGE"] + stat["CRASH"]
+    print(f"\n  GATE: DIVERGE+CRASH = {gate}  ->  {'PASS' if gate == 0 else 'FAIL'}")
+    sys.exit(1 if gate else 0)
+
+
+if __name__ == "__main__":
+    main()

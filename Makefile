@@ -15,6 +15,7 @@
 #   make soak        multi-million differential/fuzz soak across independent seeds
 #   make py          rebuild the extension (maturin --release), Python suite + tree-rule audit +
 #                    the generated start-close table vs the oracle (tools/gen_tree_rules.py --check)
+#   make gate-webpoet  web-poet integration differential vs parsel, compared on the WHOLE item
 #   make bench       full throughput matrix vs Parsel (minutes; for release notes)
 #   make bench-smoke quick article/deep-nesting performance check
 #   make ci          test + gate + gate-corpus + fuzz-smoke + py — minimum pre-release check
@@ -28,7 +29,7 @@ FUZZ_ITERS ?= 6000
 
 .DEFAULT_GOAL := help
 .PHONY: help bootstrap test build gate gate-corpus gate-seq corpus-real gate-mutate gate-mutate-full \
-	fuzz-smoke soak py bench bench-smoke ci
+	fuzz-smoke soak py gate-webpoet bench bench-smoke ci
 
 help:
 	@grep -E '^#   make ' Makefile | sed 's/^#   /  /'
@@ -108,11 +109,19 @@ py:
 	$(PY) tools/gen_tree_rules.py --check
 	$(PY) tools/audit_tree_rules.py --gate
 
+# The layer ABOVE the engine. `gate` proves a selector returns lxml's column; nothing proved that a page
+# OBJECT returns parsel's item, and five defects lived in that gap — three of them silent (a processor
+# handed a str, a field dropped from the plan, an item that came back `{}`). Compared on the whole item,
+# because a vanished KEY is the failure mode of two of them. Needs the extension, so it follows `py`.
+WEBPOET_SCHEMAS ?= 120
+gate-webpoet:
+	$(PY) tools/diff_webpoet.py --schemas $(WEBPOET_SCHEMAS)
+
 bench: build
 	$(PY) tools/bench_matrix.py
 
 bench-smoke: build
 	$(PY) tools/bench_matrix.py --smoke
 
-ci: test gate gate-corpus gate-seq fuzz-smoke py
+ci: test gate gate-corpus gate-seq fuzz-smoke py gate-webpoet
 	@echo "frostwork: all local gates passed"

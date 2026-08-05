@@ -31,8 +31,8 @@ must NOT enable it (they'd fail to link libpython); maturin builds only the `--f
 The `Makefile` bundles these into one-command gates (`make help` lists them): `make ci` = `test`
 (unit + clippy) + `gate` (differential + encoding parity vs lxml) + `gate-corpus` (value parity over
 the fixture corpus) + `gate-seq` (every tag sequence up to length 4, compared on the whole tree) +
-`fuzz-smoke` + `py` — the minimum pre-release check. Individual targets run
-their own piece.
+`fuzz-smoke` + `py` + `gate-webpoet` (the web-poet integration vs parsel, compared on the whole item) —
+the minimum pre-release check. Individual targets run their own piece.
 
 The limits of that gate are worth knowing before trusting a "100% parity" number — each bullet below is
 a way it has read 100% while the engine was wrong:
@@ -142,6 +142,25 @@ a way it has read 100% while the engine was wrong:
   and the sweep alike. It is now derived like the others and mutated per NAME (`prio:<name>`) over the same
   universe. When a rule turns out to be coarser than reality, widen the DERIVATION first — a mutation
   sweep over the wrong shape is a green light for the wrong thing.
+- **And every one of those lessons was about the ENGINE, which is the part that had an oracle.** The
+  layer above it did not, and shipped five defects a 100%-green engine gate could not see: `@attrs.define`
+  on a page object dropped its own fields (the decorator recreates the class, so `__init_subclass__`
+  re-runs after the markers are gone — an ORDER bug, like the frame ones); a `BrowserResponse` raised and
+  web-poet's own `BrowserPage` returned `{}`; and a zyte processor gated on `isinstance(value, Selector)`
+  received Frostwork's `str`, matched nothing, and returned it UNCHANGED, so a raw-HTML string landed in
+  a field typed `List[Breadcrumb]` with no error anywhere. Each was a hand-written list that omitted
+  something — class shapes, response inputs, `field()` options, processor value types — i.e. **the
+  `colgroup` mistake again, four more times, in universes that are IMPORTABLE**: web-poet and
+  zyte-common-items are Python objects you can introspect instead of guessing at. `make gate-webpoet`
+  (`tools/diff_webpoet.py`) is the missing oracle: parsel with the same selectors and the same nested
+  `Processors`, compared on the WHOLE ITEM, because a vanished KEY is the failure mode of two of the
+  three silent ones. Two things it taught while being built. **`zyte-common-items` was not in
+  `requirements-test.txt`** — the primary consumer of the integration was absent from the test
+  environment, so no gate could ever have caught the processor bug; when a defect class looks unreachable,
+  check whether the library it breaks is even installed. And the shape axis has to be applied to BOTH
+  sides: `attrs.frozen` breaks the parsel oracle too (web-poet's `cached_method` writes to the instance),
+  so decorating only our side files a web-poet/attrs incompatibility as our CRASH and leaves a bucket that
+  never empties — the same over-attribution as the truncated-tag bug.
 
 ## Repo map
 
