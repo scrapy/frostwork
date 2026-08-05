@@ -127,6 +127,39 @@ pub fn budget_usage(queries: &[String], groups: &[GroupQuery]) -> (usize, usize)
 // signal. The supported/unsupported DECISION is authoritative (it is the real compiler); the reason is
 // advisory (see [`diagnostics`]).
 
+/// The VALUE TERMINAL each query produces: `"text"`, `"attr"`, `"outer"` (bare element — the value is
+/// the matched element's raw source, i.e. a NODE reference rather than a scalar), `"normalize-space"`,
+/// or `None` for a query that does not compile.
+///
+/// Exposed because a caller sometimes has to treat a node-valued column differently from a scalar one,
+/// and the only authority on which a query is is the compiler that routes it. The web-poet layer needs
+/// exactly this: a field processor's input contract is an lxml/parsel NODE, so when a processor is
+/// attached to an `"outer"` field the raw source has to be re-parsed into one, while `"text"`/`"attr"`
+/// fields are genuinely strings and must be handed over untouched. Deriving that from
+/// [`compile_query`] — the same front-end `extract` and `Plan` use — is the difference between one
+/// definition and a hand-written heuristic that has to keep agreeing with the parser. The heuristic
+/// version of this question already shipped one bug (XPath `/text()` and `/@name` misread as node
+/// queries), which is why it is answered here instead.
+///
+/// A routed query is uniform on the node-vs-scalar axis: [`compile_query`]'s comma/union rule refuses a
+/// mix of outer-HTML and value terminals (deferred captures cannot interleave with streamed values in
+/// document order), so the first member's terminal settles it for the whole query.
+pub fn selector_terminals(queries: &[String]) -> Vec<Option<&'static str>> {
+    queries
+        .iter()
+        .map(|q| compile_query(q).first().map(|s| terminal_name(&s.terminal)))
+        .collect()
+}
+
+fn terminal_name(t: &selector::Terminal) -> &'static str {
+    match t {
+        selector::Terminal::Text { .. } => "text",
+        selector::Terminal::Attr { .. } => "attr",
+        selector::Terminal::OuterHtml => "outer",
+        selector::Terminal::NormalizeSpace(_) => "normalize-space",
+    }
+}
+
 /// Whether a selector is supported, and if not, a best-effort reason. See [`audit_schema`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Support {
@@ -484,6 +517,44 @@ mod tests {
         assert_eq!(ex(cards, "li:has(.new) ~ li::text"), v(&["a1", "B", "a2"])); // all following li (direct text)
         assert_eq!(ex(cards, "li:has(.new) + li::text"), v(&["a1"])); // adjacent: only the immediate next
         assert_eq!(ex(cards, "li:has(.absent) ~ li::text"), v(&[])); // :has fails -> nothing
+    }
+
+    /// The node-vs-scalar answer `frostwork.webpoet` routes a processor on. The XPath rows are the ones
+    /// that matter: the heuristic this replaces read `/text()` and `/@href` as node queries because they
+    /// carry no `::`-pseudo, which is exactly the mistake a query string invites and the compiler cannot
+    /// make.
+    #[test]
+    fn selector_terminals_names_the_value_terminal() {
+        let q: Vec<String> = [
+            "h1::text",                  // text
+            "div ::text",                // subtree text, still text
+            "a::attr(href)",             // attr
+            "div.card",                  // bare element -> outer HTML, i.e. a NODE
+            ".a, .b",                    // all-outer comma list stays outer
+            "//a/text()",                // XPath text terminal, NOT a node
+            "//a/@href",                 // XPath attribute terminal, NOT a node
+            "//div[@id='x']",            // XPath bare element -> outer
+            "normalize-space(//h1)",     // scalar string value
+            "div:has(.a .b)::text",      // does not compile -> None
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(
+            selector_terminals(&q),
+            vec![
+                Some("text"),
+                Some("text"),
+                Some("attr"),
+                Some("outer"),
+                Some("outer"),
+                Some("text"),
+                Some("attr"),
+                Some("outer"),
+                Some("normalize-space"),
+                None,
+            ]
+        );
     }
 
     #[test]

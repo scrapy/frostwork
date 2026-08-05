@@ -288,9 +288,11 @@ def _parsel_ns(fields, schema):
         def getter(self, sel=sel, card=card, sep=sep, proc=proc):
             sub = self.xpath(sel) if sel.startswith(("/", "(")) else self.css(sel)
             if proc is not None:
-                # `images_processor` consumes URL STRINGS, not nodes (see PROCESSOR_FIELDS); the
-                # node-taking processors consume the SelectorList.
-                return sub.getall() if card == "all" else sub
+                # Keyed on the PROCESSOR's input contract, not on cardinality: `images_processor`
+                # consumes URL STRINGS and has no Selector branch (see PROCESSOR_FIELDS), while the
+                # node-taking ones consume the SelectorList. Conflating the two would silently pick the
+                # wrong oracle the moment a node field is declared `all=True`.
+                return sub.getall() if proc in LIST_INPUT_PROCESSORS else sub
             if card == "all":
                 return sub.getall()
             if card == "join":

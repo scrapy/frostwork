@@ -195,6 +195,45 @@ sub-field are unsupported and fail validation by default, as do deferred selecto
 containers. A `Many` nested inside a sub-field is also unsupported. Pass ``strict=False`` only when
 empty results are the desired compatibility behavior.
 
+### Field processors — `Processors` / `out=`
+
+web-poet applies **field processors** to a field's value before it reaches the item, and it finds them
+**by field name** from a nested `Processors` class (`out=` on the field wins if given). That lookup is
+why the zyte-common-items base pages need no wiring: inheriting `ProductPage` attaches
+`breadcrumbs_processor` to a field merely *called* `breadcrumbs`.
+
+A processor's input contract is an lxml/parsel **node** — they are gated on
+`isinstance(value, (Selector, SelectorList, HtmlElement))` and documented to return anything else *as
+is*. So for a **bare-element** field (whose value is the element's outer HTML, i.e. a node reference),
+Frostwork re-parses that one subtree and hands the processor the **element**:
+
+```python
+from zyte_common_items.pages import ProductPage       # its Processors are inherited, not declared here
+from frostwork.webpoet import field
+
+class MyProductPage(ProductPage):
+    breadcrumbs     = field(".crumbs")     # bare element -> breadcrumbs_processor gets the <nav> node
+    descriptionHtml = field(".desc")       # -> description_html_processor gets the <div>, clear-html runs
+    aggregateRating = field(".rating")     # -> rating_processor gets the <span>
+    images          = field("img.hero::attr(src)", all=True)   # a SCALAR terminal: stays a list of str
+```
+
+Two things worth knowing about that, because both are deliberate:
+
+- **The rule is keyed on the field's TERMINAL, not on whether a processor exists.** `::text` and
+  `::attr()` fields are genuinely strings and are handed over untouched — `images_processor` takes URL
+  *strings* and has no `Selector` branch at all, so converting every processor-bearing field to a node
+  would break it. Which terminal a selector has is answered by the engine's own compiler
+  (`frostwork._frostwork.selector_terminals`), never by pattern-matching the query string.
+- **The node handoff is the one place this integration touches lxml/parsel**, imported lazily and only
+  when a processor is attached to a bare-element field. A page object with no processors never reaches
+  it. The cost is a parse of that *one subtree* — far less than the whole-document parse `FrostPage`
+  exists to avoid, but not free. Anyone using processors already has both libraries installed;
+  `zyte_common_items.processors` itself imports `from lxml.html import HtmlElement`.
+
+`join=` on a processor-bearing field stays a string: a joined value is not a node and could only be
+made into one by inventing a wrapper element.
+
 ## 4. Auditing a schema — `check` / strict validation
 
 Frostwork has **no fallback**. The underlying engine can represent an unsupported selector as an empty

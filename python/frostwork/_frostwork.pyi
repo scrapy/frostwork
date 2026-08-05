@@ -30,6 +30,12 @@ def audit_schema(
 ]:
     """Support/reason per selector plus ``(members, max_members, sib_bits, max_sib_bits)`` — no HTML parsed."""
 
+def selector_terminals(queries: List[str]) -> List[Optional[str]]:
+    """The value terminal each query produces: ``"text"``, ``"attr"``, ``"outer"``, ``"normalize-space"``,
+    or ``None`` if it does not compile. ``"outer"`` means the column holds the matched element's raw
+    source — a NODE reference, not a scalar — which is what ``frostwork.webpoet`` re-parses before handing
+    a field to a processor. Derived from the compiler, so it cannot drift from how a query is routed."""
+
 def resolve_label(label: str) -> Optional[str]:
     """Canonical WHATWG encoding name for ``label`` (e.g. ``"UTF-8"``), or ``None`` if unrecognized."""
 

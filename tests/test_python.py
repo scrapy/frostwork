@@ -420,6 +420,107 @@ def test_frostpage_returns_typed_item():
     assert item == Product(name="Widget", price="$9")
 
 
+def test_processor_on_a_bare_element_field_receives_a_node_not_raw_html():
+    """A field processor's input contract is an lxml/parsel NODE. Frostwork's outer-HTML column is a
+    string, and every zyte processor is gated on `isinstance(value, (Selector, HtmlElement))` and
+    documented to return anything else "as is" — so the string sailed through UNCHANGED and a raw-HTML
+    blob landed in a field typed `List[Breadcrumb]`, with nothing raised anywhere.
+
+    Note there is no `out=` here and none is needed: web-poet resolves processors BY FIELD NAME from a
+    nested `Processors` class, which every zyte-common-items base page declares. Inheriting `ProductPage`
+    is enough to arm this."""
+    from frostwork.webpoet import FrostPage, field
+
+    def fake_breadcrumbs(value, page):
+        """Stands in for `breadcrumbs_processor`'s isinstance gate without needing zyte installed."""
+        from parsel import Selector
+        from parsel.selector import SelectorList
+
+        if isinstance(value, SelectorList):
+            value = value[0] if len(value) else None
+        if not isinstance(value, Selector):
+            return f"<PASSTHROUGH {type(value).__name__}>"  # the bug's signature
+        return [a.attrib["href"] for a in value.css("a")]
+
+    html = (b'<html><body><nav class="crumbs"><a href="/a">A</a><a href="/b">B</a></nav>'
+            b'<h1>Title</h1><p class="p">text</p></body></html>')
+
+    class P(FrostPage):
+        class Processors:
+            crumbs = [fake_breadcrumbs]
+
+        crumbs = field(".crumbs")          # bare element -> node handoff
+        name = field("h1::text")           # scalar terminal -> untouched
+        raw = field(".crumbs")             # bare element, NO processor -> still raw source
+
+    item = asyncio.run(P(response=_resp(body=html)).to_item())
+    assert item["crumbs"] == ["/a", "/b"], item["crumbs"]
+    assert item["name"] == "Title"
+    # the no-processor bare-element field keeps its documented raw-source string
+    assert item["raw"] == '<nav class="crumbs"><a href="/a">A</a><a href="/b">B</a></nav>'
+
+
+def test_processor_on_a_scalar_terminal_field_still_gets_strings():
+    """The other half of the rule, and the reason it is keyed on the TERMINAL rather than on processor
+    presence: `images_processor` takes URL STRINGS and has no `Selector` branch at all, so converting
+    every processor-bearing field to a node would return the node unchanged and break a field that
+    works today."""
+    from frostwork.webpoet import FrostPage, field
+
+    def urls_only(value, page):
+        if isinstance(value, list) and all(isinstance(v, str) for v in value):
+            return [f"IMG:{v}" for v in value]
+        return f"<PASSTHROUGH {type(value).__name__}>"
+
+    html = b'<html><body><img class="hero" src="/1.jpg"><img class="hero" src="/2.jpg"></body></html>'
+
+    class P(FrostPage):
+        class Processors:
+            images = [urls_only]
+
+        images = field("img.hero::attr(src)", all=True)
+
+    item = asyncio.run(P(response=_resp(body=html)).to_item())
+    assert item["images"] == ["IMG:/1.jpg", "IMG:/2.jpg"], item["images"]
+
+
+def test_node_handoff_reparses_the_subtree_not_the_document():
+    """`parsel.Selector(text=...)` wraps a fragment in a synthetic `<html><body>` and its `.root` is the
+    `<html>`, so a processor would receive the DOCUMENT rather than the element it selected. The handoff
+    must yield the element itself, tag intact — including for a `<td>`, whose fragment reparse is the
+    case most likely to acquire a wrapper."""
+    from frostwork.webpoet import FrostPage, field
+
+    seen = {}
+
+    def capture(value, page):
+        seen["tag"] = value.root.tag
+        seen["text"] = value.css("::text").get()
+        return "ok"
+
+    html = b'<html><body><table><tr><td class="cell"><b>deep</b></td></tr></table></body></html>'
+
+    class P(FrostPage):
+        class Processors:
+            cell = [capture]
+
+        cell = field("td.cell")
+
+    asyncio.run(P(response=_resp(body=html)).to_item())
+    assert seen == {"tag": "td", "text": "deep"}, seen
+
+
+def test_selector_terminals_is_the_engines_answer_not_a_heuristic():
+    """The node-vs-scalar decision comes from the compiler. Guard the XPath rows in particular: a
+    query-string heuristic reads `/text()` and `/@href` as node queries because neither carries a
+    `::`-pseudo, which is the bug that shape of code has already shipped once."""
+    from frostwork._frostwork import selector_terminals
+
+    assert selector_terminals(["h1::text", "a::attr(href)", "div.card"]) == ["text", "attr", "outer"]
+    assert selector_terminals(["//a/text()", "//a/@href", "//div[@id='x']"]) == ["text", "attr", "outer"]
+    assert selector_terminals(["div:has(.a .b)::text"]) == [None]  # does not compile
+
+
 def test_frostpage_mixes_with_handwritten_field():
     from web_poet import field as wp_field
 

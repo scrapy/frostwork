@@ -24,6 +24,12 @@ still grows with field count and selector complexity.
 The page object is fed by web-poet's ``HttpResponse`` (its ``.body`` bytes are scanned with the
 response's resolved ``.encoding``, matching what Parsel would decode).
 
+**Field processors** work too, including the ones a zyte-common-items base page attaches for you: because
+a processor's input contract is an lxml/parsel node, a **bare-element** field (whose value is the
+element's outer HTML) hands the processor the parsed *element* rather than its raw source, while
+``::text``/``::attr()`` fields stay the strings they are. See ``docs/PYTHON.md`` ("Field processors") for
+the rule and its one dependency.
+
 Requires web-poet:  ``pip install frostwork[webpoet]``.
 """
 
@@ -35,12 +41,16 @@ from typing import Callable, Dict, List, Optional, Tuple
 try:
     from web_poet import WebPage, cached_method
     from web_poet import field as _wp_field
+    # documented public API (referenced from `web_poet.field`'s own docstring) but not re-exported at the
+    # package top level, so it is imported from the module that defines it
+    from web_poet.fields import get_fields_dict as _wp_fields_dict
 except ImportError as exc:  # pragma: no cover - exercised only without web-poet installed
     raise ImportError(
         "frostwork.webpoet requires web-poet; install it with `pip install frostwork[webpoet]`"
     ) from exc
 
 from ._frostwork import Plan as _Plan
+from ._frostwork import selector_terminals as _terminals
 from .page import _shape  # single source of cardinality shaping (first/all/join + transforms)
 from .page import SchemaReport, check  # schema audit / strict validation
 
@@ -175,11 +185,96 @@ def _as_wp_field(name: str, getter):
     return _wp_field(getter)
 
 
-def _make_field(name: str, card: _Card, transforms: Tuple[Callable, ...]):
-    """A ``web_poet.field``-decorated getter that reads its column from the shared batched extract."""
+def _processors_for(cls, name: str):
+    """The processors web-poet WILL apply to field ``name`` on ``cls`` — resolved exactly the way
+    ``web_poet.fields.field.__get__`` resolves them, because a different answer here means handing the
+    wrong TYPE to a processor that silently accepts anything.
+
+    web-poet's order is: an explicit ``out=`` wins, else a nested ``Processors`` class looked up BY FIELD
+    NAME. That second route is the one that matters and the one that is easy to miss: every
+    zyte-common-items base page declares a ``Processors``, so inheriting ``ProductPage`` attaches
+    ``breadcrumbs_processor`` to a field merely called ``breadcrumbs`` — with no ``out=`` written anywhere
+    in the page object."""
+    info = _wp_fields_dict(cls).get(name)
+    out = getattr(info, "out", None) if info is not None else None
+    if out:
+        return list(out)
+    procs = getattr(cls, "Processors", None)
+    if procs is not None:
+        return list(getattr(procs, name, ()) or ())
+    return []
+
+
+def _as_node(raw: str):
+    """One captured element's RAW SOURCE re-parsed into a ``parsel.Selector`` wrapping that element.
+
+    ``lxml.html.fromstring`` rather than ``parsel.Selector(text=...)``: the latter wraps the fragment in a
+    synthetic ``<html><body>`` and its ``.root`` is the ``<html>``, so a processor would receive the
+    document instead of the element it asked for. ``fromstring`` on the raw source of a single element
+    returns that element, tag intact (checked for ``<div>``, ``<p>``, ``<td>`` and a ``<tr>``).
+
+    Frostwork's outer HTML is raw source, which is the RIGHT input here: unlike lxml's re-serialization it
+    round-trips, so re-parsing it reconstructs the subtree rather than a reflowed copy of it. Implied
+    closes are already applied by the engine (``<p class=x>a<div>`` captures ``<p class=x>a``), so the
+    fragment ends where the tree says it does."""
+    from lxml.html import fromstring  # noqa: PLC0415 - see _NODE_DEPENDENCY
+    from parsel import Selector  # noqa: PLC0415
+
+    return Selector(root=fromstring(raw))
+
+
+# The node handoff is the ONE place this integration needs lxml/parsel, and the imports are function-local
+# for that reason: a page object with no processors never reaches them, so Frostwork's core stays
+# tree-free and the dependency stays optional. It is also unavoidable rather than a shortcut — a field
+# processor's input contract IS an lxml/parsel node (`isinstance(value, (Selector, HtmlElement))`), so
+# there is no way to satisfy it without them. Anyone using processors already has both installed:
+# `zyte_common_items.processors` itself imports `from lxml.html import HtmlElement`.
+#
+# The cost is honest and worth stating: a processor-bearing field parses that ONE subtree. That is far
+# less than the whole-document parse the integration exists to avoid, but it is not free, and it does not
+# apply to `::text`/`::attr()` fields at all — those are genuinely strings and are handed over untouched.
+_NODE_DEPENDENCY = "lxml + parsel, imported lazily and only for a processor-bearing outer-HTML field"
+
+
+def _as_nodes(col: List[str], card: _Card):
+    """Shape a raw-source column into the node type the processor expects, mirroring `_shape`'s cardinality.
+
+    ``all`` yields a ``SelectorList`` rather than a plain list because that is what the processors branch
+    on (zyte's ``_handle_selectorlist`` takes ``value[0]``); a plain list of ``Selector`` would fall
+    through to the "returned as is" path and reintroduce the bug in a new shape."""
+    from parsel.selector import SelectorList  # noqa: PLC0415
+
+    kind = card[0]
+    if kind == "all":
+        return SelectorList([_as_node(v) for v in col if v])
+    if kind == "join":
+        # A joined string is not a node and cannot be made into one without inventing a wrapper element.
+        # Leave it a string: `join=` on a processor-bearing field is the caller asking for text.
+        return _shape(col, card, ())
+    for v in col:
+        if v:
+            return _as_node(v)
+    return None
+
+
+def _make_field(name: str, card: _Card, transforms: Tuple[Callable, ...], node: bool = False):
+    """A ``web_poet.field``-decorated getter that reads its column from the shared batched extract.
+
+    ``node`` is true only for a BARE-ELEMENT (outer-HTML) selector, as answered by the engine's own
+    compiler via `selector_terminals` — never by re-deriving the terminal from the query string here. When
+    such a field also has a processor attached, the processor gets the parsed element instead of its raw
+    source. Both halves of that condition are load-bearing: converting on processor presence ALONE would
+    break `images_processor`, which takes URL strings and has no `Selector` branch at all, so handing it a
+    node would return the node unchanged and turn a working field into a broken one."""
 
     def getter(self):
-        return _shape(self._frostwork_columns()[name], card, transforms)
+        col = self._frostwork_columns()[name]
+        if node and _processors_for(type(self), name):
+            value = _as_nodes(col, card)
+            for fn in transforms:
+                value = fn(value)
+            return value
+        return _shape(col, card, transforms)
 
     return _as_wp_field(name, getter)
 
@@ -233,7 +328,10 @@ class FrostPage(WebPage):
         for name, val in list(vars(cls).items()):
             if isinstance(val, _FrostField):
                 own[name] = (val.selector, val.card, val.transforms)
-                wp = _make_field(name, val.card, val.transforms)
+                # Ask the COMPILER whether this selector's value is a node, once, here at class creation
+                # — not per response, and never by pattern-matching the query string.
+                is_node = _terminals([val.selector])[0] == "outer"
+                wp = _make_field(name, val.card, val.transforms, node=is_node)
             elif isinstance(val, _FrostGroup):
                 own_groups[name] = val
                 wp = _make_group_field(name, val)
