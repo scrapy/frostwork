@@ -4,8 +4,8 @@ Python harness (needs `parsel`). `oracle.py` guards the oracle toolchain (libxml
 lxml does *not* pin its vendored libxml2); `diff_lxml.py` is the gate; `conformant.py`/`families.py`/
 `foreign.py` generate test pages; `enc_check.py` (encoding parity), `sel_fuzz.py`/`diff_fuzz.py`
 (selector + malformed-HTML fuzz), `soak.py` (multi-seed soak), `support_snapshot.py`
-(regenerates/checks `docs/SUPPORT_SNAPSHOT.md`), `abi3_smoke.py` (stdlib-only floor check — the
-pinned toolchain can't be installed on py3.9), `ab_bench.py` (A/B two `bench` builds by
+(regenerates/checks `docs/SUPPORT_SNAPSHOT.md`), `abi3_smoke.py` (stdlib-only check that the
+extension works with no dependencies present), `ab_bench.py` (A/B two `bench` builds by
 **interleaving** them inside each cell, min-of-reps, reporting each cell's own jitter; aborts if the two
 builds disagree on the VALUE COUNT),
 `bench_matrix.py`/`bench_corpus.py`/`bench_mem.py`/

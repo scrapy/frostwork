@@ -40,10 +40,10 @@ dependencies = ["typing-extensions>=4.13"]
 # processor resolution this integration mirrors. To widen it: bump the pin, run `make gate-webpoet` and
 # `make gate-webpoet-mutate`, then raise the ceiling here.
 #
-# NOTE the floor is now the same as this extra's: web-poet 0.24.1 needs Python >= 3.10, and since the
-# wheel moved to abi3-py310 (so the engine can BORROW a `str`'s UTF-8 view instead of copying the
-# document - `PyUnicode_AsUTF8AndSize` is limited-API only from 3.10) the core needs 3.10 too. The core
-# is what the 3.9 classifier is about; see docs/PYTHON.md.
+# NOTE this extra no longer narrows the Python floor. It used to: web-poet needs >= 3.10 while the core
+# ran on 3.9, so `pip install frostwork[webpoet]` was the stricter half. The wheel is now abi3-py310
+# (the engine BORROWS a `str`'s UTF-8 view rather than copying the document, and
+# `PyUnicode_AsUTF8AndSize` is limited-API only from 3.10), so both halves want the same 3.10.
 [project.optional-dependencies]
 webpoet = ["web-poet>=0.24.1,<0.25"]
 

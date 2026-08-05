@@ -21,12 +21,19 @@ First public preview.
 ### Python API and tooling
 
 - `frostwork.extract`, declarative `Page`/`Item`, grouped extraction and schema introspection.
+- `html` may be `str` as well as `bytes`, so code holding already-decoded text (a browser snapshot) does
+  not pre-encode a second copy of the document per response; the engine borrows CPython's UTF-8 view of
+  the string. A `str` is scanned as UTF-8, so an `encoding` label naming a different encoding is refused
+  rather than silently decoding those bytes wrongly.
 - `frostwork.check` and `frostwork-audit` for static schema validation; `frostwork-audit --scan` finds
   selector literals in existing Scrapy code without importing it.
 - `Item.empty_fields()` distinguishes supported selectors that matched nothing from unsupported coverage
   gaps already rejected by the audit.
-- An abi3 wheel targeting CPython 3.9 and newer. The optional web-poet integration requires Python 3.10 or
-  newer.
+- An abi3 wheel targeting CPython 3.10 and newer, which is also the floor for the optional web-poet
+  integration. The two used to differ: the core ran on 3.9 while web-poet required 3.10. They converged
+  when the wheel moved to `abi3-py310` so the engine could borrow a `str`'s UTF-8 view (below);
+  `PyUnicode_AsUTF8AndSize` is limited-API only from 3.10, and Python 3.9 reached end of life in October
+  2025.
 
 ### web-poet integration
 

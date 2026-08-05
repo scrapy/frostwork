@@ -24,7 +24,7 @@ import pytest
 pytest.importorskip("mypy", reason="mypy is pinned in requirements-test.txt")
 pytest.importorskip("web_poet")
 
-# `typing.assert_type` landed in 3.11; the wheel's abi3 floor (3.9) is a separate concern from the dev
+# `typing.assert_type` landed in 3.11; the wheel's abi3 floor (3.10) is a separate concern from the dev
 # toolchain, which requires >= 3.10 anyway (see the CI workflow's note).
 pytestmark = pytest.mark.skipif(
     sys.version_info < (3, 11), reason="typing.assert_type requires Python 3.11+"

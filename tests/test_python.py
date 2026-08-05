@@ -7,12 +7,40 @@ parsel cross-check that values survive the FFI boundary unchanged.
 """
 
 import asyncio
+import contextlib
+import re
+import sys
 
 import pytest
 
 import frostwork
 from frostwork import Page
 from frostwork._frostwork import Plan as _Plan
+
+
+@contextlib.contextmanager
+def raises_at_class_definition(match):
+    """Assert a `field()`/`Many()` misdeclaration is refused when the class is created, and that the
+    diagnosis reaches the user — on every supported interpreter.
+
+    The library raises `TypeError` from `_FrostField.__set_name__`, but CPython **wraps whatever
+    `__set_name__` raises in `RuntimeError` before 3.12** (gh-77757 stopped doing so in 3.12). So on the
+    abi3 floor (3.10) and on 3.11 a user catches `RuntimeError` whose `__cause__` carries Frostwork's
+    message, and from 3.12 they catch the `TypeError` directly. Asserting only `TypeError` made this
+    suite pass on the dev interpreter and fail on the floor — which is exactly what nobody saw while the
+    floor job could not run pytest at all."""
+    with pytest.raises((TypeError, RuntimeError)) as excinfo:
+        yield
+    err = excinfo.value
+    chain = [err]
+    while chain[-1].__cause__ is not None:
+        chain.append(chain[-1].__cause__)
+    assert any(re.search(match, str(e)) for e in chain), (
+        f"none of {[type(e).__name__ for e in chain]} carried {match!r}: "
+        f"{[str(e)[:80] for e in chain]}"
+    )
+    if sys.version_info >= (3, 12):
+        assert isinstance(err, TypeError), f"3.12+ should surface TypeError unwrapped, got {err!r}"
 
 PRODUCT = (
     b"<div class=product><h1>Widget</h1><span class=price>$9</span>"
@@ -531,7 +559,7 @@ def test_a_real_zyte_product_page_composes_and_every_processor_fires():
         images = field("img.hero::attr(src)", all=True)   # scalar terminal: URL strings, not nodes
 
     # the declaration that does NOT work, pinned so the docs cannot drift back to it
-    with pytest.raises(TypeError, match="does not inherit a Frostwork page base"):
+    with raises_at_class_definition("does not inherit a Frostwork page base"):
         type("Wrong", (ProductPage,), {"name": field("h1::text")})
 
     item = asyncio.run(MyProductPage(response=_resp(body=html)).to_item())
@@ -1226,9 +1254,9 @@ def test_a_marker_on_a_non_frost_class_fails_at_class_definition():
     from frostwork.webpoet import Many, field
 
     for base in (WebPage, BrowserPage):
-        with pytest.raises(TypeError, match="does not inherit a Frostwork page base"):
+        with raises_at_class_definition("does not inherit a Frostwork page base"):
             type("Bad", (base,), {"name": field("h1::text")})
-        with pytest.raises(TypeError, match="does not inherit a Frostwork page base"):
+        with raises_at_class_definition("does not inherit a Frostwork page base"):
             type("BadGroup", (base,), {"rows": Many(".card", title=field("h3 a::text"))})
 
 

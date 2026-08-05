@@ -1,13 +1,13 @@
-"""abi3-floor smoke test: does the built extension actually work on the OLDEST supported interpreter?
+"""abi3-floor smoke test: does the built extension work with NO Python dependencies installed?
 
-Frostwork ships an **abi3-py39** wheel, but the pinned dev toolchain cannot be installed on Python 3.9
-at all — `parsel`, `web-poet` AND `pytest` each require >= 3.10 (checked 2026-07-29). So the floor
-cannot be verified by running `tests/test_python.py`; before this script CI tried to and the job failed
-on `pip install` every time, which meant the abi3 floor was never actually exercised.
+Frostwork's core (`extract`, `Page`/`Item`, `check`, the `frostwork-audit` CLI) is documented to need
+nothing but the compiled extension — no parsel, no web-poet, no pytest. `tests/test_python.py` cannot
+show that, because installing it installs those very packages.
 
 This script therefore uses NOTHING but the standard library and `frostwork` itself, and asserts the
 dependency-free surface: the primitive, strict/permissive modes, `Page`/`Item` with groups, the schema
-audit, and the source scan. Run it on any interpreter (>= 3.9) after building the extension:
+audit, and the source scan. Run it on any supported interpreter (>= 3.10, the abi3 floor) after building
+the extension:
 
     .venv/bin/python tools/abi3_smoke.py
 
