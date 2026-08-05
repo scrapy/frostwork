@@ -84,6 +84,11 @@ jobs:
       # them silent. Compared on the whole item across class shapes (plain/attrs/inherited) and response
       # types, with the real zyte-common-items processors attached the way a base page attaches them.
       - run: .venv/bin/python tools/diff_webpoet.py
+      # The package ships `py.typed`, so its annotations are a promise to every user's type checker —
+      # and `field()` used to annotate as an internal marker class, making correct code an error in the
+      # user's CI while everything here passed. Nothing but a type checker can catch that.
+      # `tests/test_typing.py` (run above) additionally asserts this check can go red.
+      - run: .venv/bin/python -m mypy python/frostwork tests/typing_fixture.py
 
   bindings:
     name: bindings (py${{ matrix.python }} / ${{ matrix.os }})

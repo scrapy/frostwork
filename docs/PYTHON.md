@@ -103,15 +103,31 @@ class ProductPage(FrostPage, Returns[Product]):
 #   item = await ProductPage(response=http_response).to_item()   # -> Product(...)
 ```
 
-`field(selector, *, all=False, join=None)`:
+`field(selector, *, all=False, join=None, cached=False, meta=None, out=None)`:
 
-| declaration | field value |
-|---|---|
-| `field(sel)` | first match, or `None` |
-| `field(sel, all=True)` | `list[str]` of every match, document order |
-| `field(sel, join=sep)` | every match joined into one `str` with `sep` |
-| `field(sel).map(fn)` | the shaped value with `fn` applied (chainable) |
-| `field(sel).re_first(rx)` | first regex match over the matched string (group 1 if any, else whole) |
+| declaration | field value | static type |
+|---|---|---|
+| `field(sel)` | first match, or `None` | `str \| None` |
+| `field(sel, all=True)` | `list[str]` of every match, document order | `list[str]` |
+| `field(sel, join=sep)` | every match joined into one `str` with `sep` | `str` |
+| `field(sel).map(fn)` | the shaped value with `fn` applied (chainable) | `fn`'s return type |
+| `field(sel).re_first(rx)` | first regex match over the matched string (group 1 if any, else whole) | `str \| None` |
+
+The **static type** column is checked, not aspirational: `field()` is overloaded so a type checker reads
+`page.name` as `str | None` and `page.images` as `list[str]`, and `Many(..., item=Card)` as `list[Card]`.
+`tests/typing_fixture.py` asserts each of those with `typing.assert_type` and `make py` runs mypy over it.
+(The package ships `py.typed`, so these annotations land in *your* CI — before this they said
+`_FrostField`, which made correct code an error.)
+
+`cached`, `meta` and `out` are `web_poet.field`'s own keywords, forwarded verbatim. They compose in a
+fixed order with the Frostwork-side transforms:
+
+1. the column is shaped by `all` / `join`,
+2. `.map()` / `.re_first()` run — plain callables, value in, value out,
+3. web-poet's processors run — `out=` if given, else a nested `Processors` entry for this field name.
+   These take `(value, page)`, so they can read the response, which a `.map()` cannot.
+
+Reach for `.map()` for a local value tweak and `out=` for an ecosystem processor.
 
 `.re_first` operates on a scalar string, so it **raises `ValueError` at declaration on an `all=True`
 field** (a list) — that would otherwise silently yield `None` for every page. Use `join=` (then

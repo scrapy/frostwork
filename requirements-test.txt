@@ -8,6 +8,10 @@ web-poet==0.24.1
 pytest==9.1.1
 # used directly by the web-poet tests (also a transitive web-poet dep); pin it explicitly
 attrs==26.1.0
+# The package ships `py.typed`, which makes its annotations a PROMISE to every user's type checker.
+# `tests/test_typing.py` is what checks that promise: `field()` used to annotate as the internal marker
+# class, so correct code (`x: str = page.name`) was an error in the user's CI and nothing here noticed.
+mypy==2.3.0
 
 # The web-poet integration's oracle (tools/diff_webpoet.py). `zyte-common-items` is the primary
 # consumer of `frostwork.webpoet`, and its absence here is why the strings-only processor bug could

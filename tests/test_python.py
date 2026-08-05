@@ -706,6 +706,93 @@ def test_frost_fields_without_an_input_hook_explains_itself():
         asyncio.run(P().to_item())
 
 
+def test_field_forwards_web_poets_own_keywords():
+    """`field()` builds a real `web_poet.field`, so there was no reason for `web_poet.field`'s options to
+    be unreachable through it. `out=` was the one that mattered: without it, wanting a processor meant
+    writing a hand-written `@web_poet.field` method (leaving the shared scan) or a nested `Processors`
+    class."""
+    from web_poet.fields import get_fields_dict
+
+    from frostwork.webpoet import FrostPage, field
+
+    class P(FrostPage):
+        plain = field("h1::text")
+        wrapped = field("h1::text", out=[lambda v, page: f"[{v}]"])
+        tagged = field("h1::text", meta={"expensive": True})
+        memo = field("h1::text", cached=True)
+
+    item = asyncio.run(P(response=_resp()).to_item())
+    assert item == {"plain": "Widget", "wrapped": "[Widget]", "tagged": "Widget", "memo": "Widget"}
+    info = get_fields_dict(P)
+    assert info["tagged"].meta == {"expensive": True}
+    assert bool(info["wrapped"].out) and not info["plain"].out
+
+
+def test_out_processors_run_after_map_transforms():
+    """The composition order, pinned: shape by cardinality -> `.map()`/`.re_first()` -> web-poet
+    processors. They are not duplicates — a processor takes `(value, page)` and can read the response,
+    which a `.map()` cannot — so the order they compose in is part of the contract."""
+    from frostwork.webpoet import FrostPage, field
+
+    order = []
+
+    def proc(value, page):
+        order.append("processor")
+        return f"proc({value})"
+
+    def transform(value):
+        order.append("transform")
+        return f"map({value})"
+
+    class P(FrostPage):
+        v = field("h1::text", out=[proc]).map(transform)
+
+    item = asyncio.run(P(response=_resp()).to_item())
+    assert item == {"v": "proc(map(Widget))"}
+    assert order == ["transform", "processor"]
+
+
+def test_out_on_a_bare_element_field_also_gets_a_node():
+    """`out=` is the other route by which a processor arrives, so the node handoff has to honour it too —
+    not just the nested `Processors` class."""
+    from frostwork.webpoet import FrostPage, field
+
+    def needs_node(value, page):
+        from parsel import Selector
+
+        if not isinstance(value, Selector):
+            return f"<PASSTHROUGH {type(value).__name__}>"
+        return [a.attrib["href"] for a in value.css("a")]
+
+    html = b'<html><body><nav class="crumbs"><a href="/a">A</a></nav></body></html>'
+
+    class P(FrostPage):
+        crumbs = field(".crumbs", out=[needs_node])
+
+    assert asyncio.run(P(response=_resp(body=html)).to_item()) == {"crumbs": ["/a"]}
+
+
+def test_field_covers_web_poet_fields_whole_keyword_surface():
+    """A keyword web-poet adds to `field()` should be a visible gap, not a silent no-op. The enumeration
+    lives in one place and is checked against the real signature."""
+    import inspect
+
+    from web_poet import field as wp_field
+
+    from frostwork.webpoet import _WP_FIELD_KWARGS, field as frost_field
+
+    upstream = {
+        n for n, p in inspect.signature(wp_field).parameters.items()
+        if p.kind == p.KEYWORD_ONLY
+    }
+    assert upstream == set(_WP_FIELD_KWARGS), (
+        f"web_poet.field's keyword surface is {sorted(upstream)} but frostwork forwards "
+        f"{sorted(_WP_FIELD_KWARGS)} — add the missing one to field() or decline it explicitly"
+    )
+    ours = set(inspect.signature(frost_field).parameters) - {"selector", "all", "join"}
+    assert ours == set(_WP_FIELD_KWARGS), sorted(ours)
+
+
 def test_frostpage_mixes_with_handwritten_field():
     from web_poet import field as wp_field
 
@@ -1577,6 +1664,35 @@ def test_audit_cli_all_ok_exits_zero(tmp_path, capsys):
     )
     assert main([target]) == 0
     assert "2/2" not in capsys.readouterr().out  # one schema, all OK
+
+
+def test_audit_cli_audits_every_page_base_not_just_frostpage(tmp_path, capsys):
+    """Discovery keys off `FrostFields`, the shared machinery base, so a browser page object and a custom
+    `frostwork_input()` one are audited too. Keying it off `FrostPage` would have left the newer bases
+    silently un-audited — which is how the no-fallback contract turns an unsupported selector into an
+    empty field nobody warned about."""
+    from frostwork.audit import main
+
+    target = _write(
+        tmp_path,
+        "import attrs\n"
+        "from frostwork.webpoet import FrostBrowserPage, FrostFields, field\n"
+        # strict=False so the unsupported selector survives class definition and reaches the audit,
+        # which is exactly the situation the CLI exists for
+        "class Browser(FrostBrowserPage, strict=False):\n"
+        "    bad = field('li:has(.a .b)::text')\n"
+        "@attrs.define\n"
+        "class Custom(FrostFields, strict=False):\n"
+        "    raw: bytes\n"
+        "    def frostwork_input(self):\n"
+        "        return self.raw, None\n"
+        "class Sub(Custom, strict=False):\n"
+        "    ok = field('h1::text')\n",
+    )
+    assert main([target]) == 1  # Browser's selector is unsupported -> nonzero
+    out = capsys.readouterr().out
+    assert "Browser" in out and "li:has(.a .b)::text" in out, out
+    assert "Sub" in out, out  # the custom-input page object is discovered too
 
 
 def test_audit_cli_json_is_machine_readable(tmp_path, capsys):

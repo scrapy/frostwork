@@ -26,7 +26,7 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field as _dc_field
 from functools import lru_cache
-from typing import Callable, Iterable, Iterator, List, Optional, Tuple, Union
+from typing import Any, Callable, Iterable, Iterator, List, Optional, Tuple, Union
 
 from ._frostwork import Plan as _Plan
 from ._frostwork import audit_schema as _audit_schema
@@ -450,12 +450,17 @@ def _split_subfields(sub):
 _Transforms = Tuple[Callable, ...]
 
 
-def _shape(col: List[str], card: _Card, transforms: _Transforms = ()):
+def _shape(col: List[str], card: _Card, transforms: _Transforms = ()) -> Any:
+    """Shape a raw column by cardinality, then apply transforms. The return type is genuinely `Any`: it is
+    `list[str]`, `str` or `str | None` depending on `card`, and a transform can make it anything at all.
+    Callers that know their cardinality statically get the precise type from `webpoet.field`'s overloads."""
     kind, arg = card
+    value: Any
     if kind == "all":
         value = list(col)
     elif kind == "join":
-        value = arg.join(col)
+        # `card` is built only by `field()`/`Page.field_join`, which always pair "join" with a separator
+        value = (arg or "").join(col)
     else:
         value = col[0] if col else None  # "first"
     for fn in transforms:

@@ -36,7 +36,19 @@ Requires web-poet:  ``pip install frostwork[webpoet]``.
 from __future__ import annotations
 
 import re
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    Generic,
+    List,
+    Literal,
+    Optional,
+    Tuple,
+    TypeVar,
+    overload,
+)
 
 try:
     from web_poet import BrowserPage, Extractor, WebPage, cached_method
@@ -59,6 +71,17 @@ __all__ = ["FrostPage", "FrostBrowserPage", "FrostFields", "field", "Many", "One
 # ("first", None) | ("all", None) | ("join", separator)
 _Card = Tuple[str, Optional[str]]
 _Spec = Tuple[str, _Card, Tuple[Callable, ...]]  # (selector, card, transforms)
+
+# `T` is a field's VALUE type as a type checker sees it through the descriptor: `str | None` for a plain
+# field, `list[str]` for `all=True`, `str` for `join=`. `U` is a `.map()` result.
+T = TypeVar("T")
+U = TypeVar("U")
+_ItemT = TypeVar("_ItemT")
+
+# web-poet's own `field()` keyword surface, forwarded verbatim by `field()` below. Enumerated here rather
+# than accepted as `**kwargs` so a keyword web-poet adds is a visible gap rather than a silent no-op —
+# `tools/webpoet_surface.py` gates this tuple against `inspect.signature(web_poet.field)`.
+_WP_FIELD_KWARGS = ("cached", "meta", "out")
 
 
 def _re_first(pattern):
@@ -95,30 +118,54 @@ def _require_frost_owner(owner, name: str, what: str) -> None:
         )
 
 
-class _FrostField:
+class _FrostField(Generic[T]):
     """Marker left in a class body by :func:`field`; :meth:`FrostFields.__init_subclass__` turns it
     into a real ``web_poet.field`` bound to the shared batched extract.
 
     :meth:`map` / :meth:`re_first` attach pure-Python transforms that run on the **shaped** value
     (after cardinality) — never in the scan — so declaring a transformed field stays a one-liner
-    instead of a separate ``@web_poet.field`` method. They return a new marker (chainable)."""
+    instead of a separate ``@web_poet.field`` method. They return a new marker (chainable).
 
-    __slots__ = ("selector", "card", "transforms")
+    The ``Generic[T]`` parameter is the field's VALUE type. It exists so a type checker reads
+    ``page.name`` as ``str | None`` rather than as this marker class: the runtime swaps the marker for a
+    ``web_poet.field`` descriptor in ``__init_subclass__``, and a checker cannot see that happen, so
+    before this the annotation said ``_FrostField`` and correct code (``x: str = page.name``) was a type
+    error. Since the package ships ``py.typed``, that wrong answer propagated into users' own CI."""
 
-    def __init__(self, selector: str, card: _Card, transforms: Tuple[Callable, ...] = ()) -> None:
+    __slots__ = ("selector", "card", "transforms", "wp_kwargs")
+
+    if TYPE_CHECKING:
+        # Descriptor protocol for the CHECKER only — at runtime this class is never accessed as a
+        # descriptor, because `__init_subclass__` has already replaced it with the real `web_poet.field`.
+        # Declaring it under TYPE_CHECKING keeps that honest: no dead `__get__` in the shipped object, and
+        # nothing that could quietly answer if the replacement ever failed to happen.
+        @overload
+        def __get__(self, instance: None, owner: Any) -> "_FrostField[T]": ...
+        @overload
+        def __get__(self, instance: Any, owner: Any) -> T: ...
+        def __get__(self, instance: Any, owner: Any = None) -> Any: ...
+
+    def __init__(
+        self,
+        selector: str,
+        card: _Card,
+        transforms: Tuple[Callable, ...] = (),
+        wp_kwargs: Optional[Dict[str, Any]] = None,
+    ) -> None:
         self.selector = selector
         self.card = card
         self.transforms = transforms
+        self.wp_kwargs = wp_kwargs or {}
 
     def __set_name__(self, owner, name: str) -> None:
         _require_frost_owner(owner, name, "field")
 
-    def map(self, fn: Callable) -> "_FrostField":
+    def map(self, fn: Callable[[T], U]) -> "_FrostField[U]":
         """Apply ``fn`` to the field's shaped value (a str/``None`` for a plain field, a ``list`` for
-        ``all=True``, a str for ``join=``). Chainable."""
-        return _FrostField(self.selector, self.card, self.transforms + (fn,))
+        ``all=True``, a str for ``join=``). Chainable, and the value type follows ``fn``'s return."""
+        return _FrostField(self.selector, self.card, self.transforms + (fn,), self.wp_kwargs)
 
-    def re_first(self, pattern: str) -> "_FrostField":
+    def re_first(self, pattern: str) -> "_FrostField[Optional[str]]":
         """Return the first regex match of ``pattern`` over the field's (first) matched string —
         capture group 1 if present, else the whole match; ``None`` if nothing matches.
 
@@ -134,13 +181,68 @@ class _FrostField:
         return self.map(_re_first(pattern))
 
 
-def field(selector: str, *, all: bool = False, join: Optional[str] = None) -> _FrostField:
+@overload
+def field(
+    selector: str,
+    *,
+    all: Literal[True],
+    cached: bool = ...,
+    meta: Optional[dict] = ...,
+    out: Optional[List[Callable]] = ...,
+) -> _FrostField[List[str]]: ...
+
+
+@overload
+def field(
+    selector: str,
+    *,
+    join: str,
+    cached: bool = ...,
+    meta: Optional[dict] = ...,
+    out: Optional[List[Callable]] = ...,
+) -> _FrostField[str]: ...
+
+
+@overload
+def field(
+    selector: str,
+    *,
+    cached: bool = ...,
+    meta: Optional[dict] = ...,
+    out: Optional[List[Callable]] = ...,
+) -> _FrostField[Optional[str]]: ...
+
+
+def field(
+    selector: str,
+    *,
+    all: bool = False,
+    join: Optional[str] = None,
+    cached: bool = False,
+    meta: Optional[dict] = None,
+    out: Optional[List[Callable]] = None,
+) -> "_FrostField[Any]":
     """Declare a Frostwork selector field on a :class:`FrostPage`.
 
     Default: the **first** match (or ``None``). ``all=True``: a **list** of every match, in document
     order. ``join=sep``: every match **joined** into one string with ``sep``. ``all`` and ``join``
     are mutually exclusive. ``selector`` is any Frostwork-supported CSS or downward XPath query.
     Chain :meth:`_FrostField.map` / :meth:`_FrostField.re_first` to transform the extracted value.
+
+    ``cached``, ``meta`` and ``out`` are ``web_poet.field``'s own keywords, forwarded verbatim — the
+    declaration is a real ``web_poet.field``, so there is no reason for its options to be unreachable
+    just because Frostwork built it. ``out`` in particular was previously impossible to pass here, which
+    forced anyone wanting a processor into a hand-written ``@web_poet.field`` method (and out of the
+    shared scan) or into a nested ``Processors`` class.
+
+    ``out`` vs :meth:`_FrostField.map` — related but not the same thing, and they compose in this order:
+
+    1. the selector's column is shaped by ``all``/``join``,
+    2. ``.map()`` / ``.re_first()`` transforms run (plain callables, value in and value out),
+    3. web-poet's processors run — ``out`` if given, else a nested ``Processors`` entry for this field
+       name. These take ``(value, page)``, so they can read the response, which a ``.map()`` cannot.
+
+    Reach for ``.map()`` for a local value tweak and ``out=`` for an ecosystem processor.
     """
     if all and join is not None:
         raise ValueError("field(): `all` and `join` are mutually exclusive")
@@ -150,14 +252,27 @@ def field(selector: str, *, all: bool = False, join: Optional[str] = None) -> _F
         card = ("join", join)
     else:
         card = ("first", None)
-    return _FrostField(selector, card)
+    wp_kwargs: Dict[str, Any] = {"cached": cached}
+    if meta is not None:
+        wp_kwargs["meta"] = meta
+    if out is not None:
+        wp_kwargs["out"] = out
+    return _FrostField(selector, card, (), wp_kwargs)
 
 
-class _FrostGroup:
+class _FrostGroup(Generic[T]):
     """Marker for a `Many`/`One` grouped field; turned into a real ``web_poet.field`` that reads the
-    shared batched :func:`extract_grouped` run."""
+    shared batched :func:`extract_grouped` run. ``T`` is the value type a checker sees — see
+    :class:`_FrostField` for why the descriptor protocol below is TYPE_CHECKING-only."""
 
     __slots__ = ("container", "subfields", "one", "item")
+
+    if TYPE_CHECKING:
+        @overload
+        def __get__(self, instance: None, owner: Any) -> "_FrostGroup[T]": ...
+        @overload
+        def __get__(self, instance: Any, owner: Any) -> T: ...
+        def __get__(self, instance: Any, owner: Any = None) -> Any: ...
 
     def __init__(self, container: str, subfields: Dict[str, _FrostField], one: bool, item):
         self.container = container
@@ -169,7 +284,17 @@ class _FrostGroup:
         _require_frost_owner(owner, name, "Many/One group")
 
 
-def Many(container: str, *, item=None, **subfields: _FrostField) -> _FrostGroup:
+@overload
+def Many(
+    container: str, *, item: Callable[..., _ItemT], **subfields: _FrostField
+) -> _FrostGroup[List[_ItemT]]: ...
+
+
+@overload
+def Many(container: str, **subfields: _FrostField) -> _FrostGroup[List[Dict[str, Any]]]: ...
+
+
+def Many(container: str, *, item=None, **subfields: _FrostField) -> "_FrostGroup[Any]":
     """A repeated nested field: for every element matching ``container`` (in document order), extract
     each keyword ``subfield`` — a :func:`field` — **scoped to that container** (descendant-or-self),
     all in the same streaming pass. Yields a ``list`` of rows. Each row is a ``dict`` of the sub-field
@@ -183,7 +308,17 @@ def Many(container: str, *, item=None, **subfields: _FrostField) -> _FrostGroup:
     return _FrostGroup(container, subfields, one=False, item=item)
 
 
-def One(container: str, *, item=None, **subfields: _FrostField) -> _FrostGroup:
+@overload
+def One(
+    container: str, *, item: Callable[..., _ItemT], **subfields: _FrostField
+) -> _FrostGroup[Optional[_ItemT]]: ...
+
+
+@overload
+def One(container: str, **subfields: _FrostField) -> _FrostGroup[Optional[Dict[str, Any]]]: ...
+
+
+def One(container: str, *, item=None, **subfields: _FrostField) -> "_FrostGroup[Any]":
     """Like :func:`Many` but yields the **first** container's row (a ``dict``/``item``), or ``None``
     if no container matches."""
     grp = Many(container, item=item, **subfields)
@@ -200,13 +335,17 @@ def _merge_mro(cls, attr: str) -> dict:
     return out
 
 
-def _as_wp_field(name: str, getter):
+def _as_wp_field(name: str, getter, wp_kwargs: Optional[Dict[str, Any]] = None):
     """Wrap ``getter`` as a real ``web_poet.field`` under ``name``. The naming is load-bearing, not
     cosmetic: web-poet keys its registration off the function's name, so a getter left called
-    ``getter`` registers every field under that one name."""
+    ``getter`` registers every field under that one name.
+
+    ``wp_kwargs`` carries `field()`'s pass-through of web-poet's own keywords (``cached``/``meta``/``out``)."""
     getter.__name__ = name
     getter.__qualname__ = name
-    return _wp_field(getter)
+    if not wp_kwargs:
+        return _wp_field(getter)
+    return _wp_field(**wp_kwargs)(getter)
 
 
 def _processors_for(cls, name: str):
@@ -281,7 +420,13 @@ def _as_nodes(col: List[str], card: _Card):
     return None
 
 
-def _make_field(name: str, card: _Card, transforms: Tuple[Callable, ...], node: bool = False):
+def _make_field(
+    name: str,
+    card: _Card,
+    transforms: Tuple[Callable, ...],
+    node: bool = False,
+    wp_kwargs: Optional[Dict[str, Any]] = None,
+):
     """A ``web_poet.field``-decorated getter that reads its column from the shared batched extract.
 
     ``node`` is true only for a BARE-ELEMENT (outer-HTML) selector, as answered by the engine's own
@@ -314,7 +459,7 @@ def _make_field(name: str, card: _Card, transforms: Tuple[Callable, ...], node: 
             return value
         return _shape(col, card, transforms)
 
-    return _as_wp_field(name, getter)
+    return _as_wp_field(name, getter, wp_kwargs)
 
 
 def _make_group_field(name: str, grp: _FrostGroup):
@@ -376,7 +521,9 @@ class FrostFields(Extractor):
                 # Ask the COMPILER whether this selector's value is a node, once, here at class creation
                 # — not per response, and never by pattern-matching the query string.
                 is_node = _terminals([val.selector])[0] == "outer"
-                wp = _make_field(name, val.card, val.transforms, node=is_node)
+                wp = _make_field(
+                    name, val.card, val.transforms, node=is_node, wp_kwargs=val.wp_kwargs
+                )
                 # Leave the spec ON the descriptor. This is what makes the class survive being REBUILT —
                 # see the `_frostwork_spec` recovery below.
                 wp._frostwork_spec = spec

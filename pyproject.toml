@@ -42,6 +42,19 @@ Repository = "https://github.com/shaneaevans/frostwork"
 Documentation = "https://github.com/shaneaevans/frostwork#readme"
 Issues = "https://github.com/shaneaevans/frostwork/issues"
 
+# The package ships `py.typed`, so its annotations are a promise to every user's type checker.
+# `make py` and CI run `mypy python/frostwork tests/typing_fixture.py`; `tests/test_typing.py` additionally
+# asserts the check can go RED, since a type check that passes regardless of the annotations proves nothing.
+[tool.mypy]
+files = ["python/frostwork", "tests/typing_fixture.py"]
+
+# lxml is an OPTIONAL, lazily-imported dependency — reached only when a field processor is attached to a
+# bare-element field (see `frostwork.webpoet._as_node`). It ships no stubs of its own and `lxml-stubs` is
+# incomplete, so requiring it would make an optional dep mandatory for anyone type-checking this package.
+[[tool.mypy.overrides]]
+module = ["lxml.*"]
+ignore_missing_imports = true
+
 [tool.maturin]
 # Mixed Rust/Python project: pure-Python package lives under python/, the compiled core is dropped
 # in as frostwork._frostwork. `--features python` turns on the pyo3 bindings (off for cargo test).

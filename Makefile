@@ -108,6 +108,7 @@ py:
 	$(PY) tools/support_snapshot.py --check
 	$(PY) tools/gen_tree_rules.py --check
 	$(PY) tools/audit_tree_rules.py --gate
+	$(PY) -m mypy python/frostwork tests/typing_fixture.py
 
 # The layer ABOVE the engine. `gate` proves a selector returns lxml's column; nothing proved that a page
 # OBJECT returns parsel's item, and five defects lived in that gap — three of them silent (a processor
