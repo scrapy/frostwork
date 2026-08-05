@@ -41,6 +41,115 @@ fn budget_error((members, sib): (usize, usize)) -> PyResult<()> {
     Ok(())
 }
 
+/// The canonical WHATWG encoding name for `label` (e.g. `"UTF-8"`), or `None` if this crate does not
+/// recognize it. Shared by the `resolve_label` binding and [`Html::encoding`], so the two cannot drift.
+fn canonical_label(label: &str) -> Option<&'static str> {
+    encoding_rs::Encoding::for_label(label.as_bytes()).map(|e| e.name())
+}
+
+/// The WHATWG encoding a label names *via Python's codec set* — `codecs.lookup(label).name` fed back
+/// through [`canonical_label`]. `None` when Python does not know the label, or knows it but WHATWG does
+/// not name the result.
+///
+/// This is deliberately the same two-step `frostwork.page._check_encoding` performs, because the two
+/// must agree about every label. `latin-1` is the case that forces it: WHATWG defines `iso-8859-1` and
+/// not `latin-1`, so WHATWG alone cannot see that `latin-1` means windows-1252 and would let a
+/// mojibake-producing label through. `utf-8-sig` is the case that forces the second `None`: Python
+/// resolves it and WHATWG does not name it, so the label is ignored and the text scanned as UTF-8 —
+/// which is what it is.
+fn whatwg_via_python_codecs(py: Python<'_>, label: &str) -> Option<&'static str> {
+    let codecs = py.import("codecs").ok()?;
+    let info = codecs.call_method1("lookup", (label,)).ok()?;
+    let name: String = info.getattr("name").ok()?.extract().ok()?;
+    canonical_label(&name)
+}
+
+/// The document to scan, as Python hands it over: raw `bytes` off the wire, or an already-decoded
+/// `str` (a browser snapshot — `web_poet.BrowserResponse.html`, `AnyResponse.text`).
+///
+/// `str` is here so callers do not have to write `.encode("utf-8")`, which allocates a whole second
+/// copy of the document per response. On CPython >= 3.10 `&str` extraction is
+/// `PyUnicode_AsUTF8AndSize`: for a compact-ASCII `str` that is a pointer INTO the string object, so
+/// the copy disappears entirely; for a non-ASCII `str` CPython transcodes once and caches the result
+/// ON the string, so a second page object over the same response is free. Either way Frostwork, not
+/// the caller, owns the conversion.
+///
+/// It is NOT free in general: a non-ASCII Python `str` is stored as UCS-2/UCS-4, so its first
+/// UTF-8 view has to be built. That cost is imposed by the representation, not by this crate — a
+/// caller holding the original bytes should pass those.
+enum Html<'a> {
+    // `bytes` first: the documented, preferred input, and the only one on the crawl hot path.
+    Bytes(&'a [u8]),
+    Str(&'a str),
+}
+
+// Hand-written rather than `#[derive(FromPyObject)]`: the derive cannot tie a borrowed variant's
+// lifetime to the input object's, so it rejects an enum holding `&'a [u8]` / `&'a str`. Both arms
+// delegate to PyO3's own borrowing extractors, so neither copies.
+impl<'a, 'py> FromPyObject<'a, 'py> for Html<'a> {
+    type Error = PyErr;
+
+    fn extract(ob: pyo3::Borrowed<'a, 'py, PyAny>) -> Result<Self, Self::Error> {
+        if let Ok(bytes) = <&'a [u8] as FromPyObject>::extract(ob) {
+            return Ok(Html::Bytes(bytes));
+        }
+        if let Ok(text) = <&'a str as FromPyObject>::extract(ob) {
+            return Ok(Html::Str(text));
+        }
+        Err(pyo3::exceptions::PyTypeError::new_err(format!(
+            "frostwork: html must be bytes (preferred - the engine tokenizes raw bytes) or str \
+             (already-decoded text, e.g. a browser snapshot), got {}. For a bytearray/memoryview use \
+             the frostwork.extract wrapper, which converts them.",
+            ob.get_type().name().map(|n| n.to_string()).unwrap_or_else(|_| "?".into())
+        )))
+    }
+}
+
+impl Html<'_> {
+    fn as_bytes(&self) -> &[u8] {
+        match self {
+            Html::Bytes(b) => b,
+            Html::Str(s) => s.as_bytes(),
+        }
+    }
+
+    /// The encoding to scan with, given the caller's label.
+    ///
+    /// For `bytes` the label passes through: the engine sniffs when it is `None`, exactly as before.
+    ///
+    /// For `str` the bytes handed on are UTF-8 by construction, so there is nothing to sniff and
+    /// nothing to guess — the answer is UTF-8, and a `<meta charset>` surviving in a browser snapshot
+    /// is correctly ignored.
+    ///
+    /// Only a label that resolves to a DIFFERENT encoding is refused, because that one would decode
+    /// UTF-8 bytes as, say, cp1252 and quietly produce mojibake — the plausible-wrong-value the
+    /// no-fallback contract exists to rule out. A label nothing can resolve is *not* refused: the
+    /// engine's rule for one is WHATWG's "failure, continue" (ignore it and sniff), and for
+    /// already-decoded text ignoring it lands on UTF-8, which is right.
+    ///
+    /// Resolution has to consult BOTH label universes, or the same argument means different things
+    /// through the two entry points. WHATWG defines `iso-8859-1` but not `latin-1`, and Python defines
+    /// `utf_8`/`utf-8-sig`/`U8` which WHATWG does not — so `frostwork.extract` (which normalizes through
+    /// `codecs`) and a direct `Plan` call (which does not go through it, and is the path
+    /// `frostwork.webpoet` uses) would disagree on both sets. `codecs` is consulted only when this
+    /// crate cannot resolve the label itself, so the common path stays inside Rust.
+    fn encoding<'e>(&self, py: Python<'_>, label: Option<&'e str>) -> PyResult<Option<&'e str>> {
+        let Html::Str(_) = self else {
+            return Ok(label); // bytes: pass the label through, `None` still sniffs
+        };
+        let Some(l) = label else { return Ok(Some("utf-8")) };
+        let resolved = canonical_label(l).or_else(|| whatwg_via_python_codecs(py, l));
+        match resolved {
+            Some(name) if name != "UTF-8" => Err(PyValueError::new_err(format!(
+                "frostwork: html is already-decoded str (tokenized as UTF-8), but encoding={l:?} \
+                 resolves to {name}, which would decode those bytes wrongly — pass the original bytes \
+                 with the label, or drop the label."
+            ))),
+            _ => Ok(Some("utf-8")),
+        }
+    }
+}
+
 /// A schema compiled ONCE and reused across pages — the native object behind `frostwork.Page` /
 /// `FrostPage`, which build a `Plan` a single time and call it per response instead of re-sending
 /// string selectors (and re-parsing them) every page. The budget is validated at construction, so an
@@ -63,11 +172,18 @@ impl Plan {
     }
 
     /// One streaming pass over `html`, returning one value-column per flat query (query order).
-    /// The GIL is released for the duration of the scan (`html` is an immutable `bytes` buffer and
+    /// The GIL is released for the duration of the scan (`html` is an immutable buffer and
     /// the compiled plan is read-only), so concurrent extracts on a thread pool run in parallel.
     #[pyo3(signature = (html, encoding=None))]
-    fn extract(&self, py: Python<'_>, html: &[u8], encoding: Option<&str>) -> Vec<Vec<String>> {
-        py.detach(|| self.inner.extract(html, encoding).0)
+    fn extract(
+        &self,
+        py: Python<'_>,
+        html: Html<'_>,
+        encoding: Option<&str>,
+    ) -> PyResult<Vec<Vec<String>>> {
+        let encoding = html.encoding(py, encoding)?;
+        let bytes = html.as_bytes();
+        Ok(py.detach(|| self.inner.extract(bytes, encoding).0))
     }
 
     /// One streaming pass returning `(flat_columns, grouped)` — see the `extract_grouped` free function.
@@ -77,16 +193,19 @@ impl Plan {
     fn extract_grouped(
         &self,
         py: Python<'_>,
-        html: &[u8],
+        html: Html<'_>,
         encoding: Option<&str>,
-    ) -> (Vec<Vec<String>>, Vec<Vec<Vec<Vec<String>>>>) {
-        py.detach(|| self.inner.extract(html, encoding))
+    ) -> PyResult<(Vec<Vec<String>>, Vec<Vec<Vec<Vec<String>>>>)> {
+        let encoding = html.encoding(py, encoding)?;
+        let bytes = html.as_bytes();
+        Ok(py.detach(|| self.inner.extract(bytes, encoding)))
     }
 }
 
 /// One streaming pass over `html`, returning one value-column per query (in query order) — the exact
-/// output of [`crate::extract`]. `html` must be `bytes` (or a `bytes` subclass such as web-poet's
-/// `HttpResponseBody`); the pure-Python `frostwork.extract` wrapper converts other bytes-likes.
+/// output of [`crate::extract`]. `html` is `bytes` (or a `bytes` subclass such as web-poet's
+/// `HttpResponseBody`) or an already-decoded `str` — see [`Html`]; the pure-Python `frostwork.extract`
+/// wrapper converts the remaining bytes-likes.
 /// `encoding` is an optional charset label as Scrapy passes from `Content-Type`; `None` sniffs
 /// (BOM → `<meta>` → UTF-8). Unsupported queries yield an empty column — there is no fallback.
 /// Raises `ValueError` if the schema exceeds the member/sibling-bit budget (a caller bug).
@@ -94,12 +213,14 @@ impl Plan {
 #[pyo3(signature = (html, queries, encoding=None))]
 fn extract(
     py: Python<'_>,
-    html: &[u8],
+    html: Html<'_>,
     queries: Vec<String>,
     encoding: Option<&str>,
 ) -> PyResult<Vec<Vec<String>>> {
     check_budget(&queries, &[])?;
-    Ok(py.detach(|| crate::extract(html, &queries, encoding)))
+    let encoding = html.encoding(py, encoding)?;
+    let bytes = html.as_bytes();
+    Ok(py.detach(|| crate::extract(bytes, &queries, encoding)))
 }
 
 /// One streaming pass returning `(flat_columns, grouped)`. `groups` is a list of
@@ -112,14 +233,16 @@ fn extract(
 #[allow(clippy::type_complexity)]
 fn extract_grouped(
     py: Python<'_>,
-    html: &[u8],
+    html: Html<'_>,
     flat_queries: Vec<String>,
     groups: Vec<(String, Vec<(String, String)>)>,
     encoding: Option<&str>,
 ) -> PyResult<(Vec<Vec<String>>, Vec<Vec<Vec<Vec<String>>>>)> {
     let gq = group_queries(groups);
     check_budget(&flat_queries, &gq)?;
-    Ok(py.detach(|| crate::extract_grouped(html, &flat_queries, &gq, encoding)))
+    let encoding = html.encoding(py, encoding)?;
+    let bytes = html.as_bytes();
+    Ok(py.detach(|| crate::extract_grouped(bytes, &flat_queries, &gq, encoding)))
 }
 
 /// Resolve `label` against the engine's charset-label set (WHATWG labels), returning the canonical
@@ -129,7 +252,7 @@ fn extract_grouped(
 /// philosophy forbids surfacing silently).
 #[pyfunction]
 fn resolve_label(label: &str) -> Option<&'static str> {
-    encoding_rs::Encoding::for_label(label.as_bytes()).map(|e| e.name())
+    canonical_label(label)
 }
 
 /// `Support` as a Python-facing `(supported: bool, reason: Optional[str])` tuple.

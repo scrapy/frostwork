@@ -5,15 +5,15 @@ one-pass primitives crossing the PyO3 boundary. `html` must be `bytes` (or a `by
 as web-poet's `HttpResponseBody`); the pure-Python wrappers accept other bytes-likes and `str`.
 """
 
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
 
 def extract(
-    html: bytes, queries: List[str], encoding: Optional[str] = ...
+    html: Union[bytes, str], queries: List[str], encoding: Optional[str] = ...
 ) -> List[List[str]]:
     """One streaming pass: one value-column per query, in query order."""
 
 def extract_grouped(
-    html: bytes,
+    html: Union[bytes, str],
     flat_queries: List[str],
     groups: List[Tuple[str, List[Tuple[str, str]]]],
     encoding: Optional[str] = ...,
@@ -54,7 +54,7 @@ class Plan:
         flat_queries: List[str],
         groups: List[Tuple[str, List[Tuple[str, str]]]],
     ) -> None: ...
-    def extract(self, html: bytes, encoding: Optional[str] = ...) -> List[List[str]]: ...
+    def extract(self, html: Union[bytes, str], encoding: Optional[str] = ...) -> List[List[str]]: ...
     def extract_grouped(
-        self, html: bytes, encoding: Optional[str] = ...
+        self, html: Union[bytes, str], encoding: Optional[str] = ...
     ) -> Tuple[List[List[str]], List[List[List[List[str]]]]]: ...

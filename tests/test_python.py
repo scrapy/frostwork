@@ -12,6 +12,7 @@ import pytest
 
 import frostwork
 from frostwork import Page
+from frostwork._frostwork import Plan as _Plan
 
 PRODUCT = (
     b"<div class=product><h1>Widget</h1><span class=price>$9</span>"
@@ -136,6 +137,29 @@ def test_extract_str_with_non_utf8_label_raises():
         frostwork.extract("<p>café</p>", ["p::text"], "windows-1252")
     # a UTF-8 label on str is consistent and allowed
     assert frostwork.extract("<p>café</p>", ["p::text"], "utf-8") == [["café"]]
+
+
+@pytest.mark.parametrize("label", [None, "utf-8", "utf8", "UTF-8", "utf_8", "utf-8-sig", "U8"])
+def test_a_str_accepts_every_utf8_label_spelling_through_both_entry_points(label):
+    """`extract` normalizes Python codec spellings through `codecs`, and the native layer resolves
+    WHATWG labels — two different labelling universes over the same argument. `utf_8`, `utf-8-sig` and
+    `U8` are UTF-8 to Python and unknown to WHATWG, so a native check that demanded a WHATWG UTF-8 name
+    made the same label mean different things through `extract` (accepted) and through `Plan` (refused),
+    which is the path `frostwork.webpoet` uses. Both must answer the same way."""
+    html = "<p>café</p>"
+    assert frostwork.extract(html, ["p::text"], label) == [["café"]]
+    assert _Plan(["p::text"], []).extract(html, label) == [["café"]]
+
+
+@pytest.mark.parametrize("label", ["windows-1252", "latin-1", "iso-8859-1", "shift_jis", "gb18030"])
+def test_a_str_refuses_a_label_that_resolves_to_another_encoding(label):
+    """The mojibake this exists to prevent: UTF-8 bytes decoded as something else. Refused on BOTH
+    entry points, since a direct `Plan` call bypasses the pure-Python check entirely."""
+    html = "<p>café</p>"
+    with pytest.raises(ValueError):
+        frostwork.extract(html, ["p::text"], label)
+    with pytest.raises(ValueError):
+        _Plan(["p::text"], []).extract(html, label)
 
 
 def test_extract_grouped_normalizes_list_shaped_groups():

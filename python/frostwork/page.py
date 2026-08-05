@@ -45,10 +45,13 @@ _Card = Tuple[str, Optional[str]]
 Bytesish = Union[bytes, bytearray, memoryview, str]
 
 
-def _as_bytes(html: Bytesish) -> bytes:
-    """Frostwork tokenizes raw bytes. `str` is encoded as UTF-8 (already-decoded text)."""
-    if isinstance(html, str):
-        return html.encode("utf-8")
+def _as_scan_input(html: Bytesish) -> Union[bytes, str]:
+    """What the engine scans. `bytes` and `str` both cross the FFI boundary as-is — the native layer
+    borrows a `str`'s UTF-8 view instead of allocating a second copy of the document (see the `Html`
+    enum in `src/python.rs`), so a caller holding already-decoded text should NOT pre-encode it. Only
+    the remaining bytes-likes need materializing."""
+    if isinstance(html, (bytes, str)):
+        return html
     return bytes(html)
 
 
@@ -168,7 +171,7 @@ def extract(
     encoding = _check_encoding(html, encoding)
     if strict:
         _validate_flat(tuple(query_list))
-    return _extract(_as_bytes(html), query_list, encoding)
+    return _extract(_as_scan_input(html), query_list, encoding)
 
 
 def extract_grouped(
@@ -192,7 +195,7 @@ def extract_grouped(
     if strict:
         group_key = tuple((container, tuple(subfields)) for container, subfields in group_list)
         _validate_grouped(tuple(query_list), group_key)
-    return _extract_grouped(_as_bytes(html), query_list, group_list, encoding)
+    return _extract_grouped(_as_scan_input(html), query_list, group_list, encoding)
 
 
 # --------------------------------------------------------------------------- schema audit / validation
@@ -603,7 +606,7 @@ class Page:
             self.check().raise_for_status()
             self._validated = True
         encoding = _check_encoding(html, encoding)
-        body = _as_bytes(html)
+        body = _as_scan_input(html)
         plan = self._get_plan()  # compiled once, reused across pages
         if not self._groups:
             cols = plan.extract(body, encoding)

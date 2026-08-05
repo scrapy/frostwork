@@ -10,14 +10,13 @@ description = "Treeless, one-pass HTML extraction — CSS/XPath selectors matche
 readme = "README.md"
 license = "BSD-3-Clause"
 license-files = ["LICENSE"]
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 authors = [{ name = "Zyte" }]
 keywords = ["html", "scraping", "css-selectors", "xpath", "streaming", "web-poet", "scrapy"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Programming Language :: Rust",
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -41,8 +40,10 @@ dependencies = ["typing-extensions>=4.13"]
 # processor resolution this integration mirrors. To widen it: bump the pin, run `make gate-webpoet` and
 # `make gate-webpoet-mutate`, then raise the ceiling here.
 #
-# NOTE this extra is narrower than Frostwork's own `requires-python = ">=3.9"`: web-poet 0.24 requires
-# Python >= 3.10, so `pip install frostwork[webpoet]` needs 3.10+ even though the core does not.
+# NOTE the floor is now the same as this extra's: web-poet 0.24.1 needs Python >= 3.10, and since the
+# wheel moved to abi3-py310 (so the engine can BORROW a `str`'s UTF-8 view instead of copying the
+# document - `PyUnicode_AsUTF8AndSize` is limited-API only from 3.10) the core needs 3.10 too. The core
+# is what the 3.9 classifier is about; see docs/PYTHON.md.
 [project.optional-dependencies]
 webpoet = ["web-poet>=0.24.1,<0.25"]
 
