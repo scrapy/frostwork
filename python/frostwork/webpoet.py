@@ -39,7 +39,7 @@ import re
 from typing import Callable, Dict, List, Optional, Tuple
 
 try:
-    from web_poet import WebPage, cached_method
+    from web_poet import BrowserPage, Extractor, WebPage, cached_method
     from web_poet import field as _wp_field
     # documented public API (referenced from `web_poet.field`'s own docstring) but not re-exported at the
     # package top level, so it is imported from the module that defines it
@@ -54,7 +54,7 @@ from ._frostwork import selector_terminals as _terminals
 from .page import _shape  # single source of cardinality shaping (first/all/join + transforms)
 from .page import SchemaReport, check  # schema audit / strict validation
 
-__all__ = ["FrostPage", "field", "Many", "One"]
+__all__ = ["FrostPage", "FrostBrowserPage", "FrostFields", "field", "Many", "One"]
 
 # ("first", None) | ("all", None) | ("join", separator)
 _Card = Tuple[str, Optional[str]]
@@ -77,8 +77,26 @@ def _re_first(pattern):
     return apply
 
 
+def _require_frost_owner(owner, name: str, what: str) -> None:
+    """A marker is inert unless something converts it, and the only thing that does is
+    :meth:`FrostFields.__init_subclass__`. Declared on a class that does not inherit it — web-poet's own
+    ``BrowserPage``, an ``Extractor``, a plain ``WebPage`` — the marker just sat in the class dict and
+    ``to_item()`` returned an item with those fields ABSENT: no error, no empty column, nothing to notice.
+
+    Python calls ``__set_name__`` on every descriptor in a class body before the parent's
+    ``__init_subclass__`` runs, and the class object already exists at that point, so this fires at class
+    definition — i.e. at import — instead of turning up as a quietly incomplete item in production."""
+    if not issubclass(owner, FrostFields):
+        raise TypeError(
+            f"Frostwork {what} {name!r} is declared on {owner.__name__}, which does not inherit a "
+            f"Frostwork page base, so nothing would convert it and to_item() would silently omit the "
+            f"field. Inherit FrostPage (for HttpResponse) or FrostBrowserPage (for BrowserResponse); for "
+            f"any other input, inherit FrostFields and override frostwork_input()."
+        )
+
+
 class _FrostField:
-    """Marker left in a class body by :func:`field`; :meth:`FrostPage.__init_subclass__` turns it
+    """Marker left in a class body by :func:`field`; :meth:`FrostFields.__init_subclass__` turns it
     into a real ``web_poet.field`` bound to the shared batched extract.
 
     :meth:`map` / :meth:`re_first` attach pure-Python transforms that run on the **shaped** value
@@ -91,6 +109,9 @@ class _FrostField:
         self.selector = selector
         self.card = card
         self.transforms = transforms
+
+    def __set_name__(self, owner, name: str) -> None:
+        _require_frost_owner(owner, name, "field")
 
     def map(self, fn: Callable) -> "_FrostField":
         """Apply ``fn`` to the field's shaped value (a str/``None`` for a plain field, a ``list`` for
@@ -143,6 +164,9 @@ class _FrostGroup:
         self.subfields = subfields
         self.one = one
         self.item = item
+
+    def __set_name__(self, owner, name: str) -> None:
+        _require_frost_owner(owner, name, "Many/One group")
 
 
 def Many(container: str, *, item=None, **subfields: _FrostField) -> _FrostGroup:
@@ -311,12 +335,18 @@ def _make_group_field(name: str, grp: _FrostGroup):
     return _as_wp_field(name, getter)
 
 
-class FrostPage(WebPage):
-    """Base page object. Declare fields with :func:`field` (and nested collections with :func:`Many` /
-    :func:`One`); ``to_item()`` returns them all from a single streaming scan of ``self.response.body``.
-    Subclass it exactly like a ``web_poet.WebPage`` (it *is* one), optionally with ``Returns[YourItem]``
-    and ``@handle_urls(...)``. Schemas are validated at class definition by default; declare
-    ``class MyPage(FrostPage, strict=False)`` to allow unsupported selectors as empty fields."""
+class FrostFields(Extractor):
+    """All of the field machinery, with **no** response contract — the piece both page bases share.
+
+    Built on web-poet's ``Extractor`` (its "base class for field support"), so this alone is a usable page
+    object: it brings ``to_item()`` and ``Returns[...]`` and needs only :meth:`frostwork_input`. That is
+    the shape to reach for when the input is neither of the two responses below.
+
+    It is split out because the response type is the one thing that varies, and getting that wrong was
+    silent: `field()` markers are converted by ``__init_subclass__``, so declaring them on a class that
+    does not inherit this mixin (web-poet's own ``BrowserPage``, say) converted nothing and ``to_item()``
+    returned an item with the fields simply absent. Subclass :class:`FrostPage` or
+    :class:`FrostBrowserPage`, or inherit this and override :meth:`frostwork_input`."""
 
     # Per-class own declarations, plus the MRO-merged view (subclasses inherit parent fields, nearest
     # class wins). BOTH are computed once at class-creation in __init_subclass__ — no per-response
@@ -428,15 +458,27 @@ class FrostPage(WebPage):
             },
         }
 
+    def frostwork_input(self) -> Tuple[bytes, Optional[str]]:
+        """The ``(html_bytes, encoding)`` this page object scans. Override to source a page object from
+        something other than the two provided bases — that is the whole extension point, and it is public
+        because web-poet's input universe is larger than the shapes shipped here (``Extractor`` subclasses
+        can be given any dependency at all).
+
+        ``encoding`` may be ``None``, in which case the engine sniffs (BOM, then a ``<meta>`` prescan)
+        exactly as Parsel would. Return the ORIGINAL bytes where you have them: decoding to ``str`` and
+        re-encoding can only lose information the sniffer would otherwise use."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not define frostwork_input(). Inherit FrostPage (HttpResponse) "
+            "or FrostBrowserPage (BrowserResponse), or override frostwork_input() to return "
+            "(html_bytes, encoding)."
+        )
+
     @cached_method
     def _frostwork_run(self):
         """Run the page object's whole schema — flat fields AND `Many`/`One` groups — in ONE pass
         through the class's pre-compiled `Plan`; cached per instance so every field reads one scan."""
-        resp = self.response
-        # web-poet's HttpResponseBody subclasses bytes, which the native fn accepts directly —
-        # avoid copying the whole body on the hot path.
-        body = resp.body if isinstance(resp.body, bytes) else bytes(resp.body)
-        flat_cols, grouped = self._frostwork_plan.extract_grouped(body, resp.encoding)
+        body, encoding = self.frostwork_input()
+        flat_cols, grouped = self._frostwork_plan.extract_grouped(body, encoding)
         return (
             dict(zip(self._frostwork_flat_names, flat_cols)),
             dict(zip(self._frostwork_group_names, grouped)),
@@ -445,3 +487,32 @@ class FrostPage(WebPage):
     def _frostwork_columns(self) -> Dict[str, List[str]]:
         """Flat columns from the shared one-pass run (grouped fields read `_frostwork_run()[1]`)."""
         return self._frostwork_run()[0]
+
+
+class FrostPage(FrostFields, WebPage):
+    """Base page object over web-poet's ``HttpResponse``. Declare fields with :func:`field` (and nested
+    collections with :func:`Many` / :func:`One`); ``to_item()`` returns them all from a single streaming
+    scan of ``self.response.body``. Subclass it exactly like a ``web_poet.WebPage`` (it *is* one),
+    optionally with ``Returns[YourItem]`` and ``@handle_urls(...)``. Schemas are validated at class
+    definition by default; declare ``class MyPage(FrostPage, strict=False)`` to allow unsupported
+    selectors as empty fields."""
+
+    def frostwork_input(self) -> Tuple[bytes, Optional[str]]:
+        resp = self.response
+        # web-poet's HttpResponseBody subclasses bytes, which the native fn accepts directly —
+        # avoid copying the whole body on the hot path.
+        body = resp.body if isinstance(resp.body, bytes) else bytes(resp.body)
+        return body, resp.encoding
+
+
+class FrostBrowserPage(FrostFields, BrowserPage):
+    """Base page object over web-poet's ``BrowserResponse`` — a browser's DOM snapshot rather than the
+    bytes off the wire. Identical to :class:`FrostPage` in every other respect.
+
+    A ``BrowserResponse`` carries ``.html`` (a ``str``) and no bytes, so there is nothing to sniff: the
+    text is encoded UTF-8 and scanned with the encoding stated rather than guessed. That is not a
+    shortcut — the browser has already resolved the page's encoding, and re-deriving it from a
+    re-encoding of the decoded text could only disagree with the browser that produced it."""
+
+    def frostwork_input(self) -> Tuple[bytes, Optional[str]]:
+        return str(self.response.html).encode("utf-8"), "utf-8"

@@ -9,7 +9,8 @@ Three layers, smallest to largest:
 
 1. `frostwork.extract` — the one-pass primitive.
 2. `frostwork.Page` / `frostwork.Item` — a declarative `{field: selector}` schema (mirror of the Rust API).
-3. `frostwork.webpoet.FrostPage` — a `web_poet.WebPage` whose selector fields share a single scan.
+3. `frostwork.webpoet.FrostPage` / `FrostBrowserPage` — a web-poet page object whose selector fields
+   share a single scan.
 
 ## Install / build
 
@@ -70,7 +71,7 @@ Pass `map=fn` to transform a field's shaped value in Python (never in the scan) 
 `.field_all("prices", ".price::text", map=lambda xs: [float(x) for x in xs])`. `Item.value` /
 `to_dict` reflect the transform; `get` / `get_all` return the raw matches.
 
-## 3. web-poet page objects — `FrostPage`
+## 3. web-poet page objects — `FrostPage` / `FrostBrowserPage`
 
 `FrostPage` is a `web_poet.WebPage`. Declare fields with `field(...)`; each becomes a **real
 `web_poet.field`**, so attribute access, `async to_item()`, `@handle_urls` routing, `Returns[Item]`,
@@ -126,8 +127,9 @@ class ProductPage(FrostPage, Returns[Product], skip_nonitem_fields=True):
     rating  = field("p.star-rating::attr(class)").map(rating_to_int)
 ```
 
-The page body is scanned as `response.body` bytes using the response's resolved `response.encoding`,
-so values match what Parsel would decode.
+The page body is scanned as `response.body` bytes using the response's resolved `response.encoding`, so
+values match what Parsel would decode. For a browser snapshot or any other input, see
+[Response types](#response-types--frostpage-frostbrowserpage-frostfields) below.
 
 **Recipe — relative → absolute URLs.** Frostwork returns the raw attribute value; to resolve it
 against the page URL, extract into a helper field and compose a computed `@web_poet.field` that calls
@@ -194,6 +196,42 @@ Sibling `+`/`~`, comma groups, reverse positions, `:has()`, and text-content pre
 sub-field are unsupported and fail validation by default, as do deferred selectors used as group
 containers. A `Many` nested inside a sub-field is also unsupported. Pass ``strict=False`` only when
 empty results are the desired compatibility behavior.
+
+### Response types — `FrostPage`, `FrostBrowserPage`, `FrostFields`
+
+Pick the base that matches the input the framework will inject:
+
+| base | input | notes |
+|---|---|---|
+| `FrostPage` | `web_poet.HttpResponse` | scans `.body` bytes with the response's resolved `.encoding` |
+| `FrostBrowserPage` | `web_poet.BrowserResponse` | scans `.html`, encoded UTF-8 |
+| `FrostFields` | anything — override `frostwork_input()` | a `web_poet.Extractor`, so it brings `to_item()` / `Returns[...]` |
+
+A `BrowserResponse` carries `.html` (a `str`) and no bytes, so **nothing is sniffed**: the browser already
+resolved the page's encoding, and re-deriving it from a re-encoding of the decoded text could only
+disagree with the browser that produced it. A `<meta charset>` left over in the snapshot is therefore
+ignored, which is the correct reading of an already-decoded DOM.
+
+For any other dependency, override the hook:
+
+```python
+@attrs.define
+class MyPage(FrostFields):
+    blob: bytes
+    def frostwork_input(self):
+        return self.blob, None          # None -> the engine sniffs (BOM, then a <meta> prescan)
+    title = field("h1::text")
+```
+
+**Declaring a `field()` on a class that does not inherit one of these raises `TypeError` at class
+definition.** Markers are converted by `FrostFields.__init_subclass__`, so on a plain `web_poet.WebPage`
+or `BrowserPage` nothing converts them and `to_item()` returns an item with those fields simply *absent* —
+no error and no empty column. Failing at import is the point.
+
+`web_poet.SelectorExtractor` is **not** supported and cannot usefully be: its input is a
+`parsel.Selector`, i.e. a tree lxml has already built. Scanning it would mean serializing that tree back
+to markup and re-parsing it, which can disagree with both the original bytes and the `Selector` itself —
+and if a tree already exists, Frostwork has nothing left to save. Query the `Selector` directly there.
 
 ### Field processors — `Processors` / `out=`
 

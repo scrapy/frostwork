@@ -625,6 +625,87 @@ def test_a_field_missing_from_the_plan_explains_itself():
         asyncio.run(P(response=_resp()).to_item())
 
 
+def test_frost_browser_page_scans_a_browser_response():
+    """`BrowserResponse` carries `.html` (a str) and no `.body`, so a `FrostPage` fed one raised
+    `AttributeError`. It gets its own base rather than a duck-typed branch, because the encoding story
+    differs: the browser already resolved the page's encoding, so there is nothing to sniff."""
+    from web_poet import BrowserHtml, BrowserResponse, ResponseUrl
+
+    from frostwork.webpoet import FrostBrowserPage, Many, field
+
+    class P(FrostBrowserPage):
+        name = field("h1::text")
+        cards = Many(".card", title=field("h3 a::text"))
+
+    resp = BrowserResponse(url=ResponseUrl("http://example.com/"), html=BrowserHtml(GRID.decode()))
+    item = asyncio.run(P(response=resp).to_item())
+    assert item["cards"] == [{"title": "A"}, {"title": "B"}]
+
+
+def test_browser_page_handles_non_ascii_without_sniffing():
+    """The `.html` str is encoded UTF-8 and scanned as UTF-8. A page whose ORIGINAL bytes declared some
+    other charset must still come out right, because what the browser handed over is already decoded — so
+    a `<meta charset=shift_jis>` left in the snapshot must not re-sniff the re-encoded text."""
+    from web_poet import BrowserHtml, BrowserResponse, ResponseUrl
+
+    from frostwork.webpoet import FrostBrowserPage, field
+
+    html = '<html><head><meta charset="shift_jis"></head><body><h1>日本語 café</h1></body></html>'
+
+    class P(FrostBrowserPage):
+        name = field("h1::text")
+
+    resp = BrowserResponse(url=ResponseUrl("http://example.com/"), html=BrowserHtml(html))
+    assert asyncio.run(P(response=resp).to_item()) == {"name": "日本語 café"}
+
+
+def test_a_marker_on_a_non_frost_class_fails_at_class_definition():
+    """The silent failure this replaces: markers are converted by `FrostFields.__init_subclass__`, so on a
+    plain web-poet class nothing converted them and `to_item()` returned an item with the fields simply
+    ABSENT — no error, no empty column, nothing to notice. `__set_name__` runs before the parent's
+    `__init_subclass__` and the class already exists, so this fires at import."""
+    from web_poet import BrowserPage, WebPage
+
+    from frostwork.webpoet import Many, field
+
+    for base in (WebPage, BrowserPage):
+        with pytest.raises(TypeError, match="does not inherit a Frostwork page base"):
+            type("Bad", (base,), {"name": field("h1::text")})
+        with pytest.raises(TypeError, match="does not inherit a Frostwork page base"):
+            type("BadGroup", (base,), {"rows": Many(".card", title=field("h3 a::text"))})
+
+
+def test_frostwork_input_is_the_extension_point_for_any_other_dependency():
+    """web-poet's input universe is larger than the two bases shipped here (an `Extractor` can be given any
+    dependency at all), so the bytes-and-encoding hook is public and overridable rather than a private
+    branch over known response types."""
+    import attrs
+
+    from frostwork.webpoet import FrostFields, field
+
+    @attrs.define
+    class RawBytesPage(FrostFields):
+        raw: bytes
+
+        def frostwork_input(self):
+            return self.raw, "utf-8"
+
+    class P(RawBytesPage):
+        name = field("h1::text")
+
+    assert asyncio.run(P(raw=PRODUCT).to_item()) == {"name": "Widget"}
+
+
+def test_frost_fields_without_an_input_hook_explains_itself():
+    from frostwork.webpoet import FrostFields, field
+
+    class P(FrostFields):
+        name = field("h1::text")
+
+    with pytest.raises(NotImplementedError, match="frostwork_input"):
+        asyncio.run(P().to_item())
+
+
 def test_frostpage_mixes_with_handwritten_field():
     from web_poet import field as wp_field
 

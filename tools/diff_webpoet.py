@@ -69,6 +69,7 @@ import parsel
 from diff_lxml import is_node_query
 from web_poet import (
     BrowserHtml,
+    BrowserPage,
     BrowserResponse,
     HttpResponse,
     HttpResponseBody,
@@ -88,7 +89,7 @@ from zyte_common_items.processors import (
 )
 
 import frostwork
-from frostwork.webpoet import FrostPage, Many, One, field
+from frostwork.webpoet import FrostBrowserPage, FrostPage, Many, One, field
 
 URL = "http://example.com/p/1"
 
@@ -314,7 +315,7 @@ def _apply_shape(cls, shape):
     return cls
 
 
-def build_page(schema, shape, *, frost: bool):
+def build_page(schema, shape, *, frost: bool, kind: str = "http"):
     """Build one side of the pair in one of the SHAPES.
 
     The shape axis is the whole point of defect 1: the decorator runs AFTER `__init_subclass__`, so it is
@@ -328,7 +329,12 @@ def build_page(schema, shape, *, frost: bool):
     truncated-tag bug. With both sides decorated, a shape that fails on both is ORACLE-SKIP and a shape
     that fails only here is a real defect."""
     ns_maker = _frost_ns if frost else _parsel_ns
-    root = FrostPage if frost else WebPage
+    # The response type picks the BASE on both sides, so the browser column compares like with like:
+    # FrostBrowserPage against web-poet's own BrowserPage, not against a WebPage that happens to work.
+    if frost:
+        root = FrostBrowserPage if kind == "browser" else FrostPage
+    else:
+        root = BrowserPage if kind == "browser" else WebPage
     fields = schema["fields"]
     procs = _processors_cls(schema)
     if shape in ("inherit_plain", "inherit_attrs"):
@@ -457,26 +463,27 @@ def main() -> None:
         for _ in range(args.schemas):
             html = gen_page(rng)
             schema = gen_schema(rng)
-            try:
-                oracle_cls = build_page(schema, shape, frost=False)
-            except Exception:  # noqa: BLE001 - the oracle cannot be built in this shape; not our verdict
-                stat["ORACLE-SKIP"] += 1
-                by_shape[f"{shape}/(build)"]["ORACLE-SKIP"] += 1
-                continue
-            try:
-                frost_cls = build_page(schema, shape, frost=True)
-            except Exception as exc:  # noqa: BLE001 - a schema that will not even build is a CRASH
-                stat["CRASH"] += 1
-                stat["pairs"] += 1
-                by_shape[shape]["CRASH"] += 1
-                if len(examples) < args.show:
-                    examples.append((shape, "<class construction>", f"{type(exc).__name__}: {exc}", "", ""))
-                continue
-
             for kind, make_response in inputs:
+                key = f"{shape}/{kind}"
+                try:
+                    oracle_cls = build_page(schema, shape, frost=False, kind=kind)
+                except Exception:  # noqa: BLE001 - oracle unbuildable in this shape; not our verdict
+                    stat["ORACLE-SKIP"] += 1
+                    by_shape[f"{key}/(build)"]["ORACLE-SKIP"] += 1
+                    continue
+                try:
+                    frost_cls = build_page(schema, shape, frost=True, kind=kind)
+                except Exception as exc:  # noqa: BLE001 - a schema that will not build is a CRASH
+                    stat["CRASH"] += 1
+                    stat["pairs"] += 1
+                    by_shape[key]["CRASH"] += 1
+                    if len(examples) < args.show:
+                        examples.append(
+                            (key, "<class construction>", f"{type(exc).__name__}: {exc}", "", "")
+                        )
+                    continue
                 mine, mine_err = _to_item(frost_cls, make_response(html))
                 theirs, theirs_err = _to_item(oracle_cls, make_response(html))
-                key = f"{shape}/{kind}"
                 if theirs_err is not None:
                     # the oracle itself could not answer; nothing to compare (parsel has no such input)
                     stat["ORACLE-SKIP"] += 1
