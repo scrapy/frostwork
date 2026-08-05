@@ -1195,11 +1195,18 @@ def test_has_widened_inners_match_correct_semantics():
         assert got == has_ids(e_css, f_css, child), frost_sel
 
 
-def test_is_where_correct_and_semantics_diverges_from_cssselect_bug():
-    # `:is()` combined with a class/attr/id or another `:is` is implemented with CORRECT AND semantics
-    # (a DOCUMENTED divergence: cssselect 1.4.0 mis-translates it, ORing the base condition with the
-    # alternatives). We can't use parsel directly as the oracle here (it IS the bug); instead compare
-    # Frostwork against parsel on the equivalent correct comma-EXPANSION, which cssselect handles fine.
+def test_is_where_matches_correct_and_semantics():
+    # `:is()` combined with a class/attr/id or another `:is` is implemented with CORRECT AND semantics.
+    # This WAS a documented divergence: cssselect <= 1.4.0 mis-translates it, ORing the base condition
+    # with the alternatives. Frostwork implemented the correct semantics anyway (the oracle-bug policy),
+    # and cssselect 1.5.0 has since converged on it.
+    #
+    # The primary oracle is deliberately NOT parsel's direct `.css(":is(...)")` — it is the equivalent
+    # comma-EXPANSION, which BOTH cssselect versions translate correctly. That keeps the test valid
+    # whichever side of 1.5.0 the installed cssselect is on, so this file does not need a version pin to
+    # be meaningful. The direct evaluation is then asserted to AGREE, which is what makes an upstream
+    # regression (or an accidental downgrade to <= 1.4.0) reopen the divergence loudly instead of
+    # silently passing. If that assertion fails, check cssselect's version before suspecting the engine.
     parsel = _oracle()
     html = (
         b'<html><body><div class="a x">1</div><div class="a c">2</div><div class="a">3</div>'
@@ -1215,11 +1222,18 @@ def test_is_where_correct_and_semantics_diverges_from_cssselect_bug():
         ("a[href]:is(.p, .q)::text", "a[href].p::text, a[href].q::text"),
         ("div:not(.x):is(.a, .b)::text", "div.a:not(.x)::text, div.b:not(.x)::text"),
     ]
+    import cssselect
+
     for form, expansion in pairs:
         got = frostwork.extract(html, [form])[0]
         assert got == sel.css(expansion).getall(), form
-        # and it genuinely diverges from cssselect's buggy direct evaluation (sanity-check the premise)
-        assert got != sel.css(form).getall(), f"{form} unexpectedly agrees with the cssselect bug"
+        # cssselect 1.5.0+ translates the direct form correctly too, so it must agree. A failure here is
+        # the divergence reopening — either an upstream regression or a cssselect older than the pin.
+        assert got == sel.css(form).getall(), (
+            f"{form}: parsel disagrees with the correct AND semantics — cssselect "
+            f"{cssselect.__version__} may have regressed to the <=1.4.0 OR mis-translation "
+            f"(see COMPATIBILITY.md, ':is()/:where() combined with other conditions')"
+        )
 
 
 # --------------------------------------------------------------------------- audit CLI

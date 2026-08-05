@@ -108,7 +108,7 @@ def g_compound(rng, depth=1):
 
 def g_has_inner(rng):
     """A single inner compound for `:has(...)`, restricted to a TYPE/`*` + class — the only inner
-    cssselect 1.4.0 translates (it RAISES on id/attribute/`:not` inners), so this keeps parsel a valid
+    cssselect translates (it RAISES on id/attribute/`:not` inners, still at 1.5.0), so this keeps parsel a valid
     oracle for the random fuzzer. The id/attribute/`:not` inners (which Frostwork supports as a
     documented divergence-in-our-favor) are covered by a dedicated parity test in tests/test_python.py."""
     p = rng.choice(TAGS) if rng.random() < 0.7 else ""
@@ -406,10 +406,17 @@ def g_quoted_delim(rng):
     that these shapes must be SUPPORTED (the half that goes red) is a contract sweep:
     `tests/test_python.py::test_quoted_delimiters_in_functional_pseudos_are_supported`.
 
-    `:is()`/`:where()` forms keep a BARE base, because cssselect mis-translates an `:is()` whose compound
-    carries any other condition (a documented divergence in our favour) and the fuzzer's oracle is
-    parsel. `:has()` is left out for the same reason: cssselect REJECTS an attribute inner, so every
-    correct answer here would grade OVERMATCH. Both are covered by unit vectors instead.
+    `:is()`/`:where()` forms used to keep a BARE base, because cssselect <= 1.4.0 mis-translated an
+    `:is()` whose compound carried any other condition, and the fuzzer's oracle is parsel. cssselect
+    1.5.0 fixed that (`tools/oracle.py` enforces the floor), so the COMBINED and CHAINED forms are now
+    oracle-valid and generated here — a surface that rode on hand vectors for exactly as long as the
+    upstream bug lasted. One of them is a red-gate discriminator for the engine's own semantics rather
+    than a coverage probe: `[class*="c"]:is([class*=")"])` is base-AND-fail, so the correct column is
+    EMPTY, and an engine that ever regressed to OR semantics would return the whole `[class*="c"]` set
+    and grade OVERMATCH.
+
+    `:has()` is still left out: cssselect REJECTS an attribute inner even at 1.5.0, so every correct
+    answer there would grade OVERMATCH. It stays covered by unit vectors.
     """
     return rng.choice([
         # DISCRIMINATING: universally-true `:not()`, so the column matches the plain selector's
@@ -424,6 +431,18 @@ def g_quoted_delim(rng):
         r':is([class*=")"], [class*="c"])::text',
         r':where([class*="("], [class*="c"])::text',
         r':is([data-k*=","], [class*="c"])::text',
+        # COMBINED base + `:is()` — unlocked by the cssselect 1.5.0 AND fix (see the docstring). Base is
+        # universally true and one alternative matches, so the column equals the plain selector's.
+        r'[class*="c"]:is([class*=")"], [class*="c"])::text',
+        r'[class*="c"]:where([class*="("], [class*="c"])::text',
+        r'[class*="c"]:not([title*="a(b"]):is([data-k*=","], [class*="c"])::text',
+        # CHAINED groups: every group must match, so this is still the plain selector's column
+        r'[class*="c"]:is([class*=")"], [class*="c"]):is([class*="("], [class*="c"])::text',
+        # AND-vs-OR DISCRIMINATOR: base AND (fails) => correct column is EMPTY. An engine that ORed the
+        # alternatives onto the base (the old cssselect bug) would return every `[class*="c"]` element,
+        # which grades OVERMATCH -> RED. This is the one form here that can fail the gate.
+        r'[class*="c"]:is([class*=")"])::text',
+        r'[class*="c"]:where([data-k*=","])::text',
         # PARSES but matches nothing on either side — a parse-path probe, not a discriminator
         r'[data-k*=")"]::text',
         r'[class$=")"]::text',

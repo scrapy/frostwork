@@ -51,7 +51,7 @@ level, public Python APIs validate schemas and raise `UnsupportedSelector` by de
 | `:has()` on a PRECEDING-SIBLING compound — `C:has(..) ~ S` / `C:has(..) + S` (value from the later sibling `S`) | ✅ supported — same mechanism as the sibling text-predicate: `C`'s `:has` fires the sibling boundary at `C`'s close, `S` emits normally (single sibling combinator) |
 | `:has()` in any OTHER shape — an inner with a **chain/sibling** (`:has(.a .b)`, `:has(a + b)`) or a positional/reverse/`:has`/`:is` inside, multiple `:has`, a **child** step into the value tail (`div:has(a) > p::text`), or a `Many`/`One`/comma member | ∅ unsupported (empty) |
 | a QUOTED delimiter inside a functional pseudo's argument — `div:is(#a, [data-x=")"])`, `:not([title='a(b'])`, `:has([data-x="a, b"])`, `:is([class="a,b"])`, and the escaped forms (`[data-x="\)"]`) | ✅ supported — argument boundaries are quote- and escape-aware, so a `)` or `,` inside a value is data. Genuinely unterminated syntax (`:is(#a, [data-x=")"]::attr(id)`) stays ∅ unsupported (empty), matching cssselect's rejection |
-| `:is(...)` / `:where(...)` — a comma-list of compound alternatives (`:is(h1, h2, h3)`, `div:is(.a, .b)`, `a:is([href], [src])`), including combined with other conditions (`div.card:is(.a, .b)`) or chained (`x:is(a, b):is(c, d)`) | ✅ supported — element matches iff it matches ≥1 alternative in EVERY group (OR within a group, AND across groups). `:is`/`:where` are identical (specificity is irrelevant to matching). **≈ divergent** for combined/chained forms — see below |
+| `:is(...)` / `:where(...)` — a comma-list of compound alternatives (`:is(h1, h2, h3)`, `div:is(.a, .b)`, `a:is([href], [src])`), including combined with other conditions (`div.card:is(.a, .b)`) or chained (`x:is(a, b):is(c, d)`) | ✅ supported — element matches iff it matches ≥1 alternative in EVERY group (OR within a group, AND across groups). `:is`/`:where` are identical (specificity is irrelevant to matching). Agrees with cssselect ≥ 1.5.0; **≈ divergent** for combined/chained forms against cssselect ≤ 1.4.0 — see below |
 | `:is(...)` with a combinator inside an alternative (`:is(.a .b)`, `:is(a + b)`), a positional/reverse/`:has` inside an alternative (`:is(:first-child)`), or a nested `:is` | ∅ unsupported (empty) — cssselect itself rejects the combinator forms |
 | `:contains()`, `::first-line`, other pseudos | ∅ unsupported (empty) |
 | `:not()` with a combinator argument (`:not(a b)`), namespaces (`ns\|tag`), `[a=b i]` case flag (cssselect rejects it) | ∅ unsupported (empty) |
@@ -395,7 +395,7 @@ next bug will be:
   document has no `<body>` at all — matched, but a rare enough shape that it is called out rather than
   assumed. Everything else about the frame is now built (see the synthesis entry in the supported list).
 
-- **`:has()` with an id/attribute/`:not` inner — a divergence *in our favor*.** cssselect 1.4.0 only
+- **`:has()` with an id/attribute/`:not` inner — a divergence *in our favor*.** cssselect only
   accepts a type/`*`+classes inner inside `:has()` and *raises* `SelectorSyntaxError` on `:has([data-x])`,
   `:has(#id)`, `:has(a[href])`, `:has(:not(.x))` (part of its broader `:has()` limitations —
   cf. [scrapy/cssselect#138](https://github.com/scrapy/cssselect/issues/138), which notes `:has(a, b)`
@@ -403,20 +403,28 @@ next bug will be:
   simply *more capable* than raw parsel here — no wrong values, just coverage parsel refuses. Bare
   type/`*`+class inners agree with parsel exactly. Oracled by
   `tests/test_python.py::test_has_widened_inners_match_correct_semantics` (a parsel/lxml ancestor walk,
-  since parsel can't evaluate these directly).
-- **`:is()`/`:where()` combined with other conditions — a divergence *in our favor*.** cssselect 1.4.0
-  mis-translates a `:is()` whose compound carries any other condition: its `xpath_matching` ORs each
-  alternative's condition onto the *base* compound's condition, so `div.a:is(.x, .c)` becomes
-  `div[a or x or c]` (matches every `div.a`, `div.x`, or `div.c`) instead of `div[a and (x or c)]`, and
-  chained `:is` ORs all groups together. Frostwork implements the **correct** CSS semantics (AND across
-  groups, OR within), so it intentionally differs from parsel on these forms — returning the standards-
-  compliant node set, a strict subset of parsel's over-match. Bare `[tag|*]:is(...)` (the only shape
-  cssselect gets right) agrees exactly. Upstream: the `:is`/`:where` handling is tracked as
-  not-spec-compliant in [scrapy/cssselect#135](https://github.com/scrapy/cssselect/issues/135) and
-  [#108](https://github.com/scrapy/cssselect/issues/108); the over-match is in `xpath_matching`
-  (`add_condition(..., "or")` folding alternatives into the base). Verified by
-  `tests/test_python.py::test_is_where_correct_and_semantics_diverges_from_cssselect_bug`, which oracles
-  against the equivalent comma-expansion (which cssselect translates correctly).
+  since parsel can't evaluate these directly). Unlike the `:is()` entry below, this one is still OPEN at
+  the pinned cssselect 1.5.0 — the two were checked together when that pin moved, and only `:is()` closed.
+- **`:is()`/`:where()` combined with other conditions — a divergence that UPSTREAM HAS SINCE CLOSED, and
+  the clearest evidence for the oracle-bug policy.** cssselect **≤ 1.4.0** mis-translates a `:is()` whose
+  compound carries any other condition: its `xpath_matching` ORs each alternative's condition onto the
+  *base* compound's condition, so `div.a:is(.x, .c)` becomes `div[a or x or c]` (matches every `div.a`,
+  `div.x`, or `div.c`) instead of `div[a and (x or c)]`, and chained `:is` ORs all groups together.
+  Frostwork implemented the **correct** CSS semantics (AND across groups, OR within) rather than capping
+  itself at the buggy oracle — and **cssselect 1.5.0 now produces exactly that**, so on the pinned
+  toolchain there is no divergence left to document: `div.a:is(.x, .c)` translates to
+  `div[a and (x or c)]` and parsel agrees with Frostwork on every form (`:is` and `:where`, combined,
+  chained, `[href]`-based and `:not`-based) that
+  `tests/test_python.py::test_is_where_matches_correct_and_semantics` checks.
+  It is kept in this list because the version is the user's, not ours: Frostwork does not depend on
+  cssselect, so a scraper comparing against a parsel that still carries **≤ 1.4.0** will see Frostwork
+  return the standards-compliant node set — a strict subset of that parsel's over-match. Upstream history:
+  [scrapy/cssselect#135](https://github.com/scrapy/cssselect/issues/135),
+  [#108](https://github.com/scrapy/cssselect/issues/108); the old over-match was in `xpath_matching`
+  (`add_condition(..., "or")` folding alternatives into the base). The test oracles against the
+  equivalent comma-expansion — which BOTH cssselect versions translate correctly — so it stays valid
+  whichever side of 1.5.0 the installed cssselect is on, and it asserts the direct evaluation agrees so
+  a future upstream regression reopens the divergence loudly instead of passing silently.
 - **Content after `</html>` is KEPT — a divergence *in our favor*, but only partly browser-equivalent.**
   libxml2 stops building the tree at `</html>` and silently discards everything after it, so
   `<html><body>…</body></html><div>late</div>` gives lxml/Parsel an empty column for `div::text` while

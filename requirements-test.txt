@@ -2,9 +2,21 @@
 # Bump parsel+lxml+cssselect together and rerun the full differential soak deliberately.
 parsel==1.11.0
 lxml==6.1.1
-cssselect==1.4.0
+cssselect==1.5.0
 maturin==1.14.1
 web-poet==0.24.1
 pytest==9.1.1
 # used directly by the web-poet tests (also a transitive web-poet dep); pin it explicitly
 attrs==26.1.0
+
+# The web-poet integration's oracle (tools/diff_webpoet.py). `zyte-common-items` is the primary
+# consumer of `frostwork.webpoet`, and its absence here is why the strings-only processor bug could
+# not be caught: no gate could see the library it breaks. The four below are transitive, but each
+# PRODUCES an expected value the gate compares against — clear-html renders `descriptionHtml`,
+# zyte-parsers renders breadcrumbs/rating/brand/gtin, price-parser renders prices, html-text renders
+# `description`. A bump in any of them moves a verdict, so they are pinned like the oracle they are.
+zyte-common-items==0.29.0
+clear-html==0.5.0
+zyte-parsers==0.6.0
+price-parser==0.5.1
+html-text==0.7.1
