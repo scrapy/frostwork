@@ -15,10 +15,13 @@
 #   make soak        multi-million differential/fuzz soak across independent seeds
 #   make py          rebuild the extension (maturin --release), Python suite + tree-rule audit +
 #                    the generated start-close table vs the oracle (tools/gen_tree_rules.py --check)
-#   make gate-webpoet  web-poet integration differential vs parsel, compared on the WHOLE item
+#   make gate-webpoet  web-poet integration differential vs parsel, compared on the WHOLE item,
+#                    plus the upstream surface snapshot (docs/WEBPOET_SURFACE.md) vs the real libraries
+#   make gate-webpoet-mutate  break one webpoet.py line at a time; does any gate notice?
 #   make bench       full throughput matrix vs Parsel (minutes; for release notes)
 #   make bench-smoke quick article/deep-nesting performance check
-#   make ci          test + gate + gate-corpus + fuzz-smoke + py — minimum pre-release check
+#   make ci          test + gate + gate-corpus + gate-seq + fuzz-smoke + py + gate-webpoet(+mutate)
+#                    — the minimum pre-release check
 #
 # The `python` cargo feature builds an extension-module cdylib that can't link into the test/bin
 # targets; only maturin (the `py` target) builds it. So `cargo test`/`build` here never pass it.
@@ -29,7 +32,7 @@ FUZZ_ITERS ?= 6000
 
 .DEFAULT_GOAL := help
 .PHONY: help bootstrap test build gate gate-corpus gate-seq corpus-real gate-mutate gate-mutate-full \
-	fuzz-smoke soak py gate-webpoet bench bench-smoke ci
+	fuzz-smoke soak py gate-webpoet gate-webpoet-mutate bench bench-smoke ci
 
 help:
 	@grep -E '^#   make ' Makefile | sed 's/^#   /  /'
@@ -117,6 +120,15 @@ py:
 WEBPOET_SCHEMAS ?= 120
 gate-webpoet:
 	$(PY) tools/diff_webpoet.py --schemas $(WEBPOET_SCHEMAS)
+	$(PY) tools/webpoet_surface.py --check
+
+# "Would a gate notice if one of these lines were WRONG?" — the same question `gate-mutate` asks of the
+# engine's rule tables, for the layer that until recently had no gate at all. Its first run found two
+# holes in the differential above (no generated field had a `.map()`, and no bare-element field was
+# `all=True` with a processor), which is the whole reason to run it: a mutation the differential misses is
+# a hole in the differential. Sampled; a survivor is a missing case, not a shrug.
+gate-webpoet-mutate:
+	$(PY) tools/mutate_webpoet.py --gate
 
 bench: build
 	$(PY) tools/bench_matrix.py
@@ -124,5 +136,5 @@ bench: build
 bench-smoke: build
 	$(PY) tools/bench_matrix.py --smoke
 
-ci: test gate gate-corpus gate-seq fuzz-smoke py gate-webpoet
+ci: test gate gate-corpus gate-seq fuzz-smoke py gate-webpoet gate-webpoet-mutate
 	@echo "frostwork: all local gates passed"

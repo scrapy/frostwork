@@ -84,6 +84,14 @@ jobs:
       # them silent. Compared on the whole item across class shapes (plain/attrs/inherited) and response
       # types, with the real zyte-common-items processors attached the way a base page attaches them.
       - run: .venv/bin/python tools/diff_webpoet.py
+      # The four upstream surfaces (page bases, field() keywords, zyte processors, processor input
+      # types), DERIVED from the installed libraries. A name that appears upstream and in neither the
+      # covered nor the declined list fails here — so the next omission arrives as a red gate rather
+      # than as the silent wrong value the last five were.
+      - run: .venv/bin/python tools/webpoet_surface.py --check
+      # And the inverse question: break one load-bearing line in webpoet.py, does any gate notice?
+      # Its first run found two holes in the differential above.
+      - run: .venv/bin/python tools/mutate_webpoet.py --gate
       # The package ships `py.typed`, so its annotations are a promise to every user's type checker —
       # and `field()` used to annotate as an internal marker class, making correct code an error in the
       # user's CI while everything here passed. Nothing but a type checker can catch that.

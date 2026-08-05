@@ -56,6 +56,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import dataclasses
 import os
 import random
 import sys
@@ -128,6 +129,34 @@ PROCESSOR_FIELDS = [
 
 # The processors that take URL strings rather than a node, so cardinality must stay `all=True` for them.
 LIST_INPUT_PROCESSORS = {"images"}
+
+# A node-taking processor on an `all=True` bare-element field, i.e. the SelectorList branch of the node
+# handoff. Added because `tools/mutate_webpoet.py` proved it was unreachable: downgrading that branch to a
+# plain `list` SURVIVED the whole differential, since nothing generated the combination. zyte's
+# `_handle_selectorlist` gates on `SelectorList` exactly, so a plain list falls through to the
+# "returned as is" path — defect 5 again, in the one shape the gate could not see.
+NODE_LIST_PROCESSORS = {"breadcrumbsAll"}
+PROCESSOR_FIELDS.append(("breadcrumbsAll", ".crumbs", "breadcrumbs"))
+PROCESSORS["breadcrumbsAll"] = (breadcrumbs_processor, True)
+
+# Transforms, so `.map()` / `.re_first()` are not a surface the differential never emits — the other thing
+# the mutation sweep caught: making `_shape` drop its transforms entirely SURVIVED, because no generated
+# field had one. Keyed by cardinality, since a transform sees the SHAPED value. Applied only to fields
+# with no processor, so "transform then processor" ordering stays a unit-vector question with one answer
+# rather than a generated one with two plausible ones.
+def _t_first(v):
+    return (v or "<none>").upper()
+
+
+def _t_all(v):
+    return [x.upper() for x in v]
+
+
+def _t_join(v):
+    return v.strip().replace("  ", " ")
+
+
+TRANSFORMS = {"first": _t_first, "all": _t_all, "join": _t_join}
 
 # Plain value fields: no processor, so these exercise the terminals rather than the node handoff.
 VALUE_FIELDS = [
@@ -221,13 +250,19 @@ def gen_schema(rng) -> dict:
     fields = rng.sample(PROCESSOR_FIELDS, n_proc) + rng.sample(VALUE_FIELDS, n_val)
     rng.shuffle(fields)
     cards = {}
+    transforms = {}
     for name, sel, _proc in fields:
-        if _proc in LIST_INPUT_PROCESSORS:
+        if name in NODE_LIST_PROCESSORS:
+            cards[name] = ("all", None)  # exercises the SelectorList branch of the node handoff
+        elif _proc in LIST_INPUT_PROCESSORS:
             cards[name] = ("all", None)  # this processor's input is a LIST of strings
         elif _proc is not None or is_node_query(sel):
             cards[name] = ("first", None)  # a node-taking processor takes ONE node; raw source is scalar
         else:
             cards[name] = rng.choice([("first", None), ("all", None), ("join", " ")])
+        # a transform on roughly half the no-processor fields
+        if _proc is None and not is_node_query(sel) and rng.random() < 0.5:
+            transforms[name] = TRANSFORMS[cards[name][0]]
     group = None
     if rng.random() < 0.4:
         group = {
@@ -236,11 +271,32 @@ def gen_schema(rng) -> dict:
             "container": ".card",
             "subs": [("title", "h3 a::text"), ("href", "h3 a::attr(href)"), ("price", ".price::text")],
         }
-    return {"fields": fields, "cards": cards, "group": group}
+    return {"fields": fields, "cards": cards, "transforms": transforms, "group": group}
 
 
 # --------------------------------------------------------------------------- class construction
-SHAPES = ("plain", "attrs_slots", "attrs_noslots", "attrs_frozen", "inherit_plain", "inherit_attrs")
+# Every way a page-object class can be built that this integration might see. Enumerated as a MATRIX
+# rather than spot-checked because defect 1 was an ORDER bug — a decorator running after
+# `__init_subclass__` — and because `attrs.define(slots=False)` mutates in place while the default
+# rebuilds the class, so a single hand vector had even odds of picking the shape that worked. It picked
+# that one.
+#
+# `dataclass` and `attrs_frozen` are expected to fail, and they are IN the sweep for that reason: both
+# fail on the parsel oracle too (a frozen instance rejects web-poet's `cached_method` write; `@dataclass`
+# generates an `__init__` that does not accept web-poet's attrs-declared `response`), so they land in
+# ORACLE-SKIP and the gate records that they were probed and are upstream incompatibilities rather than
+# leaving them unexamined. A shape that starts passing on the oracle will start being graded here.
+SHAPES = (
+    "plain",
+    "attrs_slots",
+    "attrs_noslots",
+    "attrs_frozen",
+    "dataclass",
+    "dataclass_slots",
+    "inherit_plain",
+    "inherit_attrs",
+    "rebuilt_metaclass",
+)
 
 
 def _processors_cls(schema):
@@ -253,11 +309,13 @@ def _frost_ns(fields, schema):
     for name, sel, _proc in fields:
         card, sep = schema["cards"][name]
         if card == "all":
-            ns[name] = field(sel, all=True)
+            f = field(sel, all=True)
         elif card == "join":
-            ns[name] = field(sel, join=sep)
+            f = field(sel, join=sep)
         else:
-            ns[name] = field(sel)
+            f = field(sel)
+        fn = schema["transforms"].get(name)
+        ns[name] = f.map(fn) if fn is not None else f
     return ns
 
 
@@ -286,7 +344,9 @@ def _parsel_ns(fields, schema):
     for name, sel, proc in fields:
         card, sep = schema["cards"][name]
 
-        def getter(self, sel=sel, card=card, sep=sep, proc=proc):
+        fn = schema["transforms"].get(name)
+
+        def getter(self, sel=sel, card=card, sep=sep, proc=proc, fn=fn):
             sub = self.xpath(sel) if sel.startswith(("/", "(")) else self.css(sel)
             if proc is not None:
                 # Keyed on the PROCESSOR's input contract, not on cardinality: `images_processor`
@@ -295,14 +355,24 @@ def _parsel_ns(fields, schema):
                 # wrong oracle the moment a node field is declared `all=True`.
                 return sub.getall() if proc in LIST_INPUT_PROCESSORS else sub
             if card == "all":
-                return sub.getall()
-            if card == "join":
-                return sep.join(sub.getall())
-            return sub.get()
+                value = sub.getall()
+            elif card == "join":
+                value = sep.join(sub.getall())
+            else:
+                value = sub.get()
+            # the same transform Frostwork attaches with `.map()`, applied to the same shaped value
+            return fn(value) if fn is not None else value
 
         getter.__name__ = getter.__qualname__ = name
         ns[name] = wp_field(getter)
     return ns
+
+
+def _rebuild(cls):
+    """Rebuild a class from its own `__dict__`, the way `attrs.define` does — but through a bare
+    `type()` call, so this probes the MECHANISM rather than one library's use of it. Any decorator or
+    metaclass that reconstructs a class lands here, and the spec recovery has to survive all of them."""
+    return type(cls)(cls.__name__, cls.__bases__, dict(cls.__dict__))
 
 
 def _apply_shape(cls, shape):
@@ -312,6 +382,12 @@ def _apply_shape(cls, shape):
         return attrs.define(slots=False)(cls)
     if shape == "attrs_frozen":
         return attrs.frozen(cls)
+    if shape == "dataclass":
+        return dataclasses.dataclass(cls)
+    if shape == "dataclass_slots":
+        return dataclasses.dataclass(slots=True)(cls)
+    if shape == "rebuilt_metaclass":
+        return _rebuild(cls)
     return cls
 
 
@@ -433,34 +509,24 @@ def _expected_is_meaningful(value) -> bool:
 
 
 # --------------------------------------------------------------------------- main
-def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--schemas", type=int, default=120, help="schemas per class shape")
-    ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--show", type=int, default=8)
-    ap.add_argument("--show-discrimination", action="store_true",
-                    help="per-processor count of pairs whose expected value was non-empty")
-    ap.add_argument("--no-browser", action="store_false", dest="browser",
-                    help="skip the BrowserResponse input (it is fed by default)")
-    oracle.add_argument(ap)
-    args = ap.parse_args()
-    oracle.require(args.allow_old_libxml2)
-    rng = random.Random(args.seed)
+def sweep(seed: int = 0, schemas: int = 120, browser: bool = True, show: int = 8, shapes=SHAPES):
+    """Run the differential and return `(stat, by_shape, by_proc, meaningful, examples)`.
 
-    print(f"frostwork {frostwork.__version__ if hasattr(frostwork, '__version__') else ''} "
-          f"web-poet differential")
-    print(oracle.banner())
-
+    Split out of `main` so it can be used as a DETECTOR: `tools/mutate_webpoet.py` breaks one load-bearing
+    line in `frostwork.webpoet` and asks whether this goes red. A gate nobody has tried to fool is a
+    guess about its own coverage."""
+    rng = random.Random(seed)
     stat = defaultdict(int)
     by_shape = defaultdict(lambda: defaultdict(int))
     by_proc = defaultdict(lambda: defaultdict(int))
     meaningful = defaultdict(int)
     examples = []
 
-    inputs = [("http", _http)] + ([("browser", _browser)] if args.browser else [])
+    inputs = [("http", _http)] + ([("browser", _browser)] if browser else [])
+    args = argparse.Namespace(show=show)
 
-    for shape in SHAPES:
-        for _ in range(args.schemas):
+    for shape in shapes:
+        for _ in range(schemas):
             html = gen_page(rng)
             schema = gen_schema(rng)
             for kind, make_response in inputs:
@@ -507,6 +573,30 @@ def main() -> None:
                         meaningful[bucket] += 1
                     if v == "DIVERGE" and len(examples) < args.show:
                         examples.append((key, name, repr(got)[:150], repr(want)[:150], html.decode()[:120]))
+
+    return stat, by_shape, by_proc, meaningful, examples
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--schemas", type=int, default=120, help="schemas per class shape")
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--show", type=int, default=8)
+    ap.add_argument("--show-discrimination", action="store_true",
+                    help="per-processor count of pairs whose expected value was non-empty")
+    ap.add_argument("--no-browser", action="store_false", dest="browser",
+                    help="skip the BrowserResponse input (it is fed by default)")
+    oracle.add_argument(ap)
+    args = ap.parse_args()
+    oracle.require(args.allow_old_libxml2)
+
+    print(f"frostwork {frostwork.__version__ if hasattr(frostwork, '__version__') else ''} "
+          f"web-poet differential")
+    print(oracle.banner())
+
+    stat, by_shape, by_proc, meaningful, examples = sweep(
+        seed=args.seed, schemas=args.schemas, browser=args.browser, show=args.show
+    )
 
     print(f"\n  pairs (field comparisons) {stat['pairs']:>8}")
     print(f"  AGREE                     {stat['AGREE']:>8}")

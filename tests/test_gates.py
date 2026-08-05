@@ -495,3 +495,46 @@ def test_webpoet_gate_would_not_pass_vacuously():
     assert _expected_is_meaningful("Acme")
     assert _expected_is_meaningful([{"name": "Cat 0"}])
     assert _expected_is_meaningful(0.0)  # a real extracted rating of 0 is information, not absence
+
+
+# --------------------------------------------- web-poet surface snapshot (tools/webpoet_surface.py)
+def test_the_surface_gate_fails_on_an_unclassified_upstream_name():
+    """The gate exists because five defects were hand-written lists that omitted something. So the failure
+    mode it must catch is a name that exists UPSTREAM and in neither the covered nor the declined list —
+    if that merely warned, or was silently ignored, the next omission would ship exactly like the last
+    five did."""
+    import pytest as _pytest
+    import webpoet_surface
+
+    known = {"WebPage": ("FrostPage", None)}
+    # a name upstream added and nobody classified
+    with _pytest.raises(SystemExit) as e:
+        webpoet_surface._gate("a page base class", ["WebPage", "NewShinyPage"], known)
+    assert "NewShinyPage" in str(e.value)
+    assert "Do not delete the name" in str(e.value)
+
+    # ...and the inverse: something we still target that upstream has removed
+    with _pytest.raises(SystemExit) as e:
+        webpoet_surface._gate("a page base class", [], known)
+    assert "no longer exists upstream" in str(e.value) and "WebPage" in str(e.value)
+
+    # a fully classified surface passes and returns its rows in upstream order
+    assert webpoet_surface._gate("a page base class", ["WebPage"], known) == [
+        ("WebPage", ("FrostPage", None))
+    ]
+
+
+def test_the_surface_gate_checks_the_node_handoff_really_produces_nodes():
+    """The value-type table is a CLAIM about what the integration can hand a processor. Rendering asserts
+    it against the real functions, so the table cannot go on saying `parsel.Selector` after a refactor
+    that quietly returns something else — which is the exact shape of defect 5."""
+    import webpoet_surface
+    from parsel import Selector
+    from parsel.selector import SelectorList
+
+    from frostwork.webpoet import _as_node, _as_nodes
+
+    assert isinstance(_as_node("<p>x</p>"), Selector)
+    assert isinstance(_as_nodes(["<p>x</p>"], ("all", None)), SelectorList)
+    # and the renderer is what enforces it, so it must run clean on the installed libraries
+    assert "Page / extractor base classes" in webpoet_surface.render()

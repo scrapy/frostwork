@@ -31,8 +31,9 @@ must NOT enable it (they'd fail to link libpython); maturin builds only the `--f
 The `Makefile` bundles these into one-command gates (`make help` lists them): `make ci` = `test`
 (unit + clippy) + `gate` (differential + encoding parity vs lxml) + `gate-corpus` (value parity over
 the fixture corpus) + `gate-seq` (every tag sequence up to length 4, compared on the whole tree) +
-`fuzz-smoke` + `py` + `gate-webpoet` (the web-poet integration vs parsel, compared on the whole item) —
-the minimum pre-release check. Individual targets run their own piece.
+`fuzz-smoke` + `py` (which now also type-checks the shipped package) + `gate-webpoet` (the web-poet
+integration vs parsel, compared on the whole item, plus the derived upstream-surface snapshot) +
+`gate-webpoet-mutate` — the minimum pre-release check. Individual targets run their own piece.
 
 The limits of that gate are worth knowing before trusting a "100% parity" number — each bullet below is
 a way it has read 100% while the engine was wrong:
@@ -161,6 +162,22 @@ a way it has read 100% while the engine was wrong:
   sides: `attrs.frozen` breaks the parsel oracle too (web-poet's `cached_method` writes to the instance),
   so decorating only our side files a web-poet/attrs incompatibility as our CRASH and leaves a bucket that
   never empties — the same over-attribution as the truncated-tag bug.
+  The integration now has the engine's full derive/audit/mutate trio (`tools/webpoet_surface.py`,
+  `tools/diff_webpoet.py`, `tools/mutate_webpoet.py`), and the mutation sweep immediately earned its keep:
+  it found TWO holes in the brand-new differential — no generated field carried a `.map()`, and no
+  bare-element field was `all=True` with a processor, so downgrading that branch from `SelectorList` to a
+  plain `list` (which reintroduces defect 5, because zyte gates on `SelectorList` exactly) survived the
+  entire gate. **A mutation the differential misses is a hole in the differential, not a spare cell.**
+  Also: the sweep NAMES what it cannot reach (everything inline in `__init_subclass__`, which runs at class
+  creation and cannot be patched after import) and points each entry at the gate that does cover it —
+  because "7 mutations, 0 survivors" reads as "the module is covered" and the module is bigger than what a
+  function patch can touch. That is the same lesson as end-tag scope being two `matches!` arms the engine's
+  sweep could not see.
+  One more thing the typing work settled: **`py.typed` makes annotations a PROMISE**, and `field()`
+  annotated as the internal marker class, so correct user code (`x: str = page.name`) was an error in the
+  user's CI while every test here passed. Nothing but a type checker catches that class of bug — `make py`
+  and CI now run mypy over the shipped package, and `tests/test_typing.py` seeds a wrong `assert_type` to
+  prove the check can go red.
 
 ## Repo map
 
