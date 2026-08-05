@@ -268,7 +268,21 @@ def _make_field(name: str, card: _Card, transforms: Tuple[Callable, ...], node: 
     node would return the node unchanged and turn a working field into a broken one."""
 
     def getter(self):
-        col = self._frostwork_columns()[name]
+        cols = self._frostwork_columns()
+        if name not in cols:
+            # Insurance, not an expected path: a field whose descriptor is installed but whose spec never
+            # reached the plan. `@attrs.define` used to land here (it rebuilds the class, so
+            # `__init_subclass__` re-ran with the markers gone) and the symptom was a bare `KeyError`,
+            # which says nothing about the cause. Any other decorator or metaclass that rebuilds a class
+            # in a way the recovery in `__init_subclass__` does not recognise would land here too, so it
+            # explains itself rather than leaving a mystery in a scraper's logs.
+            raise RuntimeError(
+                f"field {name!r} is installed on {type(self).__name__} but is not in its compiled plan. "
+                "Something rebuilt the class after Frostwork processed it (a class-recreating decorator "
+                "or metaclass). Frostwork recovers from `@attrs.define`; if you hit this with something "
+                "else, declaring the field on a plain base class and inheriting it is the workaround."
+            )
+        col = cols[name]
         if node and _processors_for(type(self), name):
             value = _as_nodes(col, card)
             for fn in transforms:
@@ -327,15 +341,37 @@ class FrostPage(WebPage):
         # __init_subclass__ (reached through super()) promotes the registration.
         for name, val in list(vars(cls).items()):
             if isinstance(val, _FrostField):
-                own[name] = (val.selector, val.card, val.transforms)
+                spec = (val.selector, val.card, val.transforms)
+                own[name] = spec
                 # Ask the COMPILER whether this selector's value is a node, once, here at class creation
                 # — not per response, and never by pattern-matching the query string.
                 is_node = _terminals([val.selector])[0] == "outer"
                 wp = _make_field(name, val.card, val.transforms, node=is_node)
+                # Leave the spec ON the descriptor. This is what makes the class survive being REBUILT —
+                # see the `_frostwork_spec` recovery below.
+                wp._frostwork_spec = spec
             elif isinstance(val, _FrostGroup):
                 own_groups[name] = val
                 wp = _make_group_field(name, val)
+                wp._frostwork_group = val
             else:
+                # Already a converted field? Then this class has been through here before and something
+                # REBUILT it. `@attrs.define` (slots=True, the default) does exactly that: it does not
+                # mutate the class, it constructs a new one from the old `__dict__`. So
+                # `__init_subclass__` runs a second time with the markers already gone, and the original
+                # class is not in the new MRO for `_merge_mro` to find — which silently emptied the plan
+                # and made every field raise `KeyError` at `to_item()`. Recovering the spec from the
+                # descriptor we left behind makes the rebuild a no-op instead of a wipe.
+                #
+                # Note this is an ORDER bug, not a lookup bug: the decorator runs AFTER
+                # `__init_subclass__`, so no amount of care inside a single pass could have caught it.
+                recovered = getattr(val, "_frostwork_spec", None)
+                if recovered is not None:
+                    own[name] = recovered
+                else:
+                    recovered_group = getattr(val, "_frostwork_group", None)
+                    if recovered_group is not None:
+                        own_groups[name] = recovered_group
                 continue
             setattr(cls, name, wp)
             wp.__set_name__(cls, name)

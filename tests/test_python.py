@@ -521,6 +521,110 @@ def test_selector_terminals_is_the_engines_answer_not_a_heuristic():
     assert selector_terminals(["div:has(.a .b)::text"]) == [None]  # does not compile
 
 
+def test_attrs_define_on_a_subclass_keeps_its_own_fields():
+    """`@attrs.define` (slots=True, the default) does not mutate the class — it builds a NEW one from the
+    old `__dict__`. So `__init_subclass__` ran a second time with the markers already converted, and the
+    ORIGINAL class was not in the new MRO for the merge to find: own fields vanished from the plan and
+    every one of them raised `KeyError` at `to_item()`.
+
+    This is the shape of a page object that needs an injected dependency, which is the documented web-poet
+    idiom — and web-poet hit the same attrs/`__init_subclass__` interaction itself (see the workaround
+    comment in `web_poet.pages.Extractor`)."""
+    import attrs
+
+    from frostwork.webpoet import FrostPage, field
+
+    @attrs.define
+    class P(FrostPage):
+        name = field("h1::text")
+        price = field(".price::text")
+
+    assert set(P._frostwork_specs) == {"name", "price"}
+    assert asyncio.run(P(response=_resp()).to_item()) == {"name": "Widget", "price": "$9"}
+
+
+def test_attrs_define_keeps_inherited_and_own_fields_together():
+    """The half that made the bug hard to see: a base class's fields SURVIVED (the base is still in the new
+    MRO), so a page object inheriting most of its schema looked fine and only lost what it declared
+    itself — one missing key rather than an obviously empty item."""
+    import attrs
+
+    from frostwork.webpoet import FrostPage, field
+
+    class Base(FrostPage):
+        name = field("h1::text")
+
+    @attrs.define
+    class Sub(Base):
+        price = field(".price::text")
+
+    assert set(Sub._frostwork_specs) == {"name", "price"}
+    assert asyncio.run(Sub(response=_resp()).to_item()) == {"name": "Widget", "price": "$9"}
+
+
+def test_attrs_variants_and_groups_survive_class_recreation():
+    """`slots=False` mutates in place and always worked, which is exactly why one hand vector could have
+    picked the passing side and reported the feature green. Sweep the variants, and include a `Many` —
+    groups are recovered through a separate attribute from flat fields, so a fix for one is not a fix for
+    the other."""
+    import attrs
+
+    from frostwork.webpoet import FrostPage, Many, One, field
+
+    for decorate in (attrs.define, attrs.define(slots=False), lambda c: c):
+        @decorate
+        class P(FrostPage):
+            name = field("h1::text")
+            cards = Many(".card", title=field("h3 a::text"))
+            first = One(".card", title=field("h3 a::text"))
+
+        assert set(P._frostwork_specs) == {"name"}, decorate
+        assert set(P._frostwork_groups) == {"cards", "first"}, decorate
+        item = asyncio.run(P(response=_resp(body=GRID)).to_item())
+        assert item["cards"] == [{"title": "A"}, {"title": "B"}], decorate
+        assert item["first"] == {"title": "A"}, decorate
+
+
+def test_attrs_define_with_an_injected_dependency():
+    """The reason to reach for `@attrs.define` on a page object at all: declaring an extra dependency for
+    the framework to inject alongside `response`."""
+    import attrs
+    from web_poet import field as wp_field
+
+    from frostwork.webpoet import FrostPage, field
+
+    @attrs.define
+    class Deps:
+        currency: str
+
+    @attrs.define
+    class P(FrostPage):
+        deps: Deps
+        price = field(".price::text")
+
+        @wp_field
+        def priced(self):
+            return f"{self.deps.currency}{self.price.lstrip('$')}"
+
+    item = asyncio.run(P(response=_resp(), deps=Deps(currency="EUR")).to_item())
+    assert item == {"price": "$9", "priced": "EUR9"}
+
+
+def test_a_field_missing_from_the_plan_explains_itself():
+    """Insurance for any OTHER class-rebuilding decorator: the symptom used to be a bare `KeyError`, which
+    says nothing about the cause."""
+    from frostwork.webpoet import FrostPage, field
+
+    class P(FrostPage):
+        name = field("h1::text")
+
+    # simulate a rebuild we do not recognise: the descriptor is installed, the plan has no such column
+    P._frostwork_specs = {}
+    P._frostwork_flat_names = []
+    with pytest.raises(RuntimeError, match="not in its compiled plan"):
+        asyncio.run(P(response=_resp()).to_item())
+
+
 def test_frostpage_mixes_with_handwritten_field():
     from web_poet import field as wp_field
 
