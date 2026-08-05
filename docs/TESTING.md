@@ -482,3 +482,34 @@ standard library. Parity and the web-poet integration are covered by the jobs th
 `extract` call), `Many`/`One`, and a Parsel cross-check. The cross-checks go through `_oracle()`, which
 skips them unless the installed lxml carries libxml2 ≥ 2.14 — same rule as the harness, so an
 environment with an older vendored libxml2 reports a skip rather than a spurious failure.
+
+### The web-poet layer: three gates, and what each one can see
+
+The engine's differential proves a selector returns lxml's column. It cannot see the page-object layer at
+all, and that gap shipped defects, so the integration has its own trio — deliberately mirroring the engine's
+derive/audit/mutate split:
+
+| gate | question | source of truth |
+|---|---|---|
+| `tools/webpoet_surface.py` | is every upstream name classified, and are the shipped bases usable? | `web_poet` / `zyte_common_items` by introspection, plus `is_injectable` |
+| `tools/diff_webpoet.py` | does a generated page object return parsel's whole item? | a parsel `WebPage` with the same selectors and `Processors` |
+| `tools/mutate_webpoet.py` | would a gate notice if one of these lines were wrong? | the two above, plus targeted unit vectors |
+
+Three properties of that setup are what make the numbers mean anything:
+
+- **A green differential means one of two things** — everything agreed, or nothing ran. So `coverage_failures`
+  is part of the exit condition: every expected (class shape × response input) **cell** must grade pairs
+  with no unexplained oracle skips, every processor column must carry a non-empty expected value on some
+  page, and every column the shared registry (`tools/webpoet_cases.py`) claims is covered must appear. A
+  processor family or a feature combination that stops being generated fails the gate instead of shrinking
+  the table.
+- **The raw-source allowance is structural, not textual.** Frostwork's outer HTML is raw source and lxml's is
+  a reflow, so the two are compared by parsing both and comparing tag, attributes, text and child structure.
+  Comparing non-whitespace text (the first version) excused a different tag entirely.
+- **One detector answers one question.** `mutate_webpoet.py` declares, per mutation, which detectors are
+  expected to catch it, and fails when an expected one stops — because "something noticed" hides a gate
+  losing a column. Two mutations are expected to be caught by unit vectors ALONE, and that is a finding
+  rather than a gap: the real zyte processors are too lenient to discriminate a wrong node end-to-end
+  (clear-html renders the same text from a `<title>` as from the `<html>` around it), and a multi-generation
+  override needs three classes that no generated schema builds. The element-universe sweep and the override
+  tests are those contracts' gates.

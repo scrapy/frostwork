@@ -19,10 +19,15 @@ python -m venv .venv
 .venv/bin/pip install maturin
 .venv/bin/maturin develop            # builds the extension + installs `frostwork` (editable) into the venv
 # for the web-poet integration:
-.venv/bin/pip install web-poet
+.venv/bin/pip install 'web-poet>=0.24.1'
 ```
 
 Wheels are **abi3** (`abi3-py39`): one wheel runs on CPython ≥ 3.9 (tested on 3.14).
+
+**The web-poet extra needs Python ≥ 3.10**, which is narrower than the core: `frostwork.extract`,
+`Page`/`Item` and the `frostwork-audit` CLI need nothing but the extension and run on 3.9. The
+integration's floor is `web-poet >= 0.24.1` — the version it is tested against, pinned in
+`requirements-test.txt` — and web-poet itself requires 3.10.
 
 ## 1. The primitive
 
@@ -81,17 +86,18 @@ per field). That is the point: one streaming pass per response, not one per fiel
 
 ```python
 import attrs
-from web_poet import handle_urls, Returns
+from typing import List, Optional
+from web_poet import Returns
 from frostwork.webpoet import FrostPage, field
 
 @attrs.define
 class Product:
-    name: str
-    price: str
-    images: list
-    brand: str | None
+    name: Optional[str]
+    price: Optional[str]
+    images: List[str]
+    specs: str
+    brand: Optional[str]
 
-@handle_urls("example.com")
 class ProductPage(FrostPage, Returns[Product]):
     name   = field("h1::text")
     price  = field(".price::text")
@@ -103,6 +109,10 @@ class ProductPage(FrostPage, Returns[Product]):
 #   item = await ProductPage(response=http_response).to_item()   # -> Product(...)
 ```
 
+Every field a page object declares has to be one the `Returns[...]` item can hold, or `to_item()` raises —
+so this example, and the ones below, live in [`tests/doc_examples.py`](../tests/doc_examples.py) and are run
+by the suite. Copy them from there.
+
 `field(selector, *, all=False, join=None, cached=False, meta=None, out=None)`:
 
 | declaration | field value | static type |
@@ -112,12 +122,17 @@ class ProductPage(FrostPage, Returns[Product]):
 | `field(sel, join=sep)` | every match joined into one `str` with `sep` | `str` |
 | `field(sel).map(fn)` | the shaped value with `fn` applied (chainable) | `fn`'s return type |
 | `field(sel).re_first(rx)` | first regex match over the matched string (group 1 if any, else whole) | `str \| None` |
+| `field(sel).typed_as(T)` | unchanged — a no-op that re-annotates the field as `T` | `T` |
 
 The **static type** column is checked, not aspirational: `field()` is overloaded so a type checker reads
 `page.name` as `str | None` and `page.images` as `list[str]`, and `Many(..., item=Card)` as `list[Card]`.
 `tests/typing_fixture.py` asserts each of those with `typing.assert_type` and `make py` runs mypy over it.
-(The package ships `py.typed`, so these annotations land in *your* CI — before this they said
-`_FrostField`, which made correct code an error.)
+The package ships `py.typed`, so these annotations land in *your* CI.
+
+Those types describe the value **before** a processor runs. A processor is an opaque callable, often
+attached by name from a base page's `Processors`, so nothing static can tell that a field yields
+`list[Breadcrumb]` rather than `str | None` — say so with `.typed_as(List[Breadcrumb])`, which changes
+nothing at runtime.
 
 `cached`, `meta` and `out` are `web_poet.field`'s own keywords, forwarded verbatim. They compose in a
 fixed order with the Frostwork-side transforms:
@@ -221,7 +236,7 @@ Pick the base that matches the input the framework will inject:
 |---|---|---|
 | `FrostPage` | `web_poet.HttpResponse` | scans `.body` bytes with the response's resolved `.encoding` |
 | `FrostBrowserPage` | `web_poet.BrowserResponse` | scans `.html`, encoded UTF-8 |
-| `FrostFields` | anything — override `frostwork_input()` | a `web_poet.Extractor`, so it brings `to_item()` / `Returns[...]` |
+| `FrostFields` | anything — override `frostwork_input()` | a `web_poet.ItemPage`: brings `to_item()` / `Returns[...]`, and is injectable |
 
 A `BrowserResponse` carries `.html` (a `str`) and no bytes, so **nothing is sniffed**: the browser already
 resolved the page's encoding, and re-deriving it from a re-encoding of the decoded text could only
@@ -263,14 +278,24 @@ Frostwork re-parses that one subtree and hands the processor the **element**:
 
 ```python
 from zyte_common_items.pages import ProductPage       # its Processors are inherited, not declared here
-from frostwork.webpoet import field
+from frostwork.webpoet import FrostPage, field
 
-class MyProductPage(ProductPage):
+class MyProductPage(FrostPage, ProductPage):          # FrostPage FIRST — see below
     breadcrumbs     = field(".crumbs")     # bare element -> breadcrumbs_processor gets the <nav> node
     descriptionHtml = field(".desc")       # -> description_html_processor gets the <div>, clear-html runs
     aggregateRating = field(".rating")     # -> rating_processor gets the <span>
     images          = field("img.hero::attr(src)", all=True)   # a SCALAR terminal: stays a list of str
 ```
+
+`FrostPage` has to be in the bases: `field()` leaves a marker that `FrostFields.__init_subclass__`
+converts, so `class MyProductPage(ProductPage)` alone converts nothing and raises at class definition,
+naming the field. Both compositions on this page are in [`tests/doc_examples.py`](../tests/doc_examples.py),
+built and run against the real processors by the suite.
+
+To **decline** one of the processors a base attaches by name, pass `out=[]` on the field —
+`breadcrumbs = field(".crumbs", out=[])` then yields the element's raw HTML, exactly as it would with no
+`Processors` entry anywhere. (web-poet resolves `out` with `out is not None`, so an empty list is an
+answer, not a missing argument.)
 
 Two things worth knowing about that, because both are deliberate:
 
@@ -287,6 +312,30 @@ Two things worth knowing about that, because both are deliberate:
 
 `join=` on a processor-bearing field stays a string: a joined value is not a node and could only be
 made into one by inventing a wrapper element.
+
+**The node is subtree-local, and that is the boundary of the compatibility claim.** It is re-parsed from
+the element's own raw source, so it arrives with its tag, attributes and descendants intact — the sweep in
+`tests/test_python.py` asserts that for every element name in the shared universe, including the document
+frame, where `lxml.html.fromstring` on its own returns a *different* element. What the fragment does not
+carry is the rest of the document: no ancestors, no siblings, no `base_url` on the node. So
+
+- a processor taking `(value, page)` — every zyte one that resolves a URL — is unaffected: it reads the
+  document context off `page`, which is the same `HttpResponse` web-poet would give it. `descriptionHtml`
+  resolving a relative `href` against the response URL is exercised by the gate for exactly this reason.
+- a processor that walks `ancestor::`, `preceding-sibling::` or reads `node.base_url` sees less than it
+  would under web-poet, and will return a different value. That is a real divergence, not a bug to report:
+  answering it would mean building the tree this engine exists to avoid.
+
+**Order of composition, with a processor attached:** the column is shaped by `all`/`join`, then `.map()`
+/`.re_first()` run **on the HTML source**, then the (possibly transformed) source becomes the node the
+processor receives. So `field(".desc").map(lambda src: src.replace("&nbsp;", " "))` is a source rewrite
+that the processor then parses; a `.map()` returning something that is not source raises and says so.
+
+**`Many`/`One` subfields take `.map()`, not web-poet keywords.** A subfield is one column of a row, and
+the group is the single `web_poet.field` web-poet knows about — there is no name for it to look a
+processor up under. `out=`/`cached=`/`meta=` on a subfield are refused at declaration rather than
+silently dropped; for a processor over a whole group, write the group as a hand-written
+`@web_poet.field` method.
 
 ## 4. Auditing a schema — `check` / strict validation
 

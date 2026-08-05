@@ -178,6 +178,38 @@ a way it has read 100% while the engine was wrong:
   user's CI while every test here passed. Nothing but a type checker catches that class of bug — `make py`
   and CI now run mypy over the shipped package, and `tests/test_typing.py` seeds a wrong `assert_type` to
   prove the check can go red.
+- **Then two review rounds found ten more defects behind that green gate, and the universes they had to
+  widen were the GATE's own.** Every one was a combination the generator did not emit or a contract nobody
+  restated. Four lessons worth carrying:
+  **Copy upstream's predicate, not its prose.** `out=[]` is web-poet's documented way to decline one of the
+  nine processors a zyte base attaches BY NAME, and its resolution is `out is not None`; reading that as
+  `if out:` fell through to the nested class and silently re-enabled what a user switched off. One character.
+  **A hand-checked handful is not a universe, again.** The node handoff promised "the element the selector
+  matched" on the strength of four tags and was wrong for the whole document frame (`<body>` with a lone
+  child comes back as that CHILD; `<head>`/`<title>`/`<meta>` as a synthesised `<html>`) — now derived
+  against the same 142-name element universe as the tree rules.
+  **A class keyword exists only in the `class` statement.** `@attrs.define` rebuilds the class, so
+  `strict=False` was thrown away — the same ORDER bug as the spec recovery, with the same answer: carry it
+  ON the class. And the sibling mistake: an inherited selector replaced by a hand-written `@web_poet.field`
+  has to be resolved against the MRO, not popped off a merged dict, or the popped name is still in an
+  ancestor's own declarations and comes BACK one generation later.
+  **"A usable page object" has two halves.** `FrostFields` was built on web-poet's `Extractor`, which is
+  deliberately not `Injectable`, so andi omitted the callback argument entirely — no exception, no log. That
+  needs no Scrapy to gate: `web_poet.pages.is_injectable` and `andi.plan` answer the exact question
+  scrapy-poet asks, and both are already installed. Pinning Scrapy to test it would assert a matrix this
+  repo has no code for.
+  The gate-shaped lessons are in [docs/TESTING.md](docs/TESTING.md) ("The web-poet layer: three gates"), and
+  they reduce to three: a green differential means everything agreed OR nothing ran, so coverage is part of
+  the exit condition, per (shape x input) CELL; the raw-source allowance has to compare STRUCTURE, since
+  matching text excused a different tag entirely; and one detector answers one question, so each mutation
+  declares which detectors must catch it — "something noticed" hides a gate losing a column. Two mutations
+  are expected to be caught by unit vectors alone, and that is a finding, not a gap: the real zyte
+  processors are too lenient to discriminate a wrong node end-to-end.
+  Two smaller ones. **A doc example is untested code** — `docs/PYTHON.md` told everyone to write
+  `class MyProductPage(ProductPage)`, which raises, and its `Returns[Product]` example declared a field the
+  item had no room for; the examples now live in `tests/doc_examples.py` and the suite runs them. And a
+  **dependency floor is a claim**: `web-poet>=0.8` was a guess no release near it satisfies, so the floor is
+  the pinned version the gate runs, declared once in `pyproject.toml`.
 
 ## Repo map
 

@@ -29,8 +29,20 @@ classifiers = [
 
 # The web-poet page-object integration (`frostwork.webpoet`) is optional; the core
 # (`frostwork.extract`, `frostwork.Page`) needs nothing but the compiled extension.
+#
+# The floor is the version the integration is actually TESTED against — the pin in
+# `requirements-test.txt`, restated as `frostwork.webpoet._MIN_WEB_POET` so the import error can name it.
+# It was `>=0.8`, which was a guess and a wrong one: the integration imports `Extractor`/`ItemPage`,
+# `cached_method` and `web_poet.fields.get_fields_dict`, and resolves processors the way
+# `web_poet.fields.field.__get__` does, so a declared-compatible-but-untested release either fails to
+# import or, worse, resolves processors differently. Nothing here gates any other version, so nothing
+# here should claim one.
+#
+# NOTE this extra is narrower than Frostwork's own `requires-python = ">=3.9"`: web-poet 0.24.1 requires
+# Python >= 3.10, so `pip install frostwork[webpoet]` needs 3.10+ even though the core does not. The core
+# is what the 3.9 classifier is about; see docs/PYTHON.md.
 [project.optional-dependencies]
-webpoet = ["web-poet>=0.8"]
+webpoet = ["web-poet>=0.24.1"]
 
 # Static schema-audit CLI: `frostwork-audit path/to/pageobjects.py` (or `python -m frostwork.audit`).
 [project.scripts]

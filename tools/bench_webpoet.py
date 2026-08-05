@@ -13,7 +13,8 @@ The Parsel side is its real reuse pattern — one `parsel.Selector` per response
 which is exactly what a hand-written `web_poet.WebPage` does.
 
 Run:  .venv/bin/python tools/bench_webpoet.py
-      .venv/bin/python tools/bench_webpoet.py --markdown     # the table for docs/BENCHMARKS.md
+      .venv/bin/python tools/bench_webpoet.py --markdown       # the table for docs/BENCHMARKS.md
+      .venv/bin/python tools/bench_webpoet.py --boundaries     # where the curve does NOT hold
 
 Build the extension RELEASE-first (`maturin develop --release`); a debug build measures nothing useful.
 """
@@ -135,13 +136,174 @@ def timeit(fn, reps: int) -> float:
     return statistics.median(out)
 
 
+def timeit_loop(coro_fn, reps: int) -> float:
+    """Median ms with ONE event loop reused across reps, instead of `asyncio.run` per sample.
+
+    The sweep above pays a fresh loop per call, which is what a script does but not what a crawler does —
+    Scrapy has a running loop already. Reporting only the `asyncio.run` number attributes loop setup to the
+    page object, and at one field that setup is a visible share of the total."""
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(coro_fn())
+        out = []
+        for _ in range(reps):
+            t = time.perf_counter()
+            loop.run_until_complete(coro_fn())
+            out.append((time.perf_counter() - t) * 1000.0)
+        return statistics.median(out)
+    finally:
+        loop.close()
+
+
+def peak_kb(fn) -> float:
+    """Peak Python-side allocation of one call, in KB. Not RSS: what is being compared is how much the two
+    page objects RETAIN, which is the question behind two of the boundaries below."""
+    import tracemalloc
+
+    fn()  # warm the caches that are not the subject (compiled plans, cssselect translation)
+    tracemalloc.start()
+    fn()
+    _cur, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    return peak / 1024.0
+
+
+# ------------------------------------------------------------------- the performance boundaries
+# Three shapes where the healthy-path curve above does NOT hold. Only ONE of them is slower than Parsel
+# (the node handoff at scale); the other two are wasted work and a parity cost, which is why they are
+# measured here rather than described — "there is a cliff" and "it costs 1.6x at ten matches" are
+# different claims, and only the second can be checked. See docs/BENCHMARKS.md ("Performance boundaries").
+def boundary_cardinality(reps: int, sizes=(220, 2000, 6000)):
+    """A FIRST-match field over a selector that matches everything.
+
+    Cardinality is applied in Python, AFTER the native run, so the column holds every match and the shaping
+    throws all but one away — on an outer-HTML column, one whole element's source per match. The `all=True`
+    row is the same field asked for everything, i.e. the work that is NOT wasted, so the pair brackets the
+    waste: they should differ, and they do not.
+
+    Measure it before calling it a regression, though. It is WASTE, not a loss: the parsel column is here
+    because a `first` field is the shape where lxml is structurally cheapest (`.get()` serializes only the
+    element it returns), and frostwork still wins it at every size below. What the numbers support is
+    "pushing the limit into the plan is headroom", not "this shape is slower than parsel"."""
+    rows = []
+    for cards in sizes:
+        html = gen_page(cards)
+        resp = _resp(html)
+        First = type("FirstCard", (FrostPage,), {"card": field("div.card")})
+        All = type("AllCards", (FrostPage,), {"card": field("div.card", all=True)})
+
+        def parsel_first(html=html):
+            return parsel.Selector(body=html, encoding="utf-8").css("div.card").get()
+
+        f_ms = timeit(lambda c=First: asyncio.run(c(response=resp).to_item()), reps)
+        a_ms = timeit(lambda c=All: asyncio.run(c(response=resp).to_item()), reps)
+        p_ms = timeit(parsel_first, reps)
+        f_kb = peak_kb(lambda c=First: asyncio.run(c(response=resp).to_item()))
+        rows.append(
+            (f"{cards} matches, page {len(html) // 1024} KB", f_ms,
+             f"all=True {a_ms:.2f}ms (same work), parsel .get() {p_ms:.2f}ms, peak {f_kb:.0f} KB")
+        )
+    return rows
+
+
+def boundary_cold_response(reps: int, cards: int = 220):
+    """A response with no charset anywhere: none in `Content-Type`, no BOM, no `<meta>`.
+
+    `FrostPage.frostwork_input()` reads `resp.encoding` so the bytes are scanned with the label Parsel would
+    have decoded with. On such a response web-poet cannot answer from metadata, so `HttpResponse.encoding`
+    falls through to `_body_inferred_encoding()`, which runs `w3lib.html_to_unicode` over the WHOLE body and
+    caches the decoded text on the response — a page-sized string the scan never needed. The metric is
+    therefore what is RETAINED, not the peak of the call: the string outlives it, on the response.
+
+    Also reported: the label itself. Inference answers `cp1252` where Frostwork's own sniffer would default
+    to `utf-8`, so passing the label through is not a missed optimisation — it is the parity decision. Not
+    reading it would decode some pages differently from Parsel, which is a correctness change wearing a
+    performance costume."""
+    body = gen_page(cards)
+    rows = []
+    for label, headers in (
+        ("labelled (charset in Content-Type)", {"Content-Type": "text/html; charset=utf-8"}),
+        ("cold (no charset anywhere)", {}),
+    ):
+        def make():
+            return HttpResponse(
+                url=ResponseUrl(URL),
+                body=HttpResponseBody(body),
+                headers=HttpResponseHeaders(headers),
+            )
+
+        def read():
+            return make().encoding
+
+        r = make()
+        enc = r.encoding
+        retained = len(r._cached_text or "") / 1024.0  # the decode web-poet cached on the response
+        rows.append(
+            (label, timeit(read, reps * 2),
+             f"encoding={enc!r}, body {len(body) // 1024} KB, decoded text retained {retained:.0f} KB")
+        )
+    return rows
+
+
+def boundary_node_processors(reps: int, sizes=(10, 50, 220)):
+    """`all=True` with a node-taking processor: every match is re-parsed on its own.
+
+    The handoff exists because a processor's input contract is an lxml node, and for ONE element a subtree
+    parse is far cheaper than the document parse this engine avoids. At N elements it is N subtree parses
+    against Parsel's zero — it already has the tree — so the sign of the comparison flips somewhere, and
+    the point of sweeping N is to say WHERE instead of "at hundreds"."""
+    rows = []
+
+    def count_links(value, page):
+        return [len(node.css("a")) for node in value]
+
+    procs = type("Processors", (), {"cards": [count_links]})
+    Frost = type("FrostNodes", (FrostPage,), {"Processors": procs, "cards": field("div.card", all=True)})
+
+    def parsel_getter(self):
+        return self.css("div.card")
+
+    parsel_getter.__name__ = parsel_getter.__qualname__ = "cards"
+    Parsel = type("ParselNodes", (WebPage,), {"Processors": procs, "cards": wp_field(parsel_getter)})
+
+    for cards in sizes:
+        resp = _resp(gen_page(cards))
+        f_ms = timeit(lambda: asyncio.run(Frost(response=resp).to_item()), reps)
+        p_ms = timeit(lambda: asyncio.run(Parsel(response=resp).to_item()), reps)
+        faster = "frostwork" if f_ms < p_ms else "PARSEL"
+        rows.append(
+            (f"{cards} matches, one subtree parse each", f_ms,
+             f"parsel {p_ms:.2f}ms -> {faster} faster ({max(f_ms, p_ms) / min(f_ms, p_ms):.1f}x)")
+        )
+    return rows
+
+
+def run_boundaries(reps: int) -> None:
+    print(f"  performance boundaries ({reps} reps, median) — one loss, one waste, one parity cost\n")
+    for title, rows in (
+        ("cardinality retention: shaping happens AFTER the native run", boundary_cardinality(reps)),
+        ("cold response: reading resp.encoding decodes the whole body", boundary_cold_response(reps)),
+        ("node handoff at scale: one subtree parse per match", boundary_node_processors(reps)),
+    ):
+        print(f"  {title}")
+        for label, ms, note in rows:
+            print(f"    {label:<40}{ms:>8.2f}ms   {note}")
+        print()
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--cards", type=int, default=220, help="product cards in the generated page")
     ap.add_argument("--reps", type=int, default=25)
     ap.add_argument("--fields", type=int, nargs="*", default=[1, 4, 8, 12, 16, 20])
     ap.add_argument("--markdown", action="store_true", help="emit the docs/BENCHMARKS.md table")
+    ap.add_argument("--boundaries", action="store_true",
+                    help="measure the three shapes where the healthy-path curve does not hold")
     args = ap.parse_args()
+
+    if args.boundaries:
+        run_boundaries(args.reps)
+        return
 
     html = gen_page(args.cards)
     kb = len(html) / 1024
@@ -158,13 +320,18 @@ def main() -> None:
         assert_parity(frost_cls, parsel_cls, html, n)
         f_ms = timeit(lambda c=frost_cls: asyncio.run(c(response=resp).to_item()), args.reps)
         p_ms = timeit(lambda c=parsel_cls: asyncio.run(c(response=resp).to_item()), args.reps)
-        rows.append((n, f_ms, p_ms, p_ms / f_ms))
+        # the same calls on an already-running loop, which is the state a crawler is in. BOTH sides, or the
+        # column would compare one page object's best case with the other's worst.
+        f_loop = timeit_loop(lambda c=frost_cls: c(response=resp).to_item(), args.reps)
+        p_loop = timeit_loop(lambda c=parsel_cls: c(response=resp).to_item(), args.reps)
+        rows.append((n, f_ms, p_ms, p_ms / f_ms, f_loop, p_loop))
 
     if args.markdown:
-        print(f"| fields | `FrostPage` ms | Parsel `WebPage` ms | speedup |")
-        print("| --- | --- | --- | --- |")
-        for n, f_ms, p_ms, sp in rows:
-            print(f"| {n} | {f_ms:.2f} | {p_ms:.2f} | **{sp:.0f}×** |")
+        print("| fields | `FrostPage` ms | Parsel `WebPage` ms | speedup | same, on a running loop | speedup |")
+        print("| --- | --- | --- | --- | --- | --- |")
+        for n, f_ms, p_ms, sp, f_loop, p_loop in rows:
+            print(f"| {n} | {f_ms:.2f} | {p_ms:.2f} | **{sp:.0f}×** | {f_loop:.2f} / {p_loop:.2f} | "
+                  f"**{p_loop / f_loop:.0f}×** |")
         print()
         print(f"Page {kb:.0f} KB; lxml parse alone {parse_ms:.2f} ms "
               f"({100 * parse_ms / rows[-1][2]:.0f}% of Parsel's {rows[-1][0]}-field total).")
@@ -172,9 +339,10 @@ def main() -> None:
 
     print(f"  page: {kb:.1f} KB, {args.cards} cards | reps: {args.reps} (median)")
     print(f"  lxml parse alone: {parse_ms:.2f} ms  <- the fixed cost; everything above it is traversal\n")
-    print(f"  {'fields':>7}  {'FrostPage':>10}  {'Parsel':>10}  {'speedup':>8}")
-    for n, f_ms, p_ms, sp in rows:
-        print(f"  {n:>7}  {f_ms:>9.2f}ms  {p_ms:>9.2f}ms  {sp:>7.1f}×")
+    print(f"  {'fields':>7}  {'FrostPage':>10}  {'Parsel':>10}  {'speedup':>8}   on a running loop")
+    for n, f_ms, p_ms, sp, f_loop, p_loop in rows:
+        print(f"  {n:>7}  {f_ms:>9.2f}ms  {p_ms:>9.2f}ms  {sp:>7.1f}×   "
+              f"{f_loop:>6.2f}ms vs {p_loop:>7.2f}ms  ({p_loop / f_loop:.1f}×)")
     print(
         f"\n  Parity verified on every row before timing. The parse is {parse_ms:.2f} ms of Parsel's "
         f"{rows[-1][2]:.2f} ms at {rows[-1][0]} fields ({100 * parse_ms / rows[-1][2]:.0f}%), so the gap "

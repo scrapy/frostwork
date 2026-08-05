@@ -8,6 +8,9 @@ web-poet==0.24.1
 pytest==9.1.1
 # used directly by the web-poet tests (also a transitive web-poet dep); pin it explicitly
 attrs==26.1.0
+# andi is a web-poet dependency, but `tests/test_python.py` uses `andi.plan` DIRECTLY as the oracle for
+# injectability — the exact question scrapy-poet asks — so it is pinned like the oracle it is.
+andi==0.8.0
 # The package ships `py.typed`, which makes its annotations a PROMISE to every user's type checker.
 # `tests/test_typing.py` is what checks that promise: `field()` used to annotate as the internal marker
 # class, so correct code (`x: str = page.name`) was an error in the user's CI and nothing here noticed.
@@ -20,6 +23,13 @@ mypy==2.3.0
 # zyte-parsers renders breadcrumbs/rating/brand/gtin, price-parser renders prices, html-text renders
 # `description`. A bump in any of them moves a verdict, so they are pinned like the oracle they are.
 zyte-common-items==0.29.0
+# Scrapy and scrapy-poet are deliberately NOT here, and the reason is the opposite of the one above.
+# The integration defect at that boundary was injectability — `FrostFields` was built on web-poet's
+# `Extractor`, which is not `Injectable`, so andi omitted the callback argument silently. That question is
+# answered by `web_poet.pages.is_injectable` and `andi.plan`, both of which are already installed (andi is
+# a web-poet dependency), and `tests/test_python.py` asks it exactly the way scrapy-poet does. Pinning
+# Scrapy + Twisted to gate a layer this repository contains no code for would be a large test dependency
+# asserting a version matrix nothing here exercises; README.md says so rather than implying otherwise.
 clear-html==0.5.0
 zyte-parsers==0.6.0
 price-parser==0.5.1

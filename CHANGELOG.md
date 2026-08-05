@@ -113,6 +113,28 @@ since the tokenizer was written.
   whole element universe (`implied <body>` in `tools/audit_tree_rules.py`, 695 cells), because the names
   that end the head are not the names that would open a body after an *explicit* `</head>` — and that
   explicit path is deliberately untouched, since libxml2 and html5lib disagree there.
+- The **web-poet integration** ships with these contracts, each gated (`make gate-webpoet`,
+  `make gate-webpoet-mutate`):
+  - A field processor receives **the element the selector matched** — re-parsed from its own raw source, for
+    every element name including the document frame. The handoff is subtree-local: own attributes and
+    descendants, no ancestors/siblings/`base_url` (a `(value, page)` processor reads document context off
+    `page` and is unaffected). Anything that is not one recoverable element raises, naming the field.
+  - `out=[]` declines a processor a base page attaches by field NAME, exactly as web-poet defines it, and
+    the field then yields its plain terminal value.
+  - Composition order on a field is fixed: cardinality (`all`/`join`), then `.map()`/`.re_first()` on the
+    HTML source, then web-poet's processors.
+  - The schema is resolved against the class's **MRO**, so replacing an inherited field — with a
+    hand-written `@web_poet.field`, a flat field over a group, a mixin — drops the inherited selector from
+    the plan and from `frost_schema()`, at any depth.
+  - `strict=False` survives a class rebuild (`@attrs.define`), and `Many`/`One` refuse web-poet keywords on
+    a subfield rather than dropping them silently.
+  - `FrostFields` is a `web_poet.ItemPage`, so a custom-input page object is injectable: scrapy-poet/andi
+    silently omits a callback argument whose class `is_injectable()` rejects.
+  - Field types are checked with mypy against `tests/typing_fixture.py`, including the explicit
+    `all=False`/`join=None` forms and `.typed_as(T)` for a processor-bearing field, whose value type nothing
+    static can infer.
+- **Contract:** the `webpoet` extra requires `web-poet>=0.24.1` — the version it is tested against — and
+  therefore **Python ≥ 3.10** for that extra only; the core stays ≥ 3.9.
 - **Contract:** two sampled behaviours were already-known divergences whose documented scope was too
   narrow, and `docs/COMPATIBILITY.md` now says what the sample showed. Content after `</html>` is kept
   (28 of the sample's divergences, and the tag is sometimes *misplaced* rather than trailing — one page

@@ -109,19 +109,25 @@ Parsel's real thing (one `Selector` per response, one `.css()` per field). Both 
 by field before either is timed, and a mismatch **aborts** — timing two page objects that compute
 different answers is not a benchmark. Reproduce: `.venv/bin/python tools/bench_webpoet.py`.
 
-| fields | `FrostPage` ms | Parsel `WebPage` ms | speedup |
-| --- | --- | --- | --- |
-| 1 | 0.33 | 0.92 | **3×** |
-| 4 | 0.46 | 4.78 | **10×** |
-| 8 | 0.64 | 13.56 | **21×** |
-| 12 | 0.78 | 22.38 | **29×** |
-| 16 | 0.94 | 26.47 | **28×** |
-| 20 | 1.01 | 28.09 | **28×** |
+| fields | `FrostPage` ms | Parsel `WebPage` ms | speedup | same, on a running loop | speedup |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 0.32 | 0.90 | **3×** | 0.21 / 0.76 | **4×** |
+| 4 | 0.45 | 4.52 | **10×** | 0.59 / 4.48 | **8×** |
+| 8 | 0.59 | 13.17 | **22×** | 0.50 / 12.99 | **26×** |
+| 12 | 0.79 | 21.39 | **27×** | 0.67 / 21.22 | **32×** |
+| 16 | 0.91 | 25.01 | **27×** | 0.81 / 24.71 | **31×** |
+| 20 | 1.01 | 27.02 | **27×** | 0.90 / 26.53 | **29×** |
 
 40 KB page (220 product cards), field counts are prefixes of one growing schema. Same machine and caveats
 as the matrix above: single machine (Apple arm64), warm, median of 25 reps, indicative rather than
 controlled. Repeated runs land in **25×–29×** at the top of the sweep, so treat the last three rows as one
 number (~27×) rather than as a curve that peaks at 12 fields.
+
+The **running-loop** columns exist because the main ones charge `asyncio.run` — a fresh event loop per
+call — to the page object, while a crawler already has a loop running. Both sides are re-timed that way, not
+just ours: charging the setup to one and not the other would be a comparison of one page object's best case
+with the other's worst. It matters most at one field, where the loop is a visible share of a sub-millisecond
+total, and is noise by twenty.
 
 **Read the curve, not a number.** The lxml parse is only **0.76 ms of Parsel's 28 ms** at 20 fields — 3%.
 So virtually none of the win is the parse Frostwork skips; it is per-field tree traversal that Frostwork
@@ -142,6 +148,64 @@ card-dense, their production selectors are mostly cheaper than the descendant-he
 `bench_corpus.py` times `frostwork.extract` rather than `to_item()`. What this section establishes is
 narrower and worth having on its own: the page-object layer adds no meaningful overhead of its own, and the
 win is per-field traversal rather than the skipped parse.
+
+### Performance boundaries
+
+Three shapes where the curve above does not hold. Exactly one of them is a **loss** to Parsel; the other two
+are wasted work and a parity cost, and calling all three "cliffs" would be three claims where the numbers
+support one. Measured rather than described: reproduce with
+`.venv/bin/python tools/bench_webpoet.py --boundaries`.
+
+**1. A node-taking processor on `all=True` is slower than Parsel, at every size — this is the real loss.**
+The processor contract is an lxml node, so each match is re-parsed on its own; Parsel hands over elements
+from a tree it has already built.
+
+| matches | `FrostPage` | Parsel | |
+| --- | --- | --- | --- |
+| 10 | 0.45 ms | 0.28 ms | Parsel faster |
+| 50 | 1.08 ms | 0.71 ms | Parsel faster |
+| 220 | 4.35 ms | 2.61 ms | Parsel faster |
+
+There is no crossover to find above ten matches: for *that field*, the subtree parses cost more than the
+scan saves, by a roughly constant factor. It is a compatibility cost, not a defect — the alternative is handing the processor a string it
+silently ignores, which is the defect this handoff was built to fix — and it is bounded to
+processor-bearing **bare-element** fields. A page object of `::text`/`::attr()` fields never reaches it, and
+one field like this inside a page of ordinary fields still shares the single scan, so the page total can
+win while this column loses. If a page object's hot field is a list of nodes, a hand-written
+`@web_poet.field` over one Parsel `Selector` is the faster shape and always has been.
+
+**2. Cardinality is applied after the scan, so a first-match field does the work of `all=True`.** Headroom
+rather than a regression — not slower than Parsel, just slower than it needs to be:
+
+| matches (page) | `first` | `all=True` | Parsel `.get()` | peak |
+| --- | --- | --- | --- | --- |
+| 220 (39 KB) | 0.38 ms | 0.38 ms | 1.11 ms | 57 KB |
+| 2 000 (365 KB) | 2.31 ms | 2.27 ms | 9.92 ms | 468 KB |
+| 6 000 (1.1 MB) | 6.46 ms | 6.53 ms | 30.48 ms | 1 402 KB |
+
+The first two columns are the same measurement at every size, which is the point: the column materialises
+every match — on a bare-element field, one whole element's source each — and shaping then discards all but
+one. Pushing the limit into the native plan (while continuing the scan for the other fields) is the
+optimisation these numbers argue for; **it is not implemented.** The Parsel column says why it is not urgent:
+this is the shape where lxml is structurally cheapest, since `.get()` serialises only the element it
+returns, and Frostwork still wins it several-fold.
+
+**3. A response with no charset anywhere costs a page-sized decode — and keeping it is a parity
+decision.** `frostwork_input()` reads `resp.encoding` so the bytes are scanned with the label Parsel would
+have decoded with. With no `Content-Type` charset, no BOM and no `<meta>`, web-poet falls through to
+`w3lib.html_to_unicode` over the whole body and caches the text on the response:
+
+| response | `resp.encoding` | label | decoded text retained |
+| --- | --- | --- | --- |
+| labelled (`charset=utf-8`) | 0.01 ms | `utf-8` | none |
+| cold (no charset anywhere) | 0.03 ms | `cp1252` | the whole page, as `str` |
+
+The time is negligible; the retained string is O(page) and the scan never needed it. But look at the label:
+inference answers `cp1252` where Frostwork's own sniffer would default to `utf-8`, so *not* reading
+`resp.encoding` would decode some pages differently from Parsel. That makes this a correctness trade wearing
+a performance costume, and the current choice — pay the decode, match Parsel — is the deliberate one. A
+Frostwork-specific scrapy-poet provider that supplies bytes plus Scrapy's own declared encoding is the way
+out, and would need its own parity gate before it could be believed.
 
 ## Memory (no-DOM ⇒ bounded RSS)
 

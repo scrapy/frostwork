@@ -87,10 +87,9 @@ cardinality for applications that do not use web-poet.
 With web-poet, a page object declares its selectors and Frostwork fills every field in one pass:
 
 ```python
-from web_poet import handle_urls, Returns
+from web_poet import Returns
 from frostwork.webpoet import FrostPage, field
 
-@handle_urls("example.com")
 class ProductPage(FrostPage, Returns[Product]):
     name = field("h1::text")
     price = field(".price::text")
@@ -98,7 +97,7 @@ class ProductPage(FrostPage, Returns[Product]):
     brand = field("//meta[@itemprop='brand']/@content")
 ```
 
-In a Scrapy spider, scrapy-poet injects the page object selected by `@handle_urls`. Calling
+In a Scrapy spider, scrapy-poet builds the page object from the callback's **annotation** and
 `to_item()` fills the whole `Product` in one scan:
 
 ```python
@@ -112,9 +111,17 @@ class ProductSpider(scrapy.Spider):
         yield await page.to_item()
 ```
 
-Enable scrapy-poet in `settings.py` with `ADDONS = {"scrapy_poet.Addon": 300}` and it supplies the
-page object according to `@handle_urls`. Outside Scrapy, construct it directly:
+Enable scrapy-poet in `settings.py` with `ADDONS = {"scrapy_poet.Addon": 300}`; see
+[scrapy-poet's setup docs](https://scrapy-poet.readthedocs.io/) for the rest of the wiring. Outside
+Scrapy, construct the page object directly:
 `item = await ProductPage(response=http_response).to_item()`.
+
+Two things worth knowing. `@handle_urls("example.com")` belongs to the other injection style —
+annotate the callback with the **item** (`async def parse(self, response, item: Product)`) and the
+registry picks the page object whose rule matches the URL; annotating the page class, as above,
+already names what to build. And `FrostBrowserPage` needs a provider for `BrowserResponse`, which
+scrapy-poet's built-in providers do not supply. Nothing in this repository gates the Scrapy layer —
+no Scrapy version is pinned or tested here — so treat this as a pointer, not a certified matrix.
 
 `extract(..., encoding="windows-1252")` accepts the charset label supplied by Scrapy's response;
 without one, Frostwork checks the BOM and `<meta>` declarations before defaulting to UTF-8. The

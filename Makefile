@@ -21,6 +21,7 @@
 #   make bench       full throughput matrix vs Parsel (minutes; for release notes)
 #   make bench-smoke quick article/deep-nesting performance check
 #   make bench-webpoet  FrostPage.to_item() vs a Parsel WebPage, swept over field count
+#                    (add --boundaries by hand for the three shapes where the curve does not hold)
 #   make ci          test + gate + gate-corpus + gate-seq + fuzz-smoke + py + gate-webpoet(+mutate)
 #                    — the minimum pre-release check
 #
@@ -32,7 +33,7 @@ MATURIN ?= .venv/bin/maturin
 FUZZ_ITERS ?= 6000
 
 .DEFAULT_GOAL := help
-.PHONY: help bootstrap test build gate gate-corpus gate-seq corpus-real gate-mutate gate-mutate-full \
+.PHONY: help bootstrap test build ext gate gate-corpus gate-seq corpus-real gate-mutate gate-mutate-full \
 	fuzz-smoke soak py gate-webpoet gate-webpoet-mutate bench bench-smoke bench-webpoet ci
 
 help:
@@ -48,6 +49,14 @@ test:
 
 build:
 	cargo build --release --bin differ --bin bench
+
+# The compiled extension, RELEASE, installed into the venv. Everything that imports `frostwork` from
+# Python depends on this, and only `py` used to build it — so the page-object gates and benchmarks below
+# ran against whatever `.so` was already installed. Both failure modes are silent and both were hit: a
+# STALE extension grades old behaviour as a passing gate, and a DEBUG one (what a bare `maturin develop`
+# leaves behind) makes a benchmark a measurement of the wrong build.
+ext:
+	$(MATURIN) develop --release
 
 gate: build
 	$(PY) tools/diff_lxml.py
@@ -106,8 +115,7 @@ gate-mutate-full:
 soak: build
 	$(PY) tools/soak.py
 
-py:
-	$(MATURIN) develop --release
+py: ext
 	$(PY) -m pytest tests/ -q
 	$(PY) tools/support_snapshot.py --check
 	$(PY) tools/gen_tree_rules.py --check
@@ -119,7 +127,7 @@ py:
 # handed a str, a field dropped from the plan, an item that came back `{}`). Compared on the whole item,
 # because a vanished KEY is the failure mode of two of them. Needs the extension, so it follows `py`.
 WEBPOET_SCHEMAS ?= 120
-gate-webpoet:
+gate-webpoet: ext
 	$(PY) tools/diff_webpoet.py --schemas $(WEBPOET_SCHEMAS)
 	$(PY) tools/webpoet_surface.py --check
 
@@ -128,7 +136,7 @@ gate-webpoet:
 # holes in the differential above (no generated field had a `.map()`, and no bare-element field was
 # `all=True` with a processor), which is the whole reason to run it: a mutation the differential misses is
 # a hole in the differential. Sampled; a survivor is a missing case, not a shrug.
-gate-webpoet-mutate:
+gate-webpoet-mutate: ext
 	$(PY) tools/mutate_webpoet.py --gate
 
 bench: build
@@ -137,7 +145,7 @@ bench: build
 # The page-object layer rather than the selector layer: `FrostPage.to_item()` vs an equivalent Parsel
 # `web_poet.WebPage`, swept over field count because the ratio depends on it (3x at one field, ~28x at
 # twenty). Verifies both items are identical before timing either.
-bench-webpoet:
+bench-webpoet: ext
 	$(PY) tools/bench_webpoet.py
 
 bench-smoke: build
