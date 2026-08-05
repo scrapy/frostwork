@@ -252,7 +252,12 @@ def field(
         card = ("join", join)
     else:
         card = ("first", None)
-    wp_kwargs: Dict[str, Any] = {"cached": cached}
+    # Only carry the keywords actually given, so a plain `field()` keeps the bare
+    # `web_poet.field(getter)` construction path instead of routing every declaration through the
+    # decorator-factory form for a set of defaults.
+    wp_kwargs: Dict[str, Any] = {}
+    if cached:
+        wp_kwargs["cached"] = True
     if meta is not None:
         wp_kwargs["meta"] = meta
     if out is not None:
