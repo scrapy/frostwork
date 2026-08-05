@@ -13,9 +13,9 @@ Read from: web-poet 0.24.1, zyte-common-items 0.29.0 (both pinned in `requiremen
 | web-poet class | Frostwork counterpart | if declined, why |
 |---|---|---|
 | `BrowserPage` | `FrostBrowserPage` |  |
-| `Extractor` | `FrostFields` |  |
+| `Extractor` | — | field support WITHOUT `Injectable`, for a bundle composed into a page (as `SelectorExtractor` is). `FrostFields` is the `ItemPage` form — the same support plus injectability, which scrapy-poet requires: andi silently drops a callback argument whose class `is_injectable()` rejects. |
 | `Injectable` | — | marker base for dependency injection, not an extraction surface |
-| `ItemPage` | — | abstract: no input of its own; FrostFields is the equivalent |
+| `ItemPage` | `FrostFields` |  |
 | `Returns` | — | generic item-class mixin, composed with any base |
 | `SelectorExtractor` | — | input is a parsel.Selector — a tree lxml already built. Scanning it would mean serializing that tree back to markup and re-parsing it, which can disagree with both the original bytes and the Selector; and with a tree already built there is nothing left to save. |
 | `WebPage` | `FrostPage` |  |
@@ -42,13 +42,13 @@ value, because a processor returning `None` on both sides proves nothing).
 | `brand_processor` | yes |  |
 | `breadcrumbs_processor` | yes |  |
 | `description_html_processor` | yes |  |
-| `description_processor` | no | reads `page._descriptionHtml_node`, a side channel written by description_html_processor, so its value depends on FIELD ORDER rather than on this field's selector; covered by the descriptionHtml column instead |
-| `gtin_processor` | no | takes a GTIN type argument, so it is not a bare (value, page) processor |
+| `description_processor` | yes |  |
+| `gtin_processor` | yes |  |
 | `images_processor` | yes |  |
 | `metadata_processor` | no | operates on an item's metadata object, not on a selector's value |
 | `only_handle_nodes` | no | a DECORATOR used to build processors, not a processor |
 | `price_processor` | yes |  |
-| `probability_request_list_processor` | no | operates on a Request list, not on a selector's value |
+| `probability_request_list_processor` | no | takes a Request list (one argument), not a field value |
 | `rating_processor` | yes |  |
 | `simple_price_processor` | yes |  |
 

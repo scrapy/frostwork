@@ -43,7 +43,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import web_poet
-import zyte_common_items.processors as zproc
+import webpoet_cases
 from parsel import Selector, SelectorList
 from web_poet import field as wp_field
 
@@ -56,8 +56,13 @@ TARGET = ROOT / "docs" / "WEBPOET_SURFACE.md"
 # ------------------------------------------------------------------ 1. page / extractor base classes
 # name -> (Frostwork counterpart, or None with a reason for declining)
 BASES = {
-    "ItemPage": (None, "abstract: no input of its own; FrostFields is the equivalent"),
-    "Extractor": ("FrostFields", None),
+    "ItemPage": ("FrostFields", None),
+    "Extractor": (
+        None,
+        "field support WITHOUT `Injectable`, for a bundle composed into a page (as `SelectorExtractor` is). "
+        "`FrostFields` is the `ItemPage` form — the same support plus injectability, which scrapy-poet "
+        "requires: andi silently drops a callback argument whose class `is_injectable()` rejects.",
+    ),
     "WebPage": ("FrostPage", None),
     "BrowserPage": ("FrostBrowserPage", None),
     "SelectorExtractor": (
@@ -100,40 +105,19 @@ def upstream_field_kwargs() -> list:
 
 
 # ------------------------------------------------------------------ 3. zyte processors
-# Exercised by tools/diff_webpoet.py (its PROCESSOR_FIELDS), or declined with a reason.
+# The registry in `tools/webpoet_cases.py` is the single source: it says which processors are covered, how a
+# page object reaches each one, and which gate proves it — so this tool and `tools/diff_webpoet.py` cannot
+# drift. They did: two processors were declined here with reasons that were simply wrong about upstream
+# (`description_processor` "reads a side channel" — it WRITES one; `gtin_processor` "takes a GTIN argument" —
+# it is a plain `(value, page)`), which excluded them from every gate by a sentence nobody re-read.
 PROCESSORS = {
-    "breadcrumbs_processor": None,
-    "brand_processor": None,
-    "description_html_processor": None,
-    "rating_processor": None,
-    "price_processor": None,
-    "simple_price_processor": None,
-    "images_processor": None,
-    "description_processor": (
-        "reads `page._descriptionHtml_node`, a side channel written by description_html_processor, so "
-        "its value depends on FIELD ORDER rather than on this field's selector; covered by the "
-        "descriptionHtml column instead"
-    ),
-    "gtin_processor": "takes a GTIN type argument, so it is not a bare (value, page) processor",
-    "metadata_processor": "operates on an item's metadata object, not on a selector's value",
-    "probability_request_list_processor": "operates on a Request list, not on a selector's value",
-    "only_handle_nodes": "a DECORATOR used to build processors, not a processor",
+    **{c.processor: None for c in webpoet_cases.CASES},
+    **webpoet_cases.DECLINED,
 }
 
 
 def upstream_processors() -> list:
-    """Public callables in `zyte_common_items.processors` that look like field processors."""
-    out = []
-    for name in dir(zproc):
-        if name.startswith("_"):
-            continue
-        obj = getattr(zproc, name)
-        if not callable(obj) or inspect.isclass(obj):
-            continue
-        if getattr(obj, "__module__", "") != zproc.__name__:
-            continue  # re-exported helper (extract_price, clean_node, ...)
-        out.append(name)
-    return sorted(out)
+    return webpoet_cases.upstream_processors()
 
 
 # ------------------------------------------------------------------ 4. processor input value types
@@ -190,6 +174,20 @@ def render() -> str:
     for _name, (counterpart, _reason) in BASES.items():
         if counterpart is not None and counterpart not in FROST_BASES:
             raise SystemExit(f"webpoet-surface: BASES names {counterpart!r}, which frostwork.webpoet lacks")
+
+    # ...and "usable" includes INJECTABLE, which is the half that was missing. scrapy-poet builds a
+    # callback argument only if `web_poet.pages.is_injectable` accepts its class; for anything it rejects,
+    # andi leaves the argument out of the plan and the page object never arrives — no exception, no log.
+    # Asked here rather than in a test because it is a property of an UPSTREAM predicate: if web-poet
+    # changes what counts as injectable, this is the gate that should go red.
+    from web_poet.pages import is_injectable
+
+    for name, base in FROST_BASES.items():
+        if not is_injectable(base):
+            raise SystemExit(
+                f"webpoet-surface: {name} is not is_injectable(), so scrapy-poet would silently omit a "
+                f"callback argument annotated with it. Every shipped base must be an ItemPage."
+            )
 
     # and the node types claimed producible must really be what the handoff produces
     from frostwork.webpoet import _as_node, _as_nodes

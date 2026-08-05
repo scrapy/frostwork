@@ -497,6 +497,126 @@ def test_webpoet_gate_would_not_pass_vacuously():
     assert _expected_is_meaningful(0.0)  # a real extracted rating of 0 is information, not absence
 
 
+def test_webpoet_gate_fails_when_a_column_went_quiet():
+    """A differential can be green because everything agreed or because nothing ran, and only the run's own
+    output showed the difference. Three ways that hid here, all of them real:
+
+    * a class shape whose oracle stopped building produced nothing but ORACLE-SKIPs and still exited 0;
+    * a processor row whose expected value was empty on every page could not go red;
+    * a COMBINATION the generator never emitted (`out=[]`, a `.map()` beside a processor) was reported by
+      nothing at all — which is exactly how the `all=True` node-processor branch survived a whole
+      differential before the mutation sweep found it.
+
+    So the coverage check is part of the gate's exit condition, and this seeds each of its failures."""
+    from diff_webpoet import (
+        EXPECTED_ORACLE_SKIP,
+        SHAPES,
+        coverage_failures,
+        expected_cells,
+        required_columns,
+    )
+
+    def clean():
+        """A by_shape/by_proc/meaningful triple that passes, as the baseline to break."""
+        by_shape = {cell: {"AGREE": 10, "WS": 0, "DIVERGE": 0, "CRASH": 0} for cell in expected_cells()}
+        by_shape.update({f"{s}/http": {"ORACLE-SKIP": 10} for s in EXPECTED_ORACLE_SKIP})
+        buckets = []
+        for marker, _why, exact in required_columns():
+            # an exact requirement is its own bucket; a marker is a suffix on some processor's bucket
+            buckets.append(marker if exact else f"breadcrumbs {marker}")
+        by_proc = {b: {"AGREE": 5} for b in buckets}
+        return by_shape, by_proc, {b: 5 for b in by_proc}
+
+    by_shape, by_proc, meaningful = clean()
+    assert coverage_failures(by_shape, by_proc, meaningful) == []
+
+    # 1. a CELL that graded nothing. Per cell, not per shape: the two response inputs go through different
+    #    bases, so every BrowserResponse pair could become an ORACLE-SKIP while the HTTP half kept the
+    #    shape's total non-zero — a whole input type untested, reported as a pass.
+    for cell in ("plain/http", "plain/browser", "zyte_productpage/http"):
+        broken = dict(by_shape)
+        broken[cell] = {"ORACLE-SKIP": 10}
+        failures = coverage_failures(broken, by_proc, meaningful)
+        assert any(f"cell {cell!r} graded 0 pairs" in f for f in failures), (cell, failures)
+
+    # 2. a cell that grades SOME pairs and skips others — a partial hole, which the totals hide
+    broken = dict(by_shape)
+    broken["plain/browser"] = {"AGREE": 4, "ORACLE-SKIP": 6}
+    failures = coverage_failures(broken, by_proc, meaningful)
+    assert any("skipped 6" in f for f in failures), failures
+
+    # 3. a shape listed as an expected skip that now builds — a stale expectation is a rotting gate
+    broken = dict(by_shape)
+    broken["attrs_frozen/http"] = {"AGREE": 3}
+    failures = coverage_failures(broken, by_proc, meaningful)
+    assert any("EXPECTED_ORACLE_SKIP" in f and "attrs_frozen" in f for f in failures), failures
+
+    # 4. a processor column whose expected value is empty everywhere
+    thin = dict(meaningful)
+    thin["breadcrumbs"] = 0
+    failures = coverage_failures(by_shape, by_proc, thin)
+    assert any("never carried a non-empty expected value" in f for f in failures), failures
+
+    # 5. every required column, dropped one at a time — including each processor in the shared registry, so
+    #    a whole processor family leaving the sweep is a failure rather than a smaller table
+    for marker, _why, exact in required_columns():
+        missing = {
+            b: c for b, c in by_proc.items() if (b != marker if exact else marker not in b)
+        }
+        failures = coverage_failures(by_shape, missing, {b: 5 for b in missing})
+        assert any(repr(marker) in f for f in failures), (marker, failures)
+    assert len(SHAPES) > 1  # the sweep still has a shape axis to gate
+
+
+def test_the_raw_source_allowance_excuses_serialization_and_nothing_else():
+    """What "the raw-source divergence is acceptable" is allowed to mean.
+
+    The allowance compared non-whitespace TEXT, which is far too weak: `<p class=a>same</p>` and
+    `<section id=wrong>same</section>` have identical text, so a different tag, lost attributes and a
+    reshaped subtree were all excused — on the one column where the engine's outer HTML is the value. The
+    comparison is now a structural signature, so quoting/entities/implied end tags still pass and structure
+    does not."""
+    from diff_webpoet import field_verdict
+
+    # serialization differences: attribute quoting, entity spelling, an implied end tag
+    assert field_verdict("<p class=a>x &amp; y</p>", '<p class="a">x &amp; y</p>', ".a", False) == "AGREE"
+    assert field_verdict("<ul><li>a<li>b</ul>", "<ul><li>a</li><li>b</li></ul>", "ul", False) == "AGREE"
+
+    # ...and everything a processor would actually read differently
+    assert field_verdict("<p class=a>same</p>", "<section id=wrong>same</section>", ".a", False) == "DIVERGE"
+    assert field_verdict('<p class=a>x</p>', '<p class=a id=extra>x</p>', ".a", False) == "DIVERGE"
+    assert field_verdict("<p><b>x</b></p>", "<p>x</p>", "p", False) == "DIVERGE"
+
+    # the same rules per item for an `all=True` bare-element field — a shape that did not exist until
+    # `out=[]` made an all=True node field processor-free
+    mine = ["<p class=a>one</p>", "<p class=a>two</p>"]
+    reflow = ['<p class="a">one</p>', '<p class="a">two</p>']
+    assert field_verdict(mine, reflow, ".a", False) == "AGREE"
+    assert field_verdict(mine[:1], reflow, ".a", False) == "DIVERGE"
+    assert field_verdict(["<p class=a>one</p>", "<div>two</div>"], reflow, ".a", False) == "DIVERGE"
+    # ...and the allowance never applies to a PROCESSED field, whatever the shape
+    assert field_verdict(mine, reflow, ".a", True) == "DIVERGE"
+
+
+def test_the_processor_registry_covers_the_installed_library():
+    """The shared registry is the universe both web-poet gates read, so a processor upstream that it does
+    not classify is a hole in BOTH. Two of its decline reasons were factually wrong about upstream once
+    (`description_processor` "reads a side channel" — it writes one; `gtin_processor` "takes a GTIN
+    argument" — it is a plain `(value, page)`), which is what a hand-written universe costs."""
+    import webpoet_cases
+
+    assert webpoet_cases.coverage_gaps() == []
+    # every covered case must name a real callable and a field name zyte actually wires, where it claims to
+    wired = webpoet_cases.product_page_processors()
+    for case in webpoet_cases.CASES:
+        assert callable(case.callable), case
+        if "productpage" in case.gates:
+            assert case.processor in wired.get(case.field_name, []), (
+                f"{case.processor} is claimed to arrive through ProductPage.Processors under "
+                f"{case.field_name!r}, but zyte wires {wired.get(case.field_name)} there"
+            )
+
+
 # --------------------------------------------- web-poet surface snapshot (tools/webpoet_surface.py)
 def test_the_surface_gate_fails_on_an_unclassified_upstream_name():
     """The gate exists because five defects were hand-written lists that omitted something. So the failure
