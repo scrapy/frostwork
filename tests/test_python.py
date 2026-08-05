@@ -361,6 +361,13 @@ def _resp(body=PRODUCT, encoding=None, url="http://example.com/p/1"):
     return HttpResponse(**kwargs)
 
 
+def _rebuild_class(cls):
+    """Rebuild a class from its own `__dict__`, the way `@attrs.define` does — but through a bare `type()`
+    call, so a test probes the MECHANISM rather than one library's use of it. Anything that reconstructs a
+    class (another decorator, a metaclass) has to survive the same way."""
+    return type(cls)(cls.__name__, cls.__bases__, dict(cls.__dict__))
+
+
 def test_frostpage_to_item():
     from frostwork.webpoet import FrostPage, field
 
@@ -460,6 +467,94 @@ def test_processor_on_a_bare_element_field_receives_a_node_not_raw_html():
     assert item["raw"] == '<nav class="crumbs"><a href="/a">A</a><a href="/b">B</a></nav>'
 
 
+def test_a_real_zyte_product_page_composes_and_every_processor_fires():
+    """The composition this integration exists for, with nothing synthesized: a real
+    `zyte_common_items.pages.ProductPage`, its real nested `Processors` (nine field NAMES), and a real
+    `Product` item out the other end.
+
+    Every other processor test here stands a fake in for the isinstance gate, which is faithful to the
+    gate but not to the WIRING — the by-name lookup arriving through zyte's own MRO, with `Returns[Product]`
+    and the typed item construction that made the original defect invisible (zyte's items do not validate
+    types, so a raw-HTML string in `List[Breadcrumb]` raised nothing).
+
+    Note the composition order: `FrostPage` FIRST. `class MyPage(ProductPage)` alone does not work and
+    says so at class definition — a `field()` marker on a class that does not inherit a Frostwork base
+    converts to nothing."""
+    pytest.importorskip("zyte_common_items")
+    from zyte_common_items import AggregateRating, Brand, Breadcrumb, Image, Product
+    from zyte_common_items.pages import ProductPage
+
+    from frostwork.webpoet import FrostPage, field
+
+    html = (b'<html><head><title>T</title></head><body><h1>Roomy Bag</h1>'
+            b'<nav class="crumbs"><a href="/c1">Cat 1</a><a href="/c2">Cat 2</a></nav>'
+            b'<div class="desc"><p>A roomy bag.</p><script>track()</script>'
+            b'<p>See <a href="/more">more</a>.</p></div>'
+            b'<span class="rating">3.8 out of 5 stars</span>'
+            b'<span class="price">$24.50</span><span class="brand">Acme</span>'
+            b'<img class="hero" src="/i/1.jpg"></body></html>')
+
+    class MyProductPage(FrostPage, ProductPage):
+        name = field("h1::text")
+        breadcrumbs = field(".crumbs")            # -> breadcrumbs_processor, by name only
+        descriptionHtml = field(".desc")          # -> description_html_processor (clear-html)
+        aggregateRating = field(".rating")        # -> rating_processor
+        price = field(".price")                   # -> price_processor
+        brand = field(".brand")                   # -> brand_processor
+        images = field("img.hero::attr(src)", all=True)   # scalar terminal: URL strings, not nodes
+
+    # the declaration that does NOT work, pinned so the docs cannot drift back to it
+    with pytest.raises(TypeError, match="does not inherit a Frostwork page base"):
+        type("Wrong", (ProductPage,), {"name": field("h1::text")})
+
+    item = asyncio.run(MyProductPage(response=_resp(body=html)).to_item())
+    assert isinstance(item, Product)
+    assert item.name == "Roomy Bag"
+    assert item.breadcrumbs == [
+        Breadcrumb(name="Cat 1", url="http://example.com/c1"),
+        Breadcrumb(name="Cat 2", url="http://example.com/c2"),
+    ]
+    assert item.aggregateRating == AggregateRating(bestRating=5.0, ratingValue=3.8, reviewCount=None)
+    assert item.brand == Brand(name="Acme")
+    assert item.price == "24.50"
+    assert item.images == [Image(url="/i/1.jpg")]
+    # clear-html ran: the <script> is gone and the relative href resolved against the RESPONSE url, which
+    # a (value, page) processor reads off `page` — not off the re-parsed subtree
+    assert "<script>" not in item.descriptionHtml
+    assert 'href="http://example.com/more"' in item.descriptionHtml
+
+
+def test_all_true_node_handoff_produces_a_selectorlist_not_a_plain_list():
+    """`all=True` with a node-taking processor must hand over a `SelectorList`, not a list of `Selector`.
+
+    zyte's `_handle_selectorlist` gates on `SelectorList` exactly and returns anything else UNCHANGED, so a
+    plain list is the raw-string defect in a new shape. Asserted here as well as in the differential because
+    the type is the contract: `[Selector, Selector]` compares equal to a `SelectorList` in plenty of
+    assertions and is still wrong."""
+    from parsel.selector import SelectorList
+
+    from frostwork.webpoet import FrostPage, field
+
+    seen = {}
+
+    def needs_selectorlist(value, page):
+        seen["type"] = type(value).__name__
+        if not isinstance(value, SelectorList):
+            return "<PASSTHROUGH>"  # what every zyte node processor does with the wrong type
+        return [n.attrib.get("class") for n in value]
+
+    html = b'<html><body><nav class="a"><a href="/1">1</a></nav><nav class="b"></nav></body></html>'
+
+    class P(FrostPage):
+        class Processors:
+            navs = [needs_selectorlist]
+
+        navs = field("nav", all=True)
+
+    assert asyncio.run(P(response=_resp(body=html)).to_item()) == {"navs": ["a", "b"]}
+    assert seen["type"] == "SelectorList"
+
+
 def test_processor_on_a_scalar_terminal_field_still_gets_strings():
     """The other half of the rule, and the reason it is keyed on the TERMINAL rather than on processor
     presence: `images_processor` takes URL STRINGS and has no `Selector` branch at all, so converting
@@ -508,6 +603,84 @@ def test_node_handoff_reparses_the_subtree_not_the_document():
 
     asyncio.run(P(response=_resp(body=html)).to_item())
     assert seen == {"tag": "td", "text": "deep"}, seen
+
+
+def test_node_handoff_returns_the_matched_element_for_every_element_name():
+    """The handoff's promise is "the processor gets the element the selector matched". That was asserted on
+    the strength of four hand-checked tags (`<div>`, `<p>`, `<td>`, `<tr>`) — the `colgroup` mistake in a
+    new universe — and it was false for the DOCUMENT FRAME: `lxml.html.fromstring` applies a
+    document-vs-fragment heuristic, so `<body>` with a lone child came back as that CHILD, while `<head>`,
+    `<title>`, `<meta>`, `<link>` and `<base>` came back as a synthesised `<html>`. A processor then read
+    the attributes and children of an element the selector never matched, with nothing raised.
+
+    So the sweep runs over the element universe the tree rules already share (`tools/gen_tree_rules`),
+    which is proven to be a superset of the engine's names — never a list written here. The raw source comes
+    from the ENGINE rather than being hand-written, so what is checked is the real column a field would get.
+
+    Note what discriminates this and what does not: the real zyte processors are too lenient to show it
+    end-to-end (clear-html renders the same text from a `<title>` as from the `<html>` wrapping it, and
+    `breadcrumbs_processor` finds the same links in a `<body>`'s lone child as in the `<body>`), so
+    `make gate-webpoet` cannot go red on this. The contract assertion IS the gate."""
+    import os
+    import sys
+
+    # the shared element universe, imported rather than restated (see AGENTS.md: never add a name by hand)
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools"))
+    from gen_tree_rules import ELEMENTS
+
+    import frostwork
+    from frostwork.webpoet import _as_node
+
+    # The three frame elements have to BE the frame rather than a nested copy of it (a second `<body>` does
+    # not open an element), so they carry the class on the real tag; everything else nests inside a `<div>`.
+    frame_docs = {
+        "html": "<html class=k><head><title>t</title></head><body><p>x</p></body></html>",
+        "head": "<html><head class=k><title>t</title><meta charset=utf-8></head><body><p>x</p></body></html>",
+        # a LONE child is the shape whose reparse used to collapse to that child
+        "body": "<html><head><title>t</title></head><body class=k><p>only child</p></body></html>",
+    }
+    wrong = []
+    for tag in ELEMENTS:
+        doc = frame_docs.get(
+            tag,
+            f"<html><head><title>t</title></head><body><div id=w>"
+            f"<{tag} class=k>x</{tag}></div></body></html>",
+        )
+        col = frostwork.extract(doc.encode(), [".k"])[0]
+        assert col, f"the engine captured no outer HTML for <{tag}> — fix the probe document, not this list"
+        node = _as_node(col[0])
+        # the tag AND its attributes: a processor reading `value.attrib` is the thing that breaks silently
+        if node.root.tag != tag or node.root.get("class") != "k":
+            wrong.append((tag, col[0][:40], node.root.tag, dict(node.root.attrib)))
+    assert not wrong, f"the node handoff returned a different element than the selector matched: {wrong}"
+
+
+def test_frame_element_node_handoff_end_to_end():
+    """The same rule through a real page object, with a processor that reads what actually broke — the
+    node's tag and attributes. `<body>` with a lone child is the collapsing case; `<meta>` is the hoisted
+    one, and its whole value lives in an attribute."""
+    from frostwork.webpoet import FrostPage, field
+
+    seen = {}
+
+    def capture(value, page):
+        seen[value.root.tag] = dict(value.root.attrib)
+        return value.root.tag
+
+    html = (b'<html><head><meta itemprop="brand" content="Acme"></head>'
+            b'<body class="page"><p>only child</p></body></html>')
+
+    class P(FrostPage):
+        class Processors:
+            frame = [capture]
+            brand = [capture]
+
+        frame = field("body")
+        brand = field("meta[itemprop=brand]")
+
+    item = asyncio.run(P(response=_resp(body=html)).to_item())
+    assert item == {"frame": "body", "brand": "meta"}
+    assert seen == {"body": {"class": "page"}, "meta": {"itemprop": "brand", "content": "Acme"}}
 
 
 def test_selector_terminals_is_the_engines_answer_not_a_heuristic():
@@ -583,6 +756,52 @@ def test_attrs_variants_and_groups_survive_class_recreation():
         item = asyncio.run(P(response=_resp(body=GRID)).to_item())
         assert item["cards"] == [{"title": "A"}, {"title": "B"}], decorate
         assert item["first"] == {"title": "A"}, decorate
+
+
+def test_strict_false_survives_class_recreation():
+    """`strict=False` is a CLASS KEYWORD, so it exists only in the `class ...` statement — and
+    `@attrs.define` (slots=True) throws that statement away: it rebuilds the class from its `__dict__`, so
+    `__init_subclass__` ran again with no keywords and strictness reverted to the default. A page object
+    that had explicitly opted in to unsupported selectors then raised at import.
+
+    The same ORDER bug as the spec recovery, in the one piece of state nothing was carrying. `slots=False`
+    mutates in place and always worked, which is exactly why one hand vector could have reported this
+    green — so sweep the variants."""
+    import attrs
+
+    from frostwork.webpoet import FrostPage, field
+
+    for decorate in (attrs.define, attrs.define(slots=False), _rebuild_class, lambda c: c):
+        @decorate
+        class P(FrostPage, strict=False):
+            name = field("h1::text")
+            unsupported = field("div:contains('x')::text")
+
+        assert P._frostwork_strict is False, decorate
+        assert not P.check_schema().ok, decorate
+        # the supported field still answers, and the unsupported one is the documented empty column
+        item = asyncio.run(P(response=_resp()).to_item())
+        assert item == {"name": "Widget", "unsupported": None}, (decorate, item)
+
+
+def test_strict_is_not_inherited_by_a_fresh_subclass():
+    """The other half of that fix, pinned because it is a deliberate asymmetry: a REBUILD of a class keeps
+    its opt-out (it is the same class), while a new SUBCLASS does not inherit one — strictness is the
+    default and each class says so for itself. `cls.__dict__` rather than `getattr` is what distinguishes
+    the two."""
+    from frostwork.webpoet import FrostPage, field
+
+    class Permissive(FrostPage, strict=False):
+        unsupported = field("div:contains('x')::text")
+
+    with pytest.raises(frostwork.UnsupportedSelector):
+        class Child(Permissive):
+            name = field("h1::text")
+
+    class ChildOptedOut(Permissive, strict=False):
+        name = field("h1::text")
+
+    assert set(ChildOptedOut._frostwork_specs) == {"unsupported", "name"}
 
 
 def test_attrs_define_with_an_injected_dependency():
@@ -772,6 +991,151 @@ def test_out_on_a_bare_element_field_also_gets_a_node():
     assert asyncio.run(P(response=_resp(body=html)).to_item()) == {"crumbs": ["/a"]}
 
 
+def test_out_empty_list_cancels_an_inherited_processor():
+    """`out=[]` is web-poet's way to say "no processors for this field" and cancel an inherited
+    `Processors` entry — its resolution is `if out is not None`, so an EMPTY list is an answer, not the
+    absence of one. Frostwork read it as a truthiness test, fell through to the nested class, decided a
+    processor was coming and handed back a re-parsed `Selector` where web-poet's own answer is the string.
+
+    The field-level opt-out is the whole reason this matters: a page object inheriting
+    zyte-common-items' `ProductPage` gets processors on nine field NAMES whether it wants them or not, and
+    `out=[]` is the documented way to decline one."""
+    from frostwork.webpoet import FrostPage, field
+
+    def never(value, page):  # pragma: no cover - the point is that it is not called
+        return "PROCESSED"
+
+    html = b'<html><body><nav class="crumbs"><a href="/a">A</a></nav></body></html>'
+
+    class P(FrostPage):
+        class Processors:
+            declined = [never]
+            kept = [never]
+
+        declined = field(".crumbs", out=[])   # cancels the inherited entry -> raw source, as documented
+        kept = field(".crumbs")               # the entry applies -> the processor runs
+
+    item = asyncio.run(P(response=_resp(body=html)).to_item())
+    assert item["declined"] == '<nav class="crumbs"><a href="/a">A</a></nav>'
+    assert item["kept"] == "PROCESSED"
+
+
+def test_processor_resolution_matches_web_poets_own():
+    """Frostwork has to answer "will a processor run on this field?" the same way web-poet does, because a
+    different answer means handing the wrong TYPE to something documented to accept anything and return it
+    unchanged — a wrong value with nothing raised.
+
+    So this does not restate the rule, it DERIVES it: for every combination of `out=` and nested
+    `Processors`, ask web-poet (by observing whether a processor actually ran on an equivalent
+    hand-written field) and compare with `_processors_for`'s answer. `out=[]` is the cell that was wrong,
+    and it was wrong in the direction no test was looking."""
+    from web_poet import WebPage
+    from web_poet import field as wp_field
+
+    from frostwork.webpoet import _processors_for
+
+    def marker(value, page):
+        return "RAN"
+
+    for has_nested in (True, False):
+        for out in (None, [], [marker]):
+            ns = {}
+            if has_nested:
+                ns["Processors"] = type("Processors", (), {"v": [marker]})
+            getter = (lambda self: "raw")
+            getter.__name__ = getter.__qualname__ = "v"
+            ns["v"] = wp_field(out=out)(getter) if out is not None else wp_field(getter)
+            cls = type("P", (WebPage,), ns)
+            upstream_ran = asyncio.run(cls(response=_resp()).to_item())["v"] == "RAN"
+            ours = bool(_processors_for(cls, "v"))
+            assert ours == upstream_ran, (
+                f"nested={has_nested} out={out!r}: web-poet {'runs' if upstream_ran else 'runs no'} "
+                f"processor, frostwork thinks {'a processor runs' if ours else 'none runs'}"
+            )
+
+
+def test_map_on_a_processor_bearing_node_field_runs_on_the_source():
+    """The documented pipeline is shape -> `.map()` -> processors, and it has to hold on the node-handoff
+    branch too. It did not: the conversion ran FIRST, so a transform got a `Selector` where both the
+    docstring and the type annotation promise the shaped string, and the documented one-liner
+    `field(".desc").map(str.upper)` raised `AttributeError` — but only when a processor happened to be
+    attached to that same field, which is why no unit vector had caught it."""
+    from frostwork.webpoet import FrostPage, field
+
+    seen = {}
+
+    def proc(value, page):
+        seen["tag"] = value.root.tag
+        return value.css("a::attr(href)").getall()
+
+    html = b'<html><body><nav class="crumbs"><a href="/cat-1">Cat 1</a></nav></body></html>'
+
+    class P(FrostPage):
+        class Processors:
+            crumbs = [proc]
+
+        # the transform sees HTML SOURCE and returns HTML source; the processor still gets a node
+        crumbs = field(".crumbs").map(lambda src: src.replace("/cat-1", "/CAT-1"))
+
+    assert asyncio.run(P(response=_resp(body=html)).to_item()) == {"crumbs": ["/CAT-1"]}
+    assert seen["tag"] == "nav"
+
+
+@pytest.mark.parametrize(
+    "transform, exc, match",
+    [
+        (len, TypeError, "needs one element's HTML source"),                  # not a string at all
+        (lambda s: "no markup here", TypeError, "needs one element's HTML source"),
+        (lambda s: s + "<p>second</p>", ValueError, "2 top-level elements"),  # more than one node
+        (lambda s: s[: s.index(">")], ValueError, "no <nav> to hand over"),   # start tag, no element
+    ],
+)
+def test_a_transform_that_breaks_the_node_handoff_fails_closed(transform, exc, match):
+    """`.map()` runs before the handoff, so what reaches it is whatever the transform returned. Every way
+    that can stop being one recoverable element has to RAISE and name the field: the alternative is handing
+    the processor lxml's fallback root, i.e. an element the selector never matched, silently — the exact
+    defect class the handoff exists to remove."""
+    from frostwork.webpoet import FrostPage, field
+
+    def proc(value, page):  # pragma: no cover - never reached
+        return "unused"
+
+    class P(FrostPage):
+        class Processors:
+            crumbs = [proc]
+
+        crumbs = field(".crumbs").map(transform)
+
+    html = b'<html><body><nav class="crumbs"><a href="/a">A</a></nav></body></html>'
+    with pytest.raises(exc, match=match):
+        asyncio.run(P(response=_resp(body=html)).to_item())
+
+
+def test_insignificant_whitespace_around_a_transformed_node_is_allowed():
+    """The counterpart: whitespace around an element's source is insignificant, and a transform that adds
+    some must not change which element the processor gets. It did — the tag-name scan was anchored at
+    offset 0, so a leading newline fell through to lxml's heuristic and `field("body")` handed over the
+    `<body>`'s lone CHILD."""
+    from frostwork.webpoet import FrostPage, field
+
+    seen = {}
+
+    def capture(value, page):
+        seen["tag"] = value.root.tag
+        return value.root.get("class")
+
+    html = b'<html><body class="page"><p>only child</p></body></html>'
+
+    class P(FrostPage):
+        class Processors:
+            frame = [capture]
+
+        frame = field("body").map(lambda src: "\n  " + src + "\n")
+
+    assert asyncio.run(P(response=_resp(body=html)).to_item()) == {"frame": "page"}
+    assert seen["tag"] == "body"
+
+
 def test_field_covers_web_poet_fields_whole_keyword_surface():
     """A keyword web-poet adds to `field()` should be a visible gap, not a silent no-op. The enumeration
     lives in one place and is checked against the real signature."""
@@ -836,6 +1200,202 @@ def test_frost_schema_includes_inherited_and_groups():
     # inherited flat field + own field both present (public introspection, no private dict access)
     assert schema["fields"] == {"name": "h1::text", "price": ".price::text"}
     assert schema["groups"] == {"offers": (".offer", {"price": ".p::text"})}
+
+
+def test_a_manual_override_drops_the_inherited_selector():
+    """A subclass may replace an inherited Frostwork field with a hand-written `@web_poet.field`. web-poet
+    resolves the field to the nearest declaration, so `to_item()` was already right — but the inherited
+    SELECTOR stayed in the merged schema, so the plan scanned a column nothing reads and `frost_schema()`
+    advertised a selector the page object no longer answers with."""
+    from web_poet import field as wp_field
+
+    from frostwork.webpoet import FrostPage, Many, field
+
+    class Base(FrostPage):
+        name = field("h1::text")
+        price = field(".price::text")
+        cards = Many(".card", title=field("h3 a::text"))
+
+    class Sub(Base):
+        @wp_field
+        def name(self):
+            return "computed"
+
+        @wp_field
+        def cards(self):
+            return ["computed"]
+
+    assert Sub.frost_schema() == {"fields": {"price": ".price::text"}, "groups": {}}
+    assert Sub._frostwork_flat_names == ["price"] and Sub._frostwork_group_names == []
+    item = asyncio.run(Sub(response=_resp()).to_item())
+    assert item == {"name": "computed", "price": "$9", "cards": ["computed"]}
+    # the base is untouched — the override is the subclass's business
+    assert set(Base.frost_schema()["fields"]) == {"name", "price"}
+
+
+def test_an_override_stays_dropped_in_the_next_generation():
+    """The schema is resolved against the MRO, not by popping names off a merged dict — because the popped
+    name is still in an ANCESTOR's own declarations, so merging brought it back one generation later.
+
+    Three generations for each replacement shape, since a grandchild is where the resurrection showed:
+    a Frostwork field replaced by a hand-written one, a group replaced by a flat field, and a flat field
+    replaced by a group."""
+    from web_poet import field as wp_field
+
+    from frostwork.webpoet import FrostPage, Many, field
+
+    # 1. Frostwork field -> manual web-poet field
+    class A1(FrostPage):
+        name = field("h1::text")
+        price = field(".price::text")
+
+    class A2(A1):
+        @wp_field
+        def name(self):
+            return "computed"
+
+    class A3(A2):
+        link = field("a::attr(href)")
+
+    assert set(A3.frost_schema()["fields"]) == {"price", "link"}, A3.frost_schema()
+    assert asyncio.run(A3(response=_resp()).to_item()) == {
+        "name": "computed", "price": "$9", "link": "/p/1",
+    }
+
+    # 2. group -> flat field
+    class B1(FrostPage):
+        cards = Many(".card", title=field("h3 a::text"))
+
+    class B2(B1):
+        cards = field("h1::text")
+
+    class B3(B2):
+        extra = field(".price::text")
+
+    assert B3.frost_schema() == {"fields": {"cards": "h1::text", "extra": ".price::text"}, "groups": {}}
+    assert asyncio.run(B3(response=_resp()).to_item()) == {"cards": "Widget", "extra": "$9"}
+
+    # 3. flat field -> group
+    class C1(FrostPage):
+        cards = field("h1::text")
+
+    class C2(C1):
+        cards = Many(".card", title=field("h3 a::text"))
+
+    class C3(C2):
+        extra = field(".price::text")
+
+    assert C3.frost_schema()["fields"] == {"extra": ".price::text"}
+    assert list(C3.frost_schema()["groups"]) == ["cards"]
+    item = asyncio.run(C3(response=_resp(body=GRID)).to_item())
+    assert item == {"cards": [{"title": "A"}, {"title": "B"}], "extra": "$1"}
+
+
+def test_a_manual_field_mixin_before_the_frost_base_wins():
+    """Resolution has to follow the whole MRO, not just "did this class declare it". A mixin listed before
+    the Frostwork base supplies the descriptor web-poet will use, so the inherited selector is obsolete even
+    though no class in the chain "overrode" it in the obvious sense."""
+    from web_poet import field as wp_field
+
+    from frostwork.webpoet import FrostPage, field
+
+    class Mixin:
+        @wp_field
+        def name(self):
+            return "from-mixin"
+
+    class Base(FrostPage):
+        name = field("h1::text")
+        price = field(".price::text")
+
+    class WithMixin(Mixin, Base):
+        pass
+
+    assert WithMixin.frost_schema()["fields"] == {"price": ".price::text"}
+    assert asyncio.run(WithMixin(response=_resp()).to_item()) == {"name": "from-mixin", "price": "$9"}
+
+    # ...and with the mixin AFTER the base, the Frostwork field is the one Python resolves, so it stays
+    class BaseWins(Base, Mixin):
+        pass
+
+    assert set(BaseWins.frost_schema()["fields"]) == {"name", "price"}
+    assert asyncio.run(BaseWins(response=_resp()).to_item()) == {"name": "Widget", "price": "$9"}
+
+
+def test_an_override_also_clears_a_stale_strict_failure():
+    """Why the stale selector was worse than a wasted column: strict validation ran over a schema that still
+    contained the REPLACED field, so a class could be refused at import over a selector it does not use."""
+    from web_poet import field as wp_field
+
+    from frostwork.webpoet import FrostPage, field
+
+    class Legacy(FrostPage, strict=False):
+        broken = field("div:contains('x')::text")
+
+    # replacing the unsupported field means this class's own schema is clean — so the strict default holds
+    class Fixed(Legacy):
+        @wp_field
+        def broken(self):
+            return "hand-written"
+
+    assert Fixed.check_schema().ok
+    assert asyncio.run(Fixed(response=_resp()).to_item()) == {"broken": "hand-written"}
+
+
+def test_many_rejects_web_poet_keywords_on_a_subfield():
+    """`Many`/`One` shape a row from their subfields; the GROUP is the single `web_poet.field` web-poet
+    knows about, so `out=`/`cached=`/`meta=` on a subfield have nothing to attach to. They were accepted and
+    dropped — a processor silently not running is exactly the failure mode this integration already shipped
+    once — so they are refused at declaration, where the mistake is."""
+    from frostwork.webpoet import FrostPage, Many, One, field
+
+    for maker in (Many, One):
+        with pytest.raises(TypeError, match="cannot apply to a subfield"):
+            maker(".card", title=field("h3::text", out=[lambda v, page: v]))
+        with pytest.raises(TypeError, match="cannot apply to a subfield"):
+            maker(".card", title=field("h3::text", cached=True))
+        with pytest.raises(TypeError, match="cannot apply to a subfield"):
+            maker(".card", title=field("h3::text", meta={"k": 1}))
+
+    # .map() is the supported way to transform a subfield's value, and it still works
+    class P(FrostPage):
+        cards = Many(".card", title=field("h3 a::text").map(str.upper))
+
+    assert asyncio.run(P(response=_resp(body=GRID)).to_item()) == {"cards": [{"title": "A"}, {"title": "B"}]}
+
+
+def test_every_shipped_base_is_injectable():
+    """scrapy-poet builds a callback argument only if `web_poet.pages.is_injectable` accepts its class, and
+    andi SILENTLY drops what it rejects — no exception, no log, just a missing argument. `FrostFields` was
+    built on web-poet's `Extractor`, which is deliberately not injectable (it is the shape for a field
+    bundle composed into a page), so the one base documented as "the shape to reach for when the input is
+    neither of the two responses" could not be injected at all.
+
+    Asked through andi with web-poet's own predicate: that is the exact question scrapy-poet asks, and it
+    needs neither Scrapy nor scrapy-poet installed to answer."""
+    import andi
+    from web_poet import HttpResponse
+    from web_poet.pages import is_injectable
+
+    from frostwork.webpoet import FrostBrowserPage, FrostFields, FrostPage, field
+
+    class Custom(FrostFields):
+        name = field("h1::text")
+
+        def frostwork_input(self):
+            return b"<h1>x</h1>", "utf-8"
+
+    for base in (Custom, FrostPage, FrostBrowserPage, FrostFields):
+        assert is_injectable(base), f"{base.__name__} is not injectable"
+
+    def callback(response: HttpResponse, page: Custom):  # what a spider writes
+        ...
+
+    plan = andi.plan(callback, is_injectable=is_injectable, externally_provided={HttpResponse})
+    assert set(plan[-1][1]) == {"response", "page"}, (
+        "andi left the page object out of the callback plan, which is how this fails in production: "
+        "scrapy-poet omits the argument instead of raising"
+    )
 
 
 def test_frostpage_encoding_from_response():

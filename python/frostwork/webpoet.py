@@ -8,10 +8,8 @@ and mixing in hand-written ``@web_poet.field`` methods for computed fields. The 
 call, instead of one lxml parse + one query per field. The document scan is shared; matching work
 still grows with field count and selector complexity.
 
-    from web_poet import handle_urls, Returns
     from frostwork.webpoet import FrostPage, field
 
-    @handle_urls("example.com")
     class ProductPage(FrostPage):
         name   = field("h1::text")
         price  = field(".price::text")
@@ -46,19 +44,33 @@ from typing import (
     Literal,
     Optional,
     Tuple,
+    Type,
     TypeVar,
     overload,
 )
 
 try:
-    from web_poet import BrowserPage, Extractor, WebPage, cached_method
+    from web_poet import BrowserPage, ItemPage, WebPage, cached_method
     from web_poet import field as _wp_field
     # documented public API (referenced from `web_poet.field`'s own docstring) but not re-exported at the
     # package top level, so it is imported from the module that defines it
     from web_poet.fields import get_fields_dict as _wp_fields_dict
-except ImportError as exc:  # pragma: no cover - exercised only without web-poet installed
+except ImportError as exc:  # pragma: no cover - exercised only without a usable web-poet
+    # The version floor lives in `pyproject.toml`'s `webpoet` extra and nowhere else — a constant here
+    # would be a second one to keep in step, and it could not enforce anything either (an older web-poet
+    # imports fine right up to the release that drops a name). What this adds is the DIAGNOSIS: "install
+    # web-poet" is useless advice to someone who has it installed and too old.
+    try:
+        from importlib.metadata import version as _version  # noqa: PLC0415
+
+        _installed: Optional[str] = _version("web-poet")
+    except Exception:  # pragma: no cover - web-poet is not installed at all
+        _installed = None
     raise ImportError(
-        "frostwork.webpoet requires web-poet; install it with `pip install frostwork[webpoet]`"
+        f"frostwork.webpoet: the installed web-poet {_installed} is incompatible ({exc}); reinstall with "
+        "`pip install -U 'frostwork[webpoet]'`"
+        if _installed
+        else "frostwork.webpoet requires web-poet; install it with `pip install frostwork[webpoet]`"
     ) from exc
 
 from ._frostwork import Plan as _Plan
@@ -101,20 +113,16 @@ def _re_first(pattern):
 
 
 def _require_frost_owner(owner, name: str, what: str) -> None:
-    """A marker is inert unless something converts it, and the only thing that does is
-    :meth:`FrostFields.__init_subclass__`. Declared on a class that does not inherit it — web-poet's own
-    ``BrowserPage``, an ``Extractor``, a plain ``WebPage`` — the marker just sat in the class dict and
-    ``to_item()`` returned an item with those fields ABSENT: no error, no empty column, nothing to notice.
-
-    Python calls ``__set_name__`` on every descriptor in a class body before the parent's
-    ``__init_subclass__`` runs, and the class object already exists at that point, so this fires at class
-    definition — i.e. at import — instead of turning up as a quietly incomplete item in production."""
+    """A marker is inert unless :meth:`FrostFields.__init_subclass__` converts it, so declaring one on a
+    class that does not inherit that base leaves it in the class dict and drops the field from
+    ``to_item()`` — no error, nothing to notice. Python calls ``__set_name__`` before the parent's
+    ``__init_subclass__``, so this fires at class definition instead."""
     if not issubclass(owner, FrostFields):
         raise TypeError(
-            f"Frostwork {what} {name!r} is declared on {owner.__name__}, which does not inherit a "
-            f"Frostwork page base, so nothing would convert it and to_item() would silently omit the "
-            f"field. Inherit FrostPage (for HttpResponse) or FrostBrowserPage (for BrowserResponse); for "
-            f"any other input, inherit FrostFields and override frostwork_input()."
+            f"Frostwork {what} {name!r} is declared on {owner.__name__}, which does not inherit a Frostwork "
+            f"page base, so nothing converts it and to_item() would omit the field. Inherit FrostPage (for "
+            f"HttpResponse), FrostBrowserPage (for BrowserResponse), or FrostFields with your own "
+            f"frostwork_input()."
         )
 
 
@@ -165,6 +173,21 @@ class _FrostField(Generic[T]):
         ``all=True``, a str for ``join=``). Chainable, and the value type follows ``fn``'s return."""
         return _FrostField(self.selector, self.card, self.transforms + (fn,), self.wp_kwargs)
 
+    def typed_as(self, tp: "Type[U]") -> "_FrostField[U]":
+        """Re-annotate this field as producing ``tp``. A **no-op at runtime**; it exists for the type checker.
+
+        The types the overloads on :func:`field` give you describe the value BEFORE web-poet's processors
+        run — ``str | None``, ``list[str]``, ``str`` — because a processor is an opaque callable attached by
+        name from a base page's ``Processors``, and nothing static can tell what it returns. On a
+        processor-bearing field that answer is wrong rather than imprecise: the field really produces a
+        ``list[Breadcrumb]``, an ``AggregateRating``, a ``Selector``. Say so where you declare it::
+
+            breadcrumbs = field(".crumbs").typed_as(List[Breadcrumb])
+
+        Takes a class or a generic alias (``List[Breadcrumb]``, ``dict``); for anything a checker will not
+        accept as a type argument, annotate the attribute instead."""
+        return self  # type: ignore[return-value]
+
     def re_first(self, pattern: str) -> "_FrostField[Optional[str]]":
         """Return the first regex match of ``pattern`` over the field's (first) matched string —
         capture group 1 if present, else the whole match; ``None`` if nothing matches.
@@ -203,14 +226,33 @@ def field(
 ) -> _FrostField[str]: ...
 
 
+# The default shape, and the two ways of SPELLING the default explicitly. `all=False` and `join=None` are
+# valid calls that a checker rejected until they were written down — the kind of gap `py.typed` turns into
+# an error in someone else's CI.
 @overload
 def field(
     selector: str,
     *,
+    all: Literal[False] = ...,
+    join: None = ...,
     cached: bool = ...,
     meta: Optional[dict] = ...,
     out: Optional[List[Callable]] = ...,
 ) -> _FrostField[Optional[str]]: ...
+
+
+# The fallback for cardinality decided at RUNTIME (`field(sel, all=some_bool)`): the value type genuinely
+# is not known statically, and `Any` says so rather than picking one of the two and being wrong half the time.
+@overload
+def field(
+    selector: str,
+    *,
+    all: bool = ...,
+    join: Optional[str] = ...,
+    cached: bool = ...,
+    meta: Optional[dict] = ...,
+    out: Optional[List[Callable]] = ...,
+) -> _FrostField[Any]: ...
 
 
 def field(
@@ -243,6 +285,11 @@ def field(
        name. These take ``(value, page)``, so they can read the response, which a ``.map()`` cannot.
 
     Reach for ``.map()`` for a local value tweak and ``out=`` for an ecosystem processor.
+
+    On a **bare-element** field with a processor, the handoff that turns the (transformed) raw source into a
+    node belongs to step 3 — so a ``.map()`` there sees HTML source and must return HTML source. ``out=[]``
+    means "no processors on this field", cancelling a nested ``Processors`` entry inherited from a base page,
+    and with no processor left to hand over to the value stays the raw-source string.
     """
     if all and join is not None:
         raise ValueError("field(): `all` and `join` are mutually exclusive")
@@ -310,6 +357,15 @@ def Many(container: str, *, item=None, **subfields: _FrostField) -> "_FrostGroup
     for n, f in subfields.items():
         if not isinstance(f, _FrostField):
             raise TypeError(f"Many(): subfield {n!r} must be a field(...), got {type(f).__name__}")
+        if f.wp_kwargs:
+            # A subfield is one COLUMN of a row: the GROUP is the single `web_poet.field`, so there is no
+            # descriptor for `cached`/`meta` and no name for web-poet to resolve a processor under. Refused
+            # at declaration rather than accepted and dropped.
+            raise TypeError(
+                f"Many()/One(): subfield {n!r} was given {sorted(f.wp_kwargs)}, which cannot apply to a "
+                f"subfield — web-poet only sees the group as a field. Use .map() for a per-value transform; "
+                f"for a processor over the whole group, write the group as a @web_poet.field method."
+            )
     return _FrostGroup(container, subfields, one=False, item=item)
 
 
@@ -340,6 +396,46 @@ def _merge_mro(cls, attr: str) -> dict:
     return out
 
 
+def _resolve_attr(cls, name: str):
+    """The class attribute Python itself will find for ``name`` — the first hit along the MRO.
+
+    Walked rather than ``getattr``ed so the answer is the descriptor object, whatever it is, without
+    invoking the descriptor protocol."""
+    for klass in cls.__mro__:
+        if name in vars(klass):
+            return vars(klass)[name]
+    return None
+
+
+def _resolved_schema(cls) -> Tuple[Dict[str, _Spec], Dict[str, "_FrostGroup"]]:
+    """The page object's schema: every declaration reachable in the MRO that ``cls`` still RESOLVES to a
+    Frostwork descriptor, taken from that descriptor.
+
+    Merging the inherited declarations is not enough, because a subclass can replace one — with a
+    hand-written ``@web_poet.field``, a flat field over an inherited group, a plain method, a constant, or
+    a mixin listed before the Frostwork base. web-poet answers with whatever the MRO resolves, so a schema
+    built by merging alone kept selectors the page object no longer answers with: they scanned columns
+    nothing reads and could fail strict validation for a field the class had replaced. Popping the
+    overridden names off the merged dict fixed the direct case only — the declaration is still in an
+    ancestor's `_frostwork_own_specs`, so the next generation down merged it back in.
+
+    So the merge supplies candidate NAMES (and their order) and the MRO supplies the answer. One pass, no
+    tombstones, and it holds for any number of generations because it never asks what a parent decided."""
+    specs: Dict[str, _Spec] = {}
+    groups: Dict[str, "_FrostGroup"] = {}
+    for name in (*_merge_mro(cls, "_frostwork_own_specs"), *_merge_mro(cls, "_frostwork_own_groups")):
+        if name in specs or name in groups:
+            continue
+        resolved = _resolve_attr(cls, name)
+        spec = getattr(resolved, "_frostwork_spec", None)
+        group = getattr(resolved, "_frostwork_group", None)
+        if spec is not None:
+            specs[name] = spec
+        elif group is not None:
+            groups[name] = group
+    return specs, groups
+
+
 def _as_wp_field(name: str, getter, wp_kwargs: Optional[Dict[str, Any]] = None):
     """Wrap ``getter`` as a real ``web_poet.field`` under ``name``. The naming is load-bearing, not
     cosmetic: web-poet keys its registration off the function's name, so a getter left called
@@ -354,18 +450,17 @@ def _as_wp_field(name: str, getter, wp_kwargs: Optional[Dict[str, Any]] = None):
 
 
 def _processors_for(cls, name: str):
-    """The processors web-poet WILL apply to field ``name`` on ``cls`` — resolved exactly the way
-    ``web_poet.fields.field.__get__`` resolves them, because a different answer here means handing the
-    wrong TYPE to a processor that silently accepts anything.
+    """The processors web-poet WILL apply to field ``name`` on ``cls``.
 
-    web-poet's order is: an explicit ``out=`` wins, else a nested ``Processors`` class looked up BY FIELD
-    NAME. That second route is the one that matters and the one that is easy to miss: every
-    zyte-common-items base page declares a ``Processors``, so inheriting ``ProductPage`` attaches
-    ``breadcrumbs_processor`` to a field merely called ``breadcrumbs`` — with no ``out=`` written anywhere
-    in the page object."""
+    Resolved exactly as ``web_poet.fields.field.__get__`` resolves them — an explicit ``out=`` wins, else a
+    nested ``Processors`` class looked up BY FIELD NAME — because a different answer means handing a
+    different TYPE to something documented to accept anything and return it unchanged. Two details carry
+    that: the by-name route is how every zyte-common-items base page arms nine fields with no ``out=``
+    written anywhere, and the test is ``out is not None`` rather than ``if out``, because ``out=[]`` is
+    web-poet's per-field opt-out and must CANCEL an inherited entry instead of falling through to it."""
     info = _wp_fields_dict(cls).get(name)
     out = getattr(info, "out", None) if info is not None else None
-    if out:
+    if out is not None:
         return list(out)
     procs = getattr(cls, "Processors", None)
     if procs is not None:
@@ -373,56 +468,91 @@ def _processors_for(cls, name: str):
     return []
 
 
-def _as_node(raw: str):
-    """One captured element's RAW SOURCE re-parsed into a ``parsel.Selector`` wrapping that element.
+# The element name a fragment opens with, after insignificant leading whitespace. Frostwork's own outer
+# HTML starts at the start tag, but a `.map()` on a processor-bearing field runs BEFORE the handoff, so
+# what arrives here is whatever that transform returned.
+_START_TAG_NAME = re.compile(r"\s*<([a-zA-Z][^\s/>]*)")
 
-    ``lxml.html.fromstring`` rather than ``parsel.Selector(text=...)``: the latter wraps the fragment in a
-    synthetic ``<html><body>`` and its ``.root`` is the ``<html>``, so a processor would receive the
-    document instead of the element it asked for. ``fromstring`` on the raw source of a single element
-    returns that element, tag intact (checked for ``<div>``, ``<p>``, ``<td>`` and a ``<tr>``).
+# lxml unwraps these when it decides a fragment is a document, so the count of top-level fragments in the
+# source describes their CHILDREN rather than them (`<head><title>t</title><meta>` -> two fragments, one
+# element). They are exempt from the single-element check below for that reason, not because they are safe.
+_FRAME_NAMES = frozenset({"html", "head", "body", "frameset"})
 
-    Frostwork's outer HTML is raw source, which is the RIGHT input here: unlike lxml's re-serialization it
-    round-trips, so re-parsing it reconstructs the subtree rather than a reflowed copy of it. Implied
-    closes are already applied by the engine (``<p class=x>a<div>`` captures ``<p class=x>a``), so the
-    fragment ends where the tree says it does."""
-    from lxml.html import fromstring  # noqa: PLC0415 - see _NODE_DEPENDENCY
+
+def _as_node(raw: str, what: str = "the node handoff", verify: bool = False):
+    """One element's HTML source re-parsed into a ``parsel.Selector`` wrapping **that** element.
+
+    Three invariants, all load-bearing:
+
+    * ``lxml.html.fromstring``, not ``parsel.Selector(text=...)``: the latter wraps the fragment in a
+      synthetic ``<html><body>`` and hands the processor the document instead of the element.
+    * ``fromstring`` alone is not enough either — it applies a document-vs-fragment heuristic that answers
+      with a DIFFERENT element for the document frame (a ``<body>``'s lone child; the synthesised ``<html>``
+      for ``<head>``/``<title>``/``<meta>``/``<link>``/``<base>``). So the tag name is read off the source
+      and the element is looked up in whatever tree came back. `tests/test_python.py` sweeps every name in
+      the shared element universe; a handoff that is right for four tags says nothing about the rest.
+    * It fails CLOSED. ``.map()`` runs before this, so ``raw`` is whatever a transform returned: anything
+      that is not one recoverable element raises and names the field. Falling back to lxml's root would
+      hand a processor an element the selector never matched, without a word. ``verify`` adds the
+      is-it-one-element check, and is set only for a TRANSFORMED value — the engine's own outer HTML is one
+      element by construction, and the check costs a second parse of the fragment.
+
+    Frostwork's outer HTML is raw source, which round-trips where lxml's re-serialization does not, so the
+    re-parse reconstructs the subtree rather than a reflowed copy. The contract is subtree-LOCAL: own
+    attributes and descendants, but no ancestors, siblings or ``base_url`` (docs/PYTHON.md says what that
+    costs and which processors are unaffected)."""
+    from lxml.html import fragments_fromstring, fromstring  # noqa: PLC0415
     from parsel import Selector  # noqa: PLC0415
 
-    return Selector(root=fromstring(raw))
+    m = _START_TAG_NAME.match(raw) if isinstance(raw, str) else None
+    if m is None:
+        raise TypeError(
+            f"{what} needs one element's HTML source, got {type(raw).__name__} {str(raw)[:40]!r}. A "
+            f".map()/.re_first() on a processor-bearing bare-element field runs on the source, so it must "
+            f"return source; to transform what a processor produces, put it in `out=` instead."
+        )
+    want = m.group(1).lower()
+    root = fromstring(raw)
+    if root.tag != want:
+        # the whole tree, not `root`'s subtree: an unwrapped lone child has the element we want as its PARENT
+        root = next((el for el in root.getroottree().getroot().iter(want)), None)
+    if root is None:
+        raise ValueError(f"{what}: re-parsing this source produced no <{want}> to hand over: {raw[:60]!r}")
+    if verify and want not in _FRAME_NAMES:
+        tops = [f for f in fragments_fromstring(raw.strip()) if not isinstance(f, str)]
+        if len(tops) > 1:
+            raise ValueError(
+                f"{what}: this source holds {len(tops)} top-level elements "
+                f"({', '.join('<%s>' % f.tag for f in tops[:4])}) and a processor takes one node."
+            )
+    return Selector(root=root)
 
 
-# The node handoff is the ONE place this integration needs lxml/parsel, and the imports are function-local
-# for that reason: a page object with no processors never reaches them, so Frostwork's core stays
-# tree-free and the dependency stays optional. It is also unavoidable rather than a shortcut — a field
-# processor's input contract IS an lxml/parsel node (`isinstance(value, (Selector, HtmlElement))`), so
-# there is no way to satisfy it without them. Anyone using processors already has both installed:
-# `zyte_common_items.processors` itself imports `from lxml.html import HtmlElement`.
-#
-# The cost is honest and worth stating: a processor-bearing field parses that ONE subtree. That is far
-# less than the whole-document parse the integration exists to avoid, but it is not free, and it does not
-# apply to `::text`/`::attr()` fields at all — those are genuinely strings and are handed over untouched.
-_NODE_DEPENDENCY = "lxml + parsel, imported lazily and only for a processor-bearing outer-HTML field"
+def _as_nodes(value, card: _Card, name: str = "<field>", verify: bool = False):
+    """An already-SHAPED (and already-transformed) raw-source value as the node type the processor expects.
 
+    Last step of ``shape -> .map()/.re_first() -> processors``, so it must run AFTER the transforms: doing it
+    first handed a `Selector` to user code that the contract promises the shaped string.
 
-def _as_nodes(col: List[str], card: _Card):
-    """Shape a raw-source column into the node type the processor expects, mirroring `_shape`'s cardinality.
-
-    ``all`` yields a ``SelectorList`` rather than a plain list because that is what the processors branch
-    on (zyte's ``_handle_selectorlist`` takes ``value[0]``); a plain list of ``Selector`` would fall
-    through to the "returned as is" path and reintroduce the bug in a new shape."""
+    ``all`` yields a ``SelectorList`` rather than a plain list because that is what the processors branch on
+    (zyte's ``_handle_selectorlist`` takes ``value[0]``); a plain list of `Selector` falls through to their
+    "returned as is" path."""
     from parsel.selector import SelectorList  # noqa: PLC0415
 
     kind = card[0]
+    what = f"field {name!r}"
     if kind == "all":
-        return SelectorList([_as_node(v) for v in col if v])
+        if not isinstance(value, (list, tuple)):
+            raise TypeError(
+                f"{what} is all=True with a processor attached, so its value is a list of HTML sources "
+                f"re-parsed into a SelectorList — but a .map() on it returned {type(value).__name__}."
+            )
+        return SelectorList([_as_node(v, what, verify) for v in value if v])
     if kind == "join":
-        # A joined string is not a node and cannot be made into one without inventing a wrapper element.
-        # Leave it a string: `join=` on a processor-bearing field is the caller asking for text.
-        return _shape(col, card, ())
-    for v in col:
-        if v:
-            return _as_node(v)
-    return None
+        # A joined string is not a node and could only be made one by inventing a wrapper element. Leave it
+        # a string: `join=` on a processor-bearing field is the caller asking for text.
+        return value
+    return _as_node(value, what, verify) if value else None
 
 
 def _make_field(
@@ -444,25 +574,26 @@ def _make_field(
     def getter(self):
         cols = self._frostwork_columns()
         if name not in cols:
-            # Insurance, not an expected path: a field whose descriptor is installed but whose spec never
-            # reached the plan. `@attrs.define` used to land here (it rebuilds the class, so
-            # `__init_subclass__` re-ran with the markers gone) and the symptom was a bare `KeyError`,
-            # which says nothing about the cause. Any other decorator or metaclass that rebuilds a class
-            # in a way the recovery in `__init_subclass__` does not recognise would land here too, so it
-            # explains itself rather than leaving a mystery in a scraper's logs.
+            # Insurance, not an expected path: the descriptor is installed but its spec never reached the
+            # plan, which means something rebuilt the class in a way `__init_subclass__`'s spec recovery did
+            # not recognise. Diagnosed here because the symptom would otherwise be a bare `KeyError`.
             raise RuntimeError(
                 f"field {name!r} is installed on {type(self).__name__} but is not in its compiled plan. "
-                "Something rebuilt the class after Frostwork processed it (a class-recreating decorator "
-                "or metaclass). Frostwork recovers from `@attrs.define`; if you hit this with something "
-                "else, declaring the field on a plain base class and inheriting it is the workaround."
+                "Something rebuilt the class after Frostwork processed it (a class-recreating decorator or "
+                "metaclass). `@attrs.define` is recovered from; for anything else, declare the field on a "
+                "plain base class and inherit it."
             )
         col = cols[name]
+        value = _shape(col, card, transforms)
         if node and _processors_for(type(self), name):
-            value = _as_nodes(col, card)
-            for fn in transforms:
-                value = fn(value)
-            return value
-        return _shape(col, card, transforms)
+            # LAST, after `.map()`: the documented pipeline is shape -> transforms -> processors, and the
+            # node conversion is the first half of handing over to a processor, not a replacement for the
+            # value. Doing it before the transforms handed user code a `Selector` where the annotation and
+            # the docstring both promise the shaped string.
+            # `verify` only when a transform ran: the engine's outer HTML is one element by construction,
+            # and the check is a second parse of the fragment.
+            return _as_nodes(value, card, name, verify=bool(transforms))
+        return value
 
     return _as_wp_field(name, getter, wp_kwargs)
 
@@ -485,18 +616,17 @@ def _make_group_field(name: str, grp: _FrostGroup):
     return _as_wp_field(name, getter)
 
 
-class FrostFields(Extractor):
+class FrostFields(ItemPage):
     """All of the field machinery, with **no** response contract — the piece both page bases share.
 
-    Built on web-poet's ``Extractor`` (its "base class for field support"), so this alone is a usable page
-    object: it brings ``to_item()`` and ``Returns[...]`` and needs only :meth:`frostwork_input`. That is
-    the shape to reach for when the input is neither of the two responses below.
+    Subclass it (overriding :meth:`frostwork_input`) when the input is neither of the two responses below;
+    it brings ``to_item()``, ``Returns[...]`` and web-poet's input validation with it.
 
-    It is split out because the response type is the one thing that varies, and getting that wrong was
-    silent: `field()` markers are converted by ``__init_subclass__``, so declaring them on a class that
-    does not inherit this mixin (web-poet's own ``BrowserPage``, say) converted nothing and ``to_item()``
-    returned an item with the fields simply absent. Subclass :class:`FrostPage` or
-    :class:`FrostBrowserPage`, or inherit this and override :meth:`frostwork_input`."""
+    ``ItemPage``, not ``Extractor``: scrapy-poet builds only what ``web_poet.pages.is_injectable`` accepts,
+    and ``Extractor`` is deliberately not injectable (it is web-poet's shape for a field bundle composed
+    into a page). A callback annotated with a non-injectable class is dropped from andi's plan and the
+    argument never arrives, silently. ``ItemPage`` is ``Extractor`` + ``Injectable``, so this gives up
+    nothing; `tools/webpoet_surface.py` asserts every shipped base passes ``is_injectable``."""
 
     # Per-class own declarations, plus the MRO-merged view (subclasses inherit parent fields, nearest
     # class wins). BOTH are computed once at class-creation in __init_subclass__ — no per-response
@@ -511,6 +641,9 @@ class FrostFields(Extractor):
     _frostwork_plan = None
     _frostwork_flat_names: List[str] = []
     _frostwork_group_names: List[str] = []
+    # Resolved `strict=` for THIS class, carried on the class so a rebuild cannot lose it (see
+    # `__init_subclass__`). Read from `cls.__dict__` there, never inherited.
+    _frostwork_strict: bool = True
 
     def __init_subclass__(cls, **kwargs) -> None:
         own: Dict[str, _Spec] = {}
@@ -537,16 +670,11 @@ class FrostFields(Extractor):
                 wp = _make_group_field(name, val)
                 wp._frostwork_group = val
             else:
-                # Already a converted field? Then this class has been through here before and something
-                # REBUILT it. `@attrs.define` (slots=True, the default) does exactly that: it does not
-                # mutate the class, it constructs a new one from the old `__dict__`. So
-                # `__init_subclass__` runs a second time with the markers already gone, and the original
-                # class is not in the new MRO for `_merge_mro` to find — which silently emptied the plan
-                # and made every field raise `KeyError` at `to_item()`. Recovering the spec from the
-                # descriptor we left behind makes the rebuild a no-op instead of a wipe.
-                #
-                # Note this is an ORDER bug, not a lookup bug: the decorator runs AFTER
-                # `__init_subclass__`, so no amount of care inside a single pass could have caught it.
+                # An already-converted field means this class has been through here before, i.e. something
+                # REBUILT it — `@attrs.define` (slots=True) constructs a new class from the old `__dict__`.
+                # The markers are gone by then and the original class is not in the new MRO, so the spec is
+                # recovered from the descriptor it was left on; without that, a rebuild silently empties the
+                # plan. An ORDER bug: the decorator runs after `__init_subclass__`, not before it.
                 recovered = getattr(val, "_frostwork_spec", None)
                 if recovered is not None:
                     own[name] = recovered
@@ -559,15 +687,10 @@ class FrostFields(Extractor):
             wp.__set_name__(cls, name)
         cls._frostwork_own_specs = own
         cls._frostwork_own_groups = own_groups
-        # merge across the MRO NOW (nearest class wins, order preserved) so it is not rebuilt per page
-        cls._frostwork_specs = _merge_mro(cls, "_frostwork_own_specs")
-        cls._frostwork_groups = _merge_mro(cls, "_frostwork_own_groups")
-        # A subclass may replace an inherited group with a flat field (or vice versa). Treat the nearest
-        # declaration as the single field instead of scanning both schemas under the same public name.
-        for name in own:
-            cls._frostwork_groups.pop(name, None)
-        for name in own_groups:
-            cls._frostwork_specs.pop(name, None)
+        # Resolve the whole schema NOW, once per class, so nothing is rebuilt per page. This is also where
+        # an override of any shape (manual field, flat-over-group, mixin, constant) drops out — see
+        # `_resolved_schema`, which asks the MRO instead of trusting the merge.
+        cls._frostwork_specs, cls._frostwork_groups = _resolved_schema(cls)
         # Compile the whole schema to ONE native Plan, ONCE, here at class creation — reused for every
         # response (an over-budget schema raises `ValueError` here, at import, not per page).
         cls._frostwork_flat_names = list(cls._frostwork_specs)
@@ -578,9 +701,15 @@ class FrostFields(Extractor):
             for g in (cls._frostwork_groups[n] for n in cls._frostwork_group_names)
         ]
         cls._frostwork_plan = _Plan(flat_queries, garg)
-        # Validate at class-definition time, so an unsupported selector fails loudly at import rather
-        # than becoming a silently empty field in production. `strict=False` explicitly opts out.
-        strict = kwargs.pop("strict", True)
+        # Validate at class-definition time, so an unsupported selector fails loudly at import rather than
+        # becoming a silently empty field in production. `strict=False` explicitly opts out.
+        #
+        # The default comes from the class's OWN `__dict__` because a class keyword exists only in the
+        # `class` statement, and a rebuild (`@attrs.define`) throws that statement away while copying the
+        # dict — so carrying the resolved value on the class is what makes the opt-out survive one. Own
+        # dict, not inherited, is the deliberate half: a rebuild keeps it, a fresh subclass does not.
+        strict = kwargs.pop("strict", cls.__dict__.get("_frostwork_strict", True))
+        cls._frostwork_strict = strict
         super().__init_subclass__(**kwargs)
         if strict:
             cls.check_schema().raise_for_status()

@@ -24,11 +24,22 @@ def _to_float(s: Optional[str]) -> float:
     return float((s or "0").lstrip("$"))
 
 
+DYNAMIC_ALL: bool = True
+DYNAMIC_SEP: Optional[str] = None
+
+
 class ProductPage(FrostPage):
     # cardinality drives the value type
     name = field("h1::text")
     images = field("img::attr(src)", all=True)
     specs = field(".spec ::text", join=" ")
+    # ...and the default has to be SPELLABLE: `all=False`/`join=None` are runtime-valid calls, so a checker
+    # that rejects them is the py.typed promise being broken for correct code
+    explicit_first = field("h1::text", all=False)
+    explicit_nojoin = field("h1::text", join=None)
+    # cardinality decided at runtime cannot have a static value type; `Any` is the honest answer
+    dynamic = field("h1::text", all=DYNAMIC_ALL)
+    dynamic_join = field("h1::text", join=DYNAMIC_SEP)
     # transforms follow the callable's return type
     price = field(".price::text").map(_to_float)
     symbol = field(".price::text").re_first(r"^\D+")
@@ -36,7 +47,13 @@ class ProductPage(FrostPage):
     # web-poet's own keywords are accepted and do not disturb the value type
     cached = field(".sku::text", cached=True)
     tagged = field(".sku::text", meta={"expensive": True})
+    # A processor is an opaque callable attached at runtime (often by NAME from a base page's `Processors`),
+    # so the overloads describe the value BEFORE it runs. `typed_as` is how a declaration says what the
+    # processor actually produces — without it, a field yielding `List[Card]` types as `str | None`.
     processed = field(".crumbs", out=[lambda v, page: v])
+    typed_processed = field(".crumbs", out=[lambda v, page: [Card(title="x", href=None)]]).typed_as(
+        List[Card]
+    )
     # groups: `item=` gives the item type, without it a row dict
     cards = Many(".card", item=Card, title=field("h3::text"), href=field("a::attr(href)"))
     rows = Many(".card", title=field("h3::text"))
@@ -48,12 +65,19 @@ def check_instance_types(p: ProductPage) -> None:
     assert_type(p.name, Optional[str])
     assert_type(p.images, List[str])
     assert_type(p.specs, str)
+    assert_type(p.explicit_first, Optional[str])
+    assert_type(p.explicit_nojoin, Optional[str])
+    assert_type(p.dynamic, Any)
+    assert_type(p.dynamic_join, Any)
     assert_type(p.price, float)
     assert_type(p.symbol, Optional[str])
     assert_type(p.chained, int)
     assert_type(p.cached, Optional[str])
     assert_type(p.tagged, Optional[str])
+    # the pre-processor type, which is what the overloads can know...
     assert_type(p.processed, Optional[str])
+    # ...and the declared one, which is what the field really produces
+    assert_type(p.typed_processed, List[Card])
     assert_type(p.cards, List[Card])
     assert_type(p.rows, List[Dict[str, Any]])
     assert_type(p.lead, Optional[Card])
