@@ -20,6 +20,7 @@
 #   make gate-webpoet-mutate  break one webpoet.py line at a time; does any gate notice?
 #   make bench       full throughput matrix vs Parsel (minutes; for release notes)
 #   make bench-smoke quick article/deep-nesting performance check
+#   make bench-webpoet  FrostPage.to_item() vs a Parsel WebPage, swept over field count
 #   make ci          test + gate + gate-corpus + gate-seq + fuzz-smoke + py + gate-webpoet(+mutate)
 #                    — the minimum pre-release check
 #
@@ -32,7 +33,7 @@ FUZZ_ITERS ?= 6000
 
 .DEFAULT_GOAL := help
 .PHONY: help bootstrap test build gate gate-corpus gate-seq corpus-real gate-mutate gate-mutate-full \
-	fuzz-smoke soak py gate-webpoet gate-webpoet-mutate bench bench-smoke ci
+	fuzz-smoke soak py gate-webpoet gate-webpoet-mutate bench bench-smoke bench-webpoet ci
 
 help:
 	@grep -E '^#   make ' Makefile | sed 's/^#   /  /'
@@ -132,6 +133,12 @@ gate-webpoet-mutate:
 
 bench: build
 	$(PY) tools/bench_matrix.py
+
+# The page-object layer rather than the selector layer: `FrostPage.to_item()` vs an equivalent Parsel
+# `web_poet.WebPage`, swept over field count because the ratio depends on it (3x at one field, ~28x at
+# twenty). Verifies both items are identical before timing either.
+bench-webpoet:
+	$(PY) tools/bench_webpoet.py
 
 bench-smoke: build
 	$(PY) tools/bench_matrix.py --smoke

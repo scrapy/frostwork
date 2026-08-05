@@ -5,8 +5,9 @@ lxml does *not* pin its vendored libxml2); `diff_lxml.py` is the gate; `conforma
 `foreign.py` generate test pages; `enc_check.py` (encoding parity), `sel_fuzz.py`/`diff_fuzz.py`
 (selector + malformed-HTML fuzz), `soak.py` (multi-seed soak), `support_snapshot.py`
 (regenerates/checks `docs/SUPPORT_SNAPSHOT.md`), `abi3_smoke.py` (stdlib-only floor check — the
-pinned toolchain can't be installed on py3.9), `bench_matrix.py`/`bench_corpus.py`/`bench_mem.py`
-(benchmarks).
+pinned toolchain can't be installed on py3.9), `bench_matrix.py`/`bench_corpus.py`/`bench_mem.py`/
+`bench_webpoet.py` (benchmarks — the last one times `to_item()` at the PAGE-OBJECT level and verifies both
+items are identical before timing either).
 
 Three tools own the **web-poet integration**, and they mirror the engine's derive/audit/mutate trio
 because the integration made the same mistake the engine's rule tables did — hand-written lists that

@@ -101,6 +101,48 @@ release-first — see below).
 Value parity with lxml is proven separately by the differential gate ([TESTING.md](TESTING.md)), not
 this timing run.
 
+## Page objects — `FrostPage.to_item()` vs a Parsel `web_poet.WebPage`
+
+Everything above times the selector layer. This times what a scraper actually calls: `await
+page.to_item()` on a whole page object, against the equivalent hand-written `web_poet.WebPage` doing
+Parsel's real thing (one `Selector` per response, one `.css()` per field). Both items are compared field
+by field before either is timed, and a mismatch **aborts** — timing two page objects that compute
+different answers is not a benchmark. Reproduce: `.venv/bin/python tools/bench_webpoet.py`.
+
+| fields | `FrostPage` ms | Parsel `WebPage` ms | speedup |
+| --- | --- | --- | --- |
+| 1 | 0.33 | 0.92 | **3×** |
+| 4 | 0.46 | 4.78 | **10×** |
+| 8 | 0.64 | 13.56 | **21×** |
+| 12 | 0.78 | 22.38 | **29×** |
+| 16 | 0.94 | 26.47 | **28×** |
+| 20 | 1.01 | 28.09 | **28×** |
+
+40 KB page (220 product cards), field counts are prefixes of one growing schema. Same machine and caveats
+as the matrix above: single machine (Apple arm64), warm, median of 25 reps, indicative rather than
+controlled. Repeated runs land in **25×–29×** at the top of the sweep, so treat the last three rows as one
+number (~27×) rather than as a curve that peaks at 12 fields.
+
+**Read the curve, not a number.** The lxml parse is only **0.76 ms of Parsel's 28 ms** at 20 fields — 3%.
+So virtually none of the win is the parse Frostwork skips; it is per-field tree traversal that Frostwork
+does not repeat. That is why the ratio is **3× at one field and ~28× at twenty**: a one-field page object
+is mostly fixed cost on both sides and Frostwork's advantage has nothing to amortise. Quote this with the
+field count attached, or it is folklore.
+
+**This page shape flatters the ratio, so do not read it as the corpus figure.** These are product cards —
+tag-dense, with descendant selectors (`.card .price`) that libxml2 re-walks per query, which the matrix
+above already flags as Parsel's worst case. Growing the same page while holding fields at 12 gives 27× at
+40 KB, **65× at 162 KB and 133× at 347 KB**: Parsel's per-field cost climbs super-linearly with page size
+(22 ms → 174 ms → 734 ms) while Frostwork's stays linear. So the honest summary is that page *size* moves
+this number more than field count does, upward, on this shape.
+
+That makes the real-corpus median below (**10.5×**, median 330 KB, median 11 selectors) the number to quote
+for realistic work, and the two are not reconcilable by arithmetic: real pages are more text-heavy than
+card-dense, their production selectors are mostly cheaper than the descendant-heavy pool here, and
+`bench_corpus.py` times `frostwork.extract` rather than `to_item()`. What this section establishes is
+narrower and worth having on its own: the page-object layer adds no meaningful overhead of its own, and the
+win is per-field traversal rather than the skipped parse.
+
 ## Memory (no-DOM ⇒ bounded RSS)
 
 Frostwork's defining property is invisible to a throughput chart: it **builds no tree**, so peak

@@ -452,6 +452,12 @@ unsupported case cannot reach extraction at all, so every name it returns is a d
 - **Why not a drop-in `.css()`/`.xpath()` selector?** A per-call selector would re-scan the page for
   every field — N scans instead of 1 — discarding Frostwork's whole advantage. `FrostPage` batches
   instead, which is why fields are *declared* rather than pulled ad-hoc inside methods.
+- **The win scales with FIELD COUNT, not with the skipped parse.** On a 40 KB page the lxml parse is
+  only ~3% of what an equivalent Parsel `WebPage` spends, so almost none of the gap is the tree
+  Frostwork does not build — it is per-field traversal it does not repeat. That is why `to_item()` is
+  ~3× faster at one field and ~28× at twenty. Quote it with the field count attached; see
+  [BENCHMARKS.md](BENCHMARKS.md#page-objects--frostpagetoitem-vs-a-parsel-webpoetwebpage) for the curve
+  and the page shapes that flatter or flatten it (`make bench-webpoet` reproduces it).
 - **Tests:** `tests/test_python.py` (`.venv/bin/python -m pytest tests/test_python.py`) covers the
   primitive, `Page`/`Item`, the web-poet wiring (incl. a monkeypatched assertion that a multi-field
   page object triggers exactly **one** `extract` call), and a parsel cross-check.
