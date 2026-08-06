@@ -95,6 +95,10 @@ pub struct Compound {
     // alternative compounds; the element must match ≥1 alternative in EVERY group (OR within a group,
     // AND across groups). Decided at open like `:not`, so no deferral. Empty = no `:is`/`:where`.
     pub is_groups: Vec<Vec<Compound>>,
+    /// DERIVED, not parsed: the signature bits an element must carry for this compound to have a
+    /// chance (see `matcher::sig`). The parser leaves it 0; the matcher's compile step fills it in.
+    /// 0 always means "filter nothing", so a compound that never reaches that step is merely slower.
+    pub req: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

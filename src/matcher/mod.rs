@@ -38,6 +38,7 @@ mod compile;
 mod frame;
 mod deferred;
 mod matching;
+mod sig;
 
 use compile::{
     any_has, any_reverse, any_text_pred, deferrable_has, deferrable_reverse,
@@ -122,6 +123,17 @@ pub struct OpenElem<'a> {
     /// `<b>` but not an open `<em>`.
     scid: u8,
     attrs: Vec<(&'a [u8], Cow<'a, str>)>, // only "interesting" attrs; value entity-decoded (lazy Cow)
+    /// This element's identity signature: the Bloom bits of its tag, `id`, and class tokens, built
+    /// once at open and ANDed against each compound's `req` before any string comparison (see [`sig`]).
+    /// 0 when the schema requires no bits at all (`!wants.any()`), which makes the test a no-op.
+    ///
+    /// INVARIANT: this is built from the MATERIALIZED `attrs`, which hold only the schema's
+    /// "interesting" set — so it can carry class/id bits only for a schema that asked for those
+    /// attributes. `collect_interesting` adds `class`/`id` whenever ANY compiled compound references
+    /// them, and a `req` can only carry class/id bits if some compound did, so whenever a `req` demands
+    /// them this signature was built from the same data. Materializing fewer attributes than the
+    /// compounds reference would turn this filter into silently dropped values.
+    pub(super) sig: u64,
     matched: u128, // bit k: this element is a subject match for member-selector k (≤128 members)
     matched_tree: u128, // OR of `matched` over this element and its open ancestors
     text_cols: u128, // flat output columns that want a text event directly under this element
@@ -133,59 +145,148 @@ pub struct OpenElem<'a> {
     start: usize,  // byte offset of this element's `<` (for raw-source outer-HTML capture)
     cap_cols: u128, // output columns wanting this element's raw source (OuterHtml terminal)
     insts: usize,  // number of group instances this element opened (popped when it closes)
-    gcaps: Vec<(u64, usize)>, // grouped outer-HTML captures: (instance seq, sub) this element feeds
     // 1-based sibling positions, set at open from the parent's counters (0 = not tracked). Read by the
     // matching kernel for `:nth-child`/`:nth-of-type` and XPath `[N]`. `of_type_index` is populated only
     // for tags that a positional selector references (see `CompiledSchema::positional_tags`).
     pub(super) child_index: u32,
     pub(super) of_type_index: u32,
-    // Reverse-positional (`:last-*`/`:only-*`) bookkeeping — all empty/zero unless `has_reverse`.
+    // Reverse-positional (`:last-*`/`:only-*`) bookkeeping — all zero unless `has_reverse`.
     rev_subj: u128, // bit r: this element is a PROVISIONAL subject for reverse-entry r (routes captures)
-    rev_buf: Vec<(u32, usize, String)>, // (rev-entry, offset, value) captured while this el is a subject
-    rev_pending: Vec<RevPend>, // candidates promoted from this element's children, resolved at its close
-    // `:has()` bookkeeping — all empty/zero unless `has_has`. Resolved at THIS element's own close
+    // `:has()` bookkeeping — all zero unless `has_has`. Resolved at THIS element's own close
     // (its descendants are all known then), unlike reverse (resolved at the parent's close).
     has_subj: u128, // bit h: this element is a PROVISIONAL subject for has-entry h (structural match)
     has_done: u128, // bit h: a qualifying descendant/child was found -> the `:has(h)` constraint holds
-    has_buf: Vec<(u32, usize, String)>, // (has-entry, offset, value) captured while this el is a subject
-    // Text-content predicate bookkeeping — empty/zero unless `has_text_pred`. Predicate evaluation is
-    // streaming and bounded by the needle length; only prospective terminal values are retained.
+    // Text-content predicate bookkeeping — zero unless `has_text_pred`.
     txt_subj: u128,
+    /// The buffers those tiers fill, allocated ONLY for an element that actually feeds one — see
+    /// [`ColdState`], which exists because this struct is memcpy'd per element and they are empty on
+    /// almost every one.
+    cold: Option<Box<ColdState>>,
+}
+
+/// Per-element buffers that only the DEFERRED tiers (`:has()`, reverse position, text predicates) and
+/// grouped raw-source captures ever write, boxed out of [`OpenElem`]: pushing an element memcpies the
+/// whole struct, and these six `Vec`s are 144 bytes that are empty on almost every element of almost
+/// every page. One `Option<Box<_>>` instead keeps `OpenElem` at 240 bytes and costs an allocation only
+/// where a `Vec` would have allocated anyway.
+///
+/// Cold means "written by few elements", not "read rarely": the close path reads these on every element
+/// while a deferred tier is live, so reads go through [`OpenElem::cold`], which returns a shared empty
+/// instance. Only [`OpenElem::cold_mut`] creates the box.
+#[derive(Default)]
+struct ColdState {
+    gcaps: Vec<(u64, usize)>, // grouped outer-HTML captures: (instance seq, sub) this element feeds
+    rev_buf: Vec<(u32, usize, String)>, // (rev-entry, offset, value) captured while this el is a subject
+    rev_pending: Vec<RevPend>, // candidates promoted from this element's children, resolved at its close
+    has_buf: Vec<(u32, usize, String)>, // (has-entry, offset, value) captured while this el is a subject
+    // Predicate evaluation is streaming and bounded by the needle length; only prospective terminal
+    // values are retained.
     txt_states: Vec<TextMatchState>,
     txt_emit: Vec<(u32, usize, String)>, // (entry, offset, prospective attr/direct-text value)
 }
 
+/// Read-side stand-in for an element that never wrote cold state. `Vec::new` is `const`, so this costs
+/// no allocation and lets [`OpenElem::cold`] be infallible without the box existing.
+static NO_COLD: ColdState = ColdState {
+    gcaps: Vec::new(),
+    rev_buf: Vec::new(),
+    rev_pending: Vec::new(),
+    has_buf: Vec::new(),
+    txt_states: Vec::new(),
+    txt_emit: Vec::new(),
+};
+
 impl<'a> OpenElem<'a> {
-    /// A bare element for matching-kernel tests: a tag, no attributes, no bookkeeping. Only the
-    /// `matching` unit tests build elements directly; the scan always goes through `start_tag`.
-    #[cfg(test)]
-    pub(super) fn for_test(tag: &'a [u8]) -> Self {
-        OpenElem {
+    /// A freshly opened element: the tokenizer's facts, plus the signature DERIVED from the
+    /// materialized `attrs`. The only constructor — the scan and the unit-test builders both go through
+    /// it, so a derived field cannot be set at one site and forgotten at the other. `wants` is what the
+    /// schema's compounds require (see [`sig::Wants`]); when they require nothing, every `req` is 0 and
+    /// the signature would filter nothing, so it isn't built.
+    fn open(
+        tag: &'a [u8], scid: u8, attrs: Vec<(&'a [u8], Cow<'a, str>)>, start: usize, wants: sig::Wants,
+    ) -> Self {
+        let mut e = OpenElem {
             tag,
-            scid: 0,
-            attrs: Vec::new(),
+            scid,
+            attrs,
+            sig: 0,
             matched: 0,
             matched_tree: 0,
             text_cols: 0,
             seen: 0,
             prev: 0,
             anchor: 0,
-            start: 0,
+            start,
             cap_cols: 0,
             insts: 0,
-            gcaps: Vec::new(),
             child_index: 0,
             of_type_index: 0,
             rev_subj: 0,
-            rev_buf: Vec::new(),
-            rev_pending: Vec::new(),
             has_subj: 0,
             has_done: 0,
-            has_buf: Vec::new(),
             txt_subj: 0,
-            txt_states: Vec::new(),
-            txt_emit: Vec::new(),
+            cold: None,
+        };
+        if wants.any() {
+            e.sig = e.signature(wants);
         }
+        e
+    }
+
+    /// This element's Bloom signature, over exactly the sources `compound_matches` compares
+    /// positively — and only the KINDS of source some compound requires (see [`sig::Wants`]: a schema
+    /// with no class-led compound must not pay to hash every element's class list).
+    ///
+    /// Built through the element's OWN accessors (`attr`, `class_tokens`) rather than by re-reading
+    /// `attrs`, so "which `id`, which `class` attribute, which tokens" cannot answer differently here
+    /// than in the predicate the filter guards — including for markup that repeats the attribute, where
+    /// both sides take the first.
+    fn signature(&self, wants: sig::Wants) -> u64 {
+        let mut s = if wants.tag { sig::tag_bits(self.tag) } else { 0 };
+        if wants.id {
+            if let Some(id) = self.attr("id") {
+                s |= sig::id_bits(id.as_bytes());
+            }
+        }
+        if wants.class {
+            for cls in self.class_tokens() {
+                s |= sig::class_bits(cls.as_bytes());
+            }
+        }
+        s
+    }
+
+    /// A bare element for matching-kernel tests: a tag, no attributes, no bookkeeping. Only the
+    /// `matching` unit tests build elements directly; the scan always goes through `start_tag`.
+    #[cfg(test)]
+    pub(super) fn for_test(tag: &'a [u8]) -> Self {
+        Self::open(tag, 0, Vec::new(), 0, sig::Wants::all())
+    }
+
+    /// A test element WITH attributes (`&'static str` values, borrowed like the scan's clean-UTF-8
+    /// case), so the class/id-dependent predicates and the signature can be exercised directly.
+    #[cfg(test)]
+    pub(super) fn for_test_attrs(tag: &'a [u8], attrs: &[(&'a [u8], &'a str)]) -> Self {
+        Self::open(
+            tag,
+            0,
+            attrs.iter().map(|&(n, v)| (n, Cow::Borrowed(v))).collect(),
+            0,
+            sig::Wants::all(),
+        )
+    }
+
+    /// The cold buffers for reading: the element's own if it ever wrote one, else the shared empty
+    /// [`NO_COLD`]. Infallible and allocation-free, so a close path can read these unconditionally.
+    fn cold(&self) -> &ColdState {
+        self.cold.as_deref().unwrap_or(&NO_COLD)
+    }
+
+    /// The cold buffers for writing, created on first use. Every call site is a tier that is about to
+    /// push a captured value or a predicate state, so the allocation lands only on elements that were
+    /// going to allocate a `Vec` anyway.
+    fn cold_mut(&mut self) -> &mut ColdState {
+        self.cold.get_or_insert_with(Box::default)
     }
 
     pub(super) fn attr(&self, name: &str) -> Option<&str> {
@@ -194,14 +295,23 @@ impl<'a> OpenElem<'a> {
             .find(|(n, _)| n.eq_ignore_ascii_case(name.as_bytes()))
             .map(|(_, v)| v.as_ref())
     }
-    /// ASCII whitespace, NOT `split_whitespace`'s Unicode set — HTML splits a class list on space, tab,
-    /// LF, FF and CR and nothing else. Splitting on the Unicode set invented classes: a crawled page
-    /// whose `class="ctsListWrap fadein　clearfix"` separates two of them with an IDEOGRAPHIC SPACE
-    /// (U+3000, ordinary in Japanese markup) has one token `fadein　clearfix`, and the engine matched
-    /// both `.fadein` and `.clearfix` on it — elements a scraper's selector should never have seen.
-    /// Same for NBSP, the em space, and U+000B, which is not ASCII whitespace in HTML.
+    /// This element's `class=` tokens, in source order. ASCII whitespace, NOT `split_whitespace`'s
+    /// Unicode set — HTML splits a class list on space, tab, LF, FF and CR and nothing else. Splitting
+    /// on the Unicode set invented classes: a crawled page whose `class="ctsListWrap fadein　clearfix"`
+    /// separates two of them with an IDEOGRAPHIC SPACE (U+3000, ordinary in Japanese markup) has one
+    /// token `fadein　clearfix`, and the engine matched both `.fadein` and `.clearfix` on it — elements
+    /// a scraper's selector should never have seen. Same for NBSP, the em space, and U+000B, which is
+    /// not ASCII whitespace in HTML.
+    ///
+    /// ONE tokenizer, read by both the membership predicate below and [`Self::signature`]. The split
+    /// rule is part of the predicate the signature filter guards, so a second copy of it is a
+    /// false-negative generator: tokens hashed under a wider split than the predicate compares would
+    /// let a matching element be rejected before any string comparison ran (see `sig`).
+    fn class_tokens(&self) -> impl Iterator<Item = &str> {
+        self.attr("class").unwrap_or_default().split_ascii_whitespace()
+    }
     pub(super) fn has_class(&self, cls: &str) -> bool {
-        self.attr("class").is_some_and(|v| v.split_ascii_whitespace().any(|t| t == cls))
+        self.class_tokens().any(|t| t == cls)
     }
 }
 
@@ -497,6 +607,55 @@ fn to_segments(sel: &Selector) -> (Vec<Segment>, Vec<bool>) {
 }
 
 
+/// A one-sided reject for attribute MATERIALIZATION, the same shape as the signature filter one level
+/// down: a 64-bit set of the (first byte, length) pairs the schema's "interesting" attribute names have.
+///
+/// Every raw attribute of every element used to be compared against every interesting name, so the cost
+/// was `attrs × interesting` `eq_ignore_ascii_case` calls per element — and it grew with schema size
+/// exactly where it hurts, since a 32-field attribute-led schema names about 30 attributes while a real
+/// element carries half a dozen the schema never asked for. One bit test rejects those.
+///
+/// One-sided in the same direction and for the same reason as `sig`: a set bit is NECESSARY, never
+/// sufficient, so a survivor still faces the exact comparison. A false negative here would silently drop
+/// an attribute the matcher needs — and would also silently weaken the signature filter, whose class/id
+/// bits are built from the materialized set.
+///
+/// One word and one test: a pre-filter has to be cheaper than the scan it guards for the schemas that
+/// CANNOT use it, and a two-name scan is one length comparison. `OpenElem::attr` still scans the
+/// materialized list by name, but that list holds only the interesting attributes an element actually
+/// carries — 0.33–1.40 per element over the benchmark pools, the same at 8 selectors as at 32 — so
+/// interning those names to slots has nothing left to win.
+#[derive(Clone, Copy, Default)]
+struct AttrGate(u64);
+
+impl AttrGate {
+    /// The bit an attribute name claims, from its ASCII-lowercased first byte and its length — the two
+    /// facts available without reading the name. Lowercased because the exact comparison is
+    /// case-insensitive, so `CLASS` and `class` must claim the same bit. Everything folds mod 64; a
+    /// collision only costs the exact comparison that always ran.
+    fn bit(name: &[u8]) -> u64 {
+        let Some(&b0) = name.first() else { return 0 };
+        let h = (b0.to_ascii_lowercase() as u32).wrapping_mul(37) ^ (name.len() as u32).wrapping_mul(11);
+        1u64 << (h & 63)
+    }
+
+    /// `None` below this: with one or two interesting names the scan the gate guards is already one
+    /// length comparison, and gating it measured ~1.5% worse. The name count is a proxy — what actually
+    /// decides the trade is the fraction of a PAGE's attributes the schema ignores, which is unknowable
+    /// at compile time. Measured on an attribute-heavy page: 4 names −4.1%, 8 −5.4%, 16 −7.7%, 30 −9.5%.
+    const MIN_NAMES: usize = 4;
+
+    fn build(interesting: &[Box<str>]) -> Option<AttrGate> {
+        (interesting.len() >= Self::MIN_NAMES)
+            .then(|| AttrGate(interesting.iter().fold(0, |acc, n| acc | Self::bit(n.as_bytes()))))
+    }
+
+    /// Could `name` be interesting? `false` is proof it is not.
+    fn admits(&self, name: &[u8]) -> bool {
+        self.0 & Self::bit(name) != 0
+    }
+}
+
 /// A schema compiled ONCE, reusable across any number of pages. It holds only page-independent state —
 /// the lowered selector entries, group specs, and the derived interesting-attribute set / fast-path
 /// flags — so a caller that runs the same selectors over many responses (the `Page`/`FrostPage` usage
@@ -505,6 +664,9 @@ fn to_segments(sel: &Selector) -> (Vec<Segment>, Vec<bool>) {
 pub struct CompiledSchema {
     entries: Vec<CSel>,
     interesting: Vec<Box<str>>, // attr names any selector references (lowercased)
+    // One-sided reject so an attribute no selector references costs one bit test instead of a scan.
+    // `None` when the schema names too few attributes for that to pay (see `AttrGate::MIN_NAMES`).
+    attr_gate: Option<AttrGate>,
     has_outer: bool,            // any OuterHtml selector (flat OR grouped)? (skips capture bookkeeping otherwise)
     has_sibling: bool,          // any multi-segment (sibling `+`/`~`) entry? (skips the per-element anchor pass otherwise)
     groups: Vec<GroupSpec>,     // Many/One sub-field schemas
@@ -531,6 +693,11 @@ pub struct CompiledSchema {
     // deferred (preceding-sibling-predicate) boundary fires only at its `C`'s close, not at open. All
     // ones when no Case-B selector is compiled — the hot sibling path is then unchanged.
     trig_immediate_mask: u64,
+    // What the compiled compounds require of an element signature (see `sig::Wants`) — derived by the
+    // same walk that fills the `req`s, so the two cannot disagree. That is the whole safety argument
+    // for letting the scan build LESS than a full signature: a kind of bit no `req` asks for can be
+    // left out, but one that is asked for must always be present.
+    wants: sig::Wants,
 }
 
 /// Per-page scan state, borrowing a compiled [`CompiledSchema`] and the document bytes. One is built,
@@ -967,8 +1134,58 @@ impl CompiledSchema {
         let has_ns_element = entries
             .iter()
             .any(|cs| matches!(&cs.terminal, Terminal::NormalizeSpace(inner) if matches!(**inner, Terminal::OuterHtml)));
+
+        // Signature requirements (see `sig`): ONE pass over every tier that holds compiled compounds,
+        // filling each `Compound::req` and accumulating what the scan must build (`sig::Wants`). Both
+        // jobs in the same walk on purpose — a tier missing here keeps `req == 0` (its filter is a
+        // no-op) and adds nothing to `wants`, so an omission costs speed and can never drop a match.
+        // Tail schemas are themselves `CompiledSchema`s, already finalized by their own `compile` call.
+        fn seg_reqs(seg: &mut Segment, o: sig::Opts, w: &mut sig::Wants) {
+            for c in &mut seg.parts {
+                sig::set_req(c, o, w);
+            }
+        }
+        // Are tag / class bits worth their per-element hash for THIS schema (see `sig::BITS_MIN`)? The
+        // count is over the source selectors, which is a superset of what compiles — a cost estimate,
+        // not a correctness input: `opts` drives the element signature and every `req` alike, so a
+        // miscount can only buy or forgo the optimization.
+        let (tag_tests, class_tests) = queries
+            .iter()
+            .flatten()
+            .chain(groups.iter().flat_map(|(c, subs)| c.iter().chain(subs.iter().flatten())))
+            .flat_map(|sel| sel.parts.iter())
+            .map(sig::tests)
+            .fold((0, 0), |(t, c), (dt, dc)| (t + dt, c + dc));
+        let opts = sig::Opts { tag: tag_tests >= sig::BITS_MIN, class: class_tests >= sig::BITS_MIN };
+        let mut wants = sig::Wants::default();
+        for cs in &mut entries {
+            for seg in &mut cs.segments {
+                seg_reqs(seg, opts, &mut wants);
+            }
+        }
+        for g in &mut group_specs {
+            for sub in &mut g.subs {
+                if let Some(seg) = &mut sub.seg {
+                    seg_reqs(seg, opts, &mut wants);
+                }
+            }
+        }
+        for re in &mut reverse_entries {
+            seg_reqs(&mut re.seg, opts, &mut wants);
+        }
+        for he in &mut has_entries {
+            seg_reqs(&mut he.seg, opts, &mut wants);
+            // the `:has()` inner compound is matched by its own `compound_matches` call, against
+            // descendants, so it is a filterable question in its own right
+            sig::set_req(&mut he.has.inner, opts, &mut wants);
+        }
+        for te in &mut text_entries {
+            seg_reqs(&mut te.seg, opts, &mut wants);
+        }
+
         CompiledSchema {
             n_flat_cols: queries.len(),
+            attr_gate: AttrGate::build(&interesting),
             n_groups: group_specs.len(),
             entries,
             interesting,
@@ -988,6 +1205,7 @@ impl CompiledSchema {
             text_entries,
             tail_schemas,
             trig_immediate_mask,
+            wants,
         }
     }
 
@@ -1112,7 +1330,7 @@ impl<'a> Matcher<'a> {
             cols &= cols - 1;
             self.captures.push((e.start, end, Dest::Flat(col)));
         }
-        for &(seq, sub) in &e.gcaps {
+        for &(seq, sub) in &e.cold().gcaps {
             self.captures.push((e.start, end, Dest::Grouped { seq, sub }));
         }
         for _ in 0..e.insts {
@@ -1123,11 +1341,11 @@ impl<'a> Matcher<'a> {
         // its children's totals are now known (its child counter frame is the last `stride` block of
         // `self.pos`, still present until the truncate below). Commit each candidate whose from-end
         // position satisfies the entry (see `reverse_matches`) to the deferred `pending` output.
-        if self.schema.has_reverse && !e.rev_pending.is_empty() {
+        if self.schema.has_reverse && !e.cold().rev_pending.is_empty() {
             let stride = 1 + self.schema.positional_tags.len();
             let base = self.pos.len() - stride;
             let total_children = self.pos[base];
-            for pend in &e.rev_pending {
+            for pend in &e.cold().rev_pending {
                 let re = &self.schema.reverse_entries[pend.entry as usize];
                 let total = match re.of_type_tag {
                     Some(j) => self.pos[base + 1 + j],
@@ -1167,6 +1385,7 @@ impl<'a> Matcher<'a> {
                 let (of_type, single_slot) = (re.rev.of_type, re.single_slot);
                 let idx = if of_type { e.of_type_index } else { e.child_index };
                 let vals: Vec<(usize, String)> = e
+                    .cold()
                     .rev_buf
                     .iter()
                     .filter(|(er, _, _)| *er == r)
@@ -1174,7 +1393,7 @@ impl<'a> Matcher<'a> {
                     .collect();
                 let cand = RevCand { idx, vals, span: (e.start, end) };
                 let target = match self.stack.last_mut() {
-                    Some(parent) => &mut parent.rev_pending,
+                    Some(parent) => &mut parent.cold_mut().rev_pending,
                     None => &mut self.doc_rev_pending,
                 };
                 match target.iter_mut().find(|p| p.entry == r) {
@@ -1217,7 +1436,7 @@ impl<'a> Matcher<'a> {
                     let val = decode::raw_source(&self.input[e.start..end], self.enc);
                     self.pending.push((he.col, e.start, val));
                 } else {
-                    for (eh, off, v) in &e.has_buf {
+                    for (eh, off, v) in &e.cold().has_buf {
                         if *eh == h {
                             self.pending.push((he.col, *off, v.clone()));
                         }
@@ -1235,6 +1454,7 @@ impl<'a> Matcher<'a> {
                 s &= s - 1;
                 let te = &self.schema.text_entries[t as usize];
                 let holds = e
+                    .cold()
                     .txt_states
                     .iter()
                     .find(|state| state.entry == t)
@@ -1262,7 +1482,7 @@ impl<'a> Matcher<'a> {
                         self.pending.push((te.col, e.start, val));
                     }
                     Terminal::Attr { .. } | Terminal::Text { .. } => {
-                        for (et, off, v) in &e.txt_emit {
+                        for (et, off, v) in &e.cold().txt_emit {
                             if *et == t {
                                 self.pending.push((te.col, *off, v.clone()));
                             }
@@ -1379,7 +1599,15 @@ impl<'a> Matcher<'a> {
         (self.results, grouped)
     }
 
+    /// Does any selector reference this attribute? Gated by [`AttrGate`] first, which rejects the
+    /// attributes a schema never asked about — the majority on a real page — without touching the name
+    /// list. A survivor still gets the exact case-insensitive comparison, so the answer is unchanged.
     fn is_interesting(&self, name: &[u8]) -> bool {
+        if let Some(gate) = &self.schema.attr_gate {
+            if !gate.admits(name) {
+                return false;
+            }
+        }
         self.schema.interesting.iter().any(|x| x.as_bytes().eq_ignore_ascii_case(name))
     }
 }
@@ -1537,7 +1765,7 @@ impl<'a> Matcher<'a> {
             }
         }
         self.stack[top].rev_subj = subj;
-        self.stack[top].rev_buf.extend(caps);
+        self.stack[top].cold_mut().rev_buf.extend(caps);
     }
 
     /// Capture this text node for any reverse entry whose (attached) `::text` subject is `stack[top]`.
@@ -1563,7 +1791,7 @@ impl<'a> Matcher<'a> {
         while w != 0 {
             let r = w.trailing_zeros();
             w &= w - 1;
-            self.stack[top].rev_buf.push((r, off, out.clone()));
+            self.stack[top].cold_mut().rev_buf.push((r, off, out.clone()));
         }
     }
 
@@ -1589,7 +1817,7 @@ impl<'a> Matcher<'a> {
             }
         }
         self.stack[top].has_subj = subj;
-        self.stack[top].has_buf.extend(caps);
+        self.stack[top].cold_mut().has_buf.extend(caps);
     }
 
     /// If `stack[top]` matches the `:has` INNER compound of some entry, mark that entry's `has_done` bit
@@ -1643,7 +1871,7 @@ impl<'a> Matcher<'a> {
         while w != 0 {
             let h = w.trailing_zeros();
             w &= w - 1;
-            self.stack[top].has_buf.push((h, off, out.clone()));
+            self.stack[top].cold_mut().has_buf.push((h, off, out.clone()));
         }
     }
 
@@ -1670,8 +1898,14 @@ impl<'a> Matcher<'a> {
             self.txt_open += 1;
         }
         self.stack[top].txt_subj = subj;
-        self.stack[top].txt_states.extend(states);
-        self.stack[top].txt_emit.extend(emit);
+        // `text_open` runs for EVERY element while the schema has a text-predicate entry, so touching
+        // `cold_mut()` unconditionally here would allocate a box per element and undo the point of
+        // boxing. Only a provisional subject has anything to store.
+        if !states.is_empty() || !emit.is_empty() {
+            let cold = self.stack[top].cold_mut();
+            cold.txt_states.extend(states);
+            cold.txt_emit.extend(emit);
+        }
     }
 
     /// Stream this text node through every open predicate state it belongs to. Only direct text values
@@ -1684,9 +1918,10 @@ impl<'a> Matcher<'a> {
             }
             let direct = e == top;
             let mut emit_entries = Vec::new();
-            {
-                let elem = &mut self.stack[e];
-                for state in &mut elem.txt_states {
+            // A subject's states were created at its open, so the box exists whenever there is anything
+            // to update; reading through the Option avoids creating one for a subject with no state.
+            if let Some(cold) = self.stack[e].cold.as_deref_mut() {
+                for state in &mut cold.txt_states {
                     let te = &self.schema.text_entries[state.entry as usize];
                     state.update(&te.pred, &out, direct);
                     if direct && te.tail.is_none() && matches!(te.terminal, Terminal::Text { subtree: false }) {
@@ -1695,7 +1930,7 @@ impl<'a> Matcher<'a> {
                 }
             }
             for entry in emit_entries {
-                self.stack[e].txt_emit.push((entry, off, out.clone()));
+                self.stack[e].cold_mut().txt_emit.push((entry, off, out.clone()));
             }
         }
     }
@@ -1883,32 +2118,11 @@ impl<'a> TokenSink<'a> for Matcher<'a> {
                 attrs.push((an, value));
             }
         }
-        self.stack.push(OpenElem {
-            tag: name,
-            scid,
-            attrs,
-            matched: 0,
-            matched_tree: 0,
-            text_cols: 0,
-            seen: 0,
-            prev: 0,
-            anchor: 0,
-            start: span_start,
-            cap_cols: 0,
-            insts: 0,
-            gcaps: Vec::new(),
-            child_index: 0,
-            of_type_index: 0,
-            rev_subj: 0,
-            rev_buf: Vec::new(),
-            rev_pending: Vec::new(),
-            has_subj: 0,
-            has_done: 0,
-            has_buf: Vec::new(),
-            txt_subj: 0,
-            txt_states: Vec::new(),
-            txt_emit: Vec::new(),
-        });
+        // The element's signature is built from the MATERIALIZED attributes only. That is sound because
+        // `collect_interesting` adds `class`/`id` to the interesting set whenever any compiled compound
+        // references them, so a `req` carrying class/id bits implies this element's `sig` saw the same
+        // attributes; a schema referencing neither leaves both at 0 and the filter idle.
+        self.stack.push(OpenElem::open(name, scid, attrs, span_start, self.schema.wants));
         let top = self.stack.len() - 1;
         // Assign this element's 1-based sibling positions from its parent's running counts, BEFORE
         // `eval` (positional compounds read them). Only when the schema uses positions.
@@ -1995,7 +2209,7 @@ impl<'a> TokenSink<'a> for Matcher<'a> {
                     if matches!(sub.terminal, Terminal::OuterHtml)
                         && sub_hits(&sub.seg, false, &self.stack, top, depth)
                     {
-                        self.stack[top].gcaps.push((seq, sub_idx));
+                        self.stack[top].cold_mut().gcaps.push((seq, sub_idx));
                     }
                 }
             }
@@ -2362,5 +2576,187 @@ mod deferred_state_tests {
         assert!(state.holds(&pred));
         state.update(&pred, "!", false);
         assert!(!state.holds(&pred));
+    }
+}
+
+#[cfg(test)]
+mod sig_wants_tests {
+    use super::*;
+
+    fn schema(queries: &[&str]) -> CompiledSchema {
+        let members: Vec<Vec<Selector>> =
+            queries.iter().map(|q| crate::selector::parse_list(q)).collect();
+        CompiledSchema::compile(&members, &[])
+    }
+
+    fn wants(queries: &[&str]) -> sig::Wants {
+        schema(queries).wants
+    }
+
+    /// `wants` decides how much of an element signature the scan builds, so it must be live for the
+    /// schemas that can use one and idle for the schemas that cannot. It is derived from the same walk
+    /// that sets the `req`s, so this also witnesses that the walk reaches each tier: a tier it skipped
+    /// would leave a schema that clearly requires bits reporting nothing wanted.
+    #[test]
+    fn wants_is_live_exactly_when_some_compound_requires_bits() {
+        assert!(wants(&[".price::text", ".title::text"]).any());
+        assert!(wants(&["div::text", "p::text"]).any());
+        assert!(wants(&["#main a::attr(href)"]).any());
+        assert!(wants(&["li.card:last-child span.price::text"]).any()); // deferred reverse tier
+        assert!(wants(&["div.box:has(a.deep)::text"]).any()); // deferred `:has` tier
+        // a universal selector requires nothing, so the whole signature machinery stays off
+        assert!(!wants(&["*::text"]).any());
+        assert!(!wants(&["::text"]).any());
+        assert!(!wants(&[]).any());
+    }
+
+    /// The per-KIND flags are the licence to leave bits out of an element's signature, so each must be
+    /// set whenever ANY compound — including one nested in `:not()`/`:is()`, or a `:has()` inner, or a
+    /// grouped sub-field — could ask `has_class`/`attr("id")` about it. A flag that is off while some
+    /// `req` carries that kind of bit is the one way this filter drops a value. Cases meant to be ON
+    /// carry two tests of their kind, so `sig::BITS_MIN` isn't what they measure — the two cases that DO
+    /// measure it say so.
+    #[test]
+    fn per_kind_flags_cover_every_compound_that_asks() {
+        assert!(!wants(&["div::text", "p::text"]).class);
+        assert!(!wants(&["div::text", "p::text"]).id);
+        assert!(wants(&["div::text", "p::text"]).tag);
+        // one test of a kind can't amortize hashing it (`sig::BITS_MIN`), so that kind stays off
+        assert!(!wants(&["div::text"]).tag);
+        assert!(!wants(&[".price::text"]).class);
+        assert!(wants(&[".price::text", ".title::text"]).class);
+        assert!(wants(&["#main::text"]).id);
+        assert!(wants(&["div:not(.skip).x::text"]).class); // negated class: still asked at match time
+        assert!(wants(&["div:is(.a, .b)::text"]).class);
+        assert!(wants(&["div:not(#skip)::text"]).id);
+        assert!(wants(&["div.x:has(.deep)::text"]).class); // `:has` inner, matched against descendants
+        assert!(wants(&["li:last-child.price.sale::text"]).class); // deferred reverse tier
+    }
+    /// A deferred entry whose value comes from a DESCENDANT splits into a prefix (matched in the main
+    /// scan) and a TAIL sub-schema (run over the winner's span). The class-led part of
+    /// `li:last-child span.price.sale::text` lives in the tail, so the main schema legitimately wants no
+    /// class bits — but the tail must want them, since it is the schema whose compounds ask `has_class`.
+    /// Each tail is compiled in its own right, which is what makes that automatic.
+    #[test]
+    fn a_deferred_tail_carries_its_own_wants() {
+        let sch = schema(&["li:last-child span.price.sale::text"]);
+        assert!(sch.wants.any() && !sch.wants.class, "prefix is `li:last-child`, no class");
+        let tail = &sch.tail_schemas[0].schema;
+        assert!(tail.wants.class, "the tail's `.price.sale` compound would never be filtered");
+        assert_ne!(tail.entries[0].segments[0].parts[0].req, 0);
+    }
+
+    /// Grouped containers and sub-fields are their own tier; a sub-field's compounds are matched by the
+    /// same `compound_matches`, so they must be walked too.
+    #[test]
+    fn grouped_tier_is_walked() {
+        let subs = vec![Some(crate::selector::parse_list(".price::text").remove(0))];
+        let container = Some(crate::selector::parse_list("div.card").remove(0));
+        let sch = CompiledSchema::compile(&[], &[(container, subs)]);
+        assert!(sch.wants.any());
+        assert!(sch.wants.class, "a grouped sub-field's class token was not accounted for");
+        let sub_seg = sch.groups[0].subs[0].seg.as_ref().expect("single-segment sub");
+        assert_ne!(sub_seg.parts[0].req, 0, "sub-field compound never got its req");
+        assert_ne!(sch.entries[0].segments[0].parts[0].req, 0, "container never got its req");
+    }
+}
+
+#[cfg(test)]
+mod attr_gate_tests {
+    use super::AttrGate;
+
+    /// The gate may only ever turn a `false` into a faster `false`. Swept over a spread of interesting
+    /// sets crossed with the attribute names real markup carries, comparing the gate's verdict against
+    /// the exact comparison it guards: whenever the exact answer is YES, the gate must admit.
+    #[test]
+    fn admits_everything_the_exact_comparison_would_match() {
+        let sets: [&[&str]; 6] = [
+            &["class"],
+            &["class", "id"],
+            &["href", "src", "data-sku"],
+            &["class", "id", "href", "src", "alt", "value", "content", "data-price"],
+            &[],
+            &["a", "averyveryverylongattributenamethatgoeswellpastsixtythreecharacterslong"],
+        ];
+        let names: [&[u8]; 22] = [
+            b"class", b"CLASS", b"Class", b"id", b"ID", b"href", b"HREF", b"src", b"alt", b"role",
+            b"aria-label", b"data-sku", b"DATA-SKU", b"data-index", b"value", b"content", b"itemprop",
+            b"loading", b"width", b"a", b"averyveryverylongattributenamethatgoeswellpastsixtythreecharacterslong",
+            b"",
+        ];
+        let mut admitted_but_no_match = 0u32;
+        let mut rejected = 0u32;
+        for set in sets {
+            let owned: Vec<Box<str>> = set.iter().map(|s| (*s).into()).collect();
+            let gate = AttrGate::build(&owned);
+            for name in names {
+                let admits = |n: &[u8]| gate.as_ref().is_none_or(|g| g.admits(n));
+                let exact = owned.iter().any(|x| x.as_bytes().eq_ignore_ascii_case(name));
+                if exact {
+                    assert!(
+                        admits(name),
+                        "gate rejected {:?}, which set {set:?} does reference",
+                        std::str::from_utf8(name)
+                    );
+                } else if admits(name) {
+                    admitted_but_no_match += 1; // a false positive: allowed, costs only the exact scan
+                } else {
+                    rejected += 1;
+                }
+            }
+        }
+        // and it must actually reject, or it is not doing the job this exists for. Only the sets at or
+        // above `MIN_NAMES` are gated at all; the small ones deliberately admit everything.
+        assert!(rejected > 0, "the gate rejected nothing across {} sets", sets.len());
+        assert!(
+            AttrGate::build(&[Box::from("class")]).is_none(),
+            "a one-name schema must not be gated: the scan it guards is cheaper than the test"
+        );
+        let _ = admitted_but_no_match;
+    }
+
+    /// A COLLISION must cost only the exact comparison, never an answer: two names sharing a bit are
+    /// normal (64 bits, and length folds in), so a gate built from one must admit the other and the
+    /// caller must then reject it by name. This is the property that makes one word enough.
+    #[test]
+    fn collisions_cost_a_comparison_and_not_an_answer() {
+        // distinct names, so a "collision" is never just the same name twice
+        let all: Vec<Box<str>> = (0u32..2000).map(|i| format!("a{i}").into()).collect();
+        // at least MIN_NAMES, or the gate declines to exist; the extras are distinct from the probes
+        let mut few: Vec<Box<str>> = vec![all[0].clone()];
+        few.extend((0..AttrGate::MIN_NAMES).map(|i| format!("zz-pad-{i}").into()));
+        let gate = AttrGate::build(&few).expect("a schema this size is gated");
+        let mut collided = 0u32;
+        for other in &all[1..] {
+            if gate.admits(other.as_bytes()) && !few.iter().any(|x| **x == **other) {
+                collided += 1;
+                // the gate admitted a name the schema does not reference; the exact comparison is what
+                // must then say no
+                assert!(!few.iter().any(|x| x.as_bytes().eq_ignore_ascii_case(other.as_bytes())));
+            }
+        }
+        assert!(collided > 0, "no collisions in 2000 names: the fixture is not testing the property");
+        // and the names it WAS built from are always admitted
+        for n in &few {
+            assert!(gate.admits(n.as_bytes()));
+        }
+    }
+}
+
+#[cfg(test)]
+mod open_elem_size {
+    use super::OpenElem;
+
+    /// Pushing an element memcpies this whole struct, so its size is a performance lever: 16 bytes added
+    /// here measured ~3.6% on a pure scan. A ceiling rather than an equality, since exact layout varies
+    /// with target; what it catches is a field added without weighing it against the per-element copy.
+    #[test]
+    fn stays_small_enough_to_push_cheaply() {
+        let bytes = std::mem::size_of::<OpenElem<'static>>();
+        assert!(
+            bytes <= 272,
+            "OpenElem grew to {bytes} bytes. That is a memcpy on every element push; measure it \
+             (tools/ab_bench.py --tables scan,deep) before raising this bound, and record the number."
+        );
     }
 }
