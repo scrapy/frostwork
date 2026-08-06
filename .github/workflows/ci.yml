@@ -110,8 +110,8 @@ jobs:
   bindings:
     name: bindings (py${{ matrix.python }} / ${{ matrix.os }})
     # The heavy differential runs once (above) on 3.12/linux. This matrix only builds the extension and
-    # runs the Python suite, cheaply covering the newest CPython and macOS. The abi3 FLOOR (3.9) is a
-    # separate job below — the pinned toolchain cannot be installed there at all.
+    # runs the Python suite, cheaply covering the newest CPython and macOS. The abi3 FLOOR is a separate
+    # job below, and since the floor moved to 3.10 it runs this same suite rather than a stand-in.
     strategy:
       fail-fast: false
       matrix:
@@ -133,13 +133,12 @@ jobs:
       - run: .venv/bin/python examples/basic.py  # keep the documented example runnable
 
   abi3-floor:
-    name: abi3 floor (py3.9 / ubuntu-latest)
-    # The wheel is abi3-py39, so 3.9 must keep working — but the pinned dev toolchain cannot be
-    # installed on it: `parsel`, `web-poet` and `pytest` all require >= 3.10. Running the pytest suite
-    # here is therefore impossible, not merely inconvenient (it failed at `pip install` on every run,
-    # which meant the floor was never actually tested). Instead: build the extension on a real 3.9 and
-    # exercise the dependency-free surface with tools/abi3_smoke.py (stdlib + frostwork only). Parity
-    # and the web-poet integration are covered by the jobs above, which own the pinned oracle.
+    name: abi3 floor (py3.10 / ubuntu-latest)
+    # The wheel is abi3-py310, so 3.10 must keep working. At the old 3.9 floor this job could not run the
+    # suite at all — `parsel`, `web-poet` and `pytest` each require >= 3.10, so it built the extension and
+    # ran tools/abi3_smoke.py (stdlib + frostwork only) as a stand-in. 3.10 is the first version where the
+    # pinned toolchain installs, so the floor now gets the SAME suite as every other interpreter, which is
+    # strictly more coverage than the smoke test it replaces.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -147,9 +146,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.9"
+          python-version: "3.10"
       - run: python -m venv .venv
-      - run: .venv/bin/pip install maturin==1.14.1  # the one pin that supports 3.9
+      - run: .venv/bin/pip install -r requirements-test.txt
       - run: .venv/bin/maturin develop --release
-      - run: .venv/bin/python tools/abi3_smoke.py
+      - run: .venv/bin/python -m pytest tests/ -q
+      - run: .venv/bin/python tools/abi3_smoke.py   # the wheel must also work with NO dependencies present
       - run: .venv/bin/python examples/basic.py  # keep the documented example runnable

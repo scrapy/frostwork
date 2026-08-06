@@ -187,12 +187,19 @@ When adding a gate or a coverage requirement, add a corresponding negative test.
 family, prove that the family reaches the intended behavior. Passing output is not evidence unless the same
 check can fail.
 
-## Python 3.9 wheel smoke test
+## The abi3 floor, and the dependency-free smoke test
 
-The core wheel is `abi3-py39`, while the pinned oracle and web-poet toolchain require a newer Python.
-`tools/abi3_smoke.py` therefore tests the dependency-free Python 3.9 surface separately: importing the
-extension, extraction, `Page`/`Item`, groups, audit and source scanning. Value parity remains the job of the
-oracle-backed jobs.
+The wheel is `abi3-py310`, so CPython 3.10 must keep working, and the floor job runs the same
+`pytest tests/` as every other interpreter. That is new. At the old 3.9 floor it could not: `parsel`,
+`web-poet` *and* `pytest` each require ≥ 3.10, so the job ran `tools/abi3_smoke.py` as a stand-in and the
+floor was never covered by the real suite. Raising the floor turned the weakest job in CI into a full one
+— and the first run there found a live bug (`RuntimeError` wrapping the `TypeError` a marker on a
+non-Frostwork base raises, on every Python before 3.12; see PYTHON.md).
+
+`tools/abi3_smoke.py` still runs there, now for the thing it is the only witness to: the core works with
+**no Python dependencies installed at all** — importing the extension, extraction, `Page`/`Item`, groups,
+audit and source scanning, standard library only. A venv holding parsel and web-poet cannot show that.
+Value parity remains the job of the oracle-backed jobs.
 
 ## Adding coverage
 

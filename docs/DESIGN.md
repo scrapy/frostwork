@@ -304,4 +304,4 @@ native `Plan` **at class-creation time**, then each declared `field(selector)` b
 over `response.body`. So the idiomatic web-poet surface (`to_item()`, `Returns[Item]`, `@handle_urls`,
 mixing hand-written `@field` methods) is preserved while every selector field shares a single scan of a
 pre-compiled schema — a per-call `.css()` shim would re-scan per field and throw away the one-pass
-advantage, so we don't offer one. Wheels are abi3 (`abi3-py39`). Details: [PYTHON.md](PYTHON.md).
+advantage, so we don't offer one. Wheels are abi3 (`abi3-py310`). Details: [PYTHON.md](PYTHON.md).

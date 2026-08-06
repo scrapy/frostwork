@@ -1,6 +1,6 @@
 name: release
 
-# Build abi3 wheels (one per platform, CPython >= 3.9) + an sdist, and publish to PyPI on a version
+# Build abi3 wheels (one per platform, CPython >= 3.10) + an sdist, and publish to PyPI on a version
 # tag. Publishing uses PyPI Trusted Publishing (OIDC) — no API token stored: configure this repo +
 # workflow as a trusted publisher for the `frostwork` project on PyPI, then push a tag (e.g. `v0.1.0`).
 on:

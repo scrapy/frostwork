@@ -45,6 +45,7 @@ from typing import (
     Optional,
     Tuple,
     TypeVar,
+    Union,
     overload,
 )
 
@@ -871,15 +872,19 @@ class FrostFields(ItemPage):
             },
         }
 
-    def frostwork_input(self) -> Tuple[bytes, Optional[str]]:
-        """The ``(html_bytes, encoding)`` this page object scans. Override to source a page object from
+    def frostwork_input(self) -> Tuple[Union[bytes, str], Optional[str]]:
+        """The ``(html, encoding)`` this page object scans — ``bytes`` off the wire, or a ``str`` of
+        already-decoded text (a browser snapshot). Override to source a page object from
         something other than the two provided bases — that is the whole extension point, and it is public
         because web-poet's input universe is larger than the shapes shipped here (``Extractor`` subclasses
         can be given any dependency at all).
 
         ``encoding`` may be ``None``, in which case the engine sniffs (BOM, then a ``<meta>`` prescan)
         exactly as Parsel would. Return the ORIGINAL bytes where you have them: decoding to ``str`` and
-        re-encoding can only lose information the sniffer would otherwise use."""
+        re-encoding can only lose information the sniffer would otherwise use. Where only decoded text
+        exists, return the ``str`` itself — never ``str.encode("utf-8")``, which allocates a whole
+        second copy of the document; the engine borrows CPython's UTF-8 view instead. A ``str`` is
+        scanned as UTF-8, so the only ``encoding`` it accepts is ``None`` or a UTF-8 label."""
         raise NotImplementedError(
             f"{type(self).__name__} does not define frostwork_input(). Inherit FrostPage (HttpResponse) "
             "or FrostBrowserPage (BrowserResponse), or override frostwork_input() to return "
@@ -923,9 +928,14 @@ class FrostBrowserPage(FrostFields, BrowserPage):
     bytes off the wire. Identical to :class:`FrostPage` in every other respect.
 
     A ``BrowserResponse`` carries ``.html`` (a ``str``) and no bytes, so there is nothing to sniff: the
-    text is encoded UTF-8 and scanned with the encoding stated rather than guessed. That is not a
-    shortcut — the browser has already resolved the page's encoding, and re-deriving it from a
-    re-encoding of the decoded text could only disagree with the browser that produced it."""
+    text is scanned as UTF-8 with the encoding stated rather than guessed. That is not a shortcut — the
+    browser has already resolved the page's encoding, and re-deriving it from a re-encoding of the
+    decoded text could only disagree with the browser that produced it.
 
-    def frostwork_input(self) -> Tuple[bytes, Optional[str]]:
-        return str(self.response.html).encode("utf-8"), "utf-8"
+    The ``str`` is handed over **unencoded**: the engine borrows CPython's UTF-8 view of it rather than
+    allocating a second copy of the document per response. For an all-ASCII snapshot that view IS the
+    string's own buffer, so the conversion costs nothing at all."""
+
+    def frostwork_input(self) -> Tuple[Union[bytes, str], Optional[str]]:
+        # `.html` is a `str` subclass (BrowserHtml); pass it through, do NOT `.encode()` it.
+        return self.response.html, "utf-8"

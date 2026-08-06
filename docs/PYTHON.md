@@ -20,9 +20,12 @@ python -m venv .venv
 ```
 
 `--extras=webpoet` installs the supported web-poet release. Drop it if you only need
-`extract`/`Page`/`frostwork-audit`. Wheels are **abi3** (`abi3-py39`) and support CPython ≥ 3.9.
+`extract`/`Page`/`frostwork-audit`. Wheels are **abi3** (`abi3-py310`) and support CPython ≥ 3.10.
 
-**The web-poet extra needs Python ≥ 3.10**, which is narrower than the core. It supports
+**3.10 is the floor for everything** — core and extra alike. The core used to run on 3.9, with the
+web-poet extra the stricter half; the floors converged when the wheel moved to `abi3-py310` so the engine
+could borrow a `str`'s UTF-8 view instead of copying the document (`PyUnicode_AsUTF8AndSize` is
+limited-API only from 3.10). Python 3.9 reached end of life in October 2025. The extra supports
 `web-poet >= 0.24.1, < 0.25`, the release line exercised by the integration gates.
 
 ## 1. The primitive
@@ -213,11 +216,17 @@ Pick the base that matches the input the framework will inject:
 | base | input | notes |
 | --- | --- | --- |
 | `FrostPage` | `web_poet.HttpResponse` | scans `.body` bytes with the response's resolved `.encoding` |
-| `FrostBrowserPage` | `web_poet.BrowserResponse` | scans `.html`, encoded UTF-8 |
+| `FrostBrowserPage` | `web_poet.BrowserResponse` | scans `.html` as UTF-8, borrowed rather than re-encoded |
 | `FrostFields` | anything — override `frostwork_input()` | a `web_poet.ItemPage`: brings `to_item()` / `Returns[...]`, and is injectable |
 
 A `BrowserResponse` already contains decoded HTML, so Frostwork does not sniff a charset from it. Any
 remaining `<meta charset>` is ignored.
+
+The `str` is handed over **unencoded** — `frostwork_input()` may return `bytes` *or* `str`, and the engine
+borrows CPython's UTF-8 view of a `str` rather than allocating a second copy of the document. Return the
+original bytes where you have them, the `str` itself where you do not, and never
+`str.encode("utf-8")`. Because a `str` is scanned as UTF-8, the only `encoding` it accepts is `None` or a
+UTF-8 label; anything else is refused instead of decoding those bytes wrongly.
 
 For any other dependency, override the hook:
 
@@ -230,8 +239,17 @@ class MyPage(FrostFields):
     title = field("h1::text")
 ```
 
-Declaring a Frostwork `field()` on a class without a Frostwork page base raises at class definition. This
-prevents an unconverted marker from becoming a silently absent item field.
+Declaring a Frostwork `field()` on a class without a Frostwork page base raises `TypeError` at class
+definition. This prevents an unconverted marker from becoming a silently absent item field.
+
+On **Python 3.10 and 3.11 it arrives wrapped**: the check runs in `__set_name__`, and CPython before 3.12
+re-raises anything from `__set_name__` as `RuntimeError`
+([gh-77757](https://github.com/python/cpython/issues/77757) stopped that in 3.12). Frostwork's message is
+intact on `__cause__`, so the diagnosis is not lost, but code catching this needs both types:
+
+```python
+except (TypeError, RuntimeError) as exc:      # RuntimeError only on < 3.12; exc.__cause__ has the TypeError
+```
 
 `web_poet.SelectorExtractor` is not supported: its input is already a parsed tree, so serializing and
 re-scanning it would add work and could change the source. Query that `Selector` directly.

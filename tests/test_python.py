@@ -7,11 +7,40 @@ parsel cross-check that values survive the FFI boundary unchanged.
 """
 
 import asyncio
+import contextlib
+import re
+import sys
 
 import pytest
 
 import frostwork
 from frostwork import Page
+from frostwork._frostwork import Plan as _Plan
+
+
+@contextlib.contextmanager
+def raises_at_class_definition(match):
+    """Assert a `field()`/`Many()` misdeclaration is refused when the class is created, and that the
+    diagnosis reaches the user — on every supported interpreter.
+
+    The library raises `TypeError` from `_FrostField.__set_name__`, but CPython **wraps whatever
+    `__set_name__` raises in `RuntimeError` before 3.12** (gh-77757 stopped doing so in 3.12). So on the
+    abi3 floor (3.10) and on 3.11 a user catches `RuntimeError` whose `__cause__` carries Frostwork's
+    message, and from 3.12 they catch the `TypeError` directly. Asserting only `TypeError` made this
+    suite pass on the dev interpreter and fail on the floor — which is exactly what nobody saw while the
+    floor job could not run pytest at all."""
+    with pytest.raises((TypeError, RuntimeError)) as excinfo:
+        yield
+    err = excinfo.value
+    chain = [err]
+    while chain[-1].__cause__ is not None:
+        chain.append(chain[-1].__cause__)
+    assert any(re.search(match, str(e)) for e in chain), (
+        f"none of {[type(e).__name__ for e in chain]} carried {match!r}: "
+        f"{[str(e)[:80] for e in chain]}"
+    )
+    if sys.version_info >= (3, 12):
+        assert isinstance(err, TypeError), f"3.12+ should surface TypeError unwrapped, got {err!r}"
 
 PRODUCT = (
     b"<div class=product><h1>Widget</h1><span class=price>$9</span>"
@@ -136,6 +165,29 @@ def test_extract_str_with_non_utf8_label_raises():
         frostwork.extract("<p>café</p>", ["p::text"], "windows-1252")
     # a UTF-8 label on str is consistent and allowed
     assert frostwork.extract("<p>café</p>", ["p::text"], "utf-8") == [["café"]]
+
+
+@pytest.mark.parametrize("label", [None, "utf-8", "utf8", "UTF-8", "utf_8", "utf-8-sig", "U8"])
+def test_a_str_accepts_every_utf8_label_spelling_through_both_entry_points(label):
+    """`extract` normalizes Python codec spellings through `codecs`, and the native layer resolves
+    WHATWG labels — two different labelling universes over the same argument. `utf_8`, `utf-8-sig` and
+    `U8` are UTF-8 to Python and unknown to WHATWG, so a native check that demanded a WHATWG UTF-8 name
+    made the same label mean different things through `extract` (accepted) and through `Plan` (refused),
+    which is the path `frostwork.webpoet` uses. Both must answer the same way."""
+    html = "<p>café</p>"
+    assert frostwork.extract(html, ["p::text"], label) == [["café"]]
+    assert _Plan(["p::text"], []).extract(html, label) == [["café"]]
+
+
+@pytest.mark.parametrize("label", ["windows-1252", "latin-1", "iso-8859-1", "shift_jis", "gb18030"])
+def test_a_str_refuses_a_label_that_resolves_to_another_encoding(label):
+    """The mojibake this exists to prevent: UTF-8 bytes decoded as something else. Refused on BOTH
+    entry points, since a direct `Plan` call bypasses the pure-Python check entirely."""
+    html = "<p>café</p>"
+    with pytest.raises(ValueError):
+        frostwork.extract(html, ["p::text"], label)
+    with pytest.raises(ValueError):
+        _Plan(["p::text"], []).extract(html, label)
 
 
 def test_extract_grouped_normalizes_list_shaped_groups():
@@ -507,7 +559,7 @@ def test_a_real_zyte_product_page_composes_and_every_processor_fires():
         images = field("img.hero::attr(src)", all=True)   # scalar terminal: URL strings, not nodes
 
     # the declaration that does NOT work, pinned so the docs cannot drift back to it
-    with pytest.raises(TypeError, match="does not inherit a Frostwork page base"):
+    with raises_at_class_definition("does not inherit a Frostwork page base"):
         type("Wrong", (ProductPage,), {"name": field("h1::text")})
 
     item = asyncio.run(MyProductPage(response=_resp(body=html)).to_item())
@@ -1202,9 +1254,9 @@ def test_a_marker_on_a_non_frost_class_fails_at_class_definition():
     from frostwork.webpoet import Many, field
 
     for base in (WebPage, BrowserPage):
-        with pytest.raises(TypeError, match="does not inherit a Frostwork page base"):
+        with raises_at_class_definition("does not inherit a Frostwork page base"):
             type("Bad", (base,), {"name": field("h1::text")})
-        with pytest.raises(TypeError, match="does not inherit a Frostwork page base"):
+        with raises_at_class_definition("does not inherit a Frostwork page base"):
             type("BadGroup", (base,), {"rows": Many(".card", title=field("h3 a::text"))})
 
 
