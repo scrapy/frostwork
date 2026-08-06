@@ -1,27 +1,29 @@
 # Frostwork for Python (Scrapy / web-poet)
 
-Python bindings over the Rust core, built with [PyO3](https://pyo3.rs) + [maturin](https://maturin.rs).
-The FFI surface is deliberately tiny — extraction, compiled plans, and schema audit cross into Rust —
-so there is exactly one implementation of matching logic (the Rust engine, held to the differential gate). The ergonomic
-`Page`/`Item` layer and the web-poet integration are thin pure-Python on top.
+Python bindings over the Rust core, built with [PyO3](https://pyo3.rs) and
+[maturin](https://maturin.rs). Matching stays in Rust; the `Page`/`Item` layer and web-poet integration
+provide the Python-facing API.
 
 Three layers, smallest to largest:
 
 1. `frostwork.extract` — the one-pass primitive.
 2. `frostwork.Page` / `frostwork.Item` — a declarative `{field: selector}` schema (mirror of the Rust API).
-3. `frostwork.webpoet.FrostPage` — a `web_poet.WebPage` whose selector fields share a single scan.
+3. `frostwork.webpoet.FrostPage` / `FrostBrowserPage` — a web-poet page object whose selector fields
+   share a single scan.
 
 ## Install / build
 
 ```bash
 python -m venv .venv
 .venv/bin/pip install maturin
-.venv/bin/maturin develop            # builds the extension + installs `frostwork` (editable) into the venv
-# for the web-poet integration:
-.venv/bin/pip install web-poet
+.venv/bin/maturin develop --release --extras=webpoet   # extension + `frostwork[webpoet]`, editable
 ```
 
-Wheels are **abi3** (`abi3-py39`): one wheel runs on CPython ≥ 3.9 (tested on 3.14).
+`--extras=webpoet` installs the supported web-poet release. Drop it if you only need
+`extract`/`Page`/`frostwork-audit`. Wheels are **abi3** (`abi3-py39`) and support CPython ≥ 3.9.
+
+**The web-poet extra needs Python ≥ 3.10**, which is narrower than the core. It supports
+`web-poet >= 0.24.1, < 0.25`, the release line exercised by the integration gates.
 
 ## 1. The primitive
 
@@ -33,15 +35,13 @@ cols = frostwork.extract(html, ["h1::text", ".price::text", "img::attr(src)", "/
 # -> [['Widget'], ['$9'], ['/a.png'], ['/a.png']]     one column per query, in query order
 ```
 
-`extract(html, queries, encoding=None, *, strict=True)` — `html` is `bytes` (preferred; the engine
-tokenizes raw bytes) or `str` (encoded UTF-8). `encoding` is an optional charset label as Scrapy
-passes from `Content-Type`; `None` sniffs (BOM → `<meta>` → UTF-8). A label naming no encoding at all
-(`"utf8x"`) raises; one naming a real encoding WHATWG excludes (`utf-7`, `utf-32` — w3lib resolves
-those against Python's codec set, so `response.encoding` can be one) is **ignored** and the page is
-sniffed instead, per WHATWG's "failure, continue". Unsupported queries raise
-`UnsupportedSelector` before the HTML is scanned. Pass `strict=False` for permissive empty columns.
-Supported selectors and value semantics are exactly the Rust engine's — see
-[COMPATIBILITY.md](COMPATIBILITY.md).
+`extract(html, queries, encoding=None, *, strict=True)` accepts `bytes` (preferred) or a `str`, which is
+encoded as UTF-8. Pass the response's charset label as `encoding`; `None` checks the BOM and declarations
+before defaulting to UTF-8. An unknown label raises, while a known label excluded by WHATWG is ignored and
+sniffing continues.
+
+Unsupported queries raise `UnsupportedSelector` before the HTML is scanned. Pass `strict=False` for
+permissive empty columns. [COMPATIBILITY.md](COMPATIBILITY.md) defines selector, value and encoding behavior.
 
 ## 2. Declarative `Page` / `Item`
 
@@ -70,27 +70,27 @@ Pass `map=fn` to transform a field's shaped value in Python (never in the scan) 
 `.field_all("prices", ".price::text", map=lambda xs: [float(x) for x in xs])`. `Item.value` /
 `to_dict` reflect the transform; `get` / `get_all` return the raw matches.
 
-## 3. web-poet page objects — `FrostPage`
+## 3. web-poet page objects — `FrostPage` / `FrostBrowserPage`
 
-`FrostPage` is a `web_poet.WebPage`. Declare fields with `field(...)`; each becomes a **real
-`web_poet.field`**, so attribute access, `async to_item()`, `@handle_urls` routing, `Returns[Item]`,
-and mixing in hand-written `@web_poet.field` methods all work as usual — but **every Frostwork
-selector on the page object shares one cached `extract` call** (instead of one lxml parse + a query
-per field). That is the point: one streaming pass per response, not one per field.
+`FrostPage` is a `web_poet.WebPage`. Each `field(...)` becomes a real `web_poet.field`, so attribute
+access, `async to_item()`, `@handle_urls`, `Returns[Item]` and hand-written fields work normally. All
+Frostwork fields on the page share one compiled extraction pass.
 
+<!-- doc-test: product-page -->
 ```python
 import attrs
-from web_poet import handle_urls, Returns
+from typing import List, Optional
+from web_poet import Returns
 from frostwork.webpoet import FrostPage, field
 
 @attrs.define
 class Product:
-    name: str
-    price: str
-    images: list
-    brand: str | None
+    name: Optional[str]
+    price: Optional[str]
+    images: List[str]
+    specs: str
+    brand: Optional[str]
 
-@handle_urls("example.com")
 class ProductPage(FrostPage, Returns[Product]):
     name   = field("h1::text")
     price  = field(".price::text")
@@ -102,22 +102,38 @@ class ProductPage(FrostPage, Returns[Product]):
 #   item = await ProductPage(response=http_response).to_item()   # -> Product(...)
 ```
 
-`field(selector, *, all=False, join=None)`:
+Every item field must fit the `Returns[...]` type or `to_item()` raises. Pass
+`skip_nonitem_fields=True` when the page intentionally contains helper fields that are not item attributes.
+Complete examples on this page are executed by the test suite as written.
 
-| declaration | field value |
-|---|---|
-| `field(sel)` | first match, or `None` |
-| `field(sel, all=True)` | `list[str]` of every match, document order |
-| `field(sel, join=sep)` | every match joined into one `str` with `sep` |
-| `field(sel).map(fn)` | the shaped value with `fn` applied (chainable) |
-| `field(sel).re_first(rx)` | first regex match over the matched string (group 1 if any, else whole) |
+`field(selector, *, all=False, join=None, cached=False, meta=None, out=None)`:
 
-`.re_first` operates on a scalar string, so it **raises `ValueError` at declaration on an `all=True`
-field** (a list) — that would otherwise silently yield `None` for every page. Use `join=` (then
-`re_first` sees the joined string) or `.map()` for a list transform.
+| declaration | field value | static type |
+| --- | --- | --- |
+| `field(sel)` | first match, or `None` | `str \ | None` |
+| `field(sel, all=True)` | `list[str]` of every match, document order | `list[str]` |
+| `field(sel, join=sep)` | every match joined into one `str` with `sep` | `str` |
+| `field(sel).map(fn)` | the shaped value with `fn` applied (chainable) | `fn`'s return type |
+| `field(sel).re_first(rx)` | first regex match over the matched string (group 1 if any, else whole) | `str \ | None` |
+| `field(sel).typed_as(T)` | unchanged — a no-op that re-annotates the field as `T` | `T` |
 
-`.map` / `.re_first` are **pure post-processing** — they run on the already-extracted value, never in
-the scan, so a transformed field stays a one-liner and still rides the single pass:
+The package ships `py.typed`. These annotations describe the value before a processor runs; use
+`.typed_as(List[Breadcrumb])` (or any other type expression, including a union) when a processor changes
+the result type. `.typed_as()` has no runtime effect.
+
+`cached`, `meta` and `out` are `web_poet.field`'s own keywords, forwarded verbatim. They compose in a
+fixed order with the Frostwork-side transforms:
+
+1. the column is shaped by `all` / `join`,
+2. `.map()` / `.re_first()` run — plain callables, value in, value out,
+3. web-poet's processors run — `out=` if given, otherwise a nested `Processors` entry for the field name.
+   A processor receives `value`; if it declares a `page` parameter, web-poet supplies the page too.
+
+Reach for `.map()` for a local value tweak and `out=` for an ecosystem processor.
+
+`.map()` and `.re_first()` run after extraction and do not add another scan. `.re_first()` requires a
+scalar string, so it raises at declaration on an `all=True` field; use `join=` or a list-aware `.map()`
+instead.
 
 ```python
 class ProductPage(FrostPage, Returns[Product], skip_nonitem_fields=True):
@@ -126,8 +142,10 @@ class ProductPage(FrostPage, Returns[Product], skip_nonitem_fields=True):
     rating  = field("p.star-rating::attr(class)").map(rating_to_int)
 ```
 
-The page body is scanned as `response.body` bytes using the response's resolved `response.encoding`,
-so values match what Parsel would decode.
+The page body is scanned as `response.body` bytes using the response's resolved `response.encoding`, which
+aligns charset selection with Parsel. The legacy decoder differences listed in
+[COMPATIBILITY.md](COMPATIBILITY.md) still apply. For a browser snapshot or another input, see
+[Response types](#response-types--frostpage-frostbrowserpage-frostfields).
 
 **Recipe — relative → absolute URLs.** Frostwork returns the raw attribute value; to resolve it
 against the page URL, extract into a helper field and compose a computed `@web_poet.field` that calls
@@ -160,11 +178,9 @@ ProductPage.frost_schema()
 
 ### Nested collections — `Many` / `One`
 
-To pull a *list of sub-objects* (each product card, each spec row), declare a `Many` (or `One`): for
-every element matching the container, each keyword sub-field — an ordinary `field(...)`, so `.map` /
-`.re_first` compose — is extracted **scoped to that container** (descendant-or-self), all in the
-**same one pass**. `Many` yields a `list` of rows; `One` yields the first row (or `None`). Pass
-`item=` (a class/callable) to build each row into a typed object from `item(**row)`.
+Use `Many` for a list of scoped rows and `One` for the first row (or `None`). Each keyword is a normal
+`field(...)` evaluated relative to the container in the same extraction pass. Pass a class or callable as
+`item=` to build typed rows with `item(**row)`.
 
 ```python
 from frostwork.webpoet import FrostPage, field, Many, One
@@ -178,32 +194,106 @@ class ProductPage(FrostPage, Returns[Product], skip_nonitem_fields=True):
                       reviewCount=field(".count::text").re_first(r"\d+").map(int))
 ```
 
-Rows are byte-identical to Parsel's `[ {sub: c.css(sub_sel).getall()} for c in doc.css(container) ]`
-(the differential gates this). The primitive `frostwork.Page` has the same shape:
-`Page().many("images", ".thumb", {"url": "img::attr(src)"})` / `.one(...)`. A sub-spec is a bare
-selector string (first match) **or** a tuple carrying cardinality — `("sel", "all")` → list,
-`("sel", "join", sep)` → joined string — matching `webpoet.Many`'s per-subfield expressiveness:
+A subfield uses the first match by default; `all=True` and `join=` provide the same cardinality choices as
+a flat field. Scoping and cardinality are differentially checked against Parsel. The primitive `Page` API
+has the same shape, with a selector string for the first match or a tuple for `all`/`join`:
 
 ```python
 Page().many("offers", ".offer", {"price": ".p::text", "tags": (".tag::text", "all")})
 ```
 
-On the resulting `Item`, `get(name)` / `get_all(name)` also work for a group name: `get` returns the
-first row (a `dict`), `get_all` returns the row list (a `One` group yields a 0- or 1-element list).
-Sibling `+`/`~`, comma groups, reverse positions, `:has()`, and text-content predicates inside a
-sub-field are unsupported and fail validation by default, as do deferred selectors used as group
-containers. A `Many` nested inside a sub-field is also unsupported. Pass ``strict=False`` only when
-empty results are the desired compatibility behavior.
+For a group name, `Item.get()` returns the first row and `get_all()` returns its row list. Nested groups
+are unsupported, and group containers/subfields support a narrower selector surface than flat fields; the
+schema audit reports the exact verdict. Use `strict=False` only when empty results are intentional.
+
+### Response types — `FrostPage`, `FrostBrowserPage`, `FrostFields`
+
+Pick the base that matches the input the framework will inject:
+
+| base | input | notes |
+| --- | --- | --- |
+| `FrostPage` | `web_poet.HttpResponse` | scans `.body` bytes with the response's resolved `.encoding` |
+| `FrostBrowserPage` | `web_poet.BrowserResponse` | scans `.html`, encoded UTF-8 |
+| `FrostFields` | anything — override `frostwork_input()` | a `web_poet.ItemPage`: brings `to_item()` / `Returns[...]`, and is injectable |
+
+A `BrowserResponse` already contains decoded HTML, so Frostwork does not sniff a charset from it. Any
+remaining `<meta charset>` is ignored.
+
+For any other dependency, override the hook:
+
+```python
+@attrs.define
+class MyPage(FrostFields):
+    blob: bytes
+    def frostwork_input(self):
+        return self.blob, None          # None -> the engine sniffs (BOM, then a <meta> prescan)
+    title = field("h1::text")
+```
+
+Declaring a Frostwork `field()` on a class without a Frostwork page base raises at class definition. This
+prevents an unconverted marker from becoming a silently absent item field.
+
+`web_poet.SelectorExtractor` is not supported: its input is already a parsed tree, so serializing and
+re-scanning it would add work and could change the source. Query that `Selector` directly.
+
+### Field processors — `Processors` / `out=` / `.as_node()`
+
+web-poet finds processors by field name in a nested `Processors` class; an explicit `out=` takes priority.
+A processor normally receives the field value: a string, a list, or the raw HTML source of a bare element.
+
+```python
+name = field("h1::text", out=[str.title])                   # processor receives a string
+raw = field(".desc", out=[lambda v: v.strip()]).as_value()  # processor receives HTML source
+```
+
+On a processor-bearing bare-element field, state the input explicitly. `.as_value()` passes source;
+`.as_node()` reparses the matched element as a Parsel node. The latter is required by most
+zyte-common-items field processors:
+
+<!-- doc-test: zyte-product-page -->
+```python
+from zyte_common_items.pages import ProductPage       # its Processors are inherited, not declared here
+from frostwork.webpoet import FrostPage, field
+
+class MyProductPage(FrostPage, ProductPage):
+    name = field("h1::text")
+    breadcrumbs = field(".crumbs").as_node()
+    descriptionHtml = field(".desc").as_node()
+    aggregateRating = field(".rating").as_node()
+    images = field("img.hero::attr(src)", all=True)  # images_processor expects URL strings
+```
+
+Frostwork refuses ambiguous or impossible declarations at class definition. It also refuses a match whose
+resolved tag is context-dependent:
+
+| refused | why it cannot be guessed |
+| --- | --- |
+| a processor on a bare-element field with neither `.as_node()` nor `.as_value()` | processor signatures do not reveal which representation they expect |
+| `.as_node()` on a `::text` / `::attr()` field | there is no element to re-parse |
+| `.as_node()` with `join=` | a joined string is not one element |
+| `.as_node()` with `.map()` / `.re_first()` | the transform could change the source before it is reparsed; transform the processor output instead |
+| `.as_node()` on an unconstrained selector such as `field("*")` | a synthesized document frame has no start tag in the source, so an unpinned match can be ambiguous |
+| an `.as_node()` match whose tag is `frameset` | the same source builds a different subtree at document root and inside a body; the captured source has lost that context |
+
+Name or constrain an ambiguous selector, for example `field("body")` or `field("[id=main]")`. To decline an
+inherited processor, pass `out=[]`; the field then returns its ordinary value.
+
+`.as_node()` returns a standalone subtree: the matched tag, attributes and descendants, without ancestors,
+siblings or `base_url`. The compiler supplies a pinned tag when possible and otherwise proves that reading
+the tag from each match's source is safe. Selectors whose original context cannot be reconstructed must fail
+closed. Processors needing document context should accept `page` and read it there.
+
+Reparsing happens once per match. It is inexpensive for the common scalar case but can lose to Parsel on a
+many-match field; see [BENCHMARKS.md](BENCHMARKS.md#performance-boundaries).
+
+`Many`/`One` subfields support `.map()`, not web-poet field keywords: web-poet sees the group as the field,
+not each row column. Use a hand-written `@web_poet.field` to process a whole group.
 
 ## 4. Auditing a schema — `check` / strict validation
 
-Frostwork has **no fallback**. The underlying engine can represent an unsupported selector as an empty
-column, but the public Python APIs fail fast by default because that result looks exactly like a field
-that is legitimately empty (or a page whose layout changed). Pass `strict=False` explicitly to request
-permissive empty columns. `frostwork.check` audits a schema **without parsing any HTML** — it reports
-which selectors the engine supports, an advisory reason for those it does not, and the budget usage.
-The supported/unsupported *decision* is authoritative (it is the real compiler); each `reason` is
-best-effort.
+Frostwork has no fallback, so the Python APIs reject unsupported selectors by default.
+`frostwork.check` validates a schema without parsing HTML and reports selector support and budget use.
+The verdict comes from the compiler; explanations are advisory.
 
 ```python
 import frostwork
@@ -212,153 +302,88 @@ report = frostwork.check(
     ["h1::text", "div:has(.a .b)::text", "//a[position()<2]/@href"],
     [("offers", ".offer", {"price": ".//span/text()", "kid": "./h3/text()"})],
 )
-report.ok            # False — some selectors are unsupported
-report.over_budget   # False — within the 128-member / 64-sibling-bit limits
+report.ok            # False
+report.over_budget   # False
 for f in report.unsupported:
     print(f.name, "->", f.reason)
-# [1]  -> a chained selector inside :has() is unsupported
-# [2]  -> positional predicate (`[position()<n]`, ...) ... a sole `[N]`/`[last()]` is supported
-# kid  -> relative child anchor (`./x`) ... use the descendant form `.//x` instead
-report.raise_for_status()   # raises frostwork.UnsupportedSelector unless ok
+report.raise_for_status()   # raises UnsupportedSelector unless report.ok
 ```
 
-### Schema shapes `check` accepts
+### Accepted schema shapes
 
-`queries` is one of — a **`{name: selector}` mapping**, an iterable of bare selectors (labelled `[0]`,
-`[1]`, … by position), or an iterable of `(name, selector)` pairs. `groups` is one of — a
-**`{name: (container, subfields)}` mapping**, `(name, container, subfields)` triples, or the bare
-`(container, subfields)` shape `extract_grouped` takes (auto-named `group[0]`, …); `subfields` is
-`{subname: selector}` or `[(subname, selector), …]` in every case. Anything else raises `TypeError`
-naming these shapes.
+`queries` accepts a `{name: selector}` mapping, bare selectors, or `(name, selector)` pairs. `groups`
+accepts a `{name: (container, subfields)}` mapping, `(name, container, subfields)` triples, or the bare
+`(container, subfields)` form used by `extract_grouped`. Subfields may be a mapping or name-selector
+pairs. Invalid shapes raise `TypeError`.
 
-The two mapping shapes are exactly what `FrostPage.frost_schema()` returns, so an exported schema can
-be audited as-is:
+`FrostPage.frost_schema()` returns the mapping form, ready to audit:
 
 ```python
 schema = ProductPage.frost_schema()
 frostwork.check(schema["fields"], schema["groups"]).raise_for_status()
 ```
 
-A mapping is **destructured, never iterated** — iterating `{"title": "h1::text"}` would audit the
-field *name* `title`, which is a valid type selector, so every field would report supported and
-`report.ok` would be `True`: a green report on a schema that was never looked at. For the same reason
-`extract`/`extract_grouped` **reject** a mapping for `queries` with a `TypeError` instead of
-extracting the names (their columns are positional — pass `list(schema.values())`, or use `Page` for a
-named schema).
-
 The primitive and both page-object layers validate by default:
 
 ```python
-# frostwork.Page  (a reverse position IS supported — attached, subtree, or a descendant value; a CHILD
-# step into that value tail is not, so `bad` below is the unsupported one)
 page = Page().field("title", "h1::text").field("bad", "li:last-child > b::text")
 page.check()                      # -> SchemaReport
 page.extract(html)                # raises UnsupportedSelector before scanning
 page.extract(html, strict=False)  # permissive: `bad` is empty
 
-# frostwork.webpoet.FrostPage — validate at class-definition (import) time:
-class ProductPage(FrostPage):     # raises here if any selector is unsupported
+# FrostPage validates at class-definition time:
+class ProductPage(FrostPage):
     name  = field("h1::text")
     price = field(".price::text")
 
 ProductPage.check_schema()        # -> SchemaReport (own + inherited fields and groups)
 ```
 
-Use `Page(strict=False)`, `extract(..., strict=False)`, or
-`class ProductPage(FrostPage, strict=False)` only when permissive empty results are intentional. A
-`frostwork-audit` step can still provide a consolidated report in CI, including for permissive page
-objects.
+Use `strict=False` only when an empty column is intentional. `over_budget` means the schema exceeds the
+engine limits and should be split; extraction raises `ValueError` for it.
 
-`over_budget` (too many selectors) is a distinct problem from an unsupported selector — it is a caller
-bug (split the schema), whereas unsupported is a coverage gap. `extract` still raises `ValueError` for
-an over-budget schema at run time; `check` surfaces it as a report flag up front.
+### CLI audit
 
-For CI, the `frostwork-audit` CLI runs the same static audit over a whole module of page objects
-(discovering `Page` instances and `FrostPage` subclasses) and exits non-zero if any schema has an
-unsupported selector or is over budget — no HTML required:
+`frostwork-audit` discovers `Page` instances and concrete `FrostFields` subclasses, including
+`FrostPage` and `FrostBrowserPage` subclasses, and exits non-zero for unsupported or over-budget schemas:
 
-```console
-$ frostwork-audit myproject/pages.py          # or: python -m frostwork.audit myproject/pages.py
-PROBLEMS  ProductPage  (members 2/128, sib-bits 0/64)
-    ✗ blurb = "div:contains('x')::text"
-        :contains() is unsupported (Frostwork does not match on text content)
-OK        CleanPage  (members 2/128, sib-bits 0/64)
-
-1/2 schema(s) OK, 1 with problems           # exit status 1
+```bash
+frostwork-audit myproject/pages.py
+python -m frostwork.audit myproject.pages
 ```
 
-Add `-v` to also list the supported selectors, or `--json` to emit the full report (per-schema fields,
-groups, budget, and a top-level `ok`/`summary`) as machine-readable JSON for CI annotations — the exit
-status is unchanged (`0` OK, `1` problems, `2` usage error).
-
-`frostwork-audit` discovers schemas by **importing** the target (a `.py` path or a dotted module
-name), so the module's top-level code runs. Point it at import-safe page-object modules — ones whose
-import does not open network/service clients, read required env, or otherwise reach out. If a project
-mixes schemas with heavy import-time setup, keep the page objects in a module that only defines them
-and audit that one. You can also expose an explicit mapping/iterable and audit only it with
-`frostwork-audit myproject.pages:SCHEMAS` (or `pages.py:SCHEMAS`).
+Use `-v` for supported selectors and `--json` for CI output. The command imports its target, so audit an
+import-safe module. To limit discovery, expose a collection and pass `myproject.pages:SCHEMAS`.
 
 ### Auditing code that has no schema yet — `--scan`
 
-The schema audit needs a `Page`/`FrostPage` object, so it cannot see selectors that live in plain
-spider code: inline `response.css(...)`/`.xpath(...)` in a callback, `ItemLoader.add_css`/`add_xpath`,
-`LinkExtractor(restrict_css=...)`. Those would have to be rewritten *before* they could be audited,
-which is backwards — the audit is what tells you whether a rewrite is needed. `--scan` answers the same
-question a step earlier: it parses the source with `ast` (**never imports it**, so import-time setup
-can't fire) and classifies every selector *literal*, with `file:line` for each site:
+`--scan` inspects selector literals in existing Scrapy code without importing it. It recognizes common
+`response.css` / `response.xpath`, `ItemLoader`, and `LinkExtractor` call sites:
 
-```console
-$ frostwork-audit --scan myproject/spiders/            # a file, a directory, or several of each
-    ✗ spiders/shop.py:9 [LinkExtractor] "li:contains('next') a"
-        :contains() is unsupported (Frostwork does not match on text content)
-    ✗ spiders/shop.py:15 [xpath] 'td/text()'
-        relative XPath step — a per-container loop's selector. Port the loop to a Many/One group
-        (container + `.//`-anchored sub-fields); see docs/MIGRATION.md
-    ? spiders/shop.py:18 [css] not a literal (f-string/variable) — cannot audit statically
-
-5/7 literal selector(s) supported (71%), 2 unsupported, 1 skipped (not literals)   # exit status 1
+```bash
+frostwork-audit --scan myproject/spiders/
 ```
 
-A selector built at run time (f-string, concatenation, variable) cannot be decided statically, so it is
-reported as **skipped** rather than quietly dropped — as is any file this interpreter cannot parse
-(which also makes the exit status non-zero, since the scan is then incomplete). `-v` lists the supported
-sites too and `--json` emits the whole report (per-site `file`/`line`/`call`/`selector`/`supported`, plus
-a `summary` with the coverage ratio). This is a *migration sizing* tool, not a replacement for the
-schema audit: it sees call sites, not schemas, so it cannot check the member/sibling budget or the
-container↔sub-field relationship. Use both — `--scan` on un-ported code, the schema audit on page
-objects.
+Dynamic selectors are reported as skipped. Parse failures are reported as errors and make the scan fail.
+The scan helps size a migration, but cannot validate schema budgets or group relationships; run the schema
+audit after conversion.
 
 ### Dead selector or coverage gap? — `Item.empty_fields`
 
-Without a fallback, an empty column under `strict=False` has two possible causes: the engine does not
-support that selector, or the selector no longer matches the page. They *are* distinguishable, because
-support is **static** — audit once, then treat emptiness as a page signal:
+Audit support once, then use `empty_fields()` to detect selectors that matched nothing:
 
 ```python
 report = page.check()                    # startup / CI: any unsupported selector is a coverage gap
 item = page.extract(html)                # per response
-for name in item.empty_fields():         # supported + empty  =>  the page changed
+for name in item.empty_fields():
     log.warning("selector matched nothing: %s", name)
 ```
 
-`empty_fields()` returns every declared field that matched nothing (a `many`/`one` group with no rows
-counts; a field that matched an empty string does not — it matched). Under the default `strict=True` the
-unsupported case cannot reach extraction at all, so every name it returns is a dead selector.
+An empty string counts as a match. An empty `many`/`one` group counts as empty. With the default
+`strict=True`, every returned name is a supported selector that matched nothing.
 
-## Design notes
+## Further reading
 
-- **One implementation, one gate.** Python never re-implements matching; it calls the Rust `extract`.
-  Correctness parity with lxml is whatever the Rust differential proves (`tools/diff_lxml.py`).
-- **Compile once, extract many.** A `Page`/`FrostPage` schema is compiled to a native `Plan` a single
-  time — `FrostPage` at class-creation, `Page` lazily on first `extract` (rebuilt only if you add a
-  field) — and reused for every response, so the per-page selector recompile is gone. This is
-  transparent (no API change) and matches the usage model: a page object is defined once, run over many
-  pages. It matters most on small pages, where the recompile otherwise dominates (~3× on a 244-byte
-  page with 8 selectors). An over-budget schema now raises when the plan is built (fail fast) rather
-  than per page.
-- **Why not a drop-in `.css()`/`.xpath()` selector?** A per-call selector would re-scan the page for
-  every field — N scans instead of 1 — discarding Frostwork's whole advantage. `FrostPage` batches
-  instead, which is why fields are *declared* rather than pulled ad-hoc inside methods.
-- **Tests:** `tests/test_python.py` (`.venv/bin/python -m pytest tests/test_python.py`) covers the
-  primitive, `Page`/`Item`, the web-poet wiring (incl. a monkeypatched assertion that a multi-field
-  page object triggers exactly **one** `extract` call), and a parsel cross-check.
+- [Compatibility](COMPATIBILITY.md) — supported selectors and known differences.
+- [Testing](TESTING.md) — correctness gates and release checks.
+- [Benchmarks](BENCHMARKS.md) — measured performance and boundaries.

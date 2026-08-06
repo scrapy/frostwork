@@ -45,7 +45,7 @@ import json
 import os
 import sys
 from collections.abc import Mapping
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from .page import Page, SchemaReport
 
@@ -83,11 +83,13 @@ def _load_module(target: str):
 def _discover(module, registry=None) -> List[Tuple[str, SchemaReport]]:
     """Find page-object schemas in ``module`` and audit each. Returns ``[(label, report), ...]`` in
     definition order, de-duplicated by identity (a class imported under two names is audited once)."""
-    # FrostPage is optional (needs web-poet); tolerate its absence.
+    # FrostPage is optional (needs web-poet); tolerate its absence. Bound to a separate name so the
+    # missing case is an `Optional[type]` value rather than a rebinding of the class itself.
+    frost_page: Optional[type]
     try:
-        from .webpoet import FrostPage
+        from .webpoet import FrostFields as frost_page
     except Exception:  # pragma: no cover - only when web-poet is missing
-        FrostPage = None
+        frost_page = None
 
     out: List[Tuple[str, SchemaReport]] = []
     seen = set()
@@ -112,10 +114,12 @@ def _discover(module, registry=None) -> List[Tuple[str, SchemaReport]]:
             seen.add(key)
             out.append((name, obj.check()))
         elif (
-            FrostPage is not None
+            frost_page is not None
             and inspect.isclass(obj)
-            and issubclass(obj, FrostPage)
-            and obj is not FrostPage
+            and issubclass(obj, frost_page)
+            # `FrostFields` is the machinery base, so this also finds `FrostBrowserPage` subclasses and
+            # custom `frostwork_input()` page objects; the bases themselves are not schemas to audit.
+            and obj.__name__ not in ("FrostFields", "FrostPage", "FrostBrowserPage")
             # Namespace discovery skips imported bases/re-exports; an explicit registry may intentionally
             # contain classes from another module.
             and (registry is not None or getattr(obj, "__module__", None) == getattr(module, "__name__", None))
@@ -123,7 +127,10 @@ def _discover(module, registry=None) -> List[Tuple[str, SchemaReport]]:
             if key in seen:
                 continue
             seen.add(key)
-            out.append((name, obj.check_schema()))
+            # `frost_page` is `Optional[type]` (web-poet is an optional import), so `issubclass` narrows
+            # `obj` only to `type[object]` and the checker cannot see `check_schema` on it. The runtime
+            # guarantee is the `issubclass` above.
+            out.append((name, obj.check_schema()))  # type: ignore[attr-defined]
     return out
 
 

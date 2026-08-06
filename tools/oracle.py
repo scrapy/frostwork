@@ -22,7 +22,30 @@ import sys
 # The libxml2 the engine is written against; see docs/TESTING.md ("what the oracle must be").
 MIN_LIBXML2 = (2, 14)
 
+# cssselect is the SELECTOR-ACCEPTANCE oracle, and 1.5.0 is the release that fixed its `:is()`/`:where()`
+# mis-translation (it ORed a combined compound's base condition with the alternatives; see
+# docs/COMPATIBILITY.md). Two things now assume the fix: `sel_fuzz`'s non-bare `:is()` forms, and
+# `tests/test_python.py::test_is_where_matches_correct_and_semantics`. On an older cssselect both grade
+# Frostwork's standards-correct answer as a divergence, so the floor is checked rather than hoped for.
+# Unlike libxml2 there is no escape hatch: cssselect is pure Python and a pin away, not vendored in a wheel.
+MIN_CSSSELECT = (1, 5, 0)
+
 _ENV_OVERRIDE = "FROSTWORK_ALLOW_OLD_LIBXML2"
+
+
+def _parse_version(text: str) -> tuple:
+    """`"1.5.0"` -> `(1, 5, 0)`, ignoring any non-numeric suffix (`"1.5.0b1"` -> `(1, 5)`)."""
+    out = []
+    for part in text.split("."):
+        digits = ""
+        for ch in part:
+            if not ch.isdigit():
+                break
+            digits += ch
+        if not digits:
+            break
+        out.append(int(digits))
+    return tuple(out)
 
 
 def versions() -> dict:
@@ -59,7 +82,9 @@ def add_argument(ap) -> None:
 
 
 def require(allow_old: bool = False) -> None:
-    """Exit(2) unless the vendored libxml2 is >= :data:`MIN_LIBXML2`. Prints the reason."""
+    """Exit(2) unless the oracle toolchain is new enough: the vendored libxml2 >= :data:`MIN_LIBXML2`
+    (overridable — it is baked into a wheel) and cssselect >= :data:`MIN_CSSSELECT` (not overridable)."""
+    _require_cssselect()
     got = versions()["libxml2"][: len(MIN_LIBXML2)]
     if got >= MIN_LIBXML2:
         return
@@ -78,4 +103,24 @@ def require(allow_old: bool = False) -> None:
         print(f"WARNING: {msg}\n", file=sys.stderr)
         return
     print(f"oracle-check: {msg}", file=sys.stderr)
+    sys.exit(2)
+
+
+def _require_cssselect() -> None:
+    """Exit(2) unless cssselect is >= :data:`MIN_CSSSELECT`. Prints the reason."""
+    raw = versions()["cssselect"]
+    got = _parse_version(raw)
+    if got >= MIN_CSSSELECT:
+        return
+    want = ".".join(map(str, MIN_CSSSELECT))
+    print(
+        f"oracle-check: cssselect is {raw}, but the selector-acceptance oracle must be >= {want}.\n"
+        f"{banner()}\n"
+        f"  cssselect <= 1.4.0 mis-translates a combined `:is()`/`:where()` (it ORs the base compound's\n"
+        "  condition with the alternatives instead of ANDing), so it would grade Frostwork's\n"
+        "  standards-correct node set as a divergence. See docs/COMPATIBILITY.md, ':is()/:where()\n"
+        f"  combined with other conditions'. Fix: pip install 'cssselect>={want}' (it is pinned in\n"
+        "  requirements-test.txt).",
+        file=sys.stderr,
+    )
     sys.exit(2)

@@ -6,12 +6,14 @@ query falls into one of three buckets:
 
 | bucket | meaning |
 |---|---|
-| ✅ **supported** | runs on the streaming engine and is **byte-identical to lxml** (non-whitespace), validated by the differential gate |
-| ≈ **divergent** | runs, but may differ from lxml on specific constructs — **documented and bounded** (0% on conformant/foreign input; on deliberately malformed input, confined to the SKIP set below) |
+| ✅ **supported** | runs on the streaming engine with the matching, ordering and value semantics stated in its row |
+| ≈ **divergent** | runs, but may differ from lxml on specific documented and bounded constructs |
 | ∅ **unsupported** | the engine produces an **empty result**; public Python APIs raise by default and expose this behavior with `strict=False` |
 
-The promise is *close to lxml, always one streaming pass, never a DOM*. The correctness bar is
-**non-whitespace value parity with lxml (libxml2 2.14)** on the supported set — not the HTML5 spec.
+The promise is *close to lxml, always one streaming pass, never a DOM*. Unless a row marks an exception,
+the correctness bar is non-whitespace value parity with lxml (libxml2 2.14), not the HTML5 spec. A ✅ row
+that can return a bare element covers selector matching and ordering; that value still inherits the
+documented raw-source outer-HTML exception.
 
 For a quick, always-current headline of what runs, see the generated
 [selector support snapshot](SUPPORT_SNAPSHOT.md) (regenerate with
@@ -41,7 +43,7 @@ level, public Python APIs validate schemas and raise `UnsupportedSelector` by de
 | `::text` — self (`E::text`) and descendant-or-self (`E ::text`) | ✅ supported (per text node, whitespace kept, entities decoded) |
 | `::attr(name)` — self and descendant-or-self (`E ::attr(x)`) | ✅ supported (entity-decoded) |
 | bare element → outer HTML (`div`, `.card`) | ≈ divergent — **raw source**, not lxml's reflow (see below) |
-| comma list, same terminal (`h1::text, h2::text` · `.a::attr(href), .b::attr(href)` · `h1, h2`) | ✅ supported (document-order union, per-column de-dup) |
+| comma list, same terminal (`h1::text, h2::text` · `.a::attr(href), .b::attr(href)` · `h1, h2`) | ✅ supported (document-order union, per-column de-dup; bare-element members retain the raw-source exception) |
 | comma list, **mixed** value terminals (`a::text, a::attr(href)` · `img::attr(src), img::attr(data-src)`) | ✅ supported (document-order union: `::attr` at element-open in source order, `::text` at text nodes; de-dup by node) |
 | comma list, bare-element (outer HTML) mixed with a value terminal (`b, b::text`) | ∅ unsupported (empty) — deferred captures can't interleave with streamed values in document order |
 | forward position — `:first-child`, `:nth-child(An+B)`, `:first-of-type`, `:nth-of-type(An+B)` (incl. `odd`/`even`, `-n+3`); composes inside `:not()` | ✅ supported (`:nth-child` counts element siblings; `:nth-of-type` needs a concrete tag) |
@@ -51,7 +53,7 @@ level, public Python APIs validate schemas and raise `UnsupportedSelector` by de
 | `:has()` on a PRECEDING-SIBLING compound — `C:has(..) ~ S` / `C:has(..) + S` (value from the later sibling `S`) | ✅ supported — same mechanism as the sibling text-predicate: `C`'s `:has` fires the sibling boundary at `C`'s close, `S` emits normally (single sibling combinator) |
 | `:has()` in any OTHER shape — an inner with a **chain/sibling** (`:has(.a .b)`, `:has(a + b)`) or a positional/reverse/`:has`/`:is` inside, multiple `:has`, a **child** step into the value tail (`div:has(a) > p::text`), or a `Many`/`One`/comma member | ∅ unsupported (empty) |
 | a QUOTED delimiter inside a functional pseudo's argument — `div:is(#a, [data-x=")"])`, `:not([title='a(b'])`, `:has([data-x="a, b"])`, `:is([class="a,b"])`, and the escaped forms (`[data-x="\)"]`) | ✅ supported — argument boundaries are quote- and escape-aware, so a `)` or `,` inside a value is data. Genuinely unterminated syntax (`:is(#a, [data-x=")"]::attr(id)`) stays ∅ unsupported (empty), matching cssselect's rejection |
-| `:is(...)` / `:where(...)` — a comma-list of compound alternatives (`:is(h1, h2, h3)`, `div:is(.a, .b)`, `a:is([href], [src])`), including combined with other conditions (`div.card:is(.a, .b)`) or chained (`x:is(a, b):is(c, d)`) | ✅ supported — element matches iff it matches ≥1 alternative in EVERY group (OR within a group, AND across groups). `:is`/`:where` are identical (specificity is irrelevant to matching). **≈ divergent** for combined/chained forms — see below |
+| `:is(...)` / `:where(...)` — a comma-list of compound alternatives (`:is(h1, h2, h3)`, `div:is(.a, .b)`, `a:is([href], [src])`), including combined with other conditions (`div.card:is(.a, .b)`) or chained (`x:is(a, b):is(c, d)`) | ✅ supported — element matches iff it matches ≥1 alternative in EVERY group (OR within a group, AND across groups). `:is`/`:where` are identical (specificity is irrelevant to matching). Agrees with cssselect ≥ 1.5.0; **≈ divergent** for combined/chained forms against cssselect ≤ 1.4.0 — see below |
 | `:is(...)` with a combinator inside an alternative (`:is(.a .b)`, `:is(a + b)`), a positional/reverse/`:has` inside an alternative (`:is(:first-child)`), or a nested `:is` | ∅ unsupported (empty) — cssselect itself rejects the combinator forms |
 | `:contains()`, `::first-line`, other pseudos | ∅ unsupported (empty) |
 | `:not()` with a combinator argument (`:not(a b)`), namespaces (`ns\|tag`), `[a=b i]` case flag (cssselect rejects it) | ∅ unsupported (empty) |
@@ -66,7 +68,7 @@ level, public Python APIs validate schemas and raise `UnsupportedSelector` by de
 | `//`→descendant, `/`→child steps; `*` and tag node tests | ✅ supported |
 | predicates `[@a]`, `[@a="v"]`, `[contains(@a,"v")]`, `[starts-with(@a,"v")]`, `[… and …]`, `[… or …]` | ✅ supported (a predicate `or` is distributed into union members). The compared value must be a **quoted string literal** |
 | comparison against a NON-literal operand — a variable reference (`[@id=$pid]`), a number (`[@a=2]`), or a bare name (`[@a=b]`) | ∅ unsupported (empty) — Frostwork's API takes no variable bindings (unlike `sel.xpath(q, pid=…)`), and XPath gives `[@a=2]` numeric semantics (`a="02"` matches) and `[@a=b]` node-set semantics (compare against child `<b>` elements), none of which is a byte compare. Quote the value if a literal is meant. A `$` **inside** a literal (`[contains(@id,"$p")]`) is just data |
-| terminals `text()` (self), `//text()` (descendant), `/@attr`, `//@attr` (descendant-or-self), bare element → node | ✅ supported |
+| terminals `text()` (self), `//text()` (descendant), `/@attr`, `//@attr` (descendant-or-self), bare element → node | ✅ supported (bare elements retain the raw-source exception) |
 | unions (`a \| b`) | ✅ supported — one document-ordered, node-deduped column (same as a CSS comma group) |
 | `normalize-space(path)` as the whole query | ✅ supported — a **scalar**: the string-value of the FIRST matched node (element → concat of its subtree text; `/text()` → first text node; `/@a` → attr), whitespace-collapsed. Always exactly one value (`""` if nothing matched). `normalize-space()` / `normalize-space(.)` (context node) and `normalize-space` inside a predicate are ∅ unsupported. |
 | positional predicate `[N]` (constant, sole predicate) — `//li[2]` (of-type), `//ul/*[3]` (nth child) | ✅ supported (per parent, matching lxml) |
@@ -90,9 +92,9 @@ semantics and performance to its CSS equivalent.
 
 | feature | status |
 |---|---|
-| `Many`/`One`: per-container sub-fields, one streaming pass | ✅ supported — byte-identical to Parsel's `for c in doc.css(container): {sub: c.css(sub)...}` (descendant-or-self scope), gated |
+| `Many`/`One`: per-container sub-fields, one streaming pass | ✅ supported — scoping, row order and cardinality match Parsel's per-container loop; bare-element values retain the raw-source exception |
 | container = any immediate (open-time) supported CSS/XPath selector; nested & empty containers | ✅ supported (a nested same-class container yields its own row; a value falls into every enclosing container's row, matching Parsel) |
-| sub-field terminals: `::text`, `::attr(x)`, bare element (outer HTML) | ✅ supported (same value semantics as flat) |
+| sub-field terminals: `::text`, `::attr(x)`, bare element (outer HTML) | ✅ supported (same value semantics and raw-source exception as flat fields) |
 | sub-field with descendant/child combinators (`h3 a::text`, `.p > span::text`) | ✅ supported |
 | sub-field scope axis: CSS is descendant-or-**self** (may match the container); XPath `.//` is strict **descendant** (excludes it) | ✅ supported — matches Parsel's `c.css(sub)` vs `c.xpath('.//…')` |
 | sibling `+`/`~` **inside** a sub-field | ∅ unsupported (empty column) |
@@ -191,27 +193,17 @@ DOM, no full tree construction). These rules were derived empirically against li
   has still omitted its `<html>`, and gets one. (Without that the head sat at the root with no parent and
   a second `<html>` was built for whatever followed `</head>`, so `html > head`, `html > body` and
   `head + script` were empty while the values under them looked right.)
-- **What ends the head does not always START a body.** The usual case does — that is the rule above —
-  but `<frameset>`, `<frame>` and `<noframes>` open neither part (a frameset document has no `<body>` at
-  all), and a `<frameset>` written INSIDE the `<head>` ends the head like any other non-head content. It
-  then belongs to `<html>`, not to an invented body: a real frameset page put its whole frameset, and
-  the `<body>` written after it, somewhere libxml2 never does. Which part a name opens is
-  `implied_close::frame_content`, derived from the oracle; only the head-pop path was not asking it.
-- **Character data ends an open `<head>` even when it cannot start a body.** The usual case moves the
-  text and everything after it into the body it opens; when a body already exists — only reachable by
-  writing a `<head>` after `</body>` — libxml2 still pops the head and leaves the text at `<html>` level.
+- **What ends an open `<head>` usually starts an implied `<body>`.** The first non-head element or
+  non-whitespace character ends the head; normally it and everything after it become body content, and a
+  later explicit `<body>` is redundant. Leading whitespace stays in the head. `<frameset>`, `<frame>` and
+  `<noframes>` are the exception: they open no body, and a frameset document has none. If a body is already
+  open — reachable by writing a new `<head>` after `</body>` — the head still closes but its content remains
+  at `<html>` level. The behavior is derived from the oracle over the full element universe because the
+  names that end an open head are not the same as those that open a body after an explicit `</head>`.
 - **A `<!DOCTYPE …>` does not break a text node**, and is the only declaration form that does not:
   `<div>a<!doctype html>b</div>` is the single node `ab`, while `<!foo>`, `<![CDATA[…]]>`, `<?x?>` and
   `<!>` all split the run in both engines. libxml2 matches the seven-letter prefix case-insensitively
   and does not require the name to be terminated, so `<!doctypex>` is one and `<!doctyp>` is not.
-- **Whatever ENDS the head STARTS the body.** The first thing inside `<head>` that does not belong there
-  — a `<div>`, an `<a>`, a non-whitespace character — ends the head *and opens an implied `<body>`*, so
-  it and everything after it (including any remaining `<meta>`/`<link>`/`<title>`) are body children, and
-  a later explicit `<body>` is redundant. Character data splits at the first non-space byte: the leading
-  whitespace is still the head's. Derived from the oracle over the whole element universe (`implied
-  <body>` in `tools/audit_tree_rules.py`) rather than a list of names, because the elements that *end*
-  the head are not the same set as the ones that would *open* a body after an explicit `</head>` —
-  `input`, `noscript`, `template`, `basefont`, `bgsound` and `object` are in one and not the other.
 - **An end tag cannot unwind anything that OUT-RANKS it** ("end-tag scope"). libxml2 gives each element
   name an *end priority* and discards a misplaced end tag while something higher-priority is still open
   above its match. The order is
@@ -395,7 +387,7 @@ next bug will be:
   document has no `<body>` at all — matched, but a rare enough shape that it is called out rather than
   assumed. Everything else about the frame is now built (see the synthesis entry in the supported list).
 
-- **`:has()` with an id/attribute/`:not` inner — a divergence *in our favor*.** cssselect 1.4.0 only
+- **`:has()` with an id/attribute/`:not` inner — a divergence *in our favor*.** cssselect only
   accepts a type/`*`+classes inner inside `:has()` and *raises* `SelectorSyntaxError` on `:has([data-x])`,
   `:has(#id)`, `:has(a[href])`, `:has(:not(.x))` (part of its broader `:has()` limitations —
   cf. [scrapy/cssselect#138](https://github.com/scrapy/cssselect/issues/138), which notes `:has(a, b)`
@@ -403,20 +395,28 @@ next bug will be:
   simply *more capable* than raw parsel here — no wrong values, just coverage parsel refuses. Bare
   type/`*`+class inners agree with parsel exactly. Oracled by
   `tests/test_python.py::test_has_widened_inners_match_correct_semantics` (a parsel/lxml ancestor walk,
-  since parsel can't evaluate these directly).
-- **`:is()`/`:where()` combined with other conditions — a divergence *in our favor*.** cssselect 1.4.0
-  mis-translates a `:is()` whose compound carries any other condition: its `xpath_matching` ORs each
-  alternative's condition onto the *base* compound's condition, so `div.a:is(.x, .c)` becomes
-  `div[a or x or c]` (matches every `div.a`, `div.x`, or `div.c`) instead of `div[a and (x or c)]`, and
-  chained `:is` ORs all groups together. Frostwork implements the **correct** CSS semantics (AND across
-  groups, OR within), so it intentionally differs from parsel on these forms — returning the standards-
-  compliant node set, a strict subset of parsel's over-match. Bare `[tag|*]:is(...)` (the only shape
-  cssselect gets right) agrees exactly. Upstream: the `:is`/`:where` handling is tracked as
-  not-spec-compliant in [scrapy/cssselect#135](https://github.com/scrapy/cssselect/issues/135) and
-  [#108](https://github.com/scrapy/cssselect/issues/108); the over-match is in `xpath_matching`
-  (`add_condition(..., "or")` folding alternatives into the base). Verified by
-  `tests/test_python.py::test_is_where_correct_and_semantics_diverges_from_cssselect_bug`, which oracles
-  against the equivalent comma-expansion (which cssselect translates correctly).
+  since parsel can't evaluate these directly). Unlike the `:is()` entry below, this one is still OPEN at
+  the pinned cssselect 1.5.0 — the two were checked together when that pin moved, and only `:is()` closed.
+- **`:is()`/`:where()` combined with other conditions — a divergence that UPSTREAM HAS SINCE CLOSED, and
+  the clearest evidence for the oracle-bug policy.** cssselect **≤ 1.4.0** mis-translates a `:is()` whose
+  compound carries any other condition: its `xpath_matching` ORs each alternative's condition onto the
+  *base* compound's condition, so `div.a:is(.x, .c)` becomes `div[a or x or c]` (matches every `div.a`,
+  `div.x`, or `div.c`) instead of `div[a and (x or c)]`, and chained `:is` ORs all groups together.
+  Frostwork implemented the **correct** CSS semantics (AND across groups, OR within) rather than capping
+  itself at the buggy oracle — and **cssselect 1.5.0 now produces exactly that**, so on the pinned
+  toolchain there is no divergence left to document: `div.a:is(.x, .c)` translates to
+  `div[a and (x or c)]` and parsel agrees with Frostwork on every form (`:is` and `:where`, combined,
+  chained, `[href]`-based and `:not`-based) that
+  `tests/test_python.py::test_is_where_matches_correct_and_semantics` checks.
+  It is kept in this list because the version is the user's, not ours: Frostwork does not depend on
+  cssselect, so a scraper comparing against a parsel that still carries **≤ 1.4.0** will see Frostwork
+  return the standards-compliant node set — a strict subset of that parsel's over-match. Upstream history:
+  [scrapy/cssselect#135](https://github.com/scrapy/cssselect/issues/135),
+  [#108](https://github.com/scrapy/cssselect/issues/108); the old over-match was in `xpath_matching`
+  (`add_condition(..., "or")` folding alternatives into the base). The test oracles against the
+  equivalent comma-expansion — which BOTH cssselect versions translate correctly — so it stays valid
+  whichever side of 1.5.0 the installed cssselect is on, and it asserts the direct evaluation agrees so
+  a future upstream regression reopens the divergence loudly instead of passing silently.
 - **Content after `</html>` is KEPT — a divergence *in our favor*, but only partly browser-equivalent.**
   libxml2 stops building the tree at `</html>` and silently discards everything after it, so
   `<html><body>…</body></html><div>late</div>` gives lxml/Parsel an empty column for `div::text` while
@@ -509,6 +509,7 @@ gated in `tools/enc_check.py`.
 | a `<meta charset>` after `<body>` | ignored (its regex has a `\|body` alternative and gives up there) | honoured | browsers do not stop at `<body>`, and real pages carry late declarations |
 | `charset=` inside a `<!-- comment -->` | honoured (no comment handling) | ignored | WHATWG's prescan and every browser skip comments |
 | an unsupported charset label | stops at the first regex hit, so a later valid declaration is lost | **continues** and takes the next valid one | WHATWG: an unsupported label is "failure, continue" |
+| a stray quote in an unquoted charset value (`charset=big5"`) | stops at the quote and honours `big5` | treats the quote as part of the invalid label, then continues | an unquoted HTML attribute ends only at whitespace or `>`; html5lib and browsers agree |
 | UTF-32 BOM | recognized | **not a BOM** | the WHATWG Encoding Standard has no UTF-32. A UTF-32LE document begins `FF FE 00 00`, whose first two bytes *are* the UTF-16LE BOM, so it is read as UTF-16LE — which, with NUL deletion, still yields the BMP text |
 | `<meta charset=utf-16*>` | honoured; the whole document decodes as UTF-16 and Parsel then finds nothing | read as **UTF-8** | the prescan could only READ that declaration by treating the bytes as ASCII-compatible, so the declaration contradicts itself. A real UTF-16 document (BOM, prefix, or an HTTP label) is unaffected |
 | `<meta charset=x-user-defined>` | label not resolved at all → falls back to the default | **windows-1252** | "get an encoding from a meta element", step 5. Taken literally the label maps every high byte into the private use area (`caf\xe9` → `caf\u{f7e9}`) |
@@ -585,13 +586,12 @@ An XML declaration **at** offset 0 *is* honoured, by both, including its precede
 Every ✅ above is held to non-whitespace parity with lxml by the differential harness; every ≈ is
 measured and bucketed, not assumed (full methodology: [TESTING.md](TESTING.md)):
 
-- **Differential gate** (`tools/diff_lxml.py`): **0 DIVERGE / 0 CRASH** across every (page ×
-  selector/group) pairs per seed — conformant CSS/XPath, comma groups, sibling combinators, universal
+- **Differential gate** (`tools/diff_lxml.py`): **0 DIVERGE / 0 CRASH** for every (page ×
+  selector/group) pair per seed — conformant CSS/XPath, comma groups, sibling combinators, universal
   `*` terminals, `<svg>`/`<math>`/`<template>` foreign content, and single-pass `Many`/`One`.
 - **Differential fuzzing**: mutated malformed HTML (`tools/diff_fuzz.py`) and random selectors
-  (`tools/sel_fuzz.py`) vs lxml — no crash, no non-empty-wrong value. Every divergence is attributed to a
-  documented construct; the unattributed **NOVEL** remainder is gated on a rate that ratchets downwards as
-  the causes are fixed (see [TESTING.md](TESTING.md)).
+  (`tools/sel_fuzz.py`) vs lxml. Known divergences are attributed to documented constructs; anything left
+  is **NOVEL** and gated on a rate that ratchets down as causes are fixed (see [TESTING.md](TESTING.md)).
 - **Coverage-guided fuzz** (`cargo-fuzz`, `fuzz/`): arbitrary bytes → no panic / hang / OOB.
 - **Unit**: hand-written vectors incl. tokenizer conformance (`cargo test` prints the count).
 - **Rule audit** (`tools/audit_tree_rules.py --gate`): every tree-construction rule cell against lxml,

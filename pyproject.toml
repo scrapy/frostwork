@@ -27,10 +27,24 @@ classifiers = [
     "Topic :: Internet :: WWW/HTTP :: Indexing/Search",
 ]
 
+# The only runtime requirement, and it is imported only under `TYPE_CHECKING`: `field(...).typed_as(...)`
+# is annotated with PEP 747's `TypeForm`, which no released Python has in `typing`. The package ships
+# `py.typed`, so that annotation has to resolve in the USER's type checker, not just in this repo's —
+# hence a declared dependency rather than a test-only one. 4.13 is the release that added `TypeForm`.
+dependencies = ["typing-extensions>=4.13"]
+
 # The web-poet page-object integration (`frostwork.webpoet`) is optional; the core
 # (`frostwork.extract`, `frostwork.Page`) needs nothing but the compiled extension.
+#
+# The range is the 0.24 release LINE, which is what the gates run against (CI pins 0.24.1 in
+# `requirements-test.txt`). It is closed at 0.25 because web-poet is pre-1.0, so a minor release can move the
+# processor resolution this integration mirrors. To widen it: bump the pin, run `make gate-webpoet` and
+# `make gate-webpoet-mutate`, then raise the ceiling here.
+#
+# NOTE this extra is narrower than Frostwork's own `requires-python = ">=3.9"`: web-poet 0.24 requires
+# Python >= 3.10, so `pip install frostwork[webpoet]` needs 3.10+ even though the core does not.
 [project.optional-dependencies]
-webpoet = ["web-poet>=0.8"]
+webpoet = ["web-poet>=0.24.1,<0.25"]
 
 # Static schema-audit CLI: `frostwork-audit path/to/pageobjects.py` (or `python -m frostwork.audit`).
 [project.scripts]
@@ -41,6 +55,26 @@ Homepage = "https://github.com/shaneaevans/frostwork"
 Repository = "https://github.com/shaneaevans/frostwork"
 Documentation = "https://github.com/shaneaevans/frostwork#readme"
 Issues = "https://github.com/shaneaevans/frostwork/issues"
+
+# The package ships `py.typed`, so its annotations are a promise to every user's type checker.
+# `make py` and CI run `mypy python/frostwork tests/typing_fixture.py`; `tests/test_typing.py` additionally
+# asserts the check can go RED, since a type check that passes regardless of the annotations proves nothing.
+# `webpoet_contract` marks the tests that assert an integration contract, which is what
+# `tools/mutate_webpoet.py` runs as its `unit` detector. A marker rather than a list of test names: the list
+# was a hand-written universe, and three mutations survived a sweep only because tests written in the same
+# commit were not in it.
+[tool.pytest.ini_options]
+markers = ["webpoet_contract: asserts a frostwork.webpoet contract (the mutation sweep's unit detector)"]
+
+[tool.mypy]
+files = ["python/frostwork", "tests/typing_fixture.py"]
+
+# lxml is an OPTIONAL, lazily-imported dependency — reached only when a field processor is attached to a
+# bare-element field (see `frostwork.webpoet._as_node`). It ships no stubs of its own and `lxml-stubs` is
+# incomplete, so requiring it would make an optional dep mandatory for anyone type-checking this package.
+[[tool.mypy.overrides]]
+module = ["lxml.*"]
+ignore_missing_imports = true
 
 [tool.maturin]
 # Mixed Rust/Python project: pure-Python package lives under python/, the compiled core is dropped

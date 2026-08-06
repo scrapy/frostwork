@@ -117,7 +117,7 @@ fn css_reason(qt: &str) -> String {
         ":is()/:where() alternatives must be plain compounds (tag/`*`/class/id/attr/`:not`); a \
          combinator (`:is(a b)`), a positional/reverse/`:has` inside an alternative, or a nested `:is` \
          is unsupported. Combined forms like `div.a:is(.x, .y)` ARE supported (with correct AND \
-         semantics — a documented divergence from cssselect 1.4.0's mis-translation)"
+         semantics, which cssselect also produces from 1.5.0 on; it ORed them up to 1.4.0)"
     } else if lower.contains(":contains(") {
         ":contains() is unsupported (Frostwork does not match on text content)"
     } else if lower.contains(":nth-last-")

@@ -135,7 +135,7 @@ fn is_ws(c: u8) -> bool {
 }
 
 /// Is `v` a CSS **identifier** — the only unquoted form an attribute value may take? Measured against
-/// cssselect 1.4.0, which is the oracle here: `v`, `v2`, `-v`, `_v`, `v-2` and non-ASCII (`café`) parse,
+/// cssselect 1.5.0, which is the oracle here: `v`, `v2`, `-v`, `_v`, `v-2` and non-ASCII (`café`) parse,
 /// while a leading digit (`2`, `2v`, `1e5`), a double hyphen (`--v`), `-` + digit, an empty value, and any
 /// other punctuation (`$v`, `a.b`, `/p`, `#v`) are SelectorSyntaxError. Escapes (`\32 v`) are a valid CSS
 /// ident but stay unsupported here (they parse as non-ident → empty column, an allowed coverage gap, not
@@ -850,7 +850,7 @@ fn set_has(c: &mut Compound, has: Has) -> Result<(), ()> {
 /// list, and a positional/reverse/`:has`/`:is`/text inside (those need per-parent or deferred machinery
 /// the `:has` path doesn't carry).
 ///
-/// cssselect 1.4.0 accepts only a type/`*`+classes inner and RAISES on an id/attribute/`:not` inside
+/// cssselect (still 1.5.0) accepts only a type/`*`+classes inner and RAISES on an id/attribute/`:not` inside
 /// `:has()` (a limitation tracked with its broader `:has()` gaps upstream). Frostwork implements the
 /// standards-correct behavior for those, so it is intentionally MORE capable than parsel here — a
 /// divergence in our favor (see docs/COMPATIBILITY.md). Bare type/`*`+class inners agree with parsel.
@@ -1076,8 +1076,8 @@ mod tests {
         assert!(parse("a:is([href], [data-k])::text").is_ok()); // attribute alternatives
         assert!(parse("li:is(a.x, b#y)").is_ok());
         assert!(parse("*:is(.a, .b) span::text").is_ok()); // :is on a non-subject compound (bare `*`)
-        // `:is` combined with other conditions is now supported with CORRECT AND semantics (a documented
-        // divergence from cssselect 1.4.0, which ORs them — see COMPATIBILITY.md / the matcher tests)
+        // `:is` combined with other conditions is supported with CORRECT AND semantics. cssselect ORed
+        // them up to 1.4.0 and agrees from 1.5.0 on — see COMPATIBILITY.md / the matcher tests
         assert!(parse("div.card:is(.a, .b)").is_ok()); // class + :is: div AND card AND (a or b)
         assert_eq!(is_groups("div.card:is(.a, .b)")[0].len(), 2);
         assert!(parse("div:is(.a, .b):is(.c, .d)").is_ok()); // two groups: (a or b) AND (c or d)
@@ -1104,7 +1104,7 @@ mod tests {
 mod support_boundary_tests {
     use super::*;
 
-    /// cssselect 1.4.0 rejects these, so `parse` must too (an unsupported selector -> empty column AND
+    /// cssselect 1.5.0 rejects these, so `parse` must too (an unsupported selector -> empty column AND
     /// an unsupported *verdict*). A class/attribute/pseudo-argument name is not "any non-empty string":
     /// a CSS identifier may not start with a digit, or with a hyphen followed by a digit.
     #[test]
