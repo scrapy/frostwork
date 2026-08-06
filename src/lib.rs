@@ -151,6 +151,61 @@ pub fn selector_terminals(queries: &[String]) -> Vec<Option<&'static str>> {
         .collect()
 }
 
+/// The three names libxml2 (and this engine) SYNTHESIZE around content the page never framed.
+const FRAME_NAMES: [&str; 3] = ["html", "head", "body"];
+
+/// Per query, `(pinned, synthesized_frame)` — the matched-node IDENTITY a caller needs before it can
+/// re-parse an outer-HTML value into the node it came from.
+///
+/// `pinned` is the tag name every match must carry (the subject compound's name test, when every
+/// comma/union member agrees on one concrete name); `None` when the query pins none (`*`, `.crumbs`,
+/// `p, div`). `synthesized_frame` says a match could be a document-frame element the page never wrote.
+///
+/// An outer-HTML value is the matched element's own source, so it normally NAMES the element — but a
+/// synthesized frame has no source of its own and its value begins with its CONTENT:
+/// `extract(b"<p>x</p>", ["html", "body", "p"])` returns the same string in all three columns. So
+/// `frostwork.webpoet`'s `.as_node()` handoff has to be told the identity, or refuse the field.
+///
+/// Two rules, both conservative. A synthesized frame carries no attributes (see [`matcher::frame`]), so a
+/// compound with an id/class/attribute cannot match one. And `:not()`, positions and `:has()` only NARROW
+/// what matches, so ignoring them over-reports the frame case — a refusal rather than a wrong node.
+pub fn selector_node_identity(queries: &[String]) -> Vec<(Option<String>, bool)> {
+    queries
+        .iter()
+        .map(|q| {
+            let members = compile_query(q);
+            if members.is_empty() {
+                return (None, true); // does not compile: fail closed on both axes
+            }
+            // `None` until the first member; then the name every member so far agrees on (inner `None` =
+            // they do not, or one of them has no name test at all).
+            let mut pinned: Option<Option<String>> = None;
+            let mut synth = false;
+            for sel in &members {
+                let subject = sel.parts.last().expect("a compiled selector has a subject compound");
+                let name = subject
+                    .tag
+                    .as_deref()
+                    .filter(|t| *t != "*")
+                    .map(|t| t.to_ascii_lowercase());
+                let attribute_bound =
+                    subject.id.is_some() || !subject.classes.is_empty() || !subject.attrs.is_empty();
+                let admits_frame = match &name {
+                    Some(n) => FRAME_NAMES.contains(&n.as_str()),
+                    None => true, // no name test: `<html>`/`<head>`/`<body>` are among what it admits
+                };
+                synth |= admits_frame && !attribute_bound;
+                pinned = Some(match pinned {
+                    None => name,                          // first member sets the candidate
+                    Some(prev) if prev == name => name,    // ...every later one has to repeat it
+                    Some(_) => None,
+                });
+            }
+            (pinned.flatten(), synth)
+        })
+        .collect()
+}
+
 fn terminal_name(t: &selector::Terminal) -> &'static str {
     match t {
         selector::Terminal::Text { .. } => "text",
@@ -555,6 +610,45 @@ mod tests {
                 None,
             ]
         );
+    }
+
+    /// The identity `.as_node()` cannot read off a value. `*` is the row that makes the function
+    /// necessary: on `<p>x</p>` it matches three nodes and the engine returns one string for all three.
+    #[test]
+    fn selector_node_identity_pins_a_name_and_reports_the_frame_risk() {
+        let q: Vec<String> = [
+            "div.card",         // a name AND an attribute constraint: never a synthesized frame
+            "div",              // pinned, and `div` is not a frame name
+            ".crumbs",          // no name test, but a class -> a synthesized frame has no attributes
+            "[itemprop=brand]", // ditto, via an attribute
+            "*",                // matches every frame, names nothing -> the ambiguous case
+            "body",             // pinned: every match is a `<body>`, written or synthesized
+            "//html/body",      // ...through XPath as well
+            "p, div",           // members disagree on the name; neither is a frame
+            "p, *",             // one member is the ambiguous case, so the query is
+            "body.page",        // a frame name, but attribute-bound: the source names it
+            "div:has(.a .b)",   // does not compile -> no identity, fail closed
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let want: Vec<(Option<String>, bool)> = [
+            (Some("div"), false),
+            (Some("div"), false),
+            (None, false),
+            (None, false),
+            (None, true),
+            (Some("body"), true),
+            (Some("body"), true),
+            (None, false),
+            (None, true),
+            (Some("body"), false),
+            (None, true),
+        ]
+        .iter()
+        .map(|(n, s)| (n.map(str::to_string), *s))
+        .collect();
+        assert_eq!(selector_node_identity(&q), want);
     }
 
     #[test]

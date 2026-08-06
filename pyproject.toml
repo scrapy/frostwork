@@ -27,22 +27,24 @@ classifiers = [
     "Topic :: Internet :: WWW/HTTP :: Indexing/Search",
 ]
 
+# The only runtime requirement, and it is imported only under `TYPE_CHECKING`: `field(...).typed_as(...)`
+# is annotated with PEP 747's `TypeForm`, which no released Python has in `typing`. The package ships
+# `py.typed`, so that annotation has to resolve in the USER's type checker, not just in this repo's —
+# hence a declared dependency rather than a test-only one. 4.13 is the release that added `TypeForm`.
+dependencies = ["typing-extensions>=4.13"]
+
 # The web-poet page-object integration (`frostwork.webpoet`) is optional; the core
 # (`frostwork.extract`, `frostwork.Page`) needs nothing but the compiled extension.
 #
-# The floor is the version the integration is actually TESTED against — the pin in
-# `requirements-test.txt`, restated as `frostwork.webpoet._MIN_WEB_POET` so the import error can name it.
-# It was `>=0.8`, which was a guess and a wrong one: the integration imports `Extractor`/`ItemPage`,
-# `cached_method` and `web_poet.fields.get_fields_dict`, and resolves processors the way
-# `web_poet.fields.field.__get__` does, so a declared-compatible-but-untested release either fails to
-# import or, worse, resolves processors differently. Nothing here gates any other version, so nothing
-# here should claim one.
+# The range is the 0.24 release LINE, which is what the gates run against (CI pins 0.24.1 in
+# `requirements-test.txt`). It is closed at 0.25 because web-poet is pre-1.0, so a minor release can move the
+# processor resolution this integration mirrors. To widen it: bump the pin, run `make gate-webpoet` and
+# `make gate-webpoet-mutate`, then raise the ceiling here.
 #
-# NOTE this extra is narrower than Frostwork's own `requires-python = ">=3.9"`: web-poet 0.24.1 requires
-# Python >= 3.10, so `pip install frostwork[webpoet]` needs 3.10+ even though the core does not. The core
-# is what the 3.9 classifier is about; see docs/PYTHON.md.
+# NOTE this extra is narrower than Frostwork's own `requires-python = ">=3.9"`: web-poet 0.24 requires
+# Python >= 3.10, so `pip install frostwork[webpoet]` needs 3.10+ even though the core does not.
 [project.optional-dependencies]
-webpoet = ["web-poet>=0.24.1"]
+webpoet = ["web-poet>=0.24.1,<0.25"]
 
 # Static schema-audit CLI: `frostwork-audit path/to/pageobjects.py` (or `python -m frostwork.audit`).
 [project.scripts]
@@ -57,6 +59,13 @@ Issues = "https://github.com/shaneaevans/frostwork/issues"
 # The package ships `py.typed`, so its annotations are a promise to every user's type checker.
 # `make py` and CI run `mypy python/frostwork tests/typing_fixture.py`; `tests/test_typing.py` additionally
 # asserts the check can go RED, since a type check that passes regardless of the annotations proves nothing.
+# `webpoet_contract` marks the tests that assert an integration contract, which is what
+# `tools/mutate_webpoet.py` runs as its `unit` detector. A marker rather than a list of test names: the list
+# was a hand-written universe, and three mutations survived a sweep only because tests written in the same
+# commit were not in it.
+[tool.pytest.ini_options]
+markers = ["webpoet_contract: asserts a frostwork.webpoet contract (the mutation sweep's unit detector)"]
+
 [tool.mypy]
 files = ["python/frostwork", "tests/typing_fixture.py"]
 

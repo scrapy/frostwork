@@ -31,6 +31,8 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import parsel
+import webpoet_structure
+from parsel.selector import SelectorList
 from web_poet import HttpResponse, HttpResponseBody, HttpResponseHeaders, ResponseUrl, WebPage
 from web_poet import field as wp_field
 
@@ -155,9 +157,12 @@ def timeit_loop(coro_fn, reps: int) -> float:
         loop.close()
 
 
-def peak_kb(fn) -> float:
-    """Peak Python-side allocation of one call, in KB. Not RSS: what is being compared is how much the two
-    page objects RETAIN, which is the question behind two of the boundaries below."""
+def transient_peak_kb(fn) -> float:
+    """Peak TRANSIENT Python allocation during one call, in KB (tracemalloc's high-water mark).
+
+    Not RSS and not retention: it says how much the call allocates at once, which is the question for the
+    cardinality boundary (a column materialised and then discarded). What a cold response RETAINS is measured
+    directly instead, by looking at the string web-poet cached."""
     import tracemalloc
 
     fn()  # warm the caches that are not the subject (compiled plans, cssselect translation)
@@ -173,6 +178,29 @@ def peak_kb(fn) -> float:
 # (the node handoff at scale); the other two are wasted work and a parity cost, which is why they are
 # measured here rather than described — "there is a cliff" and "it costs 1.6x at ten matches" are
 # different claims, and only the second can be checked. See docs/BENCHMARKS.md ("Performance boundaries").
+def _structure_of(value):
+    """The re-parsed structure of one HTML fragment (anything else passes through), so a parity check can
+    allow the raw-source-vs-reflow divergence without allowing a different element.
+
+    `webpoet_structure.structure_of` is the differential's own comparison. A second, weaker copy lived here
+    and collapsed whitespace with `.split()`, under which `<pre>a  b</pre>` and `<pre>a b</pre>` are the same
+    page — a benchmark can then time two page objects computing different answers."""
+    if not isinstance(value, str):
+        return value
+    return webpoet_structure.structure_of(value)
+
+
+def _same_answer(label: str, a, b) -> None:
+    """Both sides of a boundary row must compute the same thing before either is timed — the same standard as
+    the sweep above. Promising parity and not checking it is how a benchmark starts comparing two different
+    computations."""
+    if a != b:
+        raise SystemExit(
+            f"bench-webpoet: {label} — the two sides disagree, so timing them is meaningless.\n"
+            f"  frostwork={str(a)[:160]}\n  parsel   ={str(b)[:160]}"
+        )
+
+
 def boundary_cardinality(reps: int, sizes=(220, 2000, 6000)):
     """A FIRST-match field over a selector that matches everything.
 
@@ -195,10 +223,23 @@ def boundary_cardinality(reps: int, sizes=(220, 2000, 6000)):
         def parsel_first(html=html):
             return parsel.Selector(body=html, encoding="utf-8").css("div.card").get()
 
+        # the `first` field and parsel's `.get()` must agree, allowing the documented raw-source divergence
+        # (Frostwork returns source, lxml a reflow) — compared by re-parsed structure, like the differential
+        mine = asyncio.run(First(response=resp).to_item())["card"]
+        _same_answer(f"cardinality-first/{cards}", _structure_of(mine), _structure_of(parsel_first()))
+        # ...and the `all=True` row, against `.getall()`: it is a different column with a different
+        # cardinality, so timing it on the strength of the scalar row's parity proves nothing about it
+        mine_all = asyncio.run(All(response=resp).to_item())["card"]
+        theirs_all = parsel.Selector(body=html, encoding="utf-8").css("div.card").getall()
+        _same_answer(
+            f"cardinality-all/{cards}",
+            [_structure_of(v) for v in mine_all],
+            [_structure_of(v) for v in theirs_all],
+        )
         f_ms = timeit(lambda c=First: asyncio.run(c(response=resp).to_item()), reps)
         a_ms = timeit(lambda c=All: asyncio.run(c(response=resp).to_item()), reps)
         p_ms = timeit(parsel_first, reps)
-        f_kb = peak_kb(lambda c=First: asyncio.run(c(response=resp).to_item()))
+        f_kb = transient_peak_kb(lambda c=First: asyncio.run(c(response=resp).to_item()))
         rows.append(
             (f"{cards} matches, page {len(html) // 1024} KB", f_ms,
              f"all=True {a_ms:.2f}ms (same work), parsel .get() {p_ms:.2f}ms, peak {f_kb:.0f} KB")
@@ -245,7 +286,7 @@ def boundary_cold_response(reps: int, cards: int = 220):
     return rows
 
 
-def boundary_node_processors(reps: int, sizes=(10, 50, 220)):
+def boundary_node_processors(reps: int, sizes=(1, 3, 10, 50, 220)):
     """`all=True` with a node-taking processor: every match is re-parsed on its own.
 
     The handoff exists because a processor's input contract is an lxml node, and for ONE element a subtree
@@ -258,7 +299,8 @@ def boundary_node_processors(reps: int, sizes=(10, 50, 220)):
         return [len(node.css("a")) for node in value]
 
     procs = type("Processors", (), {"cards": [count_links]})
-    Frost = type("FrostNodes", (FrostPage,), {"Processors": procs, "cards": field("div.card", all=True)})
+    Frost = type("FrostNodes", (FrostPage,),
+                 {"Processors": procs, "cards": field("div.card", all=True).as_node()})
 
     def parsel_getter(self):
         return self.css("div.card")
@@ -268,6 +310,11 @@ def boundary_node_processors(reps: int, sizes=(10, 50, 220)):
 
     for cards in sizes:
         resp = _resp(gen_page(cards))
+        _same_answer(
+            f"node-processor/{cards}",
+            asyncio.run(Frost(response=resp).to_item()),
+            asyncio.run(Parsel(response=resp).to_item()),
+        )
         f_ms = timeit(lambda: asyncio.run(Frost(response=resp).to_item()), reps)
         p_ms = timeit(lambda: asyncio.run(Parsel(response=resp).to_item()), reps)
         faster = "frostwork" if f_ms < p_ms else "PARSEL"
@@ -278,12 +325,60 @@ def boundary_node_processors(reps: int, sizes=(10, 50, 220)):
     return rows
 
 
+def boundary_subtree_size(reps: int, sizes=(1, 30, 250)):
+    """One `.as_node()` field over ONE subtree that grows in SIZE, with the match count held at one.
+
+    The row above varies how many subtrees are parsed; this varies how big one is, because the handoff parses
+    the element's whole subtree whether the processor reads it or not. A page object that hands over one large
+    container pays for all of it, and that is the shape where a `.as_node()` field is most expensive."""
+    rows = []
+
+    def depth_of(value, page):
+        # parsel hands a page object a `SelectorList`; `.as_node()` hands one `Selector` (the field is scalar),
+        # so the processor takes the first of either — exactly what zyte's `_handle_selectorlist` does
+        node = (value[0] if len(value) else None) if isinstance(value, SelectorList) else value
+        if node is None:
+            return 0
+        node = node.root
+        n = 0
+        while len(node):
+            node, n = node[0], n + 1
+        return n
+
+    procs = type("Processors", (), {"deep": [depth_of]})
+    Frost = type("FrostDeep", (FrostPage,), {"Processors": procs, "deep": field("div.deep").as_node()})
+
+    def parsel_getter(self):
+        return self.css("div.deep")
+
+    parsel_getter.__name__ = parsel_getter.__qualname__ = "deep"
+    Parsel = type("ParselDeep", (WebPage,), {"Processors": procs, "deep": wp_field(parsel_getter)})
+
+    for kb in sizes:
+        row = '<div class="row"><span class="a">text</span><em>more</em><b>bold</b></div>'
+        inner = row * max(1, (kb * 1024) // len(row))
+        html = f'<html><body><div class="deep"><div class="l0">{inner}</div></div><p>after</p></body></html>'.encode()
+        resp = _resp(html)
+        _same_answer(
+            f"subtree-size/{kb}KB",
+            asyncio.run(Frost(response=resp).to_item()),
+            asyncio.run(Parsel(response=resp).to_item()),
+        )
+        f_ms = timeit(lambda: asyncio.run(Frost(response=resp).to_item()), reps)
+        p_ms = timeit(lambda: asyncio.run(Parsel(response=resp).to_item()), reps)
+        rows.append((f"one match, subtree {len(html) // 1024 or 1} KB", f_ms,
+                     f"parsel {p_ms:.2f}ms -> {'frostwork' if f_ms < p_ms else 'PARSEL'} faster "
+                     f"({max(f_ms, p_ms) / min(f_ms, p_ms):.1f}x)"))
+    return rows
+
+
 def run_boundaries(reps: int) -> None:
     print(f"  performance boundaries ({reps} reps, median) — one loss, one waste, one parity cost\n")
     for title, rows in (
         ("cardinality retention: shaping happens AFTER the native run", boundary_cardinality(reps)),
         ("cold response: reading resp.encoding decodes the whole body", boundary_cold_response(reps)),
         ("node handoff at scale: one subtree parse per match", boundary_node_processors(reps)),
+        ("node handoff by subtree SIZE: the parse is the whole subtree", boundary_subtree_size(reps)),
     ):
         print(f"  {title}")
         for label, ms, note in rows:
@@ -298,7 +393,7 @@ def main() -> None:
     ap.add_argument("--fields", type=int, nargs="*", default=[1, 4, 8, 12, 16, 20])
     ap.add_argument("--markdown", action="store_true", help="emit the docs/BENCHMARKS.md table")
     ap.add_argument("--boundaries", action="store_true",
-                    help="measure the three shapes where the healthy-path curve does not hold")
+                    help="measure the boundary questions (four sweeps) where the main curve does not hold")
     args = ap.parse_args()
 
     if args.boundaries:

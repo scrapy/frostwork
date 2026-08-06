@@ -147,6 +147,13 @@ fn selector_terminals(queries: Vec<String>) -> Vec<Option<&'static str>> {
     crate::selector_terminals(&queries)
 }
 
+/// Per query, `(pinned_tag, can_match_a_synthesized_frame)` — the matched-node identity the web-poet layer
+/// needs before it re-parses an outer-HTML value; see [`crate::selector_node_identity`].
+#[pyfunction]
+fn selector_node_identity(queries: Vec<String>) -> Vec<(Option<String>, bool)> {
+    crate::selector_node_identity(&queries)
+}
+
 /// Audit a schema WITHOUT parsing any HTML: for each flat query, group container, and sub-field,
 /// report whether the engine supports it (and, if not, a best-effort reason), plus the member /
 /// sibling-bit budget usage against the limits. The no-fallback contract makes an unsupported selector
@@ -182,6 +189,7 @@ fn _frostwork(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(extract_grouped, m)?)?;
     m.add_function(wrap_pyfunction!(audit_schema, m)?)?;
     m.add_function(wrap_pyfunction!(selector_terminals, m)?)?;
+    m.add_function(wrap_pyfunction!(selector_node_identity, m)?)?;
     m.add_function(wrap_pyfunction!(resolve_label, m)?)?;
     m.add_class::<Plan>()?;
     Ok(())

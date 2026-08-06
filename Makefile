@@ -21,7 +21,7 @@
 #   make bench       full throughput matrix vs Parsel (minutes; for release notes)
 #   make bench-smoke quick article/deep-nesting performance check
 #   make bench-webpoet  FrostPage.to_item() vs a Parsel WebPage, swept over field count
-#                    (add --boundaries by hand for the three shapes where the curve does not hold)
+#                    BENCH_ARGS="--boundaries" for the boundary questions (four sweeps)
 #   make ci          test + gate + gate-corpus + gate-seq + fuzz-smoke + py + gate-webpoet(+mutate)
 #                    — the minimum pre-release check
 #
@@ -145,8 +145,12 @@ bench: build
 # The page-object layer rather than the selector layer: `FrostPage.to_item()` vs an equivalent Parsel
 # `web_poet.WebPage`, swept over field count because the ratio depends on it (3x at one field, ~28x at
 # twenty). Verifies both items are identical before timing either.
+# The canonical way to run this: it depends on `ext`, so the numbers cannot come from a stale or debug
+# extension. `BENCH_ARGS="--boundaries"` measures the shapes where the healthy-path curve does not hold;
+# `BENCH_ARGS="--markdown"` emits the docs/BENCHMARKS.md table.
+BENCH_ARGS ?=
 bench-webpoet: ext
-	$(PY) tools/bench_webpoet.py
+	$(PY) tools/bench_webpoet.py $(BENCH_ARGS)
 
 bench-smoke: build
 	$(PY) tools/bench_matrix.py --smoke

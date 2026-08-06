@@ -1,11 +1,10 @@
 # Frostwork benchmark matrix
 
 Engine-only throughput (Rust `bench` binary, no IPC in the timed loop) vs Parsel (its real model:
-parse once, then one `.css()` per field). Both run the **same** selectors on the **same** page, and
-every page/selector pair is **byte-identical between the two** (verified: 32/32 AGREE per page), so
-each cell is a fair "extract N fields from this page" comparison. Single machine (Apple arm64),
-warm; indicative, not a controlled benchmark. Selector pool is a realistic product/article mix;
-counts are prefixes of it. Reproduce: `.venv/bin/python tools/bench_matrix.py`.
+parse once, then one `.css()` per field). Both run the same selectors on the same page, with values
+checked before timing. Results are warm runs on one Apple arm64 machine: indicative, not controlled.
+Selector counts are prefixes of one product/article pool. Reproduce with
+`.venv/bin/python tools/bench_matrix.py`.
 
 ## Page type × selector count (µs/page)
 
@@ -47,9 +46,8 @@ counts are prefixes of it. Reproduce: `.venv/bin/python tools/bench_matrix.py`.
 
 ## Grouped (Many/One) — `.product` container × N sub-fields
 
-One `Many` group over the product listing (195 KB, ~50 `.product` cards), engine (`bench`'s
-`G <container>` mode) vs **Parsel's real per-container loop** (`for c in sel.css(".product"): [c.css(sub)…]`)
-— the exact model the single-pass grouping replaces. Reproduce: `.venv/bin/python tools/bench_matrix.py`.
+One `Many` group over the product listing (195 KB, ~50 `.product` cards), compared with Parsel's
+per-container loop. Reproduce with `.venv/bin/python tools/bench_matrix.py`.
 
 | subs | engine µs | engine MB/s | vals/page | Parsel µs | speedup |
 | --- | --- | --- | --- | --- | --- |
@@ -57,11 +55,8 @@ One `Many` group over the product listing (195 KB, ~50 `.product` cards), engine
 | 3 | 1064 | 188 | 3018 | 34401 | 32.3× |
 | 5 | 1363 | 147 | 5030 | 55125 | 40.4× |
 
-The engine's grouped cost grows **sub-linearly** in sub count (735 → 1064 → 1363 µs for 1 → 3 → 5
-subs — the pass and per-element bookkeeping are shared; only the per-instance × per-sub match adds),
-while Parsel's per-container loop grows **linearly** (it re-runs each sub-selector against every
-container node). So the per-instance on-demand evaluation is healthy — no super-linear blow-up even
-at 5 000 emitted cells/page — and needs no optimization at these schema sizes.
+The shared scan keeps grouped growth below Parsel's per-container loop in this sweep. No super-linear
+growth appears at these schema sizes.
 
 ## Reading the numbers
 
@@ -75,13 +70,10 @@ at 5 000 emitted cells/page — and needs no optimization at these schema sizes.
 - **Throughput is page-shape-dependent.** Text-dominated pages (article, corpus) run 0.8–3.5 GB/s
   because memchr bulk-skips text; tag-dense pages (table, listing, deep-nest) run 50–800 MB/s because
   cost is per-element (classify + stack + per-selector match), not per-byte.
-- **Weak spot — deep nesting.** 20-level-deep pages are the engine's worst case (5–18×, and 619 µs for
-  a single selector): structural matching walks the ancestor stack per element (`seg_match`), so cost
-  rises with depth. Real pages are rarely this deep; still, it's the honest floor. (Parsel is *also*
-  slow here, so the ratio holds up, but the engine's absolute µs is high.)
-
-Net: on realistic pages (article, product listings, the real-shaped corpus) the engine is **~12–20× at
-typical field counts and up to ~40–54× on rich schemas**.
+- **Weak spot — deep nesting.** The 20-level page is the slowest Frostwork shape in this matrix (5–18×,
+  and 619 µs for one selector): structural matching walks the ancestor stack per element (`seg_match`),
+  so cost rises with depth. Parsel is also slow here, but Frostwork's absolute time is higher than on the
+  other synthetic shapes.
 
 ## Real Zyte corpus (throughput)
 
@@ -107,9 +99,10 @@ Everything above times the selector layer. This times what a scraper actually ca
 page.to_item()` on a whole page object, against the equivalent hand-written `web_poet.WebPage` doing
 Parsel's real thing (one `Selector` per response, one `.css()` per field). Both items are compared field
 by field before either is timed, and a mismatch **aborts** — timing two page objects that compute
-different answers is not a benchmark. Reproduce: `.venv/bin/python tools/bench_webpoet.py`.
+different answers is not a benchmark. Reproduce: `make bench-webpoet` (it rebuilds the release
+extension first, so a stale or debug build cannot be timed by accident).
 
-| fields | `FrostPage` ms | Parsel `WebPage` ms | speedup | same, on a running loop | speedup |
+| fields | `FrostPage` ms | Parsel `WebPage` ms | speedup | running-loop ms (`FrostPage` / Parsel) | speedup |
 | --- | --- | --- | --- | --- | --- |
 | 1 | 0.32 | 0.90 | **3×** | 0.21 / 0.76 | **4×** |
 | 4 | 0.45 | 4.52 | **10×** | 0.59 / 4.48 | **8×** |
@@ -142,46 +135,47 @@ above already flags as Parsel's worst case. Growing the same page while holding 
 (22 ms → 174 ms → 734 ms) while Frostwork's stays linear. So the honest summary is that page *size* moves
 this number more than field count does, upward, on this shape.
 
-That makes the real-corpus median below (**10.5×**, median 330 KB, median 11 selectors) the number to quote
+That makes the real-corpus median above (**10.5×**, median 330 KB, median 11 selectors) the number to quote
 for realistic work, and the two are not reconcilable by arithmetic: real pages are more text-heavy than
 card-dense, their production selectors are mostly cheaper than the descendant-heavy pool here, and
 `bench_corpus.py` times `frostwork.extract` rather than `to_item()`. What this section establishes is
-narrower and worth having on its own: the page-object layer adds no meaningful overhead of its own, and the
-win is per-field traversal rather than the skipped parse.
+narrower and worth having on its own: the selector-layer advantage remains visible through `to_item()`, and
+the measured win is per-field traversal rather than the skipped parse.
 
 ### Performance boundaries
 
-Three shapes where the curve above does not hold. Exactly one of them is a **loss** to Parsel; the other two
-are wasted work and a parity cost, and calling all three "cliffs" would be three claims where the numbers
-support one. Measured rather than described: reproduce with
-`.venv/bin/python tools/bench_webpoet.py --boundaries`.
+Three boundary questions where the curve above does not hold: node handoff (measured by match count and
+subtree size), cardinality retention, and response decoding. Only node handoff becomes slower than Parsel;
+the others expose wasted work or a correctness cost. Reproduce with
+`make bench-webpoet BENCH_ARGS="--boundaries"`, which rebuilds the release extension first.
 
-**1. A node-taking processor on `all=True` is slower than Parsel, at every size — this is the real loss.**
-The processor contract is an lxml node, so each match is re-parsed on its own; Parsel hands over elements
-from a tree it has already built.
+**1. A node-taking processor (`.as_node()`) on a many-match field loses to Parsel, and the gap grows with the
+match count.** The processor contract is an lxml node, so each match is re-parsed on its own; Parsel hands over
+elements from a tree it has already built.
 
 | matches | `FrostPage` | Parsel | |
 | --- | --- | --- | --- |
-| 10 | 0.45 ms | 0.28 ms | Parsel faster |
-| 50 | 1.08 ms | 0.71 ms | Parsel faster |
-| 220 | 4.35 ms | 2.61 ms | Parsel faster |
+| 1 | 0.16 ms | 0.16 ms | tie |
+| 3 | 0.19 ms | 0.18 ms | tie |
+| 10 | 0.28 ms | 0.26 ms | Parsel 1.1× |
+| 50 | 0.83 ms | 0.62 ms | Parsel 1.3× |
+| 220 | 3.27 ms | 2.23 ms | Parsel 1.5× |
 
-There is no crossover to find above ten matches: for *that field*, the subtree parses cost more than the
-scan saves, by a roughly constant factor. It is a compatibility cost, not a defect — the alternative is handing the processor a string it
-silently ignores, which is the defect this handoff was built to fix — and it is bounded to
-processor-bearing **bare-element** fields. A page object of `::text`/`::attr()` fields never reaches it, and
-one field like this inside a page of ordinary fields still shares the single scan, so the page total can
-win while this column loses. If a page object's hot field is a list of nodes, a hand-written
-`@web_poet.field` over one Parsel `Selector` is the faster shape and always has been.
+Scoped to what was measured: **near parity at one to three matches, and behind by ten.** One `.as_node()`
+field per page — the common case, since most zyte item fields are scalars — costs nothing measurable.
+Subtree size is not the problem: one match over a 1 KB, 30 KB and 250 KB subtree stays slightly ahead (0.16/0.88/6.41 ms
+against 0.18/0.93/6.86), because both sides parse that subtree once and Frostwork skips the whole-document
+parse. It is the per-match repetition that costs. Each row checks its processed item before timing; these
+processor-specific checks are not a substitute for the node-structure differential.
 
 **2. Cardinality is applied after the scan, so a first-match field does the work of `all=True`.** Headroom
 rather than a regression — not slower than Parsel, just slower than it needs to be:
 
-| matches (page) | `first` | `all=True` | Parsel `.get()` | peak |
+| matches (page) | `first` | `all=True` | Parsel `.get()` | transient peak |
 | --- | --- | --- | --- | --- |
-| 220 (39 KB) | 0.38 ms | 0.38 ms | 1.11 ms | 57 KB |
-| 2 000 (365 KB) | 2.31 ms | 2.27 ms | 9.92 ms | 468 KB |
-| 6 000 (1.1 MB) | 6.46 ms | 6.53 ms | 30.48 ms | 1 402 KB |
+| 220 (39 KB) | 0.32 ms | 0.33 ms | 0.97 ms | 57 KB |
+| 2 000 (365 KB) | 2.06 ms | 2.11 ms | 9.10 ms | 468 KB |
+| 6 000 (1.1 MB) | 6.00 ms | 6.14 ms | 27.82 ms | 1 402 KB |
 
 The first two columns are the same measurement at every size, which is the point: the column materialises
 every match — on a bare-element field, one whole element's source each — and shaping then discards all but
@@ -200,6 +194,9 @@ have decoded with. With no `Content-Type` charset, no BOM and no `<meta>`, web-p
 | labelled (`charset=utf-8`) | 0.01 ms | `utf-8` | none |
 | cold (no charset anywhere) | 0.03 ms | `cp1252` | the whole page, as `str` |
 
+(The peak column above is a *transient* high-water mark — what the call allocates at once, not what it
+retains. The retained figure is this table's last column, read off the string web-poet caches.)
+
 The time is negligible; the retained string is O(page) and the scan never needed it. But look at the label:
 inference answers `cp1252` where Frostwork's own sniffer would default to `utf-8`, so *not* reading
 `resp.encoding` would decode some pages differently from Parsel. That makes this a correctness trade wearing
@@ -207,7 +204,7 @@ a performance costume, and the current choice — pay the decode, match Parsel �
 Frostwork-specific scrapy-poet provider that supplies bytes plus Scrapy's own declared encoding is the way
 out, and would need its own parity gate before it could be believed.
 
-## Memory (no-DOM ⇒ bounded RSS)
+## Memory profile (no DOM)
 
 Frostwork's defining property is invisible to a throughput chart: it **builds no tree**, so peak
 memory tracks open-stack state and prospective/extracted output, not a materialized page tree.
@@ -220,17 +217,18 @@ above; the measured corpus is not distributed).
 **Synthetic size sweep** — a tiny fixed selection (3 fields) from a page padded to N MB. Parsel must
 build the whole lxml tree (RSS scales with the page); Frostwork streams past the filler:
 
-| page | Parsel RSS | Frostwork RSS | leaner | Parsel time | Frostwork time | faster |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 MB | 7.8 MB | 0.1 MB | 100× | 7.9 ms | 1.1 ms | 7.2× |
-| 4 MB | 30.0 MB | 0.0 MB | 640× | 32.2 ms | 4.4 ms | 7.4× |
-| 16 MB | 118.1 MB | 0.1 MB | 1 511× | 134.2 ms | 18.4 ms | 7.3× |
-| 64 MB | 472.2 MB | 0.3 MB | 1 679× | 541.0 ms | 70.9 ms | 7.6× |
+| page | Parsel RSS | Frostwork RSS | Parsel time | Frostwork time | faster |
+| --- | --- | --- | --- | --- | --- |
+| 1 MB | 7.8 MB | 0.1 MB | 7.9 ms | 1.1 ms | 7.2× |
+| 4 MB | 30.0 MB | <0.1 MB | 32.2 ms | 4.4 ms | 7.4× |
+| 16 MB | 118.1 MB | 0.1 MB | 134.2 ms | 18.4 ms | 7.3× |
+| 64 MB | 472.2 MB | 0.3 MB | 541.0 ms | 70.9 ms | 7.6× |
 
-Parsel's memory is **linear in page size**; Frostwork's is **flat** (~0.1–0.3 MB regardless).
+With this fixed-output selector set, Parsel's memory scales with page size while Frostwork stays below
+0.3 MB. Frostwork memory can still scale with returned values, as the corpus result below shows.
 
-**Real pages** (largest 12 in the corpus, 2.3–3.7 MB): median **0.3 MB vs 20.6 MB → 72× leaner**
-(range 2×–394×, and 7–19× faster). The gap narrows to ~2–3× only on the field-rich / value-heavy
+**Real pages** (largest 12 in the corpus, 2.3–3.7 MB): median incremental RSS is **0.3 MB vs 20.6 MB**;
+the median of the per-page ratios is **72×** (range 2×–394×, and 7–19× faster). The gap narrows to ~2–3× only on the field-rich / value-heavy
 pages (e.g. 42 selectors, or a big inline-JSON `script::text`), where Frostwork's RSS *is* the
 returned data — it still never pays for a tree.
 

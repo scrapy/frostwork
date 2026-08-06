@@ -519,7 +519,9 @@ def test_webpoet_gate_fails_when_a_column_went_quiet():
     def clean():
         """A by_shape/by_proc/meaningful triple that passes, as the baseline to break."""
         by_shape = {cell: {"AGREE": 10, "WS": 0, "DIVERGE": 0, "CRASH": 0} for cell in expected_cells()}
-        by_shape.update({f"{s}/http": {"ORACLE-SKIP": 10} for s in EXPECTED_ORACLE_SKIP})
+        by_shape.update(
+            {f"{s}/{k}": {"ORACLE-SKIP": 10} for s in EXPECTED_ORACLE_SKIP for k in ("http", "browser")}
+        )
         buckets = []
         for marker, _why, exact in required_columns():
             # an exact requirement is its own bucket; a marker is a suffix on some processor's bucket
@@ -528,33 +530,48 @@ def test_webpoet_gate_fails_when_a_column_went_quiet():
         return by_shape, by_proc, {b: 5 for b in by_proc}
 
     by_shape, by_proc, meaningful = clean()
-    assert coverage_failures(by_shape, by_proc, meaningful) == []
+    witnessed = dict(meaningful)  # every processor column showed its processor changing a value
+    assert coverage_failures(by_shape, by_proc, meaningful, witnessed) == []
+
+    # THE seeded regression for a symmetric differential: remove the processors from both sides and every
+    # value still agrees, every bucket still has a label, and every count stays non-zero — only the evidence
+    # that a processor ran disappears.
+    no_evidence = {b: 0 for b in witnessed}
+    failures = coverage_failures(by_shape, by_proc, meaningful, no_evidence)
+    assert any("never showed a processor CHANGING" in f for f in failures), failures
+    assert sum("never showed a processor CHANGING" in f for f in failures) >= 2, failures
 
     # 1. a CELL that graded nothing. Per cell, not per shape: the two response inputs go through different
     #    bases, so every BrowserResponse pair could become an ORACLE-SKIP while the HTTP half kept the
     #    shape's total non-zero — a whole input type untested, reported as a pass.
-    for cell in ("plain/http", "plain/browser", "zyte_productpage/http"):
+    for cell in ("plain/http", "plain/browser", "zyte_productpage/http", "contract/http", "contract/browser"):
         broken = dict(by_shape)
         broken[cell] = {"ORACLE-SKIP": 10}
-        failures = coverage_failures(broken, by_proc, meaningful)
+        failures = coverage_failures(broken, by_proc, meaningful, witnessed)
         assert any(f"cell {cell!r} graded 0 pairs" in f for f in failures), (cell, failures)
 
     # 2. a cell that grades SOME pairs and skips others — a partial hole, which the totals hide
     broken = dict(by_shape)
     broken["plain/browser"] = {"AGREE": 4, "ORACLE-SKIP": 6}
-    failures = coverage_failures(broken, by_proc, meaningful)
+    failures = coverage_failures(broken, by_proc, meaningful, witnessed)
     assert any("skipped 6" in f for f in failures), failures
 
     # 3. a shape listed as an expected skip that now builds — a stale expectation is a rotting gate
     broken = dict(by_shape)
     broken["attrs_frozen/http"] = {"AGREE": 3}
-    failures = coverage_failures(broken, by_proc, meaningful)
+    failures = coverage_failures(broken, by_proc, meaningful, witnessed)
     assert any("EXPECTED_ORACLE_SKIP" in f and "attrs_frozen" in f for f in failures), failures
+
+    # ...and one that is not even PROBED: an expectation no run exercises describes a shape that stopped
+    # being built, which reads exactly like one being skipped for the documented reason
+    broken = {k: v for k, v in by_shape.items() if k != "dataclass/browser"}
+    failures = coverage_failures(broken, by_proc, meaningful, witnessed)
+    assert any("expected to ORACLE-SKIP" in f and "dataclass/browser" in f for f in failures), failures
 
     # 4. a processor column whose expected value is empty everywhere
     thin = dict(meaningful)
     thin["breadcrumbs"] = 0
-    failures = coverage_failures(by_shape, by_proc, thin)
+    failures = coverage_failures(by_shape, by_proc, thin, witnessed)
     assert any("never carried a non-empty expected value" in f for f in failures), failures
 
     # 5. every required column, dropped one at a time — including each processor in the shared registry, so
@@ -563,9 +580,50 @@ def test_webpoet_gate_fails_when_a_column_went_quiet():
         missing = {
             b: c for b, c in by_proc.items() if (b != marker if exact else marker not in b)
         }
-        failures = coverage_failures(by_shape, missing, {b: 5 for b in missing})
+        failures = coverage_failures(by_shape, missing, {b: 5 for b in missing}, {b: 5 for b in missing})
         assert any(repr(marker) in f for f in failures), (marker, failures)
     assert len(SHAPES) > 1  # the sweep still has a shape axis to gate
+
+
+def test_every_required_column_comes_from_the_fixed_schemas_not_from_a_lucky_seed():
+    """The coverage check is only as deterministic as the schemas that feed it.
+
+    A variant REPLACES the column it varies, so one schema declaring every processor "and its `out=[]` and
+    `.map()` forms" left the plain forms to the random sweep — the gate passed on seed 0 and failed on
+    seed 1. This runs the contract pass with the generator DISABLED, so a required column that still needs
+    it raises rather than quietly succeeding."""
+    import diff_webpoet
+
+    def no_random(*_a, **_kw):
+        raise AssertionError("the contract pass must not generate a random schema")
+
+    original = diff_webpoet.gen_schema
+    diff_webpoet.gen_schema = no_random
+    try:
+        stat, _by_shape, by_proc, meaningful, witnessed, _ex = diff_webpoet.sweep(
+            contract_only=True, show=0
+        )
+    finally:
+        diff_webpoet.gen_schema = original
+
+    assert stat["DIVERGE"] == 0 and stat["CRASH"] == 0, stat
+    for marker, why, exact in diff_webpoet.required_columns():
+        present = marker in by_proc if exact else any(marker in bucket for bucket in by_proc)
+        assert present, f"{marker!r} ({why}) is not produced by the fixed schemas: {sorted(by_proc)}"
+        # ...and it has to be a column that could go RED: a bucket with no non-empty expected value, or (for
+        # a processor column) no evidence its processor changed anything, proves nothing by being present
+        if exact:
+            assert meaningful.get(marker, 0), f"{marker!r} carried no non-empty expected value"
+    for case in webpoet_cases_module().cases_for("generated"):
+        assert witnessed.get(case.field_name, 0), (
+            f"the fixed schemas never showed {case.processor} CHANGING its field's value"
+        )
+
+
+def webpoet_cases_module():
+    import webpoet_cases
+
+    return webpoet_cases
 
 
 def test_the_raw_source_allowance_excuses_serialization_and_nothing_else():
@@ -578,14 +636,20 @@ def test_the_raw_source_allowance_excuses_serialization_and_nothing_else():
     does not."""
     from diff_webpoet import field_verdict
 
-    # serialization differences: attribute quoting, entity spelling, an implied end tag
+    # serialization differences: attribute quoting, entity SPELLING (`&gt;` vs a literal `>`, which parse to
+    # the same character), an implied end tag
     assert field_verdict("<p class=a>x &amp; y</p>", '<p class="a">x &amp; y</p>', ".a", False) == "AGREE"
+    assert field_verdict("<p>a &gt; b</p>", "<p>a > b</p>", "p", False) == "AGREE"
     assert field_verdict("<ul><li>a<li>b</ul>", "<ul><li>a</li><li>b</li></ul>", "ul", False) == "AGREE"
 
     # ...and everything a processor would actually read differently
     assert field_verdict("<p class=a>same</p>", "<section id=wrong>same</section>", ".a", False) == "DIVERGE"
     assert field_verdict('<p class=a>x</p>', '<p class=a id=extra>x</p>', ".a", False) == "DIVERGE"
     assert field_verdict("<p><b>x</b></p>", "<p>x</p>", "p", False) == "DIVERGE"
+    # ...including comments and the text AFTER them, which a signature built from elements alone drops
+    assert field_verdict("<p>x<!--a-->y</p>", "<p>x<!--b-->y</p>", "p", False) == "DIVERGE"
+    assert field_verdict("<p>x<!--a-->y</p>", "<p>x<!--a-->z</p>", "p", False) == "DIVERGE"
+    assert field_verdict("<p>x<!--a-->y</p>", "<p>x<!--a-->y</p>", "p", False) == "AGREE"
 
     # the same rules per item for an `all=True` bare-element field — a shape that did not exist until
     # `out=[]` made an all=True node field processor-free
@@ -606,6 +670,33 @@ def test_the_processor_registry_covers_the_installed_library():
     import webpoet_cases
 
     assert webpoet_cases.coverage_gaps() == []
+
+    # a case that claims no gate would leave the differential smaller with every check still green, because
+    # the required-column set is derived from these tuples
+    for bad_gates in ((), ("nonesuch",), ("generated", "typo")):
+        with pytest.raises(ValueError, match="non-empty subset"):
+            webpoet_cases.ProcessorCase("breadcrumbs_processor", "breadcrumbs", ".c", "node", bad_gates)
+    with pytest.raises(ValueError, match="unknown input_kind"):
+        webpoet_cases.ProcessorCase("breadcrumbs_processor", "breadcrumbs", ".c", "nodes", ("generated",))
+
+    # ...and the dangerous direction: a mapping UPSTREAM adds that no case drives
+    original = webpoet_cases.product_page_processors
+
+    def with_wiring(**changes):
+        return lambda: {**original(), **changes}
+
+    try:
+        webpoet_cases.product_page_processors = with_wiring(newField=["breadcrumbs_processor"])
+        assert any("newField" in g for g in webpoet_cases.coverage_gaps()), "an added field must be a gap"
+        # A DECLINED field is declined for a specific wiring, and storing only the reason degraded the
+        # check to "it is wired to something": re-pointing it, appending to it, or emptying it all passed
+        # while the field went on doing something this registry no longer describes.
+        for wiring in (["brand_processor"], ["metadata_processor", "brand_processor"], []):
+            webpoet_cases.product_page_processors = with_wiring(metadata=wiring)
+            gaps = webpoet_cases.coverage_gaps()
+            assert any("metadata" in g and "not" in g for g in gaps), (wiring, gaps)
+    finally:
+        webpoet_cases.product_page_processors = original
     # every covered case must name a real callable and a field name zyte actually wires, where it claims to
     wired = webpoet_cases.product_page_processors()
     for case in webpoet_cases.CASES:
@@ -615,6 +706,36 @@ def test_the_processor_registry_covers_the_installed_library():
                 f"{case.processor} is claimed to arrive through ProductPage.Processors under "
                 f"{case.field_name!r}, but zyte wires {wired.get(case.field_name)} there"
             )
+
+
+def test_the_mutation_sweep_refuses_a_patch_that_changes_a_default():
+    """A mutant must differ from the real function in BEHAVIOUR and nothing else.
+
+    The guard compared whether a default existed, not what it WAS, so a patch could flip `all=False` to
+    `all=True` and pass as the same signature — a second, unmeasured mutation inside the one being
+    measured, caught by everything for the wrong reason."""
+    import mutate_webpoet
+
+    def real(selector, *, all=False, join=None):
+        return selector
+
+    def flipped_default(selector, *, all=True, join=None):
+        return selector
+
+    def lost_default(selector, *, all, join=None):
+        return selector
+
+    def renamed_kind(selector, all=False, join=None):
+        return selector
+
+    mutate_webpoet._same_signature(real, lambda selector, *, all=False, join=None: selector, "same")
+    for bad, why in (
+        (flipped_default, "a flipped default"),
+        (lost_default, "a lost default"),
+        (renamed_kind, "a keyword-only turned positional"),
+    ):
+        with pytest.raises(SystemExit, match="patch takes"):
+            mutate_webpoet._same_signature(real, bad, why)
 
 
 # --------------------------------------------- web-poet surface snapshot (tools/webpoet_surface.py)

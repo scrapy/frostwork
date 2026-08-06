@@ -177,39 +177,69 @@ a way it has read 100% while the engine was wrong:
   annotated as the internal marker class, so correct user code (`x: str = page.name`) was an error in the
   user's CI while every test here passed. Nothing but a type checker catches that class of bug — `make py`
   and CI now run mypy over the shipped package, and `tests/test_typing.py` seeds a wrong `assert_type` to
-  prove the check can go red.
-- **Then two review rounds found ten more defects behind that green gate, and the universes they had to
-  widen were the GATE's own.** Every one was a combination the generator did not emit or a contract nobody
-  restated. Four lessons worth carrying:
-  **Copy upstream's predicate, not its prose.** `out=[]` is web-poet's documented way to decline one of the
-  nine processors a zyte base attaches BY NAME, and its resolution is `out is not None`; reading that as
-  `if out:` fell through to the nested class and silently re-enabled what a user switched off. One character.
-  **A hand-checked handful is not a universe, again.** The node handoff promised "the element the selector
-  matched" on the strength of four tags and was wrong for the whole document frame (`<body>` with a lone
-  child comes back as that CHILD; `<head>`/`<title>`/`<meta>` as a synthesised `<html>`) — now derived
-  against the same 142-name element universe as the tree rules.
-  **A class keyword exists only in the `class` statement.** `@attrs.define` rebuilds the class, so
-  `strict=False` was thrown away — the same ORDER bug as the spec recovery, with the same answer: carry it
-  ON the class. And the sibling mistake: an inherited selector replaced by a hand-written `@web_poet.field`
-  has to be resolved against the MRO, not popped off a merged dict, or the popped name is still in an
-  ancestor's own declarations and comes BACK one generation later.
-  **"A usable page object" has two halves.** `FrostFields` was built on web-poet's `Extractor`, which is
-  deliberately not `Injectable`, so andi omitted the callback argument entirely — no exception, no log. That
-  needs no Scrapy to gate: `web_poet.pages.is_injectable` and `andi.plan` answer the exact question
-  scrapy-poet asks, and both are already installed. Pinning Scrapy to test it would assert a matrix this
-  repo has no code for.
-  The gate-shaped lessons are in [docs/TESTING.md](docs/TESTING.md) ("The web-poet layer: three gates"), and
-  they reduce to three: a green differential means everything agreed OR nothing ran, so coverage is part of
-  the exit condition, per (shape x input) CELL; the raw-source allowance has to compare STRUCTURE, since
-  matching text excused a different tag entirely; and one detector answers one question, so each mutation
-  declares which detectors must catch it — "something noticed" hides a gate losing a column. Two mutations
-  are expected to be caught by unit vectors alone, and that is a finding, not a gap: the real zyte
-  processors are too lenient to discriminate a wrong node end-to-end.
-  Two smaller ones. **A doc example is untested code** — `docs/PYTHON.md` told everyone to write
-  `class MyProductPage(ProductPage)`, which raises, and its `Returns[Product]` example declared a field the
-  item had no room for; the examples now live in `tests/doc_examples.py` and the suite runs them. And a
-  **dependency floor is a claim**: `web-poet>=0.8` was a guess no release near it satisfies, so the floor is
-  the pinned version the gate runs, declared once in `pyproject.toml`.
+  prove the check can go red. The fixture is that promise's universe, and it missed the same way twice: the
+  `all=False`/`join=None` spellings, then `typed_as`, annotated `Type[U]` (the type of a CLASS OBJECT) while
+  what a processor returns is usually a UNION — so `typed_as(Optional[str])` was an error in the user's CI.
+  It takes PEP 747's `TypeForm[U]` now. **A form that runs is not a form the fixture covers.**
+- **Then three review rounds found defects behind that green gate, and what they had to widen was the GATE's
+  own universes.** The durable lessons, shortest form:
+  **Copy upstream's predicate, not its prose.** `out=[]` is web-poet's way to decline a processor and it
+  resolves with `out is not None`; `if out:` re-enabled what a user switched off. And `out` has to be read
+  from the class DECLARING the resolved descriptor — web-poet merges its field info in `__bases__` order
+  (last wins) while the MRO selects the first, so the merged view answers about the wrong declaration.
+  **Never infer a contract you can declare.** Treating "a processor is attached" as "the processor wants a
+  node" broke every ordinary `out=[str.upper]`, because web-poet hands a processor the field's VALUE. The
+  input kind is now declared (`.as_node()`), and the one case where guessing wrong is silent — a zyte
+  processor on a bare-element field — is a class-definition error instead.
+  **A hand-checked handful is not a universe — and lxml answers by SHAPE, not by name.** The node handoff was
+  right for four tags and wrong for the document frame; the sweep that fixed it used one fixture per tag, so it
+  still passed while a `<body>` with two children came back as a `<div>` and an empty one as a `<span>`
+  (`fromstring` applies a document-vs-fragment heuristic; `document_fromstring` does not). The sweep now
+  really does cross the 142-name universe with the shapes — it CLAIMED to while running one shape, which is the
+  same "asserted, not tested" failure as a rule with no name to probe — and it compares the whole subtree
+  against parsel's own node rather than a tag and a class.
+  **And the value could not name its own node.** A synthesized frame has no source of its own, so
+  `extract(b"<p>x</p>", ["html", "body", "p"])` returns ONE identical string for three different nodes and
+  every source-side fix (a regex, parsing the selector) is answering the wrong question — `*`, unions and
+  group containers have no tell either. The identity is now derived by the engine
+  (`selector_node_identity`: the name the subject compound pins, plus whether a match could be a frame the
+  page never wrote) and a selector that can be neither is refused at class definition. **When a value cannot
+  carry a fact, get it from the compiler or refuse — do not infer it from the value.**
+  Two smaller ones from the same fix, both about the re-parse rather than the lookup: the element must be
+  DETACHED, or `ancestor::*` answers with the frame the parse invented, outside the subtree-local contract
+  the docs promise; and neither lxml entry point is faithful for every name — a document parse adds the
+  `<body>` the document rules imply inside a `<frameset>`, and `fragment_fromstring` appends `</body></html>`
+  that a `<plaintext>` swallows into its own text. The fragment half is therefore lxml's own wrapper minus
+  the suffix, and the universe×shape sweep is what settles which is which.
+  **Then reject what you cannot verify.** Validating a TRANSFORMED node source is not possible from the parsed
+  tree: lxml silently drops content appended to an `<html>` and silently wraps two siblings in a synthetic
+  element with the tag the lookup is searching for. So `.as_node()` refuses `.map()`, `join=`, and a
+  non-element selector at class definition — which deleted the validator, its falsey-value rules and most of
+  the handoff's cost in one move.
+  **A class keyword exists only in the `class` statement**, so `@attrs.define` throws `strict=False` away
+  unless it is carried on the class — the same ORDER bug as the spec recovery. The sibling mistake: an
+  inherited selector replaced by a hand-written field must be resolved against the MRO, or the popped name
+  returns one generation later.
+  **"A usable page object" has two halves.** `FrostFields` was built on `Extractor`, which is deliberately
+  not `Injectable`, so andi dropped the callback argument silently. `web_poet.pages.is_injectable` and
+  `andi.plan` gate that without Scrapy installed.
+  The gate-shaped lessons live in [docs/TESTING.md](docs/TESTING.md) ("The web-poet layer: three gates").
+  Three of them are worth repeating here because each was a gate reading green over a hole. **A deterministic
+  pass that varies a column REPLACES it**: one fixed schema declaring every processor "and its `out=[]` and
+  `.map()` forms" left the plain forms to the random sweep, so the gate passed on seed 0 and failed on seed 1.
+  Fixed schemas are now plain and variant, and a test runs the contract pass with the generator disabled.
+  **A decline is about a WIRING, not a name**: `metadata` was declined with a reason and no expected
+  processor list, so re-pointing it, appending to it or emptying it all passed. **And a second comparator is a
+  second standard**: the benchmark kept its own whitespace-collapsing structural check, under which
+  `<pre>a  b</pre>` and `<pre>a b</pre>` are the same page — the differential had already closed that hole,
+  in its copy. One helper, read by both.
+  Two smaller ones. **A doc example is untested code**: the documented product page declared a field its item
+  had no room for, and the processor recipe named a composition that raises. Copying the examples into a test
+  module was not enough either — the copy can drift — so the marked fenced blocks are now EXECUTED as written,
+  and the block in the docs is the only copy, ONCE (a second copy of the same example got the "does it build"
+  check and not the value assertions). Give each block's namespace a `__name__` and filter by `__module__`, or
+  the imported base counts as a page object the block defined. And **a dependency floor is a claim**: the
+  gates run one release line, so the range is closed around it.
 
 ## Repo map
 

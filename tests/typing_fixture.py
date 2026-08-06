@@ -37,9 +37,18 @@ class ProductPage(FrostPage):
     # that rejects them is the py.typed promise being broken for correct code
     explicit_first = field("h1::text", all=False)
     explicit_nojoin = field("h1::text", join=None)
+    # ...including the redundant-but-legal pairings of the two keywords
+    all_no_join = field("img::attr(src)", all=True, join=None)
+    join_not_all = field(".spec ::text", all=False, join=" ")
     # cardinality decided at runtime cannot have a static value type; `Any` is the honest answer
     dynamic = field("h1::text", all=DYNAMIC_ALL)
     dynamic_join = field("h1::text", join=DYNAMIC_SEP)
+    # `.as_node()`/`.as_value()` do not change the field's value type for a checker: what a processor returns
+    # is opaque, and pretending otherwise (`Any`) would make a node-taking `.map()` type-check even though the
+    # runtime refuses it. Narrow the processor's output with `typed_as` where it matters.
+    noded = field(".crumbs", out=[lambda v, page: [Card(title="x", href=None)]]).as_node()
+    valued = field(".crumbs", out=[lambda v, page: v]).as_value()
+    noded_typed = field(".crumbs", out=[lambda v, page: []]).as_node().typed_as(List[Card])
     # transforms follow the callable's return type
     price = field(".price::text").map(_to_float)
     symbol = field(".price::text").re_first(r"^\D+")
@@ -54,6 +63,12 @@ class ProductPage(FrostPage):
     typed_processed = field(".crumbs", out=[lambda v, page: [Card(title="x", href=None)]]).typed_as(
         List[Card]
     )
+    # ...and a processor's output is very often a UNION, in either spelling. `typed_as` was annotated
+    # `Type[U]` — the type of a CLASS OBJECT — so both of these were an error in the user's CI while every
+    # test here passed.
+    typed_optional = field(".price::text", out=[lambda v, page: v]).typed_as(Optional[str])
+    typed_union = field(".price::text", out=[lambda v, page: v]).typed_as(str | None)
+    typed_scalar = field(".price::text", out=[lambda v, page: 1.0]).typed_as(float)
     # groups: `item=` gives the item type, without it a row dict
     cards = Many(".card", item=Card, title=field("h3::text"), href=field("a::attr(href)"))
     rows = Many(".card", title=field("h3::text"))
@@ -67,8 +82,13 @@ def check_instance_types(p: ProductPage) -> None:
     assert_type(p.specs, str)
     assert_type(p.explicit_first, Optional[str])
     assert_type(p.explicit_nojoin, Optional[str])
+    assert_type(p.all_no_join, List[str])
+    assert_type(p.join_not_all, str)
     assert_type(p.dynamic, Any)
     assert_type(p.dynamic_join, Any)
+    assert_type(p.noded, Optional[str])
+    assert_type(p.valued, Optional[str])
+    assert_type(p.noded_typed, List[Card])
     assert_type(p.price, float)
     assert_type(p.symbol, Optional[str])
     assert_type(p.chained, int)
@@ -78,6 +98,9 @@ def check_instance_types(p: ProductPage) -> None:
     assert_type(p.processed, Optional[str])
     # ...and the declared one, which is what the field really produces
     assert_type(p.typed_processed, List[Card])
+    assert_type(p.typed_optional, Optional[str])
+    assert_type(p.typed_union, Optional[str])
+    assert_type(p.typed_scalar, float)
     assert_type(p.cards, List[Card])
     assert_type(p.rows, List[Dict[str, Any]])
     assert_type(p.lead, Optional[Card])

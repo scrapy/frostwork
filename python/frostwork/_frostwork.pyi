@@ -36,6 +36,13 @@ def selector_terminals(queries: List[str]) -> List[Optional[str]]:
     source — a NODE reference, not a scalar — which is what ``frostwork.webpoet`` re-parses before handing
     a field to a processor. Derived from the compiler, so it cannot drift from how a query is routed."""
 
+def selector_node_identity(queries: List[str]) -> List[Tuple[Optional[str], bool]]:
+    """Per query, ``(pinned_tag, can_match_a_synthesized_frame)`` — the matched-node identity an
+    outer-HTML value cannot always carry. ``pinned_tag`` is the tag name every match must have (the
+    subject's name test, when every comma/union member agrees) or ``None``; the flag is ``True`` when a
+    match could be an ``<html>``/``<head>``/``<body>`` the page never wrote, whose value therefore begins
+    with its CONTENT and names nothing. ``frostwork.webpoet``'s ``.as_node()`` reads both."""
+
 def resolve_label(label: str) -> Optional[str]:
     """Canonical WHATWG encoding name for ``label`` (e.g. ``"UTF-8"``), or ``None`` if unrecognized."""
 

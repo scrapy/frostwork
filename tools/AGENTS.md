@@ -11,7 +11,12 @@ items are identical before timing either; `--boundaries` measures the three shap
 curve does not hold, one of which Parsel wins outright, because a benchmark that only reports its good cases
 is a brochure).
 
-Three tools own the **web-poet integration**, and they mirror the engine's derive/audit/mutate trio
+Five files own the **web-poet integration**: `webpoet_cases.py` is the shared registry (which processors
+are covered, how a page object reaches each, which gate proves it — read by the two gates below so they
+cannot drift), `webpoet_structure.py` is the one structural signature everything compares parsed HTML with
+(the differential's raw-source allowance, the benchmark's parity check and the node-handoff sweep all read
+it: a second comparator is a second standard, and the benchmark's collapsed whitespace), and the other three
+mirror the engine's derive/audit/mutate trio
 because the integration made the same mistake the engine's rule tables did — hand-written lists that
 omitted something. `diff_webpoet.py` is the gate (build a `FrostPage` and an equivalent parsel `WebPage`
 per generated schema, diff `to_item()` on the WHOLE item, across the class-shape × response-type matrix);

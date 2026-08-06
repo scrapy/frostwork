@@ -1,52 +1,33 @@
 """Differential gate for the **web-poet integration** — Parsel is the oracle, `to_item()` is the unit.
 
-`diff_lxml.py` gates the engine: does a selector return the same COLUMN as lxml. Nothing gated the layer
-above it, so `frostwork.webpoet` shipped five defects that the 100%-green engine gate could not see. Each
-was a hand-written list that omitted something, which is the same mistake AGENTS.md records four times in
-the engine's own rule tables ("a rule with no name to probe cannot fail a gate"):
-
-  * the universe of CLASS SHAPES a page object can have omitted `@attrs.define` — which recreates the
-    class, so `__init_subclass__` re-runs after the markers are gone and the original is not in the new
-    MRO. Own fields drop out of the plan and `to_item()` raises `KeyError`.
-  * the universe of RESPONSE INPUTS omitted `BrowserResponse` (raises) and web-poet's own `BrowserPage`
-    (silently returns `{}`, because it does not inherit `FrostPage.__init_subclass__`).
-  * the universe of VALUE TYPES a field processor accepts omitted `Selector`/`SelectorList`/`HtmlElement`.
-    web-poet attaches processors BY NAME through a nested `Processors` class, which every
-    zyte-common-items base page declares, so this fires with no `out=` written anywhere: the processor
-    receives Frostwork's `str`, matches none of its `isinstance` gates, and returns it UNCHANGED
-    ("Other inputs are returned as is"). A raw-HTML string lands in a field typed `List[Breadcrumb]`.
-
-So this gate compares the WHOLE ITEM, not a few fields. That is deliberate and load-bearing: a missing
-KEY is the failure mode of two of the three defects above, and a per-field sweep that only checks the
-fields it knows about cannot see a field that vanished. It is the same lesson as `make gate-seq`
-comparing the whole tree instead of a few `::text` columns.
-
-WHAT "EQUIVALENT" MEANS (the oracle's shape)
---------------------------------------------
-For each generated schema this builds two page objects with identical field names, selectors and nested
-`Processors`, and diffs `await to_item()`:
+`diff_lxml.py` gates the engine: does a selector return the same COLUMN as lxml. This gates the layer above
+it: does a page OBJECT return parsel's item. For each generated schema it builds two page objects with the
+same field names, selectors and nested `Processors` and diffs `await to_item()`:
 
   * a `frostwork.webpoet.FrostPage` subclass using `field()` / `Many` / `One`
   * a `web_poet.WebPage` subclass whose `@web_poet.field` getters call `self.css()` / `self.xpath()`
 
-The oracle getter's shape follows the field's terminal, because Frostwork's value contract does:
+across a matrix of CLASS SHAPES (plain, the attrs and dataclass variants, inheritance, a metaclass rebuild)
+and RESPONSE INPUTS (`HttpResponse`, `BrowserResponse`).
 
-  * `::text` / `::attr(x)`      -> parsel `.get()` / `.getall()`; compared directly.
-  * bare element, NO processor  -> parsel `.get()` / `.getall()`; Frostwork returns the element's RAW
-    SOURCE, a documented divergence from lxml's reflow, so this is compared by re-parse on non-whitespace
-    text (the same rule as `diff_lxml.verdict`, imported rather than restated).
-  * bare element, WITH processor -> parsel returns the `SelectorList` itself, because that is what a real
-    page object hands a processor. The processor consumes it and yields a normalized value (a
-    `List[Breadcrumb]`, an `AggregateRating`, cleaned HTML), so the comparison is direct equality on the
-    processed result. This column is the one that is silently wrong today.
+Four rules make the comparison mean something:
 
-DISCRIMINATION
---------------
-A processor that returns `None` on both sides proves nothing, so `gen_page` emits markup the zyte
-processors can actually parse (real breadcrumb trails, `"3.8 out of 5 stars"`, prices, descriptions with a
-`<script>` and a relative href to strip/resolve) and the run PRINTS how many pairs carried a non-empty
-expected value. Read that number before believing a PASS: `--show-discrimination` breaks it down per
-processor. A family whose expected values are all empty is a family that cannot go red.
+  * **The whole ITEM, over the union of both sides' keys.** A vanished key is a real failure mode here (a
+    class rebuild dropping fields, a base whose markers were never converted), and a per-field sweep over the
+    fields it knows about cannot see a field that is not there.
+  * **The oracle's shape follows the field's contract.** `::text`/`::attr()` -> `.get()`/`.getall()`; a
+    bare-element field with no processor -> the same, compared by re-parsed STRUCTURE because Frostwork
+    returns raw source where lxml returns a reflow; a field declared `.as_node()` -> the `SelectorList` a real
+    page object hands a processor, compared by equality on the processed result; a generic `out=` processor ->
+    the field's value, since that is what web-poet gives it.
+  * **Coverage is part of the exit condition** (`coverage_failures`). A green run means everything agreed OR
+    nothing ran: every expected (class shape x input) CELL must grade pairs with no unexplained oracle skips,
+    every processor column must carry a non-empty expected value on some page, and every column the shared
+    registry (`tools/webpoet_cases.py`) claims is covered must appear.
+  * **Discrimination is printed.** A processor returning `None` on both sides proves nothing, so `gen_page`
+    emits markup the zyte processors can parse (breadcrumb trails, "3.8 out of 5 stars", prices, GTINs,
+    descriptions with a `<script>` and a relative href) and the run reports how many pairs carried a
+    non-empty expected value. `--show-discrimination` breaks it down per processor.
 
 Run:  .venv/bin/python tools/diff_webpoet.py
 Gate: DIVERGE + CRASH = 0.
@@ -63,6 +44,7 @@ import random
 import sys
 import warnings
 from collections import defaultdict
+from typing import Optional
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -70,6 +52,7 @@ import attrs
 import oracle
 import parsel
 import webpoet_cases
+import webpoet_structure
 from diff_lxml import is_node_query
 from web_poet import (
     BrowserHtml,
@@ -122,11 +105,40 @@ PROCESSOR_FIELDS.append((
     _ALL_VARIANT_OF,
 ))
 
-# Transforms, so `.map()` / `.re_first()` are not a surface the differential never emits — the other thing
-# the mutation sweep caught: making `_shape` drop its transforms entirely SURVIVED, because no generated
-# field had one. Keyed by cardinality, since a transform sees the SHAPED value. Applied only to fields
-# with no processor, so "transform then processor" ordering stays a unit-vector question with one answer
-# rather than a generated one with two plausible ones.
+
+# GENERIC processors: ordinary callables, which is what most `out=` arguments are. web-poet hands them the
+# field's VALUE, so a bare-element field gives them HTML source — and that is the column that was missing
+# when a processor's presence alone was read as "this processor wants a node": `lambda v: v.upper()` got a
+# `Selector` and raised. Nothing about these is zyte-specific, so the page object declares no input kind.
+def _p_shout(value):
+    return (value or "").upper()
+
+
+def _p_length(value):
+    return len(value) if value else 0
+
+
+def _p_with_page(value, page):
+    return f"{page.url}|{(value or '')[:12]}"
+
+
+# name: (callable, selector, does its OUTPUT inherit the raw-source divergence?). That last flag is what
+# keeps the column honest: Frostwork's outer HTML is raw source and lxml's is a reflow, so anything a
+# processor derives from it differs the same way — `len(html)` is 134 here and 138 there, and grading that as
+# a defect would be filing a documented divergence. HTML in / HTML out re-parses identically, so the
+# structural allowance still settles it; a scalar output only agrees if the input was a scalar terminal.
+GENERIC_PROCESSORS = {
+    "shoutDesc": (_p_shout, ".desc", True),          # bare element -> HTML source, uppercased
+    "skuLength": (_p_length, ".sku::text", False),   # ...and one that would crash on a node
+    "namePlusUrl": (_p_with_page, "h1::text", False),  # the (value, page) form
+}
+VALUE_INPUT_PROCESSORS = set(GENERIC_PROCESSORS)
+RAW_DERIVED_PROCESSORS = {n for n, (_f, _s, raw) in GENERIC_PROCESSORS.items() if raw}
+PROCESSORS.update({name: (fn, False) for name, (fn, _sel, _raw) in GENERIC_PROCESSORS.items()})
+PROCESSOR_FIELDS += [(name, sel, name) for name, (_fn, sel, _raw) in GENERIC_PROCESSORS.items()]
+
+# Transforms exercise `.map()` after cardinality shaping. They are used on plain fields and on selected
+# value-taking processors; node-taking processors reject the combination at class definition.
 def _t_first(v):
     return (v or "<none>").upper()
 
@@ -141,20 +153,6 @@ def _t_join(v):
 
 TRANSFORMS = {"first": _t_first, "all": _t_all, "join": _t_join}
 
-
-# A transform on a field that ALSO has a node-taking processor — the combination the differential used to
-# exclude on purpose ("ordering stays a unit-vector question"), which left the composition order asserted by
-# nothing generated: converting to a node BEFORE the transform handed user code a `Selector` where the
-# contract promises the shaped string, so the documented `field(".desc").map(...)` raised only when a
-# processor happened to be attached. The transform edits TEXT rather than markup so it survives the one
-# asymmetry in this column (see `_parsel_ns`): our side transforms RAW SOURCE, the oracle transforms lxml's
-# serialization of the same element.
-def _t_node_source(html):
-    return html.replace("Cat", "KAT")
-
-
-def _t_node_source_all(htmls):
-    return [h.replace("Cat", "KAT") for h in htmls]
 
 # Plain value fields: no processor, so these exercise the terminals rather than the node handoff.
 VALUE_FIELDS = [
@@ -243,11 +241,55 @@ def gen_page(rng) -> bytes:
 
 
 # --------------------------------------------------------------------------- schema generation
-def gen_schema(rng) -> dict:
+def _contract_cards() -> dict:
+    """Cardinality per contract field: whatever its processor's input contract requires, `first` otherwise."""
+    fields = list(PROCESSOR_FIELDS) + list(VALUE_FIELDS)
+    return {
+        name: ("all", None) if (name in NODE_LIST_PROCESSORS or proc in LIST_INPUT_PROCESSORS)
+        else ("first", None)
+        for name, _sel, proc in fields
+    }
+
+
+def contract_schemas(one: bool = False) -> list:
+    """`[(label, schema)]` — the FIXED schemas that make every required column a fact rather than a
+    probability, leaving the randomised sweep responsible only for combinations of shape and cardinality.
+
+    Two of them because a variant REPLACES the column it varies (`_bucket` labels a declined processor
+    `X (out=[])` and a transformed one `X +map`), so one schema cannot carry both forms of a field. Folded
+    into one, the plain columns came from the random sweep instead — and the gate passed on seed 0 while
+    `--schemas 1 --no-browser --seed 1` failed."""
+    fields = list(PROCESSOR_FIELDS) + list(VALUE_FIELDS)
+    cards = _contract_cards()
+    group = {
+        "name": "products",
+        "one": one,
+        "container": ".card",
+        "subs": [("title", "h3 a::text"), ("href", "h3 a::attr(href)"), ("price", ".price::text")],
+    }
+    plain = {
+        "fields": fields, "cards": cards, "transforms": {}, "out_off": set(), "group": group,
+    }
+    # ...and the variants, on the same fields: `out=[]` on the node/strings processors, a `.map()` on the
+    # value-taking ones (which cannot also be declined) and on the plain value fields.
+    out_off = {name for name, _sel, proc in fields if proc is not None and proc not in VALUE_INPUT_PROCESSORS}
+    transforms = {
+        name: TRANSFORMS[cards[name][0]]
+        for name, sel, proc in fields
+        if proc in VALUE_INPUT_PROCESSORS or (proc is None and not is_node_query(sel))
+    }
+    variants = {
+        "fields": fields, "cards": cards, "transforms": transforms, "out_off": out_off, "group": group,
+    }
+    return [("plain", plain), ("variants", variants)]
+
+
+def gen_schema(rng, idx: int = 0) -> dict:
     """A page-object schema: flat fields (some processor-bearing), optionally a `Many`/`One` group."""
     n_proc = rng.randint(1, len(PROCESSOR_FIELDS))
     n_val = rng.randint(1, len(VALUE_FIELDS))
     fields = rng.sample(PROCESSOR_FIELDS, n_proc) + rng.sample(VALUE_FIELDS, n_val)
+    plain = None  # every column is covered by the contract pass; this sweep looks for COMBINATIONS
     rng.shuffle(fields)
     cards = {}
     transforms = {}
@@ -264,26 +306,31 @@ def gen_schema(rng) -> dict:
             cards[name] = ("all", None)  # exercises the SelectorList branch of the node handoff
         elif _proc in LIST_INPUT_PROCESSORS:
             cards[name] = ("all", None)  # this processor's input is a LIST of strings
+        elif _proc in VALUE_INPUT_PROCESSORS:
+            # a generic processor takes the field's value, so any cardinality is legal; a bare-element field
+            # hands it HTML SOURCE, which is the contract the node inference used to break
+            cards[name] = ("first", None) if is_node_query(sel) else rng.choice(
+                [("first", None), ("all", None), ("join", " ")]
+            )
         elif _proc is not None or is_node_query(sel):
             cards[name] = ("first", None)  # a node-taking processor takes ONE node; raw source is scalar
         else:
             cards[name] = rng.choice([("first", None), ("all", None), ("join", " ")])
+        if name == plain:
+            continue  # the rotated-in column, kept transform-free on purpose
         # a transform on roughly half the no-processor fields...
         if _proc is None and not is_node_query(sel) and rng.random() < 0.5:
             transforms[name] = TRANSFORMS[cards[name][0]]
         # ...and on some fields that DO have a node-taking processor, which pins the composition order
-        elif (
-            _proc is not None
-            and name not in out_off
-            and _proc not in LIST_INPUT_PROCESSORS
-            and rng.random() < 0.4
-        ):
-            transforms[name] = _t_node_source_all if cards[name][0] == "all" else _t_node_source
+        elif _proc in VALUE_INPUT_PROCESSORS and rng.random() < 0.5:
+            # A transform composes with a VALUE processor (shape -> map -> processor). On an `.as_node()`
+            # field the combination is refused at class definition, so there is nothing to generate there.
+            transforms[name] = TRANSFORMS[cards[name][0]]
     group = None
-    if rng.random() < 0.4:
+    if rng.random() < 0.5:
         group = {
             "name": "products",
-            "one": rng.random() < 0.3,
+            "one": rng.random() < 0.4,
             "container": ".card",
             "subs": [("title", "h3 a::text"), ("href", "h3 a::attr(href)"), ("price", ".price::text")],
         }
@@ -322,17 +369,40 @@ SHAPES = (
 
 
 def _processors_cls(schema):
-    ns = {name: [PROCESSORS[proc][0]] for name, _sel, proc in schema["fields"] if proc}
+    """The nested `Processors` class, which is how zyte's own processors arrive — by FIELD NAME, with no `out=`
+    written anywhere. Only the node/strings ones go here; a generic processor is attached with an explicit
+    `out=` in each builder instead (see `_out_for`), so the two routes are both exercised and neither side
+    inherits the other's wiring."""
+    ns = {
+        name: [PROCESSORS[proc][0]]
+        for name, _sel, proc in schema["fields"]
+        if proc and proc not in VALUE_INPUT_PROCESSORS
+    }
     return type("Processors", (), ns) if ns else None
+
+
+def _out_for(name: str, schema) -> Optional[list]:
+    """`out=` for one field: the generic processor if it has one, `[]` if the schema declines it, else None.
+
+    Built per BUILDER rather than shared, because a shared `Processors` class is installed on both sides at
+    once — so removing a processor from it removes it from both, every value still agrees, and the coverage
+    numbers stay identical. The evidence check (`witnessed`) is the other half of that."""
+    proc = next((p for n, _s, p in schema["fields"] if n == name), None)
+    if name in schema.get("out_off", ()):
+        return []
+    if proc in VALUE_INPUT_PROCESSORS:
+        return [PROCESSORS[proc][0]]
+    return None
 
 
 def _frost_ns(fields, schema):
     ns = {}
-    for name, sel, _proc in fields:
+    for name, sel, proc in fields:
         card, sep = schema["cards"][name]
         # `out=[]` is passed as a real keyword, so this exercises `field()`'s forwarding as well as the
         # resolution: `field()` only forwards keywords it was GIVEN, and an empty list has to survive that.
-        kw = {"out": []} if name in schema.get("out_off", ()) else {}
+        out = _out_for(name, schema)
+        kw = {} if out is None else {"out": out}
         if card == "all":
             f = field(sel, all=True, **kw)
         elif card == "join":
@@ -340,7 +410,14 @@ def _frost_ns(fields, schema):
         else:
             f = field(sel, **kw)
         fn = schema["transforms"].get(name)
-        ns[name] = f.map(fn) if fn is not None else f
+        if fn is not None:
+            f = f.map(fn)
+        # The input kind is DECLARED, never inferred, and it is required for any processor over a bare
+        # element: `.as_node()` for the node-taking ones, `.as_value()` for a processor that takes the
+        # field's own value (which is what an ordinary `out=` callable does).
+        if proc is not None and name not in schema.get("out_off", ()) and is_node_query(sel):
+            f = f.as_node() if PROCESSORS[proc][1] else f.as_value()
+        ns[name] = f
     return ns
 
 
@@ -362,17 +439,6 @@ def _group_ns(schema, frost: bool):
     return {g["name"]: wp_field(getter)}
 
 
-def _reparse(html: str):
-    """An HTML fragment back into a `parsel.Selector` over that element — the oracle's own two lines, not an
-    import of the handoff being tested. Only reached by the transform-plus-processor column below, and only
-    for `<div>`/`<nav>`/`<span>` fields, where `lxml.html.fromstring` is faithful; it is NOT faithful for
-    document-frame elements, which is why that contract is asserted by a unit sweep over the whole element
-    universe (`tests/test_python.py`) instead of here."""
-    from lxml.html import fromstring
-
-    return parsel.Selector(root=fromstring(html))
-
-
 def _parsel_ns(fields, schema):
     """Oracle getters. A processor-bearing field returns the `SelectorList`/list-of-strings the processor
     actually expects; everything else returns the value, matching Frostwork's terminal contract."""
@@ -386,31 +452,23 @@ def _parsel_ns(fields, schema):
         # both sides rather than the harness pretending the entry is absent.
         off = name in schema.get("out_off", ())
 
-        def getter(self, sel=sel, card=card, sep=sep, proc=proc, fn=fn, off=off):
+        def getter(self, name=name, sel=sel, card=card, sep=sep, proc=proc, fn=fn, off=off):
             sub = self.xpath(sel) if sel.startswith(("/", "(")) else self.css(sel)
-            if proc is not None and not off:
-                # Keyed on the PROCESSOR's input contract, not on cardinality: `images_processor`
-                # consumes URL STRINGS and has no Selector branch (see PROCESSOR_FIELDS), while the
-                # node-taking ones consume the SelectorList. Conflating the two would silently pick the
-                # wrong oracle the moment a node field is declared `all=True`.
-                if proc in LIST_INPUT_PROCESSORS:
-                    value = sub.getall()
-                    return fn(value) if fn is not None else value
-                if fn is None:
-                    return sub
-                # A transform on a node-taking processor field. The contract says transforms run on the
-                # SHAPED value (the element's HTML) and the node conversion belongs to the processor
-                # handoff, so the oracle spells that out: transform the source, then re-parse.
-                #
-                # This is the one column where the oracle mirrors our composition rather than deriving the
-                # answer independently — "transform the source, then process it" has no parsel-native
-                # spelling. What it discriminates is ORDER, and an order error does not need an independent
-                # value to show up: converting first hands a `Selector` to a string transform, which raises
-                # on our side alone (a CRASH), or silently changes the value if the transform tolerates it.
-                if card == "all":
-                    return parsel.selector.SelectorList([_reparse(h) for h in fn(sub.getall()) if h])
-                first = sub.get()
-                return _reparse(fn(first)) if first else None
+            if proc is not None and not off and proc not in VALUE_INPUT_PROCESSORS:
+                # A node/strings processor: hand over what a real page object hands it, keyed on the
+                # PROCESSOR's input contract rather than on cardinality (`images_processor` consumes URL
+                # strings and has no Selector branch). A GENERIC processor is not here at all — it takes the
+                # field's VALUE, so it falls through to the no-processor path and web-poet applies it after.
+                # No transform can reach this branch (`.as_node()` refuses `.map()` at class definition), so
+                # there is no "transform the source, then re-parse" oracle to write. Checked, not assumed:
+                # a generator change is how it would come back.
+                if fn is not None:
+                    raise SystemExit(
+                        f"diff-webpoet: the generator gave field {name!r} both a transform and a "
+                        f"node/strings processor, which frostwork.webpoet refuses at class definition. The "
+                        f"oracle has no faithful answer for it — fix the generator."
+                    )
+                return sub.getall() if proc in LIST_INPUT_PROCESSORS else sub
             if card == "all":
                 value = sub.getall()
             elif card == "join":
@@ -421,7 +479,8 @@ def _parsel_ns(fields, schema):
             return fn(value) if fn is not None else value
 
         getter.__name__ = getter.__qualname__ = name
-        ns[name] = wp_field(out=[])(getter) if off else wp_field(getter)
+        out = _out_for(name, schema)
+        ns[name] = wp_field(getter) if out is None else wp_field(out=out)(getter)
     return ns
 
 
@@ -520,7 +579,12 @@ def build_zyte_pages():
     oracle_ns = {}
     for name, sel in ZYTE_FIELDS:
         list_input = name in LIST_INPUT_PROCESSORS
-        frost_ns[name] = field(sel, all=True) if list_input else field(sel)
+        if list_input:
+            frost_ns[name] = field(sel, all=True)  # URL strings, not a node
+        elif has_proc[name]:
+            frost_ns[name] = field(sel).as_node()  # the declaration a zyte node processor needs
+        else:
+            frost_ns[name] = field(sel)
 
         def getter(self, sel=sel, proc=has_proc[name], list_input=list_input):
             sub = self.css(sel)
@@ -531,8 +595,8 @@ def build_zyte_pages():
         getter.__name__ = getter.__qualname__ = name
         oracle_ns[name] = wp_field(getter)
 
-    # `FrostPage` FIRST: the markers are converted by its `__init_subclass__`, and a `field()` on a class
-    # that does not inherit a Frostwork base raises at class definition (see `_require_frost_owner`).
+    # A Frostwork base has to be present (either order works): the markers are converted by its
+    # `__init_subclass__`, and a `field()` on a class without one raises at class definition.
     return (
         type("FrostProductPage", (FrostPage, ProductPage), frost_ns),
         type("ParselProductPage", (ProductPage,), oracle_ns),
@@ -549,11 +613,11 @@ def _zyte_item_rest(item) -> dict:
     """Every OTHER field of the item, so this column is a whole-item comparison like the rest of the gate
     rather than a check of the fields the harness happens to declare.
 
-    It is one comparison rather than thirty rows because most of a `Product` is `None` here and thirty
-    vacuous AGREEs per page would drown the discrimination count — the number the run prints to say whether
-    a PASS means anything. What it adds is real: `description` lands in here, and zyte computes it from
-    `descriptionHtml` through a side channel (`_descriptionHtml_node`), so this column grades the node the
-    handoff produced a second time, through a field nobody declared."""
+    One comparison rather than thirty rows because most of a `Product` is `None` here, and thirty vacuous
+    AGREEs per page would drown the discrimination count — the number the run prints to say whether a PASS
+    means anything. What it catches is a field appearing or vanishing on one side only, including the ones
+    zyte's own mixins compute (`currencyRaw`, `descriptionHtml`'s side-channel partners) from values these
+    page objects declare."""
     declared = {n for n, _sel in ZYTE_FIELDS} | {"metadata"}
     return {k: v for k, v in attrs.asdict(item).items() if k not in declared}
 
@@ -600,27 +664,9 @@ def _to_item(cls, response):
 
 
 # --------------------------------------------------------------------------- verdicts
-def _structure(html: str):
-    """A normalized structural signature of one HTML fragment: tag, attributes, text and tails (whitespace
-    collapsed), and the same recursively for each child element.
-
-    This is what "the raw-source divergence is acceptable" has to mean. Comparing non-whitespace TEXT was
-    too weak by a mile — `<p class=a>same</p>` and `<section id=wrong>same</section>` have identical text,
-    so the allowance excused a different tag, lost attributes and a reshaped subtree. Serialization
-    differences (quoting, entity spelling, an implied end tag) disappear when both sides are parsed;
-    structure does not, and structure is what a processor reads."""
-    from lxml.html import fromstring  # noqa: PLC0415
-
-    def walk(el):
-        return (
-            el.tag,
-            tuple(sorted((k, " ".join(v.split())) for k, v in el.attrib.items())),
-            " ".join((el.text or "").split()),
-            tuple(walk(c) for c in el if isinstance(c.tag, str)),
-            " ".join((el.tail or "").split()),
-        )
-
-    return walk(fromstring(html))
+# What "the raw-source divergence is acceptable" is allowed to mean, in one place (`bench_webpoet.py` reads
+# the same function). A whitespace-only difference is graded WS by the caller before this is reached.
+_structure = webpoet_structure.structure_of
 
 
 def field_verdict(mine, theirs, selector: str, has_processor: bool) -> str:
@@ -668,7 +714,13 @@ def item_verdicts(mine_item, theirs_item, schema) -> list:
     # allowance applies again. Grading it as "processed" would demand byte equality on outer HTML and file
     # the documented reflow divergence as a defect — the mirror image of the mistake this gate exists for.
     off = schema.get("out_off", ())
-    procs = {name: (None if name in off else proc) for name, _sel, proc in schema["fields"]}
+    # A processor whose output is DERIVED from the element's HTML source keeps the raw-source allowance: what
+    # differs between the two sides is the reflow, transformed. Everything else with a processor is compared
+    # by equality, because a normalized processor output has no allowance to make.
+    procs = {
+        name: (None if name in off or proc in RAW_DERIVED_PROCESSORS else proc)
+        for name, _sel, proc in schema["fields"]
+    }
     sels = {name: sel for name, sel, _proc in schema["fields"]}
     for key in sorted(set(mine_item) | set(theirs_item)):
         if key not in mine_item or key not in theirs_item:
@@ -686,6 +738,11 @@ def _bucket(name: str, schema) -> str:
     were combinations rather than processors (`all=True` with a processor, and a `.map()` alongside one).
     Naming them here is what makes `coverage_failures` able to notice that a column stopped being generated
     — a hole in the generator reads exactly like a passing gate otherwise."""
+    group = schema.get("group")
+    if group and group["name"] == name:
+        # `Many` and `One` are separate columns: they take different code paths (row list vs first row) and a
+        # generator that stopped emitting one of them is not visible in a "(no processor)" total.
+        return "One" if group["one"] else "Many"
     procs = {n: p for n, _s, p in schema["fields"]}
     proc = procs.get(name)
     if proc is None:
@@ -720,9 +777,10 @@ INPUT_KINDS = ("http", "browser")
 
 def expected_cells(shapes=SHAPES, browser: bool = True, zyte: bool = True) -> list:
     kinds = INPUT_KINDS if browser else ("http",)
-    cells = [
-        f"{shape}/{kind}" for shape in shapes for kind in kinds if shape not in EXPECTED_ORACLE_SKIP
-    ]
+    # the deterministic contract pass first: it is what makes every column's coverage a fact rather than a
+    # probability, so a run that stopped doing it must fail rather than lean on the random sweep
+    cells = [f"contract/{kind}" for kind in kinds]
+    cells += [f"{shape}/{kind}" for shape in shapes for kind in kinds if shape not in EXPECTED_ORACLE_SKIP]
     return cells + (["zyte_productpage/http"] if zyte else [])
 
 
@@ -737,16 +795,23 @@ def required_columns() -> list:
              for c in webpoet_cases.cases_for("generated")]
     exact += [(f"zyte:{c.field_name}", f"{c.processor} through zyte's real ProductPage wiring", True)
               for c in webpoet_cases.cases_for("productpage")]
-    exact.append(("(no processor)", "plain value fields, where the terminal contract answers", True))
+    exact += [(name, f"a generic `out=` processor over the field's own value ({name})", True)
+              for name in sorted(GENERIC_PROCESSORS)]
+    exact += [
+        ("(no processor)", "plain value fields, where the terminal contract answers", True),
+        ("Many", "a grouped field's row list", True),
+        ("One", "a grouped field's first row", True),
+        ("zyte:(other fields)", "every undeclared field of the real Product item", True),
+    ]
     markers = [
         ("(out=[])", "an explicit out=[] cancelling an inherited Processors entry", False),
-        ("+map", "a .map() on a processor-bearing node field — the shape -> map -> processor ORDER", False),
+        ("+map", "a .map() on a value-processor field — the shape -> map -> processor order", False),
         ("(all=True)", "a node-taking processor on an all=True field — the SelectorList branch", False),
     ]
     return exact + markers
 
 
-def coverage_failures(by_shape, by_proc, meaningful, cells=None) -> list:
+def coverage_failures(by_shape, by_proc, meaningful, witnessed=None, cells=None, kinds=INPUT_KINDS) -> list:
     """Reasons this run proves less than its PASS suggests. Pure and importable so `tests/test_gates.py`
     can seed each one.
 
@@ -775,14 +840,35 @@ def coverage_failures(by_shape, by_proc, meaningful, cells=None) -> list:
                 f"cell {cell!r} graded {graded[cell]} pairs but skipped {skipped[cell]}: the oracle failed "
                 f"to build or answer for some of them, which is a hole this run reported as a pass."
             )
-    for shape in SHAPES:
+    for shape, why in EXPECTED_ORACLE_SKIP.items():
         shape_graded = sum(v for cell, v in graded.items() if cell.split("/")[0] == shape)
-        if shape_graded and shape in EXPECTED_ORACLE_SKIP:
+        if shape_graded:
             failures.append(
-                f"class shape {shape!r} is listed in EXPECTED_ORACLE_SKIP ({EXPECTED_ORACLE_SKIP[shape]}) "
-                f"but graded {shape_graded} pairs — upstream changed; remove the entry so it is gated."
+                f"class shape {shape!r} is listed in EXPECTED_ORACLE_SKIP ({why}) but graded "
+                f"{shape_graded} pairs — upstream changed; remove the entry so it is gated."
             )
+        # ...and it has to have been PROBED. An expectation no run exercises is a shape that quietly stopped
+        # being built at all, which reads exactly like one that is being skipped for the documented reason.
+        for kind in kinds:
+            cell = f"{shape}/{kind}"
+            if not skipped.get(cell, 0):
+                failures.append(
+                    f"cell {cell!r} is expected to ORACLE-SKIP ({why}) but no skip was recorded — the shape "
+                    f"is not being built, so the expectation proves nothing."
+                )
     for bucket, counts in by_proc.items():
+        # A processor column has to show EVIDENCE that its processor ran: both sides install the same ones, so
+        # a harness that stopped installing them would agree on every pair while the labels stayed.
+        is_processor_column = (
+            bucket not in ("(no processor)", "Many", "One", "zyte:(other fields)")
+            and "(out=[])" not in bucket  # a declined processor is expected NOT to change the value
+        )
+        if sum(counts.values()) and is_processor_column and witnessed is not None and not witnessed.get(bucket, 0):
+            failures.append(
+                f"column {bucket!r} never showed a processor CHANGING its field's value, so nothing proves a "
+                f"processor ran there — the label comes from the schema, not from evidence. Check that the "
+                f"processors are still installed and that `gen_page` feeds them."
+            )
         if sum(counts.values()) and not meaningful.get(bucket, 0):
             failures.append(
                 f"column {bucket!r} never carried a non-empty expected value, so it cannot go red — the "
@@ -797,6 +883,25 @@ def coverage_failures(by_shape, by_proc, meaningful, cells=None) -> list:
                 f"registry (tools/webpoet_cases.py) says is covered."
             )
     return failures
+
+
+def unprocessed_values(html: bytes, schema) -> dict:
+    """`{field name: the value the field would have with NO processor}`, straight from parsel.
+
+    This is the WITNESS the coverage check needs. A "non-empty expected value" only says the page had content;
+    it cannot tell a processor that ran from one that was never installed — and both sides of this differential
+    install the same processors, so removing them from the harness would agree perfectly. Comparing the
+    processed value against the unprocessed one is evidence: if they differ, the processor ran and did
+    something."""
+    sel = parsel.Selector(body=html, encoding="utf-8")
+    out = {}
+    for name, query, proc in schema["fields"]:
+        if proc is None:
+            continue
+        sub = sel.xpath(query) if query.startswith(("/", "(")) else sel.css(query)
+        card, sep = schema["cards"][name]
+        out[name] = sub.getall() if card == "all" else (sep or "").join(sub.getall()) if card == "join" else sub.get()
+    return out
 
 
 def _expected_is_meaningful(value) -> bool:
@@ -816,23 +921,65 @@ def sweep(
     show: int = 8,
     shapes=SHAPES,
     zyte: bool = True,
+    contract_only: bool = False,
 ):
     """Run the differential and return `(stat, by_shape, by_proc, meaningful, examples)`.
 
     Split out of `main` so it can be used as a DETECTOR: `tools/mutate_webpoet.py` breaks one load-bearing
     line in `frostwork.webpoet` and asks whether this goes red. A gate nobody has tried to fool is a
-    guess about its own coverage."""
+    guess about its own coverage.
+
+    `contract_only` runs the fixed schemas and nothing else — no `gen_schema()` at all — which is how
+    `tests/test_gates.py` asserts that every required column comes from the deterministic pass rather than
+    from a lucky seed."""
     rng = random.Random(seed)
     stat = defaultdict(int)
     by_shape = defaultdict(lambda: defaultdict(int))
     by_proc = defaultdict(lambda: defaultdict(int))
     meaningful = defaultdict(int)
+    witnessed = defaultdict(int)
     examples = []
 
     inputs = [("http", _http)] + ([("browser", _browser)] if browser else [])
     args = argparse.Namespace(show=show)
 
-    for shape in shapes:
+    # ---- the deterministic contract pass: every processor column, once, on one fixed page ----
+    # Coverage is a FACT here rather than something the rotation had to arrange: fixed schemas declare every
+    # column the registry knows about, and they run before the randomised shapes. The random sweep below is
+    # then free to be random — it is looking for combinations, not for coverage.
+    contract_html = gen_page(random.Random(0))
+    contract_cases = [
+        (contract, i) for one in (False, True) for _label, contract in contract_schemas(one) for i in inputs
+    ]
+    for contract, (kind, make_response) in contract_cases:
+        key = f"contract/{kind}"
+        oracle_cls = build_page(contract, "plain", frost=False, kind=kind)
+        frost_cls = build_page(contract, "plain", frost=True, kind=kind)
+        mine, mine_err = _to_item(frost_cls, make_response(contract_html))
+        theirs, theirs_err = _to_item(oracle_cls, make_response(contract_html))
+        if theirs_err is not None:
+            raise SystemExit(f"diff-webpoet: the parsel oracle cannot answer the contract page: {theirs_err}")
+        if mine_err is not None:
+            stat["CRASH"] += 1
+            stat["pairs"] += 1
+            by_shape[key]["CRASH"] += 1
+            examples.append((key, "<to_item raised>", mine_err, "", contract_html.decode()[:120]))
+        else:
+            raw_values = unprocessed_values(contract_html, contract)
+            for name, v, got, want in item_verdicts(dict(mine), dict(theirs), contract):
+                stat[v] += 1
+                stat["pairs"] += 1
+                by_shape[key][v] += 1
+                bucket = _bucket(name, contract)
+                by_proc[bucket][v] += 1
+                if _expected_is_meaningful(want):
+                    meaningful[bucket] += 1
+                if name in raw_values and want != raw_values[name] and _expected_is_meaningful(want):
+                    witnessed[bucket] += 1
+                if v == "DIVERGE" and len(examples) < args.show:
+                    examples.append((key, name, repr(got)[:150], repr(want)[:150], contract_html.decode()[:120]))
+
+    for shape in () if contract_only else shapes:
         for _ in range(schemas):
             html = gen_page(rng)
             schema = gen_schema(rng)
@@ -869,6 +1016,7 @@ def sweep(
                     if len(examples) < args.show:
                         examples.append((key, "<to_item raised>", mine_err, "", html.decode()[:120]))
                     continue
+                raw_values = unprocessed_values(html, schema)
                 for name, v, got, want in item_verdicts(dict(mine), dict(theirs), schema):
                     stat[v] += 1
                     stat["pairs"] += 1
@@ -877,6 +1025,10 @@ def sweep(
                     by_proc[bucket][v] += 1
                     if _expected_is_meaningful(want):
                         meaningful[bucket] += 1
+                    # the processor demonstrably ran: the oracle's value is not what the field would have
+                    # returned without it
+                    if name in raw_values and want != raw_values[name] and _expected_is_meaningful(want):
+                        witnessed[bucket] += 1
                     if v == "DIVERGE" and len(examples) < args.show:
                         examples.append((key, name, repr(got)[:150], repr(want)[:150], html.decode()[:120]))
 
@@ -886,7 +1038,7 @@ def sweep(
         # MRO doing the processor wiring — the thing a synthesized `Processors` class cannot prove.
         zschema = _zyte_schema()
         frost_cls, oracle_cls = build_zyte_pages()
-        for _ in range(schemas):
+        for _ in range(1 if contract_only else schemas):
             html = gen_page(rng)
             key = "zyte_productpage/http"
             mine, mine_err = _to_item(frost_cls, _http(html))
@@ -911,11 +1063,14 @@ def sweep(
                 rest_mine,
                 rest_theirs,
             ))
+            zyte_raw = unprocessed_values(html, zschema)
             for name, v, got, want in pairs:
                 stat[v] += 1
                 stat["pairs"] += 1
                 by_shape[key][v] += 1
                 bucket = _bucket(name, zschema) if name != "(other item fields)" else "zyte:(other fields)"
+                if name in zyte_raw and want != zyte_raw[name] and _expected_is_meaningful(want):
+                    witnessed[bucket] += 1
                 by_proc[bucket][v] += 1
                 # for the rest-bucket, "meaningful" means at least one of those fields carried a value —
                 # a dict of thirty `None`s has a length and would otherwise read as information
@@ -929,7 +1084,7 @@ def sweep(
                 if v == "DIVERGE" and len(examples) < args.show:
                     examples.append((key, name, repr(got)[:150], repr(want)[:150], html.decode()[:120]))
 
-    return stat, by_shape, by_proc, meaningful, examples
+    return stat, by_shape, by_proc, meaningful, witnessed, examples
 
 
 def main() -> None:
@@ -944,12 +1099,11 @@ def main() -> None:
     oracle.add_argument(ap)
     args = ap.parse_args()
     oracle.require(args.allow_old_libxml2)
-
     print(f"frostwork {frostwork.__version__ if hasattr(frostwork, '__version__') else ''} "
           f"web-poet differential")
     print(oracle.banner())
 
-    stat, by_shape, by_proc, meaningful, examples = sweep(
+    stat, by_shape, by_proc, meaningful, witnessed, examples = sweep(
         seed=args.seed, schemas=args.schemas, browser=args.browser, show=args.show
     )
 
@@ -967,11 +1121,12 @@ def main() -> None:
         print(f"    {key:<24}{p:>6}{d['AGREE']:>8}{d['WS']:>5}{d['DIVERGE']:>9}{d['CRASH']:>7}"
               f"{d['ORACLE-SKIP']:>13}")
 
-    print("\n  by processor:             pairs   AGREE   WS  DIVERGE   non-empty expected")
+    print("\n  by processor:             pairs   AGREE   WS  DIVERGE   non-empty   processor ran")
     for key in sorted(by_proc):
         d = by_proc[key]
         p = sum(d.values())
-        print(f"    {key:<24}{p:>6}{d['AGREE']:>8}{d['WS']:>5}{d['DIVERGE']:>9}{meaningful[key]:>16}")
+        print(f"    {key:<24}{p:>6}{d['AGREE']:>8}{d['WS']:>5}{d['DIVERGE']:>9}{meaningful[key]:>12}"
+              f"{witnessed[key]:>15}")
     total_meaningful = sum(meaningful.values())
     print(f"\n  DISCRIMINATION: {total_meaningful} of {stat['pairs']} pairs had a non-empty expected value."
           f" A processor row with 0 here cannot go red.")
@@ -986,8 +1141,10 @@ def main() -> None:
     # A green run is only worth the columns it actually graded, and that used to be reported rather than
     # gated: a shape that produced nothing but ORACLE-SKIPs, a processor row whose expected value was empty
     # everywhere, and a combination the generator never emitted all exited 0.
+    kinds = INPUT_KINDS if args.browser else ("http",)
     coverage = coverage_failures(
-        by_shape, by_proc, meaningful, cells=expected_cells(browser=args.browser)
+        by_shape, by_proc, meaningful, witnessed,
+        cells=expected_cells(browser=args.browser), kinds=kinds,
     )
     if coverage:
         print("\n  COVERAGE FAILURES (the run proves less than a PASS suggests):")

@@ -76,6 +76,15 @@ jobs:
       # lxml. It is the check that catches the rule-table bugs the generated gate cannot reach, so it
       # has to run here and not only in `make py`.
       - run: .venv/bin/python tools/audit_tree_rules.py --gate
+      # ...and "is the generated table still the oracle's answer?", which the audit above does NOT ask: it
+      # grades the ENGINE against lxml, so a hand-edit to `src/implied_close/generated.rs` that lxml happens
+      # to agree with passes it. AGENTS.md forbids hand-editing that block; this is what enforces it.
+      # In `make py`, and it was missing here — the same "written and then not run" failure as the note above.
+      - run: .venv/bin/python tools/gen_tree_rules.py --check
+      # Tag SEQUENCES, compared on the whole TREE. The rule sweeps are 2-D; this is the surface where the
+      # state at token N depends on tokens 1..N-1, which is where six of the last engine bugs lived (it found
+      # three on its first run). ~30s. In `make ci` as `gate-seq`, and likewise missing here.
+      - run: .venv/bin/python tools/seq_sweep.py --depth 4 --random 20000 --length 8 --gate
       # Value parity over PAGES rather than rules: the fixtures are shaped like the doc-generator and
       # table markup that broke the engine while the generated gate read 100%.
       - run: .venv/bin/python tools/bench_corpus.py tests/corpus --gate
