@@ -5,7 +5,10 @@ lxml does *not* pin its vendored libxml2); `diff_lxml.py` is the gate; `conforma
 `foreign.py` generate test pages; `enc_check.py` (encoding parity), `sel_fuzz.py`/`diff_fuzz.py`
 (selector + malformed-HTML fuzz), `soak.py` (multi-seed soak), `support_snapshot.py`
 (regenerates/checks `docs/SUPPORT_SNAPSHOT.md`), `abi3_smoke.py` (stdlib-only floor check — the
-pinned toolchain can't be installed on py3.9), `bench_matrix.py`/`bench_corpus.py`/`bench_mem.py`/
+pinned toolchain can't be installed on py3.9), `ab_bench.py` (A/B two `bench` builds by
+**interleaving** them inside each cell, min-of-reps, reporting each cell's own jitter; aborts if the two
+builds disagree on the VALUE COUNT),
+`bench_matrix.py`/`bench_corpus.py`/`bench_mem.py`/
 `bench_webpoet.py` (benchmarks — the last one times `to_item()` at the PAGE-OBJECT level and verifies both
 items are identical before timing either; `--boundaries` measures the three shapes where the healthy-path
 curve does not hold, one of which Parsel wins outright, because a benchmark that only reports its good cases

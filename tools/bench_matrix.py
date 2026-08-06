@@ -45,6 +45,57 @@ TAIL_POOL = [
     "li:last-child a::attr(href)", "div:has(a) ::text",
 ]
 
+# CLASS-LED, high field count — where per-(element, selector) work dominates: every class-led compound
+# asks the element for its `class=` and looks for its own token. The tag-led POOL above barely exercises
+# that, so a change to class/id comparison is invisible there. Most fields deliberately DON'T match,
+# since a real schema's misses still cost a test per element.
+CLASS_POOL = [
+    ".price::text", ".title::text", ".desc::text", ".thumb::attr(src)", ".link::attr(href)",
+    ".card .price::text", ".card .title::text", ".product-card .desc::text",
+    ".badge::text", ".rating::text", ".sku::text", ".stock-label::text",
+    ".card .badge .value::text", ".breadcrumb a::attr(href)", ".pagination .next::attr(href)",
+    ".facet .label::text", ".swatch::attr(data-color)", ".promo .text-xl::text",
+    ".review .author::text", ".review .body::text", ".seller-name::text", ".shipping-note::text",
+    ".card .price-was::text", ".card .price-now::text", ".gallery img::attr(src)",
+    ".spec-table .name::text", ".spec-table .value::text", ".qty-input::attr(value)",
+    ".wishlist::attr(href)", ".compare::attr(href)", ".variant .title::text", ".tag-list a::text",
+]
+CLASS_COUNTS = [1, 2, 4, 8, 16, 32]
+
+# DESCENDANT-LED: every selector is 2-3 compounds, what a real page object mostly contains
+# (`.product-info .price::text`). CLASS_POOL is subject-led at its head, so it cannot see a change to the
+# ANCESTOR walk; this pool can. Most selectors deliberately do not match, which is the case that costs
+# the walk the most.
+DESC_POOL = [
+    ".card .price::text", ".card .title::text", ".product-card .desc::text",
+    ".grid .card .link::attr(href)", ".listing .thumb::attr(src)", ".panel .badge::text",
+    ".sidebar .facet .label::text", ".review .author::text", ".review .body::text",
+    ".spec-table .name::text", ".spec-table .value::text", ".gallery img::attr(src)",
+    ".breadcrumb a::attr(href)", ".pagination .next::attr(href)", ".promo .text-xl::text",
+    ".header .nav a::text", ".footer .links a::attr(href)", ".modal .close::attr(title)",
+    ".tabs .tab .label::text", ".accordion .item .head::text", ".rail .widget .title::text",
+    ".hero .cta::attr(href)", ".filters .chip::text", ".compare .row .cell::text",
+    ".variant .swatch::attr(data-color)", ".stock .label::text", ".shipping .note::text",
+    ".seller .name::text", ".rating .stars::attr(title)", ".qty .input::attr(value)",
+    ".wishlist .btn::attr(href)", ".related .card .title::text",
+]
+
+
+# ATTRIBUTE-PREDICATE-LED. The signature filter summarizes only tag/id/class, so a schema built on
+# `[data-x=y]` and `a[href^=/p]` gets nothing from it and pays a materialized-attribute lookup per
+# (element, predicate). Neither other pool contains an attribute predicate.
+ATTR_POOL = [
+    "[data-sku]::attr(data-sku)", "a[href^='/p/']::attr(href)", "[data-qty]::text",
+    "img[src$='.jpg']::attr(src)", "[data-variant]::text", "[data-track='view']::text",
+    "a[href*='promo']::attr(href)", "[data-price]::attr(data-price)", "[data-stock]::text",
+    "[data-color]::attr(data-color)", "[data-size]::text", "[data-brand]::attr(data-brand)",
+    "[data-rating]::text", "[data-reviews]::text", "[data-seller]::text", "[data-ship]::text",
+    "input[value]::attr(value)", "[data-cat]::text", "[data-sub]::text", "[data-id]::attr(data-id)",
+    "a[href$='.html']::attr(href)", "[data-img]::attr(data-img)", "[data-alt]::text",
+    "[data-tag]::text", "[data-promo]::text", "[data-badge]::text", "[data-new]::text",
+    "[data-sale]::text", "[data-eta]::text", "[data-store]::text", "[data-lang]::text",
+    "[data-cur]::text",
+]
 
 # ---- page generators (deterministic, ~size bytes) ----
 def article(size):
@@ -73,6 +124,41 @@ def table(size):
     while n < size:
         body.append(row); n += len(row)
     return f'<!DOCTYPE html><html><head><title>Data</title></head><body><table><tbody>{"".join(body)}</tbody></table></body></html>'.encode()
+
+
+def class_heavy(size):
+    """Utility-CSS markup: every element carries a handful of class tokens (the shape Tailwind-style
+    sites produce), so a class-led selector's token search is real work rather than a 1-token hit."""
+    card = ('<div class="card product-card flex flex-col rounded-lg shadow-sm p-4 mb-2">'
+            '<h3 class="title text-lg font-semibold leading-tight truncate">Widget Pro</h3>'
+            '<span class="price text-xl font-bold text-green-700">$19.99</span>'
+            '<a class="link btn btn-primary inline-block mt-2" href="/p/123">view</a>'
+            '<img class="thumb rounded object-cover w-full" src="/img/w.jpg" alt="w">'
+            '<p class="desc text-sm text-gray-600 leading-snug">A useful widget for many tasks.</p>'
+            '</div>')
+    body, n = [], 0
+    while n < size:
+        body.append(card); n += len(card)
+    return ('<!DOCTYPE html><html><head><title>Shop</title></head>'
+            f'<body><div class="grid grid-cols-3 gap-4 px-6">{"".join(body)}</div>'
+            '</body></html>').encode()
+
+
+def attr_heavy(size):
+    """Elements carrying several attributes each, most of which no selector references -- the shape a
+    component framework emits. Every one of them still meets `is_interesting` on the way in, so this is
+    where attribute MATERIALIZATION cost shows, separately from attribute matching."""
+    card = ('<div class="card" data-testid="card" data-index="7" role="listitem" aria-label="w">'
+            '<a class="link" href="/p/123" title="Widget" rel="nofollow" data-ga="click">Widget</a>'
+            '<img class="thumb" src="/img/w.jpg" alt="w" loading="lazy" width="120" height="90">'
+            '<span class="price" data-currency="USD" itemprop="price" content="19.99">$19.99</span>'
+            '<button class="add" type="button" data-action="add" aria-pressed="false">Add</button>'
+            '</div>')
+    body, n = [], 0
+    while n < size:
+        body.append(card); n += len(card)
+    return ('<!DOCTYPE html><html><head><title>Shop</title></head>'
+            f'<body><div class="grid">{"".join(body)}</div></body></html>').encode()
 
 
 def deep_nested(size):
@@ -145,15 +231,35 @@ def parsel_bench(html_bytes, sels):
     return (time.perf_counter() - t) / iters * 1e6
 
 
-def run_table(name, html_bytes, counts=COUNTS):
+# Rows accumulated for `--markdown`, so docs/BENCHMARKS.md is regenerated from a run rather than
+# transcribed by hand.
+MD_ROWS = []
+
+
+def emit_markdown():
+    """The `page type x selector count` table in docs/BENCHMARKS.md's exact shape."""
+    print("\n\n<!-- BEGIN generated: tools/bench_matrix.py --markdown -->")
+    print("| page (≈196 KB) | sels | engine µs | engine MB/s | Parsel µs | speedup |")
+    print("| --- | --- | --- | --- | --- | --- |")
+    last = None
+    for name, c, eus, embs, pus in MD_ROWS:
+        label = f"**{name.replace('_', '&#95;')}**" if name != last else ""
+        last = name
+        print(f"| {label} | {c} | {eus:.0f} | {embs:.0f} | {pus:.0f} | {pus / eus:.1f}× |")
+    print("<!-- END generated -->")
+
+
+def run_table(name, html_bytes, counts=COUNTS, pool=None):
+    pool = pool or POOL
     kb = len(html_bytes) / 1024
     print(f"\n### {name}  ({kb:.0f} KB)")
     print(f"  {'sels':>4} | {'engine µs':>10} {'MB/s':>7} {'vals':>6} | {'parsel µs':>10} | {'speedup':>7}")
     print("  " + "-" * 60)
     for c in counts:
-        sels = POOL[:c]
+        sels = pool[:c]
         eus, embs, vals = engine_bench(html_bytes, sels)
         pus = parsel_bench(html_bytes, sels)
+        MD_ROWS.append((name, c, eus, embs, pus))
         print(f"  {c:>4} | {eus:>10.1f} {embs:>7.0f} {vals:>6} | {pus:>10.1f} | {pus/eus:>6.1f}x")
 
 
@@ -161,6 +267,8 @@ def main():
     global SMOKE
     ap = argparse.ArgumentParser()
     ap.add_argument("--smoke", action="store_true", help="quick article/deep check at 8 and 32 selectors")
+    ap.add_argument("--markdown", action="store_true",
+                    help="also emit the docs/BENCHMARKS.md table, so it is regenerated not transcribed")
     args = ap.parse_args()
     SMOKE = args.smoke
     med = 200_000
@@ -186,6 +294,8 @@ def main():
     for name, html in pages:
         run_table(name, html, [8, 32] if args.smoke else COUNTS)
 
+    if args.markdown:
+        emit_markdown()
     if args.smoke:
         return
 

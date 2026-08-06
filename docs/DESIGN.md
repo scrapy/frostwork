@@ -39,6 +39,17 @@ bytes ─▶ tokenizer (TokenSink: start/text/end) ─▶ corrected-stack matche
   feasible position, right to left. Greedy is sound because a deeper placement leaves strictly more room
   above (exchange argument), and grouping `>`-runs is what makes it sound: greedy on individual compounds
   gets `a > b c` against `<a><b><b><c>` wrong. Searching combinations instead was exponential.
+  Before any of that runs, each `(element, compound)` pair meets a **one-sided signature filter**
+  (`matcher/sig.rs`, the shape of WebKit/Blink's `SelectorFilter`): at open, an element hashes its tag
+  name, `id` and each `class` token to two bits each of a `u64`; each compiled compound carries the same
+  bits for its own positive tag/id/classes; `compound_matches` opens with `el.sig & c.req != c.req →
+  false`. One AND rejects most pairs before a string is touched. A set bit is **necessary, never
+  sufficient** — collisions produce false positives, which cost only the exact comparisons that always
+  ran, while a false negative would be a silently dropped value. So the hash must mirror each
+  predicate's own equality: the tag is ASCII-folded on both sides (`eq_ignore_ascii_case`), `id` and
+  class tokens are hashed verbatim (`==`), the class list is split by the **one** tokenizer the
+  membership predicate uses (ASCII whitespace, so `class="a\u{3000}b"` is one token on both sides), and
+  nothing is contributed by `:not()` (inverted), `:is()` (an OR), attribute predicates, or positions.
 - **Selectors** — `selector.rs` parses the CSS subset; `xpath.rs` compiles the **downward** XPath
   subset to the *same* `Selector` model (so XPath and CSS share matching + performance).
 
@@ -161,7 +172,7 @@ Retention per candidate is therefore two integers, and the streaming path is unt
 That "single bounded extra pass" is **per selector**, though: each deferred tail is its own sub-schema, so
 N tail-bearing fields over the same outer subtree re-scan it N times, losing the multi-selector scan
 sharing the main pass has. Measured on a 200 KB product listing (`bench_matrix`'s `TAIL_POOL`): one tail
-field costs ~2.6× a plain one and eight cost ~4.3×, i.e. the penalty grows with FIELD COUNT. Left as is
+field costs ~2.9× a plain one and eight cost ~5.0×, i.e. the penalty grows with FIELD COUNT. Left as is
 deliberately — the absolute cost is milliseconds and no real schema is tail-heavy yet — but it is now in
 the benchmark so the decision is revisitable. The fix, if it ever matters, is merging tails that share a
 deferred prefix into one sub-schema (their winner spans are identical by construction).
@@ -224,9 +235,39 @@ descendant's emission and stays an empty column.
   the parse cost per *schema*, not per *page*. The per-page recompile it removes is negligible against
   a large page's scan, but on small pages it dominates: ~3× fewer µs/page on a 244-byte page with 8
   selectors. `extract`/`extract_grouped` remain as one-shot convenience (a throwaway `Plan`).
-- **Rejected by measurement (do not re-attempt without a workload that shows a win):** a SIMD
-  structural index (the base scan is per-*element* bound, not per-byte; memchr already bulk-skips text)
-  and a subject-tag dispatch index (real selectors are class-led, so it can't bucket them).
+- **One-sided signature filter** (`matcher/sig.rs`, described under *Pipeline*) — the matcher's cost is
+  `selectors × elements`, and every pair used to pay string work: a `memcmp` per tag test, and per class
+  test an `attrs` scan plus a fresh split of `class=`. The filter answers "could this compound match at
+  all?" in one AND, which is where a class-led, high-field-count schema gets most of its time back:
+  −13% at 4 class-led fields, −24% at 8, −41% at 16, −54% at 32 on the utility-CSS page; −10%/−22% at
+  8/32 on the product listing; −2% to −19% on the tag-led pools, which use it far less. Each KIND of bit
+  is included only above `sig::BITS_MIN` tests of that kind, dropped from both sides together.
+- **Attribute materialization gate** (`matcher::AttrGate`) — the signature filter deliberately summarizes
+  only tag/id/class, because a prefix/substring test is not the token equality a hash can model, so an
+  attribute-predicate schema (`[data-testid=x]`, `a[href^="/p/"]`) got nothing from it. Its cost was
+  `attributes × interesting names` case-insensitive comparisons per element, growing with schema size just
+  where it hurts: a 32-field attribute-led schema names ~30 attributes while a real element carries half a
+  dozen the schema never asked for. One 64-bit set of `(first byte, length)` pairs rejects those in one
+  test, one-sided in the same direction as the signature (a set bit is necessary, never sufficient).
+  Measured −4% at 4 attribute-led fields to −9.5% at 32, neutral elsewhere. Applied only above a
+  name-count floor (`AttrGate::MIN_NAMES`): with one or two interesting names the scan it guards is a
+  single length comparison. The count is a proxy for what actually decides the trade — the fraction of a
+  page's attributes the schema ignores, highest on component-framework markup (`data-*`, `aria-*`).
+- **Rejected by measurement (do not re-attempt without a workload that shows a win):**
+  - a SIMD structural index — the base scan is per-*element* bound, not per-byte, and memchr already
+    bulk-skips text;
+  - a subject-tag dispatch index — real selectors are class-led, so it cannot bucket them;
+  - **caching each element's split `class=` tokens** on the open-element stack — worth −27% to −51% on
+    class-led schemas alone, but only ~3% on top of the signature filter while taxing every other
+    workload ~8–11%, for the 40 bytes it added to each stack element;
+  - an **eight-bytes-per-multiply hash** for the signature — no faster than byte-at-a-time FNV-1a,
+    because short tokens pay a variable-length copy per word;
+  - an **ancestor signature** (the OR of an element's and its open ancestors' bits, to reject `div.foo a`
+    before the ancestor walk) — ~5% at 24–32 descendant-led fields on a deep page, but +3% to +11% worse
+    at 4–16 even when gated, since the residue is a wider `Segment` and a branch in the hot walk, and the
+    corpus median of 11 fields/page sits in the losing half;
+  - **member dedup** — the corpus schemas contain zero exact duplicate selectors, and their shared
+    prefixes would be factored by a weaker form of that ancestor signature.
 
 The shape of the result is what the design predicts: the advantage over Parsel grows with field count,
 because the scan is paid once per page rather than once per field, and shrinks with nesting depth (the

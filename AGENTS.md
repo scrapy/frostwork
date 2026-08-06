@@ -250,7 +250,9 @@ a way it has read 100% while the engine was wrong:
   faithfully vs. stay unsupported), `matching.rs` (pure read-only match predicates), `deferred.rs`
   (bounded state machines for deferred-close predicates), `frame.rs` (document-frame state and the NAMED
   questions the frame rules ask about it — read its header before touching one), `decode.rs` (value
-  decoding). `selector.rs` (CSS parse), `xpath.rs` (downward XPath → `Selector`), `diagnostics.rs`
+  decoding), `sig.rs` (the ONE-SIDED element/compound Bloom signatures `compound_matches` opens with — a
+  set bit is necessary, never sufficient; read its header before touching the hash or the class
+  tokenizer). `selector.rs` (CSS parse), `xpath.rs` (downward XPath → `Selector`), `diagnostics.rs`
   (advisory unsupported-reason classifier for the audit API), `implied_close/` (libxml2 tree-construction
   rules: `generated.rs` is derived from the oracle, `mod.rs` is the hand-written half),
   `encoding.rs`, `entities.rs`, `mutate.rs` (an identity function unless built
@@ -304,3 +306,15 @@ a way it has read 100% while the engine was wrong:
 - Rust: exhaustive `match`, keep `clippy` clean. Measure before optimizing (SIMD structural indexing
   and a tag-dispatch index were both prototyped and *rejected* by measurement — don't re-attempt
   without a workload that shows a win).
+- **Performance work: measure with `tools/ab_bench.py` and read the jitter column.** It interleaves two
+  `bench` builds inside each cell (A,B,A,B…, min-of-reps) because sequential runs drift 5–10%, and prints
+  each cell's own spread, marking with `~` any delta inside it — two identical binaries produce per-cell
+  deltas up to ±2.3%, so a sub-2% cell is not evidence. Calibrate by passing the same binary as `--a` and
+  `--b`. Run nothing else meanwhile. And a pool only measures what it contains: the tag-led pool cannot
+  see class matching, `CLASS_POOL` is subject-led at its head so it cannot see the ancestor walk, and
+  neither holds an attribute predicate — adding the pool that can see a change is part of the change.
+- **A pre-filter must be cheaper than what it guards for the schemas that cannot use it.** Both matcher
+  filters are gated on a measured floor for this reason (`sig::BITS_MIN`, `AttrGate::MIN_NAMES`).
+- **`OpenElem`'s size is a performance lever.** Pushing an element memcpies the whole struct, so a field
+  added there is paid per element on every page; 16 bytes measured ~3.6% on a pure scan.
+  `stays_small_enough_to_push_cheaply` asserts the ceiling and names the benchmark to run before raising it.
