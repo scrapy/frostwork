@@ -23,12 +23,12 @@ bytes ─▶ tokenizer (TokenSink: start/text/end) ─▶ corrected-stack matche
 
 - **Tokenizer** (`tokenizer.rs`) — a minimal, correctness-first HTML tokenizer over **raw `&[u8]`**.
   It implements only the states needed to avoid a *global* offset desync: every one of libxml2's DATA
-  MODES (raw text for `script`/`style`/`iframe`/`noembed`/`noframes`/`xmp`, RCDATA for
-  `textarea`/`title`, PLAINTEXT for `plaintext`, plus script's escaped/double-escaped states), comments,
+  MODES (raw text, RCDATA, PLAINTEXT, plus script's escaped/double-escaped states), comments,
   CDATA/DOCTYPE/PI skipping, attribute parsing, and "`<`-not-a-tag as text". A missing data mode is the
   worst class of bug available here — it *fabricates* elements out of an element's text content and then
-  honours the wrong end tag — so the set is swept against the whole element universe rather than
-  maintained by hand. It emits borrowed byte slices through a source-agnostic `TokenSink` trait — so the
+  honours the wrong end tag — so WHICH names take which mode is not written here at all: it is derived
+  from the oracle over the whole element universe and rendered into `implied_close::data_mode`, and this
+  file owns only the states themselves. It emits borrowed byte slices through a source-agnostic `TokenSink` trait — so the
   matcher is decoupled from it and the tokenizer can be swapped/optimised independently.
 - **Matcher** (`matcher/`) — maintains an open-element stack **reshaped by HTML implied-end-tag
   rules** so combinators match the tree lxml *would* build. Each open element carries a `matched`

@@ -214,21 +214,68 @@ def test_the_decoder_sweep_is_exhaustive_not_sampled():
     frostwork = pytest.importorskip("frostwork")
     html_to_unicode = pytest.importorskip("w3lib.encoding").html_to_unicode
     parsel = pytest.importorskip("parsel")
-    src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
-                            "tools", "enc_check.py")).read()
-    assert "INDEX_DIVERGENCE" in src, "the decoder gate must enumerate its index differences"
-    for label in ("big5", "euc-jp", "euc-kr", "gb18030", "shift_jis"):
-        assert f'"{label}"' in src, f"{label} is not swept — a label with no row is not 'full parity'"
-    assert "PUA_UNASSIGNED" in src, \
-        "the vendor private-use class must be COUNTED, or it hides real divergences in bulk"
+    import decoder_sweep as D
 
-    # the real-page witness, both sides. EUC-JP A1 C1.
-    doc = b'<html><head><meta charset="euc-jp"></head><body><p class="c">\xa1\xc1</p></body></html>'
-    _, txt = html_to_unicode(None, doc, auto_detect_fun=None, default_encoding="utf8")
-    assert parsel.Selector(text=txt).css("p.c::text").getall() == ["〜"], \
-        "Parsel now decodes euc-jp A1C1 as something else — that INDEX_DIVERGENCE row is stale"
-    assert frostwork.extract(doc, ["p.c::text"], strict=False)[0] == ["～"], \
-        "euc-jp A1C1 must be U+FF5E (the WHATWG index, what browsers show)"
+    # ---- the ENUMERATION. Its failure mode is narrowing, so pin the boundaries, not a count.
+    cand = D.candidates()
+    assert len(cand) == len(D.LEAD) * len(D.TRAIL) == 24066
+    assert min(s[0] for s in cand) == 0x81 and max(s[0] for s in cand) == 0xFE
+    assert min(s[1] for s in cand) == 0x40 and max(s[1] for s in cand) == 0xFE
+    # no candidate can carry a byte that would break the `<p class="c">…</p>` wrapper, which is a
+    # property of the ranges — the filter that used to say so was dead code below 0x40
+    assert not [s for s in cand if any(b in D.MARKUP_BYTES for b in s)]
+    # it must not be a function of any PYTHON CODEC: filtering on what `euc_jp` calls assigned is exactly
+    # how the WHATWG-only class stayed invisible. Both witnesses have to be in it.
+    assert b"\xad\xa1" in cand, "AD A1 (the `①` euc_jp has no mapping for) must be swept"
+    assert b"\xa1\xc1" in cand, "A1 C1 (the crawled wave dash) must be swept"
+    assert D.LABELS == ("big5", "euc-jp", "gb18030", "euc-kr", "shift_jis"), \
+        "a label with no row is not evidence of parity"
+
+    # ---- the CLASSIFIER. Every class must be reachable and none may swallow another. (The private-use
+    # characters are written as escapes on purpose: a literal one is invisible in a source file.)
+    pua, fffd = "\ue794", "\ufffd"
+    assert D.classify("x", "x") == "agree"
+    assert D.classify("\uff5e", "\u301c") == "real"      # index divergence: the wave dash
+    assert D.classify(fffd, pua) == "pua"               # Parsel private-use, WHATWG nothing at all
+    assert D.classify(fffd + "\uff89", pua + "\uff89") == "pua"  # ...position-wise, mid-string
+    assert D.classify("\u2460", fffd) == "whatwg_only"   # AD A1's class: WHATWG has it, Python does not
+    assert D.classify(fffd, fffd * 2) == "replacement_shape"
+    # a real character opposite a PUA one is NOT the pua class — that would hide a mapping difference
+    assert D.classify("\u3000", pua) == "real"
+
+    # ---- the VERDICT. Each class must be able to go red, in both directions.
+    label = "euc-jp"
+    clean = dict(D.INDEX_DIVERGENCE[label])
+    counts = D.expected_counts(label)
+    assert D.verify(label, clean, counts) == [], "the recorded state must be clean"
+    assert D.verify(label, {**clean, b"\xff\xff": ("a", "b")}, counts), "a NEW pair must fail"
+    assert D.verify(label, {}, counts), "a pair that stops diverging must fail as stale"
+    assert D.verify(label, {**clean, b"\xa1\xc1": ("x", "y")}, counts), \
+        "a pair that maps differently must fail"
+    # the three BULK classes are gated by count, so each needs a label where it is actually populated —
+    # zeroing a class that is already zero proves nothing, and every class must be reachable somewhere
+    for kind in D.BULK:
+        where = [lab for lab in D.LABELS if D.expected_counts(lab)[kind]]
+        assert where, f"no label populates the {kind} class — it is gated by a count of nothing"
+        for lab in where:
+            want = D.expected_counts(lab)
+            assert D.verify(lab, D.INDEX_DIVERGENCE[lab], want) == [], lab
+            assert D.verify(lab, D.INDEX_DIVERGENCE[lab], {**want, kind: want[kind] + 1}), \
+                f"a drift in {lab}'s {kind} count must fail"
+            assert D.verify(lab, D.INDEX_DIVERGENCE[lab], {**want, kind: 0}), \
+                f"{lab}'s {kind} class emptying must fail too — silence is not parity"
+
+    # ---- and the two real-page witnesses, both sides, so a row cannot rot into a silent agreement. The
+    # AD A1 row is the load-bearing one: Parsel gets U+FFFD PER BYTE for a character `euc_jp` has no
+    # mapping for, which is why enumerating over "what Python calls assigned" could never have seen it.
+    for seq, theirs, mine in ((b"\xa1\xc1", "〜", "～"), (b"\xad\xa1", "��", "①")):
+        doc = (b'<html><head><meta charset="euc-jp"></head><body><p class="c">'
+               + seq + b"</p></body></html>")
+        _, txt = html_to_unicode(None, doc, auto_detect_fun=None, default_encoding="utf8")
+        assert parsel.Selector(text=txt).css("p.c::text").getall() == [theirs], \
+            f"Parsel now decodes euc-jp {seq.hex()} differently — that row is stale"
+        assert frostwork.extract(doc, ["p.c::text"], strict=False)[0] == [mine], \
+            f"euc-jp {seq.hex()} must follow the WHATWG index, which is what browsers show"
 
 
 # ------------------------------------------------------- rule-table mutation sweep (mutate_rules.py)
@@ -244,7 +291,7 @@ def test_mutation_sweep_enumerates_every_rule_table():
     A full name-pair sweep would be 142² mutants (about 13 hours), so the close dimension runs ONE
     REPRESENTATIVE PER ORACLE-DERIVED BEHAVIOUR CLASS. That compression is only sound if (a) the classes
     come from the measurement rather than from memory, and (b) every name is in some class — which is what
-    this test pins. Per-name coverage is carried by the rule AUDIT, which probes all 142 names.
+    this test pins. Per-name coverage is carried by the rule AUDIT, which probes every name.
     """
     import mutate_rules
     from gen_tree_rules import ELEMENTS, Oracle, classify
@@ -338,48 +385,108 @@ def test_the_mutation_sweep_refuses_to_run_against_an_inert_build():
     assert mutate_rules.CANARY_EVERY > 0, "a start-only canary cannot catch a mid-run rebuild"
 
 
-def test_the_known_start_close_gap_may_shrink_but_never_grow():
-    """The cheapest way to make the rule audit green is to append to `KNOWN_START_CLOSE_GAP`.
+def test_the_element_universe_sees_every_engine_owned_name():
+    """A rule can name a tag from anywhere in the engine, and the universe must contain every such name —
+    a rule with no name to probe cannot fail a gate.
 
-    It held 87 pairs, and the fix was to port libxml2's table rather than live with them, so the list is
-    now EMPTY and this test keeps it that way: appending an entry is appending a divergence.
+    The scan behind that invariant has been too narrow twice. It first NAMED `src/implied_close.rs` and
+    `src/tokenizer.rs`, so moving the tables into `src/implied_close/` would have stopped scanning them;
+    a glob over those two paths then missed `src/matcher/frame.rs` and `src/matcher/mod.rs` when the
+    document-frame rules moved there — four element names decided by rules no scan was reading. It now
+    reads the whole tree, which is the only version that cannot go stale as files move.
     """
-    from audit_tree_rules import KNOWN_START_CLOSE_GAP
+    import glob
 
-    total = sum(len(v) for v in KNOWN_START_CLOSE_GAP.values())
-    assert total == 0, (f"the known start-close gap is {total}, expected 0 — it was closed by porting "
-                        f"libxml2's htmlStartClose table into implied_close::start_closes. A new entry "
-                        f"here is a NEW divergence and needs to be a deliberate, reviewed decision.")
-    # every entry must name real tags (a typo would silently mask a real divergence forever)
-    for inc, opens in KNOWN_START_CLOSE_GAP.items():
-        assert inc.isalnum() and opens, (inc, opens)
-        assert len(set(opens)) == len(opens), f"duplicate open tags for <{inc}>: {opens}"
+    import gen_tree_rules as G
+
+    root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+    every = {os.path.realpath(p) for p in glob.glob(os.path.join(root, "src", "**", "*.rs"),
+                                                    recursive=True)}
+    assert every, "no Rust sources found — this test is not looking where it thinks it is"
+    assert {os.path.realpath(p) for p in G.rule_sources()} == every, \
+        "the universe check does not read every engine source"
+
+    # ...and that is not a formality: names live outside the rule tables. Derived, not listed, so the
+    # test keeps discriminating as code moves.
+    tables = [p for p in every if "implied_close" in p or p.endswith("tokenizer.rs")]
+    elsewhere = [p for p in every if p not in tables]
+    only_elsewhere = (G.names_in(elsewhere) & set(G.ELEMENTS)) - G.names_in(tables)
+    assert only_elsewhere, "every element name is in the rule tables — this test no longer discriminates"
+    assert only_elsewhere <= G.engine_names(), f"unscanned engine names: {only_elsewhere}"
+
+    # and the invariant can go RED: drop a frame name the engine decides rules with, and the check that
+    # gates `--write`/`--check` must report it.
+    full = list(G.ELEMENTS)
+    try:
+        G.ELEMENTS[:] = [e for e in full if e != "body"]
+        assert "body" in G.check_universe(), \
+            "a name the engine mentions and the universe omits must fail the universe check"
+    finally:
+        G.ELEMENTS[:] = full
+    assert not G.check_universe(), "the real universe must be a superset"
 
 
-def test_the_rule_audit_notices_a_stale_gap_entry():
-    """A pair that stops diverging must fail, or the allow-list outlives the bug it documents.
+def test_the_sequence_gate_fails_on_a_tree_difference():
+    """`gate-seq` compares whole TREES over enumerated token sequences, and its failure mode is grading
+    nothing: an alphabet that generates no documents, or a fingerprint that cannot see a reshaped tree,
+    both read as PASS. Seed a tree difference into the comparison and require the verdict to go red.
 
-    Seed a KNOWN-GAP entry for a pair that actually AGREES (`<td>` does not close an open `<em>`) and check
-    the audit records a failure. Without this the list could accumulate entries for divergences that were
-    fixed years earlier, each one a hole where a REGRESSION would now pass.
+    The fingerprint half is the part worth pinning. Three of the bugs this gate found move an element
+    without moving any `::text` value, so a comparison of a few columns would have passed on all three —
+    which is what every other differential here does.
     """
-    pytest.importorskip("frostwork")
+    import seq_sweep
+
+    # the alphabet must cover the shapes the sweep exists for, or "0 differing shapes" means nothing
+    assert len(seq_sweep.ALPHABET) > 15
+    for token in ("<html{}>", "</html>", "<head{}>", "<body{}>", "</body>", "</%>", "</>", "x"):
+        assert token in seq_sweep.ALPHABET, f"{token} is the shape of a real bug and is not enumerated"
+
+    frostwork = pytest.importorskip("frostwork")
+
+    # a real document, its real fingerprint, and a tree RESHAPED the way the bugs this gate found were:
+    # the span stops being the div's child while every text node stays exactly where it was.
+    doc, ids = seq_sweep.build(("<div{}>", "<span{}>", "x"))
+    sels = seq_sweep.fingerprint_selectors(ids)
+    mine = frostwork.extract(doc, sels, "utf-8")
+    assert seq_sweep.compare(sels, mine, mine) is None, "identical answers are not a difference"
+
+    nested = sels.index('//*[@id="0"]//*/@id')
+    assert mine[nested] == ["1"], f"the fingerprint must read placement: {doc!r} -> {mine[nested]}"
+    reshaped = [list(c) for c in mine]
+    reshaped[nested] = []
+    diff = seq_sweep.compare(sels, mine, reshaped)
+    assert diff and diff[0] == sels[nested], "a moved element must be a difference"
+    # ...and it is invisible to the text columns, which is why this gate compares the whole tree
+    texts = [i for i, s in enumerate(sels) if s.endswith("/text()")]
+    assert texts and all(mine[i] == reshaped[i] for i in texts)
+
+
+def test_the_rule_audit_has_no_bypass_for_a_start_close_divergence():
+    """A disagreeing start-close cell must fail the audit outright.
+
+    It did not have to. Every cell was graded through an allow-list (`KNOWN_START_CLOSE_GAP` plus a
+    `check_gap` that recorded a failure only for UNLISTED pairs), which held 87 entries, then zero — and
+    an empty allow-list is not a safeguard, it is a documented way to make this gate green. Deriving the
+    table from the oracle removed the reason for it, so the mechanism is gone; this pins that nothing
+    grew back, and that the audit really does record a divergence rather than absorb it.
+    """
     import audit_tree_rules as A
 
-    original = A.KNOWN_START_CLOSE_GAP
-    try:
-        A.KNOWN_START_CLOSE_GAP = dict(original, td=list(original.get("td", [])) + ["em"])
-        audit = A.Audit(verbose=False)
-        A.audit_start_close_pairs(audit)
-        stale = [f for f in audit.fails if "now AGREE" in str(f[1])]
-        assert stale, "a KNOWN_START_CLOSE_GAP entry that agrees must be reported as stale"
-    finally:
-        A.KNOWN_START_CLOSE_GAP = original
-
-    # and with the real list, that section is clean
+    assert not hasattr(A, "KNOWN_START_CLOSE_GAP"), "the start-close allow-list is back"
+    assert not hasattr(A.Audit, "check_gap"), "the divergence-tolerating check is back"
+    # every cell disagreeing must produce fails, not a tolerated gap. Stubbed rather than run for real:
+    # the honest 142x142 sweep is `tools/audit_tree_rules.py --gate` (in `make py` and hosted CI), and
+    # what this owns is the VERDICT, which no engine is needed to exercise.
     audit = A.Audit(verbose=False)
-    A.audit_start_close_pairs(audit)
-    assert not audit.fails, audit.fails[:3]
+    real = A.both_multi
+    A.both_multi = lambda html, sels: ([["lxml"]] * len(sels), [["engine"]] * len(sels))
+    try:
+        A.audit_start_close_pairs(audit)
+    finally:
+        A.both_multi = real
+    assert audit.checked and len(audit.fails) == audit.checked, \
+        f"{len(audit.fails)} of {audit.checked} disagreeing cells reported"
 
 
 def test_the_oracle_version_guard_actually_rejects_an_old_libxml2():

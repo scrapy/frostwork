@@ -286,25 +286,42 @@ DOM, no full tree construction). These rules were derived empirically against li
   `href` holding the rest of the document that no other parser sees. Truncated responses are not rare in
   a crawl: one such page cost 6 divergent columns, and the shape was the largest remaining group in
   `tools/diff_fuzz.py`.
-- **Raw NUL is deleted from the whole document before tokenizing**, exactly as Parsel/w3lib do
-  (`body.replace(b"\x00", b"")`). It has to happen before parsing, not at value-emit time: a NUL inside a
-  tag or attribute *name* is invisible to lxml (`<di\0v>` is a `div`), so dropping it only from emitted
-  values made the two sides disagree about the document's structure and `div::text` came back empty. For
-  UTF-16 input the deletion is applied to the DECODED text, since in UTF-16 every ASCII character carries
-  a 0x00 byte. A character *reference* to NUL (`&#0;`) is a different thing and still becomes U+FFFD.
-- **A leading BOM may be INDENTED**, for the same reason and by the same rule: `Selector(text=...)`
-  parses `text.strip()`, so on a page that indents its doctype — `"    ﻿<!DOCTYPE HTML>"` — the
-  U+FEFF is promoted to offset 0, where libxml2 eats it as a BOM. Read the bytes as they arrive and that
-  U+FEFF is a *character* instead, and a character before the frame opens the `<body>`: the page's
-  `<head>`, its `<title>` and even the attributes of its own `<html>` tag (redundant once a body is
-  open) are all lost, so `head title::text` and `html::attr(xmlns)` come back silently **empty**. libxml2
-  on the raw bytes and html5lib both agree with the raw reading — this is Parsel normalizing its input,
-  and matching what a scraper sees is the point. Only ASCII whitespace may precede it, and only in
-  UTF-8: in windows-1252 those three bytes are `ï»¿`, three real characters, and Parsel's decode agrees.
-- **Trailing whitespace is not a text node**, the other half of that same `strip()`. It can only ever
-  move whitespace, so it changes no value — but it changes how many a column returns: a page ending
-  `…<option class="c3">\n` gives that option a text node here and none under Parsel. Matching it took
-  the malformed-HTML fuzzer's unexplained-divergence bucket from 22 to 7.
+- **Parsel's own input normalization is reproduced, in Parsel's order.** `Selector(text=…)` parses
+  `text.strip().replace("\x00", "")` — trim the ends, then delete NUL — and the engine does the same to
+  the whole document before tokenizing. The order matters: parsel's *other* entry point,
+  `Selector(body=…)`, deletes NUL FIRST, and the two disagree wherever a NUL sits at a document edge.
+  The text path is the one reproduced here, because it is the path a scraper is on — Scrapy's
+  `response.selector` and web-poet's `HttpResponse` both build their selector from `response.text`.
+  - **Raw NUL is deleted document-wide**, not at value-emit time: a NUL inside a tag or attribute *name*
+    is invisible to lxml (`<di\0v>` is a `div`), so dropping it only from emitted values made the two
+    sides disagree about the document's STRUCTURE and `div::text` came back empty. For UTF-16 input the
+    deletion applies to the DECODED text, since in UTF-16 every ASCII character carries a 0x00 byte. A
+    character *reference* to NUL (`&#0;`) is a different thing and still becomes U+FFFD.
+  - **A leading BOM may be INDENTED.** On a page that indents its doctype — `"    ﻿<!DOCTYPE HTML>"` —
+    the strip promotes the U+FEFF to offset 0, where libxml2 eats it as a BOM. Read the bytes as they
+    arrive and that U+FEFF is a *character* instead, and a character before the frame opens the `<body>`:
+    the page's `<head>`, its `<title>` and even the attributes of its own `<html>` tag (redundant once a
+    body is open) are all lost, so `head title::text` and `html::attr(xmlns)` come back silently
+    **empty**. libxml2 on the raw bytes and html5lib both agree with the raw reading — this is Parsel
+    normalizing its input, and matching what a scraper sees is the point. Only whitespace may precede the
+    BOM, and the BOM half applies **only in UTF-8**: in windows-1252 those three bytes are `ï»¿`, three
+    real characters, and Parsel's decode agrees.
+  - **Trailing whitespace is not a text node**, the other half of that same `strip()`. It can only ever
+    move whitespace, so it changes no value — but it changes how many a column returns: a page ending
+    `…<option class="c3">\n` gives that option a text node here and none under Parsel. Matching it took
+    the malformed-HTML fuzzer's unexplained-divergence bucket from 22 to 7.
+  - **The whitespace stripped is Python's ASCII set, which includes VERTICAL TAB** (`0x0B`) — not HTML
+    whitespace, and not Rust's `is_ascii_whitespace` either, both of which exclude it. It is a real page
+    shape and not a curiosity: `0x0B` is not whitespace to libxml2, so an un-stripped leading one is
+    character data before the frame and costs the page its whole head, exactly as the un-promoted BOM
+    above does. Unlike the BOM this half is **not** gated on UTF-8, because Parsel strips the decoded
+    text whatever the label says.
+  - ⚠️ **Leading or trailing UNICODE whitespace (U+00A0, U+3000, U+2028, …) is not stripped**, and there
+    Parsel's two entry points disagree with each other: `str.strip()` removes them, `bytes.strip()` does
+    not. The engine matches the `body=` answer here and keeps them, so a page that begins with a stray
+    NBSP has that character before its frame — which opens the `<body>` and loses the head, the same
+    silence as above. Chasing it would mean picking one Parsel path over the other on a shape neither
+    browsers nor libxml2 treat as whitespace, so it is documented rather than matched.
 
 ## Value semantics
 
@@ -537,30 +554,35 @@ An XML declaration **at** offset 0 *is* honoured, by both, including its precede
     `charset=iso-8859-1` and writes its en dashes as the single byte `0x96`, which is `–` here and in
     Scrapy and `U+0096` under raw Parsel. A harness that grades against raw Parsel is measuring its own
     oracle construction, not Frostwork.
-  - **`big5`: exactly 11 assigned two-byte sequences** (of ~18,400) where WHATWG's index resolves a
+  - **`big5`: exactly 11 two-byte sequences** where WHATWG's index resolves a
     duplicate pointer differently from `big5hkscs` — `A145` → U+2027 not U+2022, `A244`/`A246`/`A247` →
     the fullwidth ￥/￠/￡ not the halfwidth ¥/¢/£, and seven more.
-  - **`euc-jp`: exactly 6** (of ~6,900) — the JIS-vs-CP932 round-trip family. `A1C1` is the wave dash:
+  - **`euc-jp`: exactly 6** — the JIS-vs-CP932 round-trip family. `A1C1` is the wave dash:
     U+FF5E here (what CP932, WHATWG and every browser say) and U+301C in Python's `euc_jp`. The others
     are `A1C2` ∥, `A1DD` －, `A1F1` ￠, `A1F2` ￡, `A2CC` ￢ — fullwidth here, the JIS forms there.
-  - **`gb18030`: exactly 20** (of ~23,900), and here it is *Parsel* that loses the character: GB18030-2005
+  - **`gb18030`: exactly 20**, and here it is *Parsel* that loses the character: GB18030-2005
     moved these out of the private use area, WHATWG's index is the newer revision and Python's is the
     older one, so `A3A0` is U+3000 (ideographic space) here and U+E5E5 there.
-  - **`euc-kr`: full parity** across all ~17,000 assigned sequences. **`shift_jis`: full parity** on
-    every real character; its only differences (582) are cp932's *user-defined area*, which the WHATWG
-    index leaves unassigned — private-use code points there, U+FFFD here, and not text with a meaning.
-  - Each list is enumerated over **every assigned two-byte sequence** and gated in both directions by
-    `tools/enc_check.py`. An earlier version of that gate sampled 800 characters per label and reported
-    "full parity" for all of them; a crawled EUC-JP wiki containing one `A1C1` is what disproved it, so
-    the sampling is gone.
-  - Over **unassigned** byte sequences the two differ much more widely (8–22% of all two-byte
-    combinations, depending on label). That is inherent to total-vs-partial indexes and is not text any
-    real page contains.
+  - **`euc-kr`: full parity** on every real character. **`shift_jis`: full parity** too; its only
+    differences (762 sequences) are cp932's *user-defined area*, which the WHATWG index leaves
+    unassigned — private-use code points there, U+FFFD here, and not text with a meaning.
+  - **And a class where the engine has a character Parsel does not: 457 sequences in `euc-jp`, 192 in
+    `big5`.** WHATWG's index assigns them and the Python codec does not, so Parsel returns U+FFFD —
+    `AD A1` is the `①` of ordinary Japanese prose, which `euc_jp` (strict JIS X 0208, no NEC row 13) has
+    no mapping for. Browsers use the WHATWG index, so this is an oracle limitation rather than a
+    divergence to fix; it is counted rather than listed because it runs to hundreds of sequences.
+  - Every label is swept over **every two-byte sequence in the legacy lead/trail space**, not over the
+    sequences the Python codec calls assigned — that filter is shaped like the oracle's own limitations
+    and is exactly what hid the class above. Two earlier versions of this gate were weaker: one sampled
+    800 characters per label and reported "full parity" for all of them (a crawled EUC-JP wiki containing
+    one `A1C1` disproved it), and the next enumerated by assignment. `tools/decoder_sweep.py` holds the
+    enumeration, the four disagreement classes and the expected counts; `tools/enc_check.py` gates every
+    one of them in both directions, so neither a new divergence nor one that quietly disappears can pass.
+  - Sequences **neither** index assigns differ only in how many U+FFFD come back (WHATWG replaces per
+    maximal subpart, Python per byte). Counted, not listed: it is not text any real page contains.
 
-  Both enumerated lists are gated in `tools/enc_check.py` in both directions: a divergence outside the
-  list fails, and a listed one that starts agreeing fails too, so the list cannot rot. The 35 ordinary
-  parity vectors never touch these bytes, which is why nothing caught this until the decoders were
-  compared byte by byte.
+  The ordinary parity vectors never touch these bytes, which is why nothing caught any of it until the
+  decoders were compared sequence by sequence.
 - ✅ **UTF-16** (LE/BE; BOM, label, or the BOM-less `<?` prefix) decodes correctly, matching the
   decode-first result Scrapy uses.
   (Note: lxml's HTML parser can't parse UTF-16 *bytes* — `Selector(body=…, encoding="utf-16")` returns

@@ -470,4 +470,3 @@ mod w3lib_oracle_tests {
         assert_eq!(resolve(&be32, None), encoding_rs::UTF_8);
     }
 }
-

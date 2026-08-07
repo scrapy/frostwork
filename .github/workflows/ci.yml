@@ -32,13 +32,17 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      # the `python` feature is OFF here (it links libpython only under maturin); lib + differ/bench bins
-      - run: cargo test
-      - run: cargo clippy --all-targets -- -D warnings
+      # `make test` = cargo test + clippy. The `python` feature is OFF here (it links libpython only
+      # under maturin); this builds the lib + differ/bench bins.
+      - run: make test
 
   differential:
     name: differential gate + python
     runs-on: ubuntu-latest
+    # EVERY STEP IS A MAKE TARGET, and that is the point rather than a convenience: this job used to
+    # inline the same commands, and it drifted — `make ci` grew the sequence sweep and the generated-table
+    # drift check, and hosted CI ran neither, so the checks a contributor is told are mandatory were not
+    # the checks a pull request had to pass. Add a gate to the Makefile and it lands here for free.
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -46,66 +50,36 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      # the differ/bench bins the harness drives (built without the `python` feature)
-      - run: cargo build --release --bin differ --bin bench
       - run: python -m venv .venv
       # pin the oracle exactly: an lxml/parsel upgrade silently moving the reference must be a
       # deliberate bump, not an incidental one that quietly changes what "parity" means.
       - run: .venv/bin/pip install -r requirements-test.txt
-      # correctness gate: 0 non-whitespace DIVERGE + 0 CRASH vs lxml (flat AND grouped One/Many)
-      - run: .venv/bin/python tools/diff_lxml.py
-      - run: .venv/bin/python tools/enc_check.py
-      # differential fuzz: mutate well-formed pages into MALFORMED HTML and diff vs lxml. DIVERGE is
-      # expected here (documented foster-parenting / adoption-agency SKIP set), so only CRASH is gated
-      # (--gate): any panic on any input is a real bug. Catches tokenizer desync (e.g. comment-close)
-      # that the well-formed gate can't reach.
-      - run: .venv/bin/python tools/diff_fuzz.py --iters 6000 --gate
-      # selector fuzz: fuzz the QUERY (valid/exotic/malformed/budget-bomb) against real pages. Enforces
-      # the no-fallback contract — a column is empty OR equals lxml, never non-empty-and-wrong, never a
-      # crash. Gates WRONG (disagree) + OVERMATCH (data on a parsel-invalid selector) + CRASH.
-      - run: .venv/bin/python tools/sel_fuzz.py --iters 6000 --gate
-      # build the extension into the venv, then exercise the Python surface (extract, Page, FrostPage,
-      # Many/One) AND tests/test_gates.py, which seeds a known regression into each gate's decision
-      # function and asserts it goes red. `tests/` not `tests/test_python.py`: the gate meta-tests were
-      # written and then not run by either `make ci` or this workflow, which is the exact failure they
-      # exist to catch.
-      - run: .venv/bin/maturin develop --release
-      - run: .venv/bin/python -m pytest tests/ -q
-      - run: .venv/bin/python tools/support_snapshot.py --check
-      # Page coverage is not RULE coverage: this enumerates every tree-construction rule cell against
-      # lxml. It is the check that catches the rule-table bugs the generated gate cannot reach, so it
-      # has to run here and not only in `make py`.
-      - run: .venv/bin/python tools/audit_tree_rules.py --gate
-      # ...and "is the generated table still the oracle's answer?", which the audit above does NOT ask: it
-      # grades the ENGINE against lxml, so a hand-edit to `src/implied_close/generated.rs` that lxml happens
-      # to agree with passes it. AGENTS.md forbids hand-editing that block; this is what enforces it.
-      # In `make py`, and it was missing here — the same "written and then not run" failure as the note above.
-      - run: .venv/bin/python tools/gen_tree_rules.py --check
-      # Tag SEQUENCES, compared on the whole TREE. The rule sweeps are 2-D; this is the surface where the
-      # state at token N depends on tokens 1..N-1, which is where six of the last engine bugs lived (it found
-      # three on its first run). ~30s. In `make ci` as `gate-seq`, and likewise missing here.
-      - run: .venv/bin/python tools/seq_sweep.py --depth 4 --random 20000 --length 8 --gate
-      # Value parity over PAGES rather than rules: the fixtures are shaped like the doc-generator and
+      # The gates hosted CI runs are the gates `make ci` runs, by NAME rather than by a second copy of
+      # the command list. The copy had already drifted: three targets in the Makefile were missing here,
+      # which is the failure the meta-gates exist to catch, one level up.
+      #
+      # `make gate` — 0 non-whitespace DIVERGE + 0 CRASH vs lxml (flat AND grouped One/Many), then
+      # encoding parity. Builds the differ/bench bins the harness drives.
+      - run: make gate
+      # selector fuzz (no-fallback contract: empty OR equal to lxml, never non-empty-and-wrong) plus
+      # malformed-HTML fuzz (CRASH gated absolutely, NOVEL as a rate).
+      - run: make fuzz-smoke
+      # builds the extension, then: the Python surface, tests/test_gates.py (which seeds a regression
+      # into each gate's decision function and asserts it goes red), the support snapshot, the GENERATED
+      # rule tables against the oracle, every tree-construction rule cell against lxml, and mypy over the
+      # shipped package (its annotations are a promise to every user's type checker).
+      - run: make py
+      # value parity over PAGES rather than rules: the fixtures are shaped like the doc-generator and
       # table markup that broke the engine while the generated gate read 100%.
-      - run: .venv/bin/python tools/bench_corpus.py tests/corpus --gate
-      # The layer ABOVE the engine: does a page OBJECT return parsel's item? Every gate before this one
-      # stops at "does a selector return lxml's column", and five defects lived in that gap — three of
-      # them silent. Compared on the whole item across class shapes (plain/attrs/inherited) and response
-      # types, with the real zyte-common-items processors attached the way a base page attaches them.
-      - run: .venv/bin/python tools/diff_webpoet.py
-      # The four upstream surfaces (page bases, field() keywords, zyte processors, processor input
-      # types), DERIVED from the installed libraries. A name that appears upstream and in neither the
-      # covered nor the declined list fails here — so the next omission arrives as a red gate rather
-      # than as the silent wrong value the last five were.
-      - run: .venv/bin/python tools/webpoet_surface.py --check
-      # And the inverse question: break one load-bearing line in webpoet.py, does any gate notice?
-      # Its first run found two holes in the differential above.
-      - run: .venv/bin/python tools/mutate_webpoet.py --gate
-      # The package ships `py.typed`, so its annotations are a promise to every user's type checker —
-      # and `field()` used to annotate as an internal marker class, making correct code an error in the
-      # user's CI while everything here passed. Nothing but a type checker can catch that.
-      # `tests/test_typing.py` (run above) additionally asserts this check can go red.
-      - run: .venv/bin/python -m mypy python/frostwork tests/typing_fixture.py
+      - run: make gate-corpus
+      # TAG SEQUENCES, exhaustively, compared on the whole tree — the surface where the state at token N
+      # depends on tokens 1..N-1, which no (open x incoming) rule sweep can reach.
+      - run: make gate-seq
+      # The layer ABOVE the engine: does a page OBJECT return parsel's item? Five defects lived in that
+      # gap, three of them silent. Includes the derived upstream-surface snapshot.
+      - run: make gate-webpoet
+      # And the inverse: break one load-bearing line in webpoet.py, does any gate notice?
+      - run: make gate-webpoet-mutate
 
   bindings:
     name: bindings (py${{ matrix.python }} / ${{ matrix.os }})

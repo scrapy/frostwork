@@ -10,9 +10,10 @@
 #   make gate        the correctness gate: build the bins, then differential + encoding parity vs lxml
 #   make fuzz-smoke  quick selector + malformed-HTML fuzz (crash/WRONG/OVERMATCH gate)
 #   make gate-corpus [CORPUS=<dir>]  value-parity gate over a page corpus (defaults to tests/corpus)
+#   make gate-seq    every tag SEQUENCE up to depth 4, compared on the whole tree
 #   make corpus-real fetch REAL pages into fixtures/realweb (gitignored), then gate over them
 #   make gate-mutate flip rule-table cells one at a time and check a gate notices (sampled)
-#   make gate-mutate-full  every cell (~1,700 mutants, ~65 min with the fast gates) — nightly
+#   make gate-mutate-full  every rule cell, with the fast gates only (~an hour) — nightly
 #   make soak        multi-million differential/fuzz soak across independent seeds
 #   make py          rebuild the extension (maturin --release), Python suite + tree-rule audit +
 #                    the generated start-close table vs the oracle (tools/gen_tree_rules.py --check)
@@ -27,7 +28,8 @@
 #                    values checked against parsel/lxml before anything is timed
 #   make bench-engines-mem CORPUS=<dir>  peak RSS for the same engines on the largest real pages
 #   make ci          test + gate + gate-corpus + gate-seq + fuzz-smoke + py + gate-webpoet(+mutate)
-#                    — the minimum pre-release check
+#                    — the minimum pre-release check, and the same target list hosted CI runs
+#                    (.github/workflows/ci.yml names these targets rather than copying the commands)
 #
 # The `python` cargo feature builds an extension-module cdylib that can't link into the test/bin
 # targets; only maturin (the `py` target) builds it. So `cargo test`/`build` here never pass it.
@@ -96,7 +98,7 @@ corpus-real: build
 
 # Tag SEQUENCES, exhaustively, compared on the whole TREE rather than a few selector values. The rule
 # sweeps are two-dimensional and the crawl corpus is luck; this is the surface where the state at token N
-# depends on tokens 1..N-1, which is where six of the last bugs lived. depth 4 = ~292k documents, ~30s.
+# depends on tokens 1..N-1, which is where six of the last bugs lived. Depth 4 takes tens of seconds.
 SEQ_DEPTH ?= 4
 gate-seq:
 	$(PY) tools/seq_sweep.py --depth $(SEQ_DEPTH) --random 20000 --length 8 --gate

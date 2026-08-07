@@ -12,8 +12,8 @@ Sequence space over a curated alphabet is small enough to enumerate outright, so
 
   * an ALPHABET of ~20 tokens, one per behaviour class the engine special-cases (frame tags, table
     machinery, raw text, a bogus end tag, text, a doctype), NOT a list of tags someone found interesting;
-  * every sequence of length <= `--depth` (default 4: ~160k documents), plus a random sample at greater
-    lengths for the shapes only depth reaches;
+  * every sequence of length <= `--depth`, plus a random sample at greater lengths for the shapes only
+    depth reaches (the count is exponential in the alphabet, so the run prints it rather than this text);
   * a comparison of the ENTIRE TREE, not of a handful of selector values.
 
 The tree comparison is the other half of the idea. Everything else here grades a few `::text` columns,
@@ -27,8 +27,8 @@ Both sides are asked through the SAME selectors, so the fingerprint cannot encod
 convention (parsel's `#a *` includes the subject; that is fine as long as both sides are asked).
 
 Usage:
-  .venv/bin/python tools/seq_sweep.py --depth 3            # ~8k documents, seconds
-  .venv/bin/python tools/seq_sweep.py --depth 4 --gate     # ~160k documents, the CI form
+  .venv/bin/python tools/seq_sweep.py --depth 3            # seconds
+  .venv/bin/python tools/seq_sweep.py --depth 4 --gate     # the CI form
   .venv/bin/python tools/seq_sweep.py --depth 4 --random 20000 --length 7
 """
 from __future__ import annotations
@@ -93,6 +93,20 @@ def fingerprint_selectors(ids: list[str]) -> list[str]:
     return sels
 
 
+def compare(sels: list[str], mine: list[list[str]],
+            theirs: list[list[str]]) -> tuple[str, list[str], list[str]] | None:
+    """The first fingerprint column whose answers differ, or `None` if the two trees are the same one.
+
+    The whole verdict of this gate, kept as a function so `tests/test_gates.py` can seed a reshaped tree
+    into it and require a difference: a comparison that structurally cannot see one reads exactly like a
+    clean run.
+    """
+    for s, m, t in zip(sels, mine, theirs):
+        if m != t:
+            return s, m, t
+    return None
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -126,14 +140,11 @@ def main() -> int:
         sel = parsel.Selector(text=doc.decode(), type="html")
         theirs = [sel.xpath(s).getall() for s in sels]
         checked += 1
-        for s, m, t in zip(sels, mine, theirs):
-            if m != t:
-                # one report per SHAPE (the token sequence with ids stripped), not per document
-                shape = tuple(tok for tok in seq)
-                if shape not in seen_shapes:
-                    seen_shapes.add(shape)
-                    differences.append((doc.decode(), s, m, t))
-                break
+        diff = compare(sels, mine, theirs)
+        if diff and seq not in seen_shapes:
+            # one report per SHAPE (the token sequence), not per document
+            seen_shapes.add(seq)
+            differences.append((doc.decode(), *diff))
 
     print(f"sequences checked : {checked}")
     print(f"alphabet          : {len(ALPHABET)} tokens")

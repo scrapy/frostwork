@@ -108,47 +108,20 @@ fn is_name_char(c: u8) -> bool {
     !cls::is(c, cls::TAG_NAME_END)
 }
 
-/// How libxml2 tokenizes an element's CONTENT. Anything other than `Normal` means the content is
-/// character data: a `<` inside it starts no tag, so a missing mode is not a cosmetic gap — it invents
-/// elements that do not exist (`<iframe><div>x</div></iframe>` matching `div::text`) and desynchronizes
-/// every offset after it.
-///
-/// The set is libxml2 2.14's, derived by enumeration over the whole element universe
-/// (`tools/gen_tree_rules.py --report`), NOT from the HTML5 spec's list: `listing` and `noscript` look
-/// like they belong here and do not (libxml2 parses their content as markup, since it has scripting
-/// disabled), while the obsolete `xmp`/`plaintext` do.
+/// How libxml2 tokenizes an element's CONTENT. Which names take which mode is DERIVED from the oracle —
+/// the table is [`crate::implied_close::data_mode`], written by `tools/gen_tree_rules.py` — so the
+/// variants are documented here and the name list is not written anywhere by hand.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DataMode {
     /// Ordinary markup.
     Normal,
-    /// Character data to the matching end tag, entities NOT decoded — `style`, `iframe`, `noembed`,
-    /// `noframes`, `xmp` (and `script`, which additionally needs [`find_script_end`]).
+    /// Character data to the matching end tag, entities NOT decoded. `script` is in this mode and
+    /// additionally needs [`find_script_end`].
     Rawtext,
-    /// Character data to the matching end tag, entities decoded — `textarea`, `title`.
+    /// Character data to the matching end tag, entities decoded.
     Rcdata,
-    /// Character data to END OF FILE. `</plaintext>` does not end it; nothing can.
+    /// Character data to END OF FILE. The element's own end tag does not end it; nothing can.
     Plaintext,
-}
-
-/// The data mode for a raw (possibly mixed-case) tag name.
-pub(crate) fn data_mode(name: &[u8]) -> DataMode {
-    crate::mutate::data_mode(name, data_mode_inner(name))
-}
-
-fn data_mode_inner(name: &[u8]) -> DataMode {
-    // gated on the length first so the common case (an ordinary element) costs one compare
-    match name.len() {
-        5 if name.eq_ignore_ascii_case(b"style") => DataMode::Rawtext,
-        5 if name.eq_ignore_ascii_case(b"title") => DataMode::Rcdata,
-        6 if name.eq_ignore_ascii_case(b"script") => DataMode::Rawtext,
-        6 if name.eq_ignore_ascii_case(b"iframe") => DataMode::Rawtext,
-        7 if name.eq_ignore_ascii_case(b"noembed") => DataMode::Rawtext,
-        8 if name.eq_ignore_ascii_case(b"textarea") => DataMode::Rcdata,
-        8 if name.eq_ignore_ascii_case(b"noframes") => DataMode::Rawtext,
-        3 if name.eq_ignore_ascii_case(b"xmp") => DataMode::Rawtext,
-        9 if name.eq_ignore_ascii_case(b"plaintext") => DataMode::Plaintext,
-        _ => DataMode::Normal,
-    }
 }
 
 enum Markup {
@@ -580,7 +553,7 @@ fn handle_start<'a, S: TokenSink<'a>>(
         return n;
     }
 
-    let mode = data_mode(name);
+    let mode = crate::implied_close::data_mode_of(name);
     sink.start_tag(name, attr_buf, self_closing, p, i);
 
     if mode != DataMode::Normal && !self_closing {

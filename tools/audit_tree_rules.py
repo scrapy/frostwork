@@ -112,14 +112,10 @@ XPROD_WRAP = dict(WRAP, span="div", div="section")
 # 0 disagreements. A subset is only safe if you already know the partition, which is exactly the thing
 # under test.
 #
-# incoming tag -> open elements it closes in libxml2 2.14 but not (yet) here
-KNOWN_START_CLOSE_GAP: dict[str, list[str]] = {
-    # EMPTY, and kept that way deliberately. This held 87 pairs where libxml2 closed an open element and
-    # the engine nested it; `implied_close::start_closes` is now GENERATED from the oracle over the full
-    # universe by tools/gen_tree_rules.py and every cell agrees. The mechanism stays because it is what
-    # keeps the list honest: an unlisted divergence fails the gate, and a LISTED pair that starts
-    # agreeing also fails, so a future gap has to be added here in a diff someone reads.
-}
+# There is no allow-list here, deliberately. One held 87 pairs where libxml2 closed an open element and
+# the engine nested it; `implied_close::start_closes` is now GENERATED from the oracle over the full
+# universe by tools/gen_tree_rules.py and every cell agrees, so the list reached zero — and an empty
+# allow-list is not a safeguard, it is the cheapest way to make this gate green. A disagreeing cell fails.
 
 
 def _engine():
@@ -167,15 +163,6 @@ class Audit:
                 return False
 
         return _Section()
-
-    def check_gap(self, group: str, label: str, html: bytes, sel: str, expected_gap: bool):
-        """Like `check`, but this cell is a KNOWN divergence: a disagreement is recorded only when it is
-        NOT the expected one. Counted as checked either way — the cell IS being measured."""
-        lx, fr = both(html, sel)
-        self.checked += 1
-        if lx != fr and not expected_gap:
-            self.fails.append((group, label, sel, lx, fr, html))
-        return lx, fr
 
     def check(self, group: str, label: str, html: bytes, sel: str):
         lx, fr = both(html, sel)
@@ -291,10 +278,7 @@ def audit_implied_close(a: Audit):
             pre = EXTRA.get(x, "")
             html = f"<html><body><{w}>{pre}<{x}>aaa<{y}>bbb</{w}></body></html>".encode()
             # `bbb` surfaces under the wrapper only if <y> closed <x> (else it is nested inside it).
-            # `span` and `div` stand for the OTHER/BLOCK ids, so some of these cells land on the
-            # enumerated name-pair gap below — same lookup, one source of truth for it.
-            a.check_gap("implied-close", f"<{w}>{pre}<{x}>aaa<{y}>bbb", html, f"{w} > {y}::text",
-                        x in KNOWN_START_CLOSE_GAP.get(y, ()))
+            a.check("implied-close", f"<{w}>{pre}<{x}>aaa<{y}>bbb", html, f"{w} > {y}::text")
         # incoming <table>: keep the probe text in a CELL so the answer is not confounded by
         # foster-parenting, and ask whether the table landed under the wrapper or inside <x>
         for x in tags:
@@ -324,7 +308,6 @@ def audit_start_close_pairs(a: Audit):
     """
     with a.section(f"start-close relation, all {len(ELEMENTS)}x{len(ELEMENTS)} pairs "
                    f"(libxml2 htmlStartClose)"):
-        stale = []
         # NO `x == y` skip: the diagonal (does <X> close an open <X>?) is a rule cell like any other, and
         # skipping it hid the nested-<a> and nested-<form> closes. The probe stays unambiguous because
         # only the SECOND element carries the id / trailing text.
@@ -332,17 +315,7 @@ def audit_start_close_pairs(a: Audit):
             html = f'<html><body><xwrap>xx<{x}>aaa<{y} id="Z">bbb</xwrap></body></html>'.encode()
             label = f"<{x}>aaa<{y} id=Z>bbb"
             probes = [f"xwrap > {y}::attr(id)", f"xwrap > {y}::text", f"xwrap > {x}::text"]
-            if x in KNOWN_START_CLOSE_GAP.get(y, ()):
-                lx, fr = a.check_gap("start-close", label, html, probes[0], True)
-                if lx == fr:
-                    stale.append((y, x))
-            else:
-                a.check_many("start-close", label, html, probes)
-        if stale:
-            a.fails.append(("start-close", f"{len(stale)} KNOWN_START_CLOSE_GAP entries now AGREE "
-                                           f"(remove them): {stale[:6]}", "-", "-", "-", b""))
-        print(f"   known gap: {sum(len(v) for v in KNOWN_START_CLOSE_GAP.values())} pairs where libxml2 "
-              f"closes and the engine nests (enumerated, not tolerated — see COMPATIBILITY.md)")
+            a.check_many("start-close", label, html, probes)
 
 
 def audit_document_frame(a: Audit):
@@ -509,7 +482,7 @@ def audit_implied_body(a: Audit):
     have encoded whichever of those the author happened to try. Only the implicit end is asserted here —
     after an explicit `</head>` libxml2 and html5lib disagree, and the engine keeps libxml2's shape.
     """
-    with a.section(f"implied <body> (whole universe: does what ends the head start it?)"):
+    with a.section("implied <body> (whole universe: does what ends the head start it?)"):
         for t in ELEMENTS:
             if t in ("html", "head", "body", "frameset", "frame"):
                 continue  # the frame itself, and frameset documents, which have no body at all

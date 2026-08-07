@@ -5,6 +5,8 @@
 //! `--check` fails if this file and the oracle have drifted; `--write` regenerates it. To change a rule,
 //! change what the oracle is asked, never this file. The hand-written half is in `mod.rs`.
 
+use crate::tokenizer::DataMode;
+
 /// Start-close behaviour classes — the granularity libxml2's `htmlStartClose` pair
 /// table actually needs. Two names share a class only if the oracle answers every
 /// (open x incoming) cell identically for them in BOTH roles; the partition, the ids
@@ -198,6 +200,29 @@ pub fn frame_content(name: &str) -> FrameContent {
     }
 }
 
+/// How libxml2 tokenizes an element's CONTENT. Anything other than `Normal` means the
+/// content is character data: a `<` inside it starts no tag, so a missing name here is
+/// not a cosmetic gap — it invents elements that are not in the document
+/// (`<iframe><div>x</div></iframe>` matching `div::text`) and desynchronizes every offset
+/// after it.
+///
+/// Derived by `tools/gen_tree_rules.py` over the whole element universe, which is why it
+/// is libxml2 2.14's set and not HTML5's: `listing` and `noscript` look like they belong
+/// here and do not (libxml2 parses their content as markup, having scripting disabled),
+/// while the obsolete `xmp`/`plaintext` do belong. It was a hand-written list of nine
+/// names before it was derived.
+pub fn data_mode(name: &str) -> DataMode {
+    crate::mutate::data_mode(
+        name,
+        match name {
+            "iframe" | "noembed" | "noframes" | "script" | "style" | "xmp" => DataMode::Rawtext,
+            "textarea" | "title" => DataMode::Rcdata,
+            "plaintext" => DataMode::Plaintext,
+            _ => DataMode::Normal,
+        },
+    )
+}
+
 /// Misplaced-END-TAG scope, as libxml2's END PRIORITY per element name: a stray end tag
 /// may only unwind elements whose priority is at most its own, so with a HIGHER-priority
 /// element still open above the match the end tag is DISCARDED. `<div><table><tr><td>A
@@ -222,4 +247,3 @@ pub fn end_priority(name: &str) -> u8 {
         },
     )
 }
-
