@@ -27,6 +27,12 @@ First public preview.
   rather than silently decoding those bytes wrongly.
 - `frostwork.check` and `frostwork-audit` for static schema validation; `frostwork-audit --scan` finds
   selector literals in existing Scrapy code without importing it.
+- `frostwork.check` reads a `dict` as `{name: selector}` (and `{name: (container, subfields)}` for groups,
+  the shapes `FrostPage.frost_schema()` returns) instead of iterating it. Iterating audited the field
+  *names* as selectors, and a bare name like `title` is a valid type selector, so `report.ok` came back
+  `True` for a schema that had never been looked at. Any other shape raises `TypeError` naming the
+  accepted ones, and `extract`/`extract_grouped` reject a `dict` of queries outright, their columns
+  being positional.
 - `Item.empty_fields()` distinguishes supported selectors that matched nothing from unsupported coverage
   gaps already rejected by the audit.
 - An abi3 wheel targeting CPython 3.10 and newer, which is also the floor for the optional web-poet
