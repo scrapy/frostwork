@@ -39,8 +39,56 @@ pub trait TokenSink<'a> {
     }
 }
 
+/// Byte classes for the tokenizer's three inner scan loops, as one table lookup instead of the four-
+/// to-eight comparisons each condition expands to. The loops run per BYTE of every tag name, attribute
+/// name and unquoted attribute value on the page, and `handle_start` is the largest single cost on an
+/// element-dense page.
+///
+/// The table is the single definition of each set; the predicates below read it, so a set cannot drift
+/// between the loop that scans a name and the predicate that ends it — which is exactly how the two
+/// name scanners disagreed before (see [`is_name_char`]).
+mod cls {
+    pub const WS: u8 = 1 << 0;
+    /// Ends an ATTRIBUTE name: whitespace, `=`, `>`, `/`.
+    pub const ATTR_NAME_END: u8 = 1 << 1;
+    /// Ends a TAG name: whitespace, `>`, `/` — `=` is a name byte here (`<p=x>`), which is why this is
+    /// a separate class rather than the same one.
+    pub const TAG_NAME_END: u8 = 1 << 2;
+    /// Ends an UNQUOTED attribute value: whitespace, `>`.
+    pub const UNQUOTED_END: u8 = 1 << 3;
+
+    pub static TABLE: [u8; 256] = {
+        let mut t = [0u8; 256];
+        let mut c = 0usize;
+        while c < 256 {
+            let ws = matches!(c as u8, b' ' | b'\t' | b'\n' | b'\r' | 0x0c);
+            let mut f = 0u8;
+            if ws {
+                f |= WS | ATTR_NAME_END | TAG_NAME_END | UNQUOTED_END;
+            }
+            if c as u8 == b'>' {
+                f |= ATTR_NAME_END | TAG_NAME_END | UNQUOTED_END;
+            }
+            if c as u8 == b'/' {
+                f |= ATTR_NAME_END | TAG_NAME_END;
+            }
+            if c as u8 == b'=' {
+                f |= ATTR_NAME_END;
+            }
+            t[c] = f;
+            c += 1;
+        }
+        t
+    };
+
+    #[inline(always)]
+    pub fn is(c: u8, class: u8) -> bool {
+        TABLE[c as usize] & class != 0
+    }
+}
+
 fn is_ws(c: u8) -> bool {
-    matches!(c, b' ' | b'\t' | b'\n' | b'\r' | 0x0c)
+    cls::is(c, cls::WS)
 }
 
 /// Is `c` part of a TAG NAME? libxml2's `htmlParseHTMLName` ends a name at exactly three things —
@@ -57,7 +105,7 @@ fn is_ws(c: u8) -> bool {
 /// `find_raw_end` already ended a rawtext close tag on exactly this set, so the tokenizer's two name
 /// scanners used to disagree with each other as well as with the oracle.
 fn is_name_char(c: u8) -> bool {
-    !is_ws(c) && c != b'>' && c != b'/'
+    !cls::is(c, cls::TAG_NAME_END)
 }
 
 /// How libxml2 tokenizes an element's CONTENT. Anything other than `Normal` means the content is
@@ -137,8 +185,14 @@ pub(crate) fn scan_comment(b: &[u8], p: usize) -> usize {
         return i + 2;
     }
     // running comment: earliest of `-->` or `--!>` closes (extra leading dashes fold into the match).
+    // Both start with `-`, so that is the only byte worth stopping on — a minifier banner or a
+    // commented-out block is otherwise walked one byte at a time.
     let mut j = i;
     while j < n {
+        match memchr::memchr(b'-', &b[j..]) {
+            None => break,
+            Some(k) => j += k,
+        }
         if b[j..].starts_with(b"-->") {
             return j + 3;
         }
@@ -241,6 +295,19 @@ fn find_script_end<'a>(
     let mut state = State::Data;
     let mut i = from;
     while i < n {
+        // Only two bytes can begin anything this scanner acts on: `<` (every state) and `-` (the `-->`
+        // that leaves an escaped state). Skip to the next one instead of stepping — a `<script>` holding
+        // inline JSON is one long run of neither, and this was the ONE scanner in the file still walking
+        // it a byte at a time (`find_raw_end`, `skip_to_gt` and `tokenize` all already jump). On a real
+        // 1.6 MB product page it was ~90% of the whole no-selector scan.
+        let hit = match state {
+            State::Data => memchr::memchr(b'<', &b[i..]),
+            State::Escaped | State::DoubleEscaped => memchr::memchr2(b'-', b'<', &b[i..]),
+        };
+        match hit {
+            None => break,
+            Some(k) => i += k,
+        }
         if matches!(state, State::Escaped | State::DoubleEscaped) && b[i..].starts_with(b"-->") {
             state = State::Data;
             i += 3;
@@ -439,7 +506,7 @@ fn scan_attrs<'a>(
         if b[i] == b'=' {
             i += 1;
         }
-        while i < n && !is_ws(b[i]) && b[i] != b'=' && b[i] != b'>' && b[i] != b'/' {
+        while i < n && !cls::is(b[i], cls::ATTR_NAME_END) {
             i += 1;
         }
         let aname = &b[as_..i];
@@ -457,16 +524,20 @@ fn scan_attrs<'a>(
                 let q = b[j];
                 j += 1;
                 let vs = j;
-                while j < n && b[j] != q {
-                    j += 1;
-                }
+                // A quoted value runs to the next matching quote and nothing else can end it, so jump
+                // rather than step: real pages carry `srcset`, `style` and `data-*` values hundreds of
+                // bytes long, and this loop ran once per byte of every one of them.
+                j = match memchr::memchr(q, &b[vs..]) {
+                    Some(k) => vs + k,
+                    None => n,
+                };
                 aval = Some(&b[vs..j]);
                 if j < n {
                     j += 1;
                 }
             } else {
                 let vs = j;
-                while j < n && !is_ws(b[j]) && b[j] != b'>' {
+                while j < n && !cls::is(b[j], cls::UNQUOTED_END) {
                     j += 1;
                 }
                 aval = Some(&b[vs..j]);

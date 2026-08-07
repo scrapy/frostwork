@@ -7,7 +7,8 @@ requested values. It does not build a document tree, so working memory tracks pa
 matches rather than the whole page. Supported results are continuously checked against lxml; the exact
 coverage and known differences are listed in the [compatibility contract](docs/COMPATIBILITY.md).
 
-**More than 10× faster than Parsel at the median on the measured production-selector corpus. Often much
+**~11× faster than Parsel at the median on the measured production-selector corpus (5.3×–16.3× across
+its pages), and ~6.7× faster than selectolax/lexbor on the workload both can express. Often much
 faster on large, selector-rich product and listing pages, where Parsel must traverse its DOM for each
 field.**
 

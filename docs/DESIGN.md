@@ -253,9 +253,20 @@ descendant's emission and stays an empty column.
   name-count floor (`AttrGate::MIN_NAMES`): with one or two interesting names the scan it guards is a
   single length comparison. The count is a proxy for what actually decides the trade — the fraction of a
   page's attributes the schema ignores, highest on component-framework markup (`data-*`, `aria-*`).
+- **Where the time actually was, and how long it hid.** Every optimization above and below is
+  matcher-side, because the matcher is where the interesting logic is. Profiling the *pure scan* (no
+  selectors) over real corpus pages put **43% of median page time in the tokenizer**, and three of its
+  inner loops — `find_script_end`, quoted attribute values, `scan_comment` — were still stepping one
+  byte at a time while `find_raw_end`, `skip_to_gt` and `tokenize` in the same file all used `memchr`.
+  Inline `<script>` on a real product page is one long run of bytes none of those loops could act on:
+  fixing it alone was **−75% on a 1.6 MB page** and took the corpus from 6.7× to ~10× over Parsel. The
+  synthetic tables could not see it (their generated pages carry no realistic inline JSON) and neither
+  could the matcher work, which is why it survived thirty commits of performance attention. **Profile
+  the real corpus before choosing what to optimize.**
 - **Rejected by measurement (do not re-attempt without a workload that shows a win):**
   - a SIMD structural index — the base scan is per-*element* bound, not per-byte, and memchr already
-    bulk-skips text;
+    bulk-skips text (this remains true of the *base* scan; the byte-at-a-time scanners above were a
+    different thing, and were not SIMD-shaped either — they were missing a `memchr` call);
   - a subject-tag dispatch index — real selectors are class-led, so it cannot bucket them;
   - **caching each element's split `class=` tokens** on the open-element stack — worth −27% to −51% on
     class-led schemas alone, but only ~3% on top of the signature filter while taxing every other
@@ -267,7 +278,13 @@ descendant's emission and stays an empty column.
     at 4–16 even when gated, since the residue is a wider `Segment` and a branch in the hot walk, and the
     corpus median of 11 fields/page sits in the losing half;
   - **member dedup** — the corpus schemas contain zero exact duplicate selectors, and their shared
-    prefixes would be factored by a weaker form of that ancestor signature.
+    prefixes would be factored by a weaker form of that ancestor signature;
+  - a **UTF-8 fast path for text and raw-source decoding** (`std::str::from_utf8` instead of
+    encoding_rs) — value decoding is ~25% of the work on a schema full of bare-element fields, so it
+    looked like a lever; A/B over the real corpus gave median −0.5% with **0 of 15 cells above their own
+    jitter**. encoding_rs's UTF-8 validation is already as fast as std's. The helper it introduced
+    stayed, because it gives "decode" one definition instead of two that had drifted, but it is not an
+    optimization and `matcher/decode.rs` says so.
 
 The shape of the result is what the design predicts: the advantage over Parsel grows with field count,
 because the scan is paid once per page rather than once per field, and shrinks with nesting depth (the
