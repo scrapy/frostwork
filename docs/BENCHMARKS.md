@@ -1,364 +1,273 @@
-# Frostwork benchmark matrix
+# Frostwork benchmarks
 
-Engine-only throughput (Rust `bench` binary, no IPC in the timed loop) vs Parsel (its real model:
-parse once, then one `.css()` per field). Both run the same selectors on the same page, with values
-checked before timing. Results are warm runs on one Apple arm64 machine: indicative, not controlled.
-Selector counts are prefixes of one product/article pool. Reproduce with
-`.venv/bin/python tools/bench_matrix.py` (`--markdown` regenerates the tables below rather than having
-them transcribed by hand). Before comparing any cell here against a figure measured elsewhere, read
-"An absolute µs figure is only comparable inside its own run".
+Frostwork answers a fixed set of CSS/XPath selectors in **one streaming pass, with no DOM**. These are
+its measured numbers against the parsers scraping actually uses.
 
-## Page type × selector count (µs/page)
+| on a real production corpus | Frostwork |
+| --- | --- |
+| vs **Parsel** (what Scrapy uses) | **10.7×** faster, median page |
+| vs **lxml + cssselect** | **7.8×** faster |
+| vs **selectolax / lexbor** | **6.7×** faster |
+| peak memory, large real pages | **0.5 MB** vs Parsel's 20.7 MB |
+| values identical to lxml | **99.9%** of production columns |
 
-Regenerated with `tools/bench_matrix.py --markdown`. The former `corpus (real-shaped)` row is absent: it
-reads a gitignored fixture, so it is not reproducible from a clean checkout (`make corpus-real` fetches
-one).
+Every figure here is measured on one warm Apple arm64 machine and is indicative rather than
+controlled: treat a ratio as meaningful and an absolute µs as comparable only inside its own run.
+**Nothing is timed before its values are checked against lxml** — a benchmark of two engines computing
+different answers is not a benchmark.
 
-| page (≈196 KB) | sels | engine µs | engine MB/s | Parsel µs | speedup |
-| --- | --- | --- | --- | --- | --- |
-| **article** (text-heavy) | 1 | 91 | 2204 | 582 | 6.4× |
-|  | 4 | 200 | 1003 | 2951 | 14.7× |
-|  | 8 | 301 | 666 | 5807 | 19.3× |
-|  | 16 | 374 | 537 | 7570 | 20.2× |
-|  | 26 | 672 | 299 | 12079 | 18.0× |
-|  | 32 | 652 | 308 | 13008 | 19.9× |
-| **product&#95;listing** | 1 | 466 | 430 | 3246 | 7.0× |
-|  | 4 | 1053 | 190 | 17299 | 16.4× |
-|  | 8 | 1631 | 123 | 25910 | 15.9× |
-|  | 16 | 2398 | 84 | 97532 | 40.7× |
-|  | 26 | 3356 | 60 | 174036 | 51.9× |
-|  | 32 | 3396 | 59 | 177933 | 52.4× |
-| **table-heavy** | 1 | 679 | 295 | 4036 | 5.9× |
-|  | 4 | 1207 | 166 | 15405 | 12.8× |
-|  | 8 | 1382 | 145 | 16760 | 12.1× |
-|  | 16 | 2388 | 84 | 54811 | 22.9× |
-|  | 26 | 3273 | 61 | 95816 | 29.3× |
-|  | 32 | 3992 | 50 | 119906 | 30.0× |
-| **deep-nested** (20-deep) | 1 | 1038 | 193 | 4766 | 4.6× |
-|  | 4 | 1500 | 133 | 13682 | 9.1× |
-|  | 8 | 1909 | 105 | 16587 | 8.7× |
-|  | 16 | 2952 | 68 | 49423 | 16.7× |
-|  | 26 | 3632 | 55 | 61447 | 16.9× |
-|  | 32 | 4463 | 45 | 63235 | 14.2× |
+## Real production pages
 
-## Size sweep (product_listing, 8 selectors)
+587 real pages across 116 page objects (363 MB, median 468 KB, max 3.7 MB), each extracted with its
+**own production selectors** — 10 729 (page, selector) columns, ~18 per page. Frostwork does one
+streaming pass; Parsel parses once then queries per field, which is its real reuse pattern.
 
-| size | engine µs | engine MB/s | Parsel µs | speedup |
-| --- | --- | --- | --- | --- |
-| 19 KB | 152 | 133 | 2544 | 16.7× |
-| 195 KB | 1482 | 135 | 26829 | 18.1× |
-| 976 KB | 7357 | 136 | 131214 | 17.8× |
+Scoped to the 9 994 columns Frostwork, Parsel and lxml all express *and* agree on. Speedups are the
+**median of the per-page ratios**, with p10/p90, because page shape moves this number more than
+anything else.
 
-## Grouped (Many/One) — `.product` container × N sub-fields
+| | median µs/page | vs Parsel (p10 – median – p90) | vs lxml |
+| --- | --- | --- | --- |
+| **Frostwork (`Plan`)** | **603** (772 MB/s) | 7.3× – **13.9×** – 26.9× | **9.2×** |
+| **Frostwork** | **653** (689 MB/s) | 5.3× – **10.7×** – 16.3× | **7.8×** |
+| lxml + cssselect | 4 532 | 1.0× – 1.2× – 3.2× | 1× |
+| Parsel | 5 771 | 1× | — |
 
-One `Many` group over the product listing (195 KB, ~50 `.product` cards), compared with Parsel's
-per-container loop. Reproduce with `.venv/bin/python tools/bench_matrix.py`.
+`Plan` is what `frostwork.Page` / `FrostPage` run: the schema is compiled once and reused per page.
+The plain row re-parses the selector strings on every call, so it is the pessimistic case.
 
-| subs | engine µs | engine MB/s | vals/page | Parsel µs | speedup |
-| --- | --- | --- | --- | --- | --- |
-| 1 | 869 | 230 | 1006 | 15190 | 17.5× |
-| 3 | 1157 | 173 | 3018 | 37810 | 32.7× |
-| 5 | 1478 | 136 | 5030 | 63696 | 43.1× |
+**Stripping Parsel's Python wrapper does not explain the gap.** Raw lxml with compiled CSS→XPath is
+only ~1.2× faster than Parsel at the median — the wrapper is worth about 20%, and the remaining ~8× is
+against libxml2 itself.
 
-The shared scan keeps grouped growth below Parsel's per-container loop in this sweep. No super-linear
-growth appears at these schema sizes.
-
-## Reading the numbers
-
-- **Typical speedup \~12–20×, rising to \~52× on selector-rich pages, and only \~5–7× at one field.**
-  The engine's cost grows roughly linearly with selector count and page size; Parsel's grows
-  **super-linearly** once selectors get descendant-heavy (`.product .price`, `.product ::text`) —
-  cssselect translates each to XPath and libxml2 re-walks per query, so at 16–32 fields Parsel reaches
-  98–178 ms while the engine's single pass stays in single-digit ms. The one-pass, no-DOM design is what
-  widens the gap with field count; the flip side is that a ONE-field schema is the weak case, because the
-  scan is paid whether or not there is anything to amortize it over.
-- **Constant speedup across size** (~17–18× from 19 KB to ~1 MB): both scale linearly, engine at a steady
-  ~135 MB/s on this page type.
-- **Throughput is page-shape-dependent.** Text-dominated pages (article) reach ~2.2 GB/s because memchr
-  bulk-skips text; tag-dense pages (table, listing, deep-nest) run 45–430 MB/s because cost is
-  per-element (classify + stack + per-selector match), not per-byte.
-- **Weak spot — deep nesting.** The 20-level page is the slowest Frostwork shape in this matrix (4.6–17×,
-  and ~1.0 ms for one selector): structural matching walks the ancestor stack per element (`seg_match`),
-  so cost rises with depth. Parsel is also slow here, but Frostwork's absolute time is higher than on the
-  other synthetic shapes.
-- **Run-to-run spread is ~5–15% per cell**, same binary, same machine. Two consecutive full regenerations
-  of this table differed by that much on the tag-dense cells. Treat a single absolute figure as
-  indicative and use `tools/ab_bench.py` for anything comparative.
-
-## An absolute µs figure is only comparable inside its own run
-
-These tables had not been re-run since the initial commit, across thirty commits of correctness work
-(derived tree-construction rules, document-frame synthesis, end-tag scope priorities, end-tag attribute
-states, input normalization). That work costs per element, so the previous figures were ~1.7× optimistic;
-everything here is regenerated.
-
-So these tables answer "how does this build compare to Parsel on this page shape" — a ratio measured
-inside one run. They do not answer "did this commit help": for that, A/B two builds with
-`tools/ab_bench.py`, and regenerate this file (`--markdown`) when per-element cost changes.
-
-**That open question — "~1.7–1.9× slower since the initial commit, is that really all correctness?" —
-has since been answered, and the answer was "no".** It named four suspects (input normalization, frame
-rules per start tag, scope as a priority comparison, end tags scanning attribute states) and all four
-were wrong. Profiling the pure scan on real corpus pages found three inner loops in `tokenizer.rs`
-walking bytes one at a time while every other scanner in the same file used `memchr`. Fixing them took
-the corpus median from 1 062 µs/page to 653 and the speedup from 6.7× to 10.7× — see [Real Zyte
-corpus](#real-zyte-corpus-throughput). The lesson worth keeping is the method, not the fix: the suspects
-were all *rules*, because rules are what the recent commits added, and the cost was in a scanner nobody
-had changed. **Profile before naming a suspect.**
-
-## Selector-matching optimizations: measured deltas
-
-From `tools/ab_bench.py` (interleaved, min-of-reps, each cell carrying its own jitter). Two identical
-binaries disagree by up to 2.3% per cell here, so a sub-2% cell is not evidence; every figure below
-cleared its own jitter. Reproduce against this branch's merge base:
+The corpus is not distributed, but the harness runs against any directory of page snapshots laid out
+as `<dir>/<page-object>/selectors.json` + `pages/*.html`:
 
 ```bash
-git worktree add /tmp/fw-base "$(git merge-base HEAD origin/main)"   # the build these are measured against
-(cd /tmp/fw-base && cargo build --release --bin bench)
-cargo build --release --bin bench
-.venv/bin/python tools/ab_bench.py --a /tmp/fw-base/target/release/bench \
-    --b target/release/bench --reps 15 --tables class-led,tag-led,attr-led,scan
+make bootstrap-bench
 ```
 
-| workload (196 KB page) | 1 | 2 | 4 | 8 | 16 | 32 fields |
-| --- | --- | --- | --- | --- | --- | --- |
-| **class-led selectors**, utility-CSS page | −6.5% | −7.7% | −17.0% | −25.8% | −42.8% | −55.0% |
-| **tag-led selectors**, same page | −8.3% | −7.6% | −4.5% | −5.4% | −15.2% | −20.7% |
-| **class-led selectors**, product listing | −10.7% | −10.5% | −12.0% | −16.5% | −21.8% | −25.3% |
-| **tag-led selectors**, product listing | −10.1% | −9.0% | −8.1% | −8.0% | −8.5% | −7.9% |
-| **attribute-predicate selectors**, attribute-heavy page | — | — | −4.1% | −5.4% | −7.7% | −9.5% |
+```bash
+make bench-engines CORPUS=<dir>
+```
 
-Plus, at every field count: pure scan (0 selectors) −10.3%, article −7.2%…−10.2%, tag-dense table
-−10.3%…−14.0%, deep-nested −9.2%…−13.0%, deferred-tail (`:has`/`:last-child`) −1.7%…−6.9%. The
-class-led column is the one that matters most for real page objects, and the real-corpus median is 11
-selectors/page — the middle of that table.
+## The competitive field
 
-**On the real corpus these deltas do not appear.** Measured end to end against the pre-signature build
-over 587 real pages with their own production selectors, the median page time is unchanged inside
-run-to-run noise. That is not a contradiction: this table's cells are one selector shape applied to one
-generated page, where per-element matching is most of the work, and on real pages it was not — 43% of
-median page time was in the tokenizer, and the rest is spread across value decoding, the ancestor walk
-and output. A synthetic table can prove a change helps *the thing it measures*; only the corpus says
-whether that thing is where the time was.
-
-Two negative results are recorded in [DESIGN.md](DESIGN.md)'s rejected list rather than here, because
-neither shipped: an ancestor signature (helps only above ~16 descendant-led fields, costs below that)
-and member dedup (zero exact duplicates exist across the corpus schemas).
-
-## Real Zyte corpus (throughput)
-
-Where the synthetic matrix above uses the Rust `bench` binary, this runs the **Python binding**
-(`frostwork.extract`) against Parsel over a **real Zyte corpus**: 587 real pages across 116 page
-objects (363 MB, median 468 KB, max 3.7 MB), each extracted with its **own production selectors**
-(10 729 (page, selector) columns, ~18/page). Frostwork does one streaming pass; Parsel parses once then
-queries per field (its real reuse pattern). The corpus is not distributed, but the harness runs against
-any directory of page snapshots laid out as `<dir>/<page-object>/selectors.json` + `pages/*.html`.
-These rows come from the competitive run below — `make bench-engines CORPUS=<dir>` — which measures
-them beside the other parsers rather than in a run of their own.
-
-Scope: the 9 994 columns Frostwork, Parsel and lxml all express **and agree on**. Frostwork declines
-7% of this corpus's selectors (`:contains()`, positional predicates, mixed-terminal comma groups — see
-the coverage table below), and no engine here is timed on a column it gets wrong.
-
-| metric | Frostwork | Frostwork (`Plan`) | Parsel |
-| --- | --- | --- | --- |
-| median µs/page | 653 (689 MB/s) | 603 (772 MB/s) | 5 771 |
-| speedup vs Parsel (p10 – median – p90) | 5.3× – **10.7×** – 16.3× | 7.3× – **13.9×** – 26.9× | 1× |
-| aggregate | 14.3× | 15.2× | 1× |
-
-**Quote the median with its spread, not on its own.** The speedup is the median of the *per-page*
-ratios, and those run from ~5× to ~16× across this corpus; a single number hides that page shape, not
-field count, is what moves it. The `Plan` row is what `frostwork.Page` / `FrostPage` actually run
-(schema compiled once, reused per page); the plain row re-parses the selector strings on every call and
-is the pessimistic case.
-
-**Where this number came from, because the previous one was measured wrong.** The figures this replaces
-(788 pages, 10.5×) predated ~30 commits of correctness work and were never re-run — this file said so.
-Re-run on the corpus, that build measured **6.7×**, not a floor of 10.5×: the correctness work had cost
-more than the selector-matching work gave back, and "the ratio is a floor" was unsound because the
-stale number also predated the slowdown. What closed the gap was not the matcher. Profiling the pure
-scan (0 selectors) on real pages put **43% of median page time in the tokenizer**, and three of its
-inner loops were still walking bytes one at a time while the rest of the file used `memchr`:
-
-| fix | worst cell | corpus median |
-| --- | --- | --- |
-| `find_script_end` — inline `<script>` scanned per byte | −74.8% | −5.4% |
-| quoted attribute values + `scan_comment` | −21.1% | −3.9% |
-| byte-class table for the three name/value scan loops | −3.8% | −1.7% |
-
-Together: median µs/page 1 062 → 653, and 6.7× → 10.7×. The first is the whole story on script-heavy
-pages — one 1.6 MB product page went 1 885 µs → 475 µs — and near-zero elsewhere, which is why a median
-alone would have hidden it. All three were A/B'd interleaved against the previous build with
-`tools/ab_bench.py --corpus`; the gate stayed at 0 DIVERGE / 0 CRASH throughout and the corpus's own 6
-divergences are unchanged.
-
-Value parity with lxml is proven separately by the differential gate ([TESTING.md](TESTING.md)); the
-run above also re-checks every column before timing it.
-
-> `tools/bench_corpus.py` cannot be pointed at this corpus: it calls `frostwork.extract` with strict
-> validation, so the first page object carrying a selector Frostwork declines raises rather than
-> reporting. That is why these numbers come from `bench_engines.py`, which treats coverage as a
-> measurement instead of an error.
-
-## The competitive field — vs the other fast scraping parsers
-
-Everything above measures Frostwork against Parsel, which answers "faster than what you run today"
-and not "faster than the fastest thing available" — Parsel is the incumbent, not the fast end of the
-field. This section runs the **same corpus, same production selectors** against the parsers a scraper
-would actually consider swapping in. Reproduce with `make bench-engines CORPUS=<dir>` (competitors
-pinned in `requirements-bench.txt`, installed by `make bootstrap-bench`).
+The same corpus and the same production selectors, against the parsers a scraper would consider
+swapping in.
 
 | engine | what it is |
 | --- | --- |
-| **frostwork** | one streaming pass, no DOM. Selectors re-parsed per call — the pessimistic case |
-| **frostwork (`Plan`)** | the same engine with the schema compiled once, as `Page`/`FrostPage` use it |
-| **parsel** | the incumbent, and this run's parity oracle |
-| **lxml + cssselect** | parsel's tree and translation without parsel's Python wrapper |
+| **Frostwork** | one streaming pass, no DOM |
+| **Parsel** | what Scrapy uses; also this run's parity oracle |
+| **lxml + cssselect** | Parsel's tree and translation without Parsel's Python wrapper |
 | **selectolax (lexbor)** | the fastest CSS-selector HTML parser in Python scraping |
-| **bs4 + lxml** | lxml's tree, soupsieve's CSS, a Python object per node — what most scrapers run |
+| **bs4 + lxml** | lxml's tree, soupsieve's CSS, a Python object per node |
 
-Two rules make this a comparison rather than a set of unrelated timings, and both cost coverage:
-**nothing is timed before its values are checked** against parsel/lxml with the differential gate's
-own comparator, and **an engine that cannot express a selector does not get a cheaper workload**. So
-the headline table is scoped to the 7 913 columns all six engines express *and* agree on.
+Two rules make this a comparison rather than a set of unrelated timings: nothing is timed before its
+values are checked, and an engine that cannot express a selector does not get a cheaper workload. So
+the table is scoped to the 7 913 columns all six express *and* answer identically — 582 pages, 363 MB.
 
-### Throughput — 582 pages, 7 913 shared columns (363 MB, median 472 KB)
+| engine | median µs/page | MB/s | vs Parsel (p10 – median – p90) |
+| --- | --- | --- | --- |
+| **Frostwork (`Plan`)** | **453** | 898 | 7.5× – **13.4×** – 26.6× |
+| **Frostwork** | **483** | 810 | 5.5× – **10.4×** – 15.8× |
+| selectolax (lexbor) | 3 248 | 144 | 1.0× – 1.6× – 2.7× |
+| lxml + cssselect | 4 060 | 86 | 1.0× – 1.1× – 3.0× |
+| Parsel | 4 862 | 78 | 1× |
+| bs4 + lxml | 34 030 | 11 | 0.1× – 0.2× – 0.3× |
 
-Speedups are the **median of the per-page ratios** against parsel, quoted with p10/p90 because a
-single number hides how much page shape moves it.
+### Where selectolax's speed actually comes from
 
-| engine | median µs/page | MB/s | vs parsel (p10–median–p90) | aggregate |
-| --- | --- | --- | --- | --- |
-| **frostwork (`Plan`)** | **453** | 898 | 7.5× – **13.4×** – 26.6× | 15.1× |
-| **frostwork** | **483** | 810 | 5.5× – **10.4×** – 15.8× | 14.3× |
-| selectolax (lexbor) | 3 248 | 144 | 1.0× – **1.6×** – 2.7× | 2.3× |
-| lxml + cssselect | 4 060 | 86 | 1.0× – **1.1×** – 3.0× | 1.1× |
-| parsel | 4 862 | 78 | 1× | 1× |
-| bs4 + lxml | 34 030 | 11 | 0.1× – **0.2×** – 0.3× | 0.2× |
+Not the parse. Timing each engine's document build alone, with no queries, over a size spread of 59
+real pages (`make bench-engines ENGINE_ARGS="--parse-only --limit 60"`):
 
-**Frostwork is ~6.7× the fastest competitor here, and selectolax's win is not where folklore puts
-it.** `--parse-only` times each engine's document build with no queries at all, over a size spread of
-59 real corpus pages (`make bench-engines ENGINE_ARGS="--parse-only --limit 60"`):
-
-| document build alone | median µs | its time ÷ libxml2's, per page (median, p10–p90) |
+| document build alone | median µs | its time ÷ libxml2's (median, p10–p90) |
 | --- | --- | --- |
 | lxml (libxml2) | 1 415 | 1.00× |
 | selectolax (lexbor) | 1 609 | **1.12×** (0.93–1.76) |
 | selectolax (modest) | 3 169 | 2.23× (1.52–4.70) |
 | bs4 + lxml | 7 521 | 6.37× (3.88–11.25) |
 
-So lexbor does **not** parse faster than libxml2 on real pages — it is a shade slower at the median
-and faster on some. What buys selectolax its 1.6× above is the query side: `tree.css()` walks its own
-tree per selector, where cssselect translates to XPath and libxml2 re-walks. Frostwork's margin comes
-from somewhere else again: it answers every field in one scan and never builds the tree at all, so it
-has no row in this table.
+lexbor is a shade *slower* than libxml2 at building the tree. Its 1.6× comes from the query side —
+`tree.css()` walks its own tree per selector, where cssselect translates to XPath and libxml2 re-walks
+it. Frostwork's margin comes from neither: it answers every field in one scan and never builds the
+tree, so it has no row in this table.
 
-### Coverage — what fraction of real production selectors can each engine express?
+### Coverage — how much of a real schema can each engine express?
 
-Half of "can I use this?", and the half a throughput table cannot show. Of 10 729 (page, selector)
-columns — the counts below are columns, not distinct selectors:
+The other half of "can I use this?". Of 10 729 production columns:
 
-| engine | expressible | the main reasons for the rest |
+| engine | expressible | what it cannot reach |
 | --- | --- | --- |
-| parsel / lxml + cssselect | 97.5% | 266 columns cssselect itself rejects |
-| **frostwork** | **93.2%** | mixed-terminal comma groups (179), `:contains()` (137), positional predicates (125), XPath outside the downward subset (110) |
-| bs4 + lxml | 79.6% | **no XPath at all (1 551)**, universal/empty element part (364), mixed-terminal comma lists (160) |
+| Parsel / lxml + cssselect | 97.5% | 266 columns cssselect itself rejects |
+| **Frostwork** | **93.2%** | mixed-terminal comma groups (179), `:contains()` (137), positional predicates (125), XPath outside the downward subset (110) |
+| bs4 + lxml | 79.6% | **no XPath at all (1 551)**, universal element part (364), mixed-terminal comma lists (160) |
 | selectolax (lexbor) | 78.6% | the same three, plus 128 its CSS engine rejects |
 
-**XPath is the CSS-only engines' cliff**: 14% of this corpus's selector slots are XPath, and neither
-selectolax nor bs4 has any. The next two reasons are shared and are about `::text`/`::attr` rather
-than CSS — a selector like `::text` or `h1::text, img::attr(src)` needs lxml's node-set semantics
-(dedupe, document order across branches) that a match-then-read loop does not provide.
+**XPath is the CSS-only engines' cliff**: 14% of this corpus's selectors are XPath and neither
+selectolax nor bs4 has any. Frostwork's declines are listed in the
+[compatibility contract](COMPATIBILITY.md) and reported by `frostwork.check` before a scrape runs, so
+an unsupported selector is a build-time answer rather than a wrong value.
 
-### Value parity vs parsel/lxml — over each engine's own expressible columns
+### Value parity — the number a speed table hides
 
-| engine | identical | ws-only | diverges | of which |
-| --- | --- | --- | --- | --- |
-| parsel / lxml + cssselect | 100% | 0 | 0 | — |
-| **frostwork** | **99.9%** | 0 | 6 | 6 subset (whole-document `::text` collectors) |
-| bs4 + lxml | 97.7% | 138 | 54 | 54 subset |
-| selectolax (lexbor) | 95.8% | 4 | 344 | 221 subset, 114 empty, **9 wrong** |
+Each engine's own expressible columns, compared against Parsel/lxml with the differential gate's
+comparator:
 
-**This is the number a speed table hides: roughly one production column in twenty-four changes value
-if you swap in selectolax — before any question of speed.** lexbor is an HTML5 parser and libxml2 is
-not, and on real pages that is not a subtlety:
+| engine | identical | whitespace-only | differs |
+| --- | --- | --- | --- |
+| Parsel / lxml + cssselect | 100% | 0 | 0 |
+| **Frostwork** | **99.9%** | 0 | 6 |
+| bs4 + lxml | 97.7% | 138 | 54 |
+| selectolax (lexbor) | 95.8% | 4 | 344 |
+
+**Roughly one production column in twenty-four changes value if you swap in selectolax** — before any
+question of speed. lexbor is an HTML5 parser and libxml2 is not, and on real pages that is not subtle:
 
 - **`table tbody tr` returns 353 rows under lexbor and 0 under lxml** on a page whose markup omits
-  `<tbody>`. HTML5 parsers synthesize it; libxml2 does not. A production selector written against
-  Parsel silently matches nothing, or one written against lexbor silently matches everything,
-  depending which way you migrate. `tbody tr a` is the same page shape (12 vs 0).
+  `<tbody>`. HTML5 parsers synthesize it; libxml2 does not.
 - **`<template>` content is a separate document fragment in lexbor**, so `… template::text` comes back
-  empty where lxml reads straight through it. That is most of the 114 `EMPTY` columns.
-- **Tree recovery differs on malformed markup** — one page's `li a` finds 212 links under lexbor and
-  192 under lxml.
-- The `SUBSET` bulk is the match-then-read loop, not the parser: lexbor's `css()` does not dedupe
-  across a comma list's branches the way an XPath union does, so `tbody tr, tr` returns each row twice.
+  empty where lxml reads straight through it.
+- **Tree recovery differs on malformed markup** — one page's `li a` finds 212 links under lexbor, 192
+  under lxml.
 
-bs4's row runs on lxml's own tree, so its 54 divergences are all the ordering kind rather than parsing
-differences, and its 138 whitespace-only cells are its own text handling. Frostwork's six are all
-whole-document `::text` collectors — the documented segmentation divergence.
+Frostwork's six are whole-document `::text` collectors, a documented text-segmentation difference.
 
 ### Memory — the 12 largest real pages
 
-Peak RSS attributable to parse+extract, over the 12 largest corpus pages (2.3–3.7 MB). Same protocol
-as the **Memory profile** section below: work − baseline, one process per engine, every engine on the
-same selectors. Reproduce with `make bench-engines-mem CORPUS=<dir>`.
+Peak RSS attributable to parse+extract (2.3–3.7 MB pages, work − baseline, one process per engine,
+every engine on the same selectors). Reproduce with `make bench-engines-mem CORPUS=<dir>`.
 
 | engine | median RSS | median ms |
 | --- | --- | --- |
-| **frostwork (`Plan`)** | **0.4 MB** | 0.9 |
-| **frostwork** | **0.5 MB** | 0.9 |
+| **Frostwork (`Plan`)** | **0.4 MB** | 0.9 |
+| **Frostwork** | **0.5 MB** | 0.9 |
 | selectolax (lexbor) | 12.2 MB | 8.9 |
 | lxml + cssselect | 13.8 MB | 9.8 |
-| parsel | 20.7 MB | 10.3 |
+| Parsel | 20.7 MB | 10.3 |
 | bs4 + lxml | 24.9 MB | 46.1 |
 
-lexbor's tree is the leanest of the four — ~12% under raw libxml2's and ~40% under what Parsel
-retains — which is exactly the kind of result a throughput-only comparison would have missed. It is
-still a tree: **~25× Frostwork's**, and scaling with the page rather than with what you asked for. The
-per-page rows vary widely in both directions: on two value-heavy pages Frostwork's RSS rises to ~6 MB
-(it *is* the returned data), and on one 2.5 MB page selectolax peaks above parsel.
+lexbor's tree is the leanest of the four — ~12% under raw libxml2's, ~40% under what Parsel retains.
+It is still a tree: **~25× Frostwork's**, scaling with the page rather than with what you asked for.
 
-### Reading the numbers, and what is not here
+### Not measured, and why
 
-- **Same machine, warm, best of 3** (Apple arm64), like every other section: indicative, not
-  controlled.
-- **The shared workload is smaller than the real one.** 7 913 of 10 729 columns survive being
-  expressible-and-correct everywhere; the excluded ones are disproportionately XPath, which is the
-  work the CSS-only engines cannot do at all. Read the coverage table alongside the speed table.
-- **The CSS-only engines are driven the way their users drive them** — match elements, then read text
-  or an attribute off each match, in match order. That is not lxml's node-set semantics, and where it
-  differs the column diverges out of the shared workload. Reproducing document-order merging on top
-  of a CSS engine would be a fairer *parser* comparison and a dishonest *library* one, since no
-  scraper writes that loop.
-- **`selectolax`'s row pays for value parity.** Its fast C-level `node.text()` returns one
-  concatenated string per element; Parsel's `::text` is one value per text node. Producing the latter
-  costs a Python-level node walk, and that cost is in the row. A scraper that wants the concatenated
-  string would see a faster selectolax and a different value.
-- **bs4 is told `from_encoding="utf-8"`** like everyone else. Left to itself it ran UnicodeDammit and
-  chose windows-1251 for a utf-8 page — an encoding-sniffing difference that would have been filed as
-  a parser divergence.
+- **lol_html** (Cloudflare) is the closest architectural peer — streaming, CSS-driven, no DOM — but a
+  Rust crate, not something a Python scraper can swap in.
+- **resiliparse** is a second binding over the same lexbor engine, so it would report binding overhead
+  rather than another parser.
+- **selectolax's `modest` backend** is a second backend of an engine already here; the parse-only
+  sweep carries it, at ~2× lexbor.
+- **html5lib** is the HTML5 spec reference, used in this repo as a correctness oracle. At two orders
+  of magnitude off lxml it is not a competitor.
 
-Not measured, and why:
+Two fairness notes. The CSS-only engines are driven the way their users drive them — match elements,
+then read text or an attribute off each match — which is not lxml's node-set semantics; where that
+differs, the column drops out of the shared workload rather than being quietly reproduced. And
+selectolax's row pays for value parity: its C-level `node.text()` returns one concatenated string per
+element where Parsel's `::text` is one value per text node, and producing the latter costs a
+Python-level walk.
 
-- **lol_html** (Cloudflare) is the closest architectural peer — streaming, CSS-driven, no DOM — but
-  it is a Rust crate, not something a Python scraper can swap in, so comparing it belongs in a
-  Rust-side harness rather than this one.
-- **resiliparse** is a second binding over the same lexbor engine measured here; it would report
-  binding overhead, not another parser.
-- **selectolax's `modest` backend** is a second backend of an engine already in the table; the
-  parse-only sweep above carries it, at ~2× lexbor.
-- **html5lib** is the HTML5 spec reference used elsewhere in this repo as an *oracle*; at roughly two
-  orders of magnitude off lxml it is not a competitor.
+## Memory profile — what "no DOM" buys
+
+Frostwork's defining property is invisible to a throughput chart. It builds no tree, so peak memory
+tracks open-element state and extracted output, not a materialized page. Measured as
+subprocess-isolated peak RSS, reported as work − baseline so interpreter, imports and document bytes
+cancel out (`.venv/bin/python tools/bench_mem.py`).
+
+A tiny fixed selection (3 fields) from a page padded to N MB — Parsel must build the whole tree,
+Frostwork streams past the filler:
+
+| page | Parsel RSS | Frostwork RSS | leaner | Parsel | Frostwork | faster |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 MB | 7.8 MB | 0.3 MB | 24× | 8.4 ms | 2.0 ms | 4.3× |
+| 4 MB | 29.9 MB | 0.4 MB | 74× | 34.7 ms | 8.2 ms | 4.2× |
+| 16 MB | 118.2 MB | 0.3 MB | 420× | 150.1 ms | 32.5 ms | 4.6× |
+| 64 MB | 472.3 MB | 0.3 MB | **1439×** | 575.8 ms | 133.7 ms | 4.3× |
+
+For a fixed-output schema Frostwork's memory is flat while Parsel's tracks the page. On real pages it
+scales with the values you asked for instead: across the 12 largest corpus pages the median ratio is
+**31×**, narrowing to ~2× on the value-heavy ones (42 selectors, or a big inline-JSON `script::text`,
+where Frostwork's RSS *is* the returned data). It never pays for a tree either way.
+
+## Page shape — the synthetic matrix
+
+Engine-only throughput (the Rust `bench` binary, no IPC in the timed loop) against Parsel on generated
+pages, to isolate how page shape and selector count move the ratio. Regenerate with
+`.venv/bin/python tools/bench_matrix.py --markdown`.
+
+<!-- BEGIN generated: tools/bench_matrix.py --markdown -->
+| page (≈196 KB) | sels | engine µs | engine MB/s | Parsel µs | speedup |
+| --- | --- | --- | --- | --- | --- |
+| **article (text-heavy)** | 1 | 102 | 1973 | 591 | 5.8× |
+|  | 4 | 207 | 970 | 2868 | 13.9× |
+|  | 8 | 306 | 656 | 5855 | 19.1× |
+|  | 16 | 386 | 520 | 6650 | 17.2× |
+|  | 26 | 485 | 413 | 10067 | 20.7× |
+|  | 32 | 586 | 342 | 11542 | 19.7× |
+| **product&#95;listing** | 1 | 442 | 453 | 2801 | 6.3× |
+|  | 4 | 1103 | 182 | 15859 | 14.4× |
+|  | 8 | 1448 | 138 | 22882 | 15.8× |
+|  | 16 | 2202 | 91 | 86205 | 39.1× |
+|  | 26 | 2802 | 72 | 154307 | 55.1× |
+|  | 32 | 3041 | 66 | 154231 | 50.7× |
+| **table-heavy** | 1 | 605 | 331 | 3214 | 5.3× |
+|  | 4 | 1028 | 195 | 13192 | 12.8× |
+|  | 8 | 1214 | 165 | 13455 | 11.1× |
+|  | 16 | 2095 | 96 | 44779 | 21.4× |
+|  | 26 | 2932 | 68 | 81998 | 28.0× |
+|  | 32 | 3544 | 56 | 98003 | 27.7× |
+| **deep-nested** | 1 | 972 | 206 | 3370 | 3.5× |
+|  | 4 | 1359 | 147 | 10642 | 7.8× |
+|  | 8 | 1708 | 117 | 12846 | 7.5× |
+|  | 16 | 2718 | 74 | 39833 | 14.7× |
+|  | 26 | 3712 | 54 | 55186 | 14.9× |
+|  | 32 | 4276 | 47 | 59533 | 13.9× |
+<!-- END generated -->
+
+**Size sweep** (product listing, 8 selectors) — both scale linearly, so the ratio holds:
+
+| size | engine µs | engine MB/s | Parsel µs | speedup |
+| --- | --- | --- | --- | --- |
+| 19 KB | 144 | 140 | 2 276 | 15.8× |
+| 195 KB | 1 412 | 142 | 24 009 | 17.0× |
+| 976 KB | 7 495 | 134 | 124 622 | 16.6× |
+
+**Grouped** (`Many`/`One`) — one `.product` container × N sub-fields over the same listing, against
+Parsel's per-container loop. The shared scan keeps growth below the loop:
+
+| subs | engine µs | vals/page | Parsel µs | speedup |
+| --- | --- | --- | --- | --- |
+| 1 | 826 | 1 006 | 13 756 | 16.7× |
+| 3 | 1 121 | 3 018 | 33 366 | 29.8× |
+| 5 | 1 414 | 5 030 | 52 889 | 37.4× |
+
+### Reading these
+
+- **The gap widens with field count.** Frostwork's cost grows roughly linearly with selectors and page
+  size; Parsel's grows super-linearly once selectors are descendant-heavy (`.product .price`), because
+  cssselect translates each to XPath and libxml2 re-walks the tree per query. At 26–32 fields Parsel
+  reaches 98–154 ms where the single pass stays in single-digit ms.
+- **A one-field schema is the weak case** (3.5–6.3×): the scan is paid whether or not there is anything
+  to amortise it over.
+- **Throughput is page-shape-dependent.** Text-dominated pages reach ~2 GB/s because `memchr`
+  bulk-skips text; tag-dense pages run 47–450 MB/s because cost is per element, not per byte.
+- **Deep nesting is the slowest shape** (3.5–14.9×): structural matching walks the ancestor stack per
+  element, so cost rises with depth.
+- **Deferred tails cost extra.** `:has()` and `:last-child` resolve from a re-scan of each winner's
+  span rather than from the streaming pass, so they do not share the scan: one tail field is ~2.9× a
+  plain field and eight are ~4.6×.
+- **Run-to-run spread is ~5–15% per cell** on the same binary. For anything comparative, A/B two builds
+  with `tools/ab_bench.py` (interleaved, min-of-reps, each cell carrying its own jitter) rather than
+  comparing absolute figures across runs.
 
 ## Page objects — `FrostPage.to_item()` vs a Parsel `web_poet.WebPage`
 
 Everything above times the selector layer. This times what a scraper actually calls: `await
 page.to_item()` on a whole page object, against the equivalent hand-written `web_poet.WebPage` doing
-Parsel's real thing (one `Selector` per response, one `.css()` per field). Both items are compared field
-by field before either is timed, and a mismatch **aborts** — timing two page objects that compute
-different answers is not a benchmark. Reproduce: `make bench-webpoet` (it rebuilds the release
-extension first, so a stale or debug build cannot be timed by accident).
+Parsel's real thing. Both items are compared field by field before either is timed, and a mismatch
+aborts. Reproduce: `make bench-webpoet`.
 
 | fields | `FrostPage` ms | Parsel `WebPage` ms | speedup | running-loop ms (`FrostPage` / Parsel) | speedup |
 | --- | --- | --- | --- | --- | --- |
@@ -369,51 +278,32 @@ extension first, so a stale or debug build cannot be timed by accident).
 | 16 | 0.83 | 23.32 | **28×** | 0.69 / 23.35 | **34×** |
 | 20 | 0.86 | 25.31 | **29×** | 0.75 / 24.82 | **33×** |
 
-40 KB page (220 product cards), field counts are prefixes of one growing schema. Same machine and caveats
-as the matrix above: single machine (Apple arm64), warm, median of 25 reps, indicative rather than
-controlled. Repeated runs land in **25×–30×** at the top of the sweep, so treat the last three rows as one
-number (~29×) rather than as a curve that peaks at 12 fields.
-
-An independent check on the selector-matching work: through the Python binding and a whole page object
-rather than the `bench` binary, every `FrostPage` cell came down 8–17% (1 field 0.32 → 0.30 ms, 8 fields
-0.59 → 0.52, 20 fields 1.01 → 0.86).
+40 KB page (220 product cards), field counts are prefixes of one growing schema, median of 25 reps.
+Repeated runs land in 25×–30× at the top, so read the last three rows as one number (~29×) rather than
+as a curve that peaks at 12 fields.
 
 The **running-loop** columns exist because the main ones charge `asyncio.run` — a fresh event loop per
-call — to the page object, while a crawler already has a loop running. Both sides are re-timed that way, not
-just ours: charging the setup to one and not the other would be a comparison of one page object's best case
-with the other's worst. It matters most at one field, where the loop is a visible share of a sub-millisecond
-total, and is noise by twenty.
+call — to the page object, while a crawler already has one running. Both sides are re-timed that way.
 
-**Read the curve, not a number.** The lxml parse is only **0.76 ms of Parsel's 28 ms** at 20 fields — 3%.
-So virtually none of the win is the parse Frostwork skips; it is per-field tree traversal that Frostwork
-does not repeat. That is why the ratio is **3× at one field and ~28× at twenty**: a one-field page object
-is mostly fixed cost on both sides and Frostwork's advantage has nothing to amortise. Quote this with the
-field count attached, or it is folklore.
+**Read the curve, not a number.** The lxml parse is only 0.76 ms of Parsel's 25 ms at 20 fields, ~3%.
+Virtually none of the win is the parse Frostwork skips; it is per-field tree traversal Frostwork does
+not repeat. That is why the ratio is 3× at one field and ~29× at twenty.
 
-**This page shape flatters the ratio, so do not read it as the corpus figure.** These are product cards —
-tag-dense, with descendant selectors (`.card .price`) that libxml2 re-walks per query, which the matrix
-above already flags as Parsel's worst case. Growing the same page while holding fields at 12 gives 27× at
-40 KB, **65× at 162 KB and 133× at 347 KB**: Parsel's per-field cost climbs super-linearly with page size
-(22 ms → 174 ms → 734 ms) while Frostwork's stays linear. So the honest summary is that page *size* moves
-this number more than field count does, upward, on this shape.
+**This page shape flatters the ratio.** These are product cards — tag-dense, with descendant selectors
+that libxml2 re-walks per query, the matrix's worst case for Parsel. Growing the page while holding
+fields at 12 gives 27× at 40 KB, **65× at 162 KB and 133× at 347 KB**. Page *size* moves this number
+more than field count does. The real-corpus median (**10.7×**) is the figure to quote for realistic
+work: real pages are more text-heavy than card-dense, and their production selectors are mostly cheaper
+than the descendant-heavy pool here.
 
-That makes the real-corpus median above (**10.5×**, median 330 KB, median 11 selectors) the number to quote
-for realistic work, and the two are not reconcilable by arithmetic: real pages are more text-heavy than
-card-dense, their production selectors are mostly cheaper than the descendant-heavy pool here, and
-`bench_corpus.py` times `frostwork.extract` rather than `to_item()`. What this section establishes is
-narrower and worth having on its own: the selector-layer advantage remains visible through `to_item()`, and
-the measured win is per-field traversal rather than the skipped parse.
+### Where the design trades off
 
-### Performance boundaries
+Three shapes where the curve above does not hold. Reproduce with
+`make bench-webpoet BENCH_ARGS="--boundaries"`.
 
-Three boundary questions where the curve above does not hold: node handoff (measured by match count and
-subtree size), cardinality retention, and response decoding. Only node handoff becomes slower than Parsel;
-the others expose wasted work or a correctness cost. Reproduce with
-`make bench-webpoet BENCH_ARGS="--boundaries"`, which rebuilds the release extension first.
-
-**1. A node-taking processor (`.as_node()`) on a many-match field loses to Parsel, and the gap grows with the
-match count.** The processor contract is an lxml node, so each match is re-parsed on its own; Parsel hands over
-elements from a tree it has already built.
+**1. A node-taking processor (`.as_node()`) on a many-match field loses to Parsel.** The processor
+contract is an lxml node, so each match is re-parsed on its own, where Parsel hands over elements from
+a tree it has already built.
 
 | matches | `FrostPage` | Parsel | |
 | --- | --- | --- | --- |
@@ -423,83 +313,40 @@ elements from a tree it has already built.
 | 50 | 0.83 ms | 0.62 ms | Parsel 1.3× |
 | 220 | 3.27 ms | 2.23 ms | Parsel 1.5× |
 
-Scoped to what was measured: **near parity at one to three matches, and behind by ten.** One `.as_node()`
-field per page — the common case, since most zyte item fields are scalars — costs nothing measurable.
-Subtree size is not the problem: one match over a 1 KB, 30 KB and 250 KB subtree stays slightly ahead (0.16/0.88/6.41 ms
-against 0.18/0.93/6.86), because both sides parse that subtree once and Frostwork skips the whole-document
-parse. It is the per-match repetition that costs. Each row checks its processed item before timing; these
-processor-specific checks are not a substitute for the node-structure differential.
+Near parity at one to three matches, behind by ten. One `.as_node()` field per page — the common case,
+since most zyte item fields are scalars — costs nothing measurable, and subtree size is not the
+problem: one match over a 1 KB, 30 KB and 250 KB subtree stays slightly ahead. It is the per-match
+repetition that costs.
 
-**2. Cardinality is applied after the scan, so a first-match field does the work of `all=True`.** Headroom
-rather than a regression — not slower than Parsel, just slower than it needs to be:
+**2. Cardinality is applied after the scan**, so a first-match field does the work of `all=True`.
+Headroom rather than a regression — still several-fold faster than Parsel's `.get()`, which is the
+shape where lxml is structurally cheapest:
 
-| matches (page) | `first` | `all=True` | Parsel `.get()` | transient peak |
-| --- | --- | --- | --- | --- |
-| 220 (39 KB) | 0.32 ms | 0.33 ms | 0.97 ms | 57 KB |
-| 2 000 (365 KB) | 2.06 ms | 2.11 ms | 9.10 ms | 468 KB |
-| 6 000 (1.1 MB) | 6.00 ms | 6.14 ms | 27.82 ms | 1 402 KB |
-
-The first two columns are the same measurement at every size, which is the point: the column materialises
-every match — on a bare-element field, one whole element's source each — and shaping then discards all but
-one. Pushing the limit into the native plan (while continuing the scan for the other fields) is the
-optimisation these numbers argue for; **it is not implemented.** The Parsel column says why it is not urgent:
-this is the shape where lxml is structurally cheapest, since `.get()` serialises only the element it
-returns, and Frostwork still wins it several-fold.
-
-**3. A response with no charset anywhere costs a page-sized decode — and keeping it is a parity
-decision.** `frostwork_input()` reads `resp.encoding` so the bytes are scanned with the label Parsel would
-have decoded with. With no `Content-Type` charset, no BOM and no `<meta>`, web-poet falls through to
-`w3lib.html_to_unicode` over the whole body and caches the text on the response:
-
-| response | `resp.encoding` | label | decoded text retained |
+| matches (page) | `first` | `all=True` | Parsel `.get()` |
 | --- | --- | --- | --- |
-| labelled (`charset=utf-8`) | 0.01 ms | `utf-8` | none |
-| cold (no charset anywhere) | 0.03 ms | `cp1252` | the whole page, as `str` |
+| 220 (39 KB) | 0.32 ms | 0.33 ms | 0.97 ms |
+| 2 000 (365 KB) | 2.06 ms | 2.11 ms | 9.10 ms |
+| 6 000 (1.1 MB) | 6.00 ms | 6.14 ms | 27.82 ms |
 
-(The peak column above is a *transient* high-water mark — what the call allocates at once, not what it
-retains. The retained figure is this table's last column, read off the string web-poet caches.)
+**3. A response with no charset anywhere costs a page-sized decode.** `frostwork_input()` reads
+`resp.encoding` so the bytes are scanned with the label Parsel would have decoded with; with no
+`Content-Type` charset, no BOM and no `<meta>`, web-poet falls through to `w3lib.html_to_unicode` over
+the whole body. The time is negligible (0.01 → 0.03 ms) but the decoded text is retained. Keeping it
+is deliberate: inference answers `cp1252` where Frostwork's own sniffer would default to `utf-8`, so
+*not* reading `resp.encoding` would decode some pages differently from Parsel.
 
-The time is negligible; the retained string is O(page) and the scan never needed it. But look at the label:
-inference answers `cp1252` where Frostwork's own sniffer would default to `utf-8`, so *not* reading
-`resp.encoding` would decode some pages differently from Parsel. That makes this a correctness trade wearing
-a performance costume, and the current choice — pay the decode, match Parsel — is the deliberate one. A
-Frostwork-specific scrapy-poet provider that supplies bytes plus Scrapy's own declared encoding is the way
-out, and would need its own parity gate before it could be believed.
+## Method
 
-## Memory profile (no DOM)
+- One warm Apple arm64 machine, best-of-N per cell. Ratios are comparable; absolute µs figures are
+  comparable only inside their own run.
+- Values are checked before timing everywhere: the corpus runs compare every column against
+  Parsel/lxml with the differential gate's own comparator, and the page-object bench aborts on a
+  mismatched item.
+- Value parity with lxml is proven separately and continuously by the differential gate — see
+  [TESTING.md](TESTING.md).
+- For "did this change help?", A/B two builds with `tools/ab_bench.py` (add `--corpus <dir>` to run it
+  over real pages with their own selectors) rather than comparing figures between runs.
 
-Frostwork's defining property is invisible to a throughput chart: it **builds no tree**, so peak
-memory tracks open-stack state and prospective/extracted output, not a materialized page tree.
-Text-content predicates use bounded streaming comparison state rather than retaining their subject's
-whole string-value. Measured as subprocess-isolated peak RSS
-(`ru_maxrss`), reported as work − baseline so interpreter/import/doc-bytes cancel out. Reproduce:
-`.venv/bin/python tools/bench_mem.py` (sweep) and `… --real <corpus_dir>` (any corpus in the layout
-above; the measured corpus is not distributed).
-
-**Synthetic size sweep** — a tiny fixed selection (3 fields) from a page padded to N MB. Parsel must
-build the whole lxml tree (RSS scales with the page); Frostwork streams past the filler:
-
-| page | Parsel RSS | Frostwork RSS | Parsel time | Frostwork time | faster |
-| --- | --- | --- | --- | --- | --- |
-| 1 MB | 7.8 MB | 0.1 MB | 8.1 ms | 1.9 ms | 4.4× |
-| 4 MB | 30.1 MB | 0.4 MB | 34.4 ms | 7.5 ms | 4.6× |
-| 16 MB | 118.2 MB | 0.2 MB | 146.5 ms | 29.2 ms | 5.0× |
-| 64 MB | 472.3 MB | 0.1 MB | 547.1 ms | 119.3 ms | 4.6× |
-
-With this fixed-output selector set, Parsel's memory scales with page size while Frostwork stays below
-0.5 MB — a 55× to 6000× difference that grows with the page, which is the property the whole design
-exists for. Frostwork memory can still scale with returned values, as the corpus result below shows.
-
-The **time** column aged the same way as the matrix at the top (previously 1.1–70.9 ms, 7.2–7.6×), for
-the same reason; the RSS story is unaffected.
-
-**Real pages** (largest 12 in the corpus, 2.3–3.7 MB, each with its page object's own selectors):
-median incremental RSS is **0.5 MB vs 20.7 MB**; the median of the per-page ratios is **31×** (range
-2×–186×, and 5.9×–14.9× faster). The gap narrows to ~2× only on the field-rich / value-heavy pages (42
-selectors, or a big inline-JSON `script::text`, where Frostwork's RSS peaks at 20 MB because it *is* the
-returned data) — it still never pays for a tree. The same 12 pages against every competitor, including
-the one with a leaner tree than libxml2's, are in the competitive-field section above.
-
-> **Build release first.** These tools call the Python extension; `maturin develop` defaults to a
-> **debug** build that is ~10× slower and would make the time columns meaningless (RSS is
-> unaffected). Run `.venv/bin/maturin develop --release` before benchmarking.
+> **Build release first.** These tools call the Python extension, and `maturin develop` defaults to a
+> **debug** build ~10× slower than release, which would make every time column meaningless. Run
+> `.venv/bin/maturin develop --release`, or use the `make` targets above — they rebuild it for you.

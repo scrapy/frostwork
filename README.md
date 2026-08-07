@@ -7,10 +7,10 @@ requested values. It does not build a document tree, so working memory tracks pa
 matches rather than the whole page. Supported results are continuously checked against lxml; the exact
 coverage and known differences are listed in the [compatibility contract](docs/COMPATIBILITY.md).
 
-**~11× faster than Parsel at the median on the measured production-selector corpus (5.3×–16.3× across
-its pages), and ~6.7× faster than selectolax/lexbor on the workload both can express. Often much
-faster on large, selector-rich product and listing pages, where Parsel must traverse its DOM for each
-field.**
+**~8× faster than lxml and ~11× faster than Parsel (what Scrapy uses) at the median on the measured
+production-selector corpus, and ~6.7× faster than selectolax/lexbor on the workload both can express.
+Often much faster on large, selector-rich product and listing pages, where each of them must traverse a
+DOM per field.**
 
 Because Frostwork never builds that DOM, working memory stays essentially constant as page size grows for
 a fixed-output schema; it scales with parser state and returned values instead of the page tree. Results
