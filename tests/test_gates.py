@@ -779,3 +779,80 @@ def test_the_surface_gate_checks_the_node_handoff_really_produces_nodes():
     assert isinstance(_as_nodes(["<p>x</p>"], ("all", None)), SelectorList)
     # and the renderer is what enforces it, so it must run clean on the installed libraries
     assert "Page / extractor base classes" in webpoet_surface.render()
+
+
+# ------------------------------------------- competitive benchmark (tools/bench_engines.py)
+# `bench_engines.py` is not a gate, but it publishes a table, and the only thing standing between that
+# table and a comparison of engines computing DIFFERENT answers is its parity filter. That filter is
+# untested code with a published number attached, which is the exact shape of every gate above.
+def test_the_competitive_benchmark_drops_a_column_an_engine_gets_wrong():
+    """An engine that returns the wrong value must LOSE the column, not keep it and be timed on work the
+    others are doing correctly. Faster-because-wrong is the failure mode a speed table cannot show."""
+    bench_engines = pytest.importorskip("bench_engines")
+
+    keys = ["frostwork", "parsel", "selectolax"]
+    ok = {k: [True, True] for k in keys}
+    clean = {k: ["AGREE", "AGREE"] for k in keys}
+
+    assert bench_engines.workload_columns(2, ok, keys, clean) == [0, 1]
+    # whitespace-only differences stay in — that is the project's parity bar everywhere else
+    ws = {**clean, "selectolax": ["WS", "AGREE"]}
+    assert bench_engines.workload_columns(2, ok, keys, ws) == [0, 1]
+    # a real divergence takes the column away from EVERY engine, not just the one that got it wrong
+    bad = {**clean, "selectolax": ["DIVERGE", "AGREE"]}
+    assert bench_engines.workload_columns(2, ok, keys, bad) == [1]
+    # and so does a column an engine cannot express at all
+    cant = {**ok, "selectolax": [False, True]}
+    assert bench_engines.workload_columns(2, cant, keys, clean) == [1]
+
+
+def test_the_competitive_benchmark_refuses_to_time_engines_on_different_work():
+    """The scopes exist so every row is measured on the same columns. If an adapter quietly drops a
+    selector it cannot run, its row gets a cheaper workload and the table silently stops being a
+    comparison — so the invariant is asserted at runtime, not assumed."""
+    bench_engines = pytest.importorskip("bench_engines")
+
+    assert bench_engines.assert_same_work("W-common", {"a": [0, 1, 2], "b": [0, 1, 2]})
+    with pytest.raises(AssertionError, match="different columns"):
+        bench_engines.assert_same_work("W-common", {"a": [0, 1, 2], "b": [0, 1]})
+
+
+def test_the_competitive_benchmark_names_an_engine_it_could_not_run():
+    """A competitor that is not installed must be REPORTED, not skipped. "0 engines skipped" is how an
+    absent competitor should never look — it reads as "we measured the field" when a row is missing."""
+    bench_engines = pytest.importorskip("bench_engines")
+
+    class Absent(bench_engines.Engine):
+        key, label = "absent", "absent-engine"
+
+        def unavailable(self):
+            return "not installed"
+
+    assert bench_engines.unavailable_report([Absent()]) == [("absent-engine", "not installed")]
+    # the installed registry reports itself honestly too — every listed engine either runs or says why
+    for e in bench_engines.ENGINES:
+        why = e.unavailable()
+        assert why is None or isinstance(why, str) and why
+
+
+def test_the_competitive_benchmark_translates_parsel_text_pseudos_faithfully():
+    """`X::text` is X's CHILD text nodes, `X ::text` and `X *::text` are its descendants. Three spellings
+    that differ by a space, and an adapter that reads them off the string instead of off parsel's own
+    translator returns a subset — which looks like a fast engine rather than a broken one."""
+    bench_engines = pytest.importorskip("bench_engines")
+    CHILD, DESC = bench_engines.CHILD_TEXT, bench_engines.DESC_TEXT
+
+    assert bench_engines.css_plan("p::text") == ("p", CHILD, None)
+    assert bench_engines.css_plan("p ::text") == ("p", DESC, None)
+    assert bench_engines.css_plan("p *::text") == ("p", DESC, None)
+    assert bench_engines.css_plan("a::attr(href)") == ("a", "attr", "href")
+    # ...and the same trap on the attribute side: `X ::attr(a)` reads the attribute off X AND its
+    # descendants, which CSS can only name as two selectors
+    assert bench_engines.css_plan("div ::attr(id)") == ("div, div *", "attr", "id")
+    assert bench_engines.css_plan("div *::attr(id)") == ("div, div *", "attr", "id")
+    assert bench_engines.css_plan("div.card") == ("div.card", "node", None)
+    # a comma list is only merged when every branch agrees on the terminal; otherwise the CSS-only
+    # engines are told they cannot express it, with the reason, rather than guessing at document order
+    assert bench_engines.css_plan("h1::text, h2::text") == ("h1, h2", CHILD, None)
+    assert bench_engines.css_translate("h1::text, img::attr(src)")[1].startswith("comma list")
+    assert bench_engines.css_translate("//div/text()")[1].startswith("xpath")

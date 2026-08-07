@@ -7,12 +7,32 @@ lxml does *not* pin its vendored libxml2); `diff_lxml.py` is the gate; `conforma
 (regenerates/checks `docs/SUPPORT_SNAPSHOT.md`), `abi3_smoke.py` (stdlib-only check that the
 extension works with no dependencies present), `ab_bench.py` (A/B two `bench` builds by
 **interleaving** them inside each cell, min-of-reps, reporting each cell's own jitter; aborts if the two
-builds disagree on the VALUE COUNT),
+builds disagree on the VALUE COUNT — and `--corpus <dir>` runs the same comparison over REAL pages with
+their own production selectors, which is the mode that matters: the generated tables scored the
+signature filter at −13% to −55% and the corpus scored it at zero, while the tokenizer fix the tables
+could not see was worth −75% on a real page),
 `bench_matrix.py`/`bench_corpus.py`/`bench_mem.py`/
 `bench_webpoet.py` (benchmarks — the last one times `to_item()` at the PAGE-OBJECT level and verifies both
 items are identical before timing either; `--boundaries` measures the three shapes where the healthy-path
 curve does not hold, one of which Parsel wins outright, because a benchmark that only reports its good cases
 is a brochure).
+
+`bench_engines.py` is the COMPETITIVE benchmark (`make bench-engines CORPUS=<dir>`, competitors pinned in
+`requirements-bench.txt`): the same corpus against selectolax/lexbor, raw lxml+cssselect and bs4+soupsieve,
+because everything else here measures Frostwork against the incumbent rather than against the fast end of
+the field. Three things it does that a speed table normally does not, each because the alternative reads as
+a win that was not measured. **Nothing is timed before its values are checked** — every column goes through
+`diff_lxml.verdict`, imported, so AGREE means what it means in the gate. **An engine that cannot express a
+selector does not get a cheaper workload**: `workload_columns` is the one decision function behind both
+timed scopes (`W-all`, and `W-common` = the columns every engine expresses AND gets right), and
+`assert_same_work` re-checks the invariant per page. **Coverage and its reasons are reported separately**,
+since "expresses 73% of production selectors" is the other half of "can I use this?". The CSS-only engines
+are driven the way their users drive them — match, then read text off each match — which is NOT lxml's
+node-set semantics; where that differs the column diverges out of the shared workload rather than being
+quietly reproduced, because no scraper writes the document-order merge. `tests/test_gates.py` seeds a wrong
+column, a mismatched workload and an absent competitor into those three functions. `bench_mem.py --engines`
+runs the peak-RSS side over the same registry: lexbor's DOM is much leaner than libxml2's, which is exactly
+the kind of thing a throughput-only comparison hides.
 
 Five files own the **web-poet integration**: `webpoet_cases.py` is the shared registry (which processors
 are covered, how a page object reaches each, which gate proves it — read by the two gates below so they

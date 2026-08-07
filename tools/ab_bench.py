@@ -117,6 +117,72 @@ ALL = ["class-led", "tag-led", "desc-led", "desc-deep", "attr-led", "attr-page",
        "listing-class", "article", "deep", "table", "tail", "scan"]
 
 
+def corpus_cells(corpus_dir, limit):
+    """[(label, html_path, selectors)] — one cell per REAL page, with its page object's own selectors.
+
+    The generated tables above can only see what their author thought to generate: a pool is one shape
+    applied to one page, and DESIGN.md's rejected list is mostly optimizations that won a synthetic table
+    and lost on the schemas real page objects actually carry (the ancestor signature helps above ~16
+    descendant-led fields; the corpus median is 11). This mode runs the thing the corpus number is
+    measured on, so a delta here is the delta that moves it.
+
+    Selectors the engine declines are dropped: they compile to an empty column on both sides, so keeping
+    them would dilute every cell with work neither build does.
+    """
+    import glob
+    import json
+
+    try:
+        import frostwork
+    except ImportError:
+        raise SystemExit("corpus mode needs the frostwork extension: .venv/bin/maturin develop --release")
+
+    pages = sorted(glob.glob(os.path.join(os.path.expanduser(corpus_dir), "*", "pages", "*.html")),
+                   key=os.path.getsize)
+    if not pages:
+        raise SystemExit(f"no <dir>/*/pages/*.html under {corpus_dir}")
+    if limit:  # a size spread, not the N smallest
+        step = max(1, len(pages) // limit)
+        pages = pages[::step][:limit]
+
+    supported = {}
+    cells = []
+    for p in pages:
+        sel_json = os.path.join(os.path.dirname(os.path.dirname(p)), "selectors.json")
+        if not os.path.exists(sel_json):
+            continue
+        with open(sel_json) as f:
+            raw = [q for q in json.load(f).values() if isinstance(q, str) and q.strip()]
+        sels = []
+        for q in raw:
+            if q not in supported:
+                try:
+                    supported[q] = not frostwork.check([q]).unsupported
+                except Exception:
+                    supported[q] = False
+            if supported[q]:
+                sels.append(q)
+        if not sels or not os.path.getsize(p):
+            continue
+        cells.append((f"{os.path.basename(os.path.dirname(os.path.dirname(p)))[:34]}", p, sels))
+    return cells
+
+
+def corpus_sweep(corpus_dir, limit, a, b, iters, reps, out):
+    cells = corpus_cells(corpus_dir, limit)
+    print(f"\n### real corpus: {corpus_dir}  ({len(cells)} pages, own selectors)")
+    print(f"  {'KB':>6} {'sels':>4} | {'A µs':>10} {'B µs':>10} | {'delta':>8} {'jitter':>7} | page object")
+    print("  " + "-" * 78)
+    for label, path, sels in cells:
+        ma, mb, jit, va, vb = cell(a, b, path, sels, iters, reps)
+        flag = "" if va == vb else f"  ** VALUE MISMATCH A={va} B={vb} **"
+        pct = (mb - ma) / ma * 100.0
+        mark = " " if abs(pct) > jit else "~"
+        print(f"  {os.path.getsize(path)/1024:>6.0f} {len(sels):>4} | {ma:>10.1f} {mb:>10.1f} | "
+              f"{pct:>+7.1f}%{mark}{jit:>6.1f}% | {label}{flag}")
+        out.append((label, len(sels), ma, mb, pct, va == vb, jit))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--a", required=True, help="baseline bench binary")
@@ -125,11 +191,15 @@ def main():
     ap.add_argument("--iters", type=int, default=1200, help="pages per bench invocation")
     ap.add_argument("--tables", default=",".join(ALL), help=f"comma list of {ALL}")
     ap.add_argument("--counts", default="", help="override each table's selector counts, e.g. 8,16,32")
+    ap.add_argument("--corpus", default=None,
+                    help="A/B over a REAL page corpus (each page with its own selectors) instead of "
+                         "the generated tables — the workload the corpus number is measured on")
+    ap.add_argument("--limit", type=int, default=40, help="corpus mode: size-spread sample of N pages")
     args = ap.parse_args()
 
     which = [w.strip() for w in args.tables.split(",") if w.strip()]
     bad = [w for w in which if w not in ALL]
-    if bad:
+    if bad and not args.corpus:
         raise SystemExit(f"unknown table(s) {bad}; choose from {ALL}")
 
     print("=" * 72)
@@ -141,8 +211,11 @@ def main():
 
     override = [int(c) for c in args.counts.split(",") if c.strip()] if args.counts else None
     out = []
-    for name, html, counts, pool in tables(which):
-        sweep(name, html, override or counts, pool, args.a, args.b, args.iters, args.reps, out)
+    if args.corpus:
+        corpus_sweep(args.corpus, args.limit, args.a, args.b, args.iters, args.reps, out)
+    else:
+        for name, html, counts, pool in tables(which):
+            sweep(name, html, override or counts, pool, args.a, args.b, args.iters, args.reps, out)
 
     print("\n" + "=" * 72)
     ok = all(same for *_, _, same, _ in out)

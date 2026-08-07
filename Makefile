@@ -5,6 +5,7 @@
 # See AGENTS.md / CLAUDE.md for what each check proves.
 #
 #   make bootstrap   create .venv and install the pinned test/oracle toolchain
+#   make bootstrap-bench  add the pinned COMPETITOR parsers (selectolax, bs4) for bench-engines
 #   make test        Rust unit vectors + clippy (python feature OFF — it must be, see below)
 #   make gate        the correctness gate: build the bins, then differential + encoding parity vs lxml
 #   make fuzz-smoke  quick selector + malformed-HTML fuzz (crash/WRONG/OVERMATCH gate)
@@ -22,6 +23,9 @@
 #   make bench-smoke quick article/deep-nesting performance check
 #   make bench-webpoet  FrostPage.to_item() vs a Parsel WebPage, swept over field count
 #                    BENCH_ARGS="--boundaries" for the boundary questions (four sweeps)
+#   make bench-engines CORPUS=<dir>  vs the other fast scraping parsers (selectolax, lxml, bs4),
+#                    values checked against parsel/lxml before anything is timed
+#   make bench-engines-mem CORPUS=<dir>  peak RSS for the same engines on the largest real pages
 #   make ci          test + gate + gate-corpus + gate-seq + fuzz-smoke + py + gate-webpoet(+mutate)
 #                    — the minimum pre-release check
 #
@@ -33,8 +37,9 @@ MATURIN ?= .venv/bin/maturin
 FUZZ_ITERS ?= 6000
 
 .DEFAULT_GOAL := help
-.PHONY: help bootstrap test build ext gate gate-corpus gate-seq corpus-real gate-mutate gate-mutate-full \
-	fuzz-smoke soak py gate-webpoet gate-webpoet-mutate bench bench-smoke bench-webpoet ci
+.PHONY: help bootstrap bootstrap-bench test build ext gate gate-corpus gate-seq corpus-real gate-mutate \
+	gate-mutate-full fuzz-smoke soak py gate-webpoet gate-webpoet-mutate bench bench-smoke bench-webpoet \
+	bench-engines bench-engines-mem ci
 
 help:
 	@grep -E '^#   make ' Makefile | sed 's/^#   /  /'
@@ -42,6 +47,11 @@ help:
 bootstrap:
 	python3 -m venv .venv
 	.venv/bin/pip install -r requirements-test.txt
+
+# The competitor parsers `bench-engines` measures against. Separate from `bootstrap` because they are
+# not oracles — nothing gated depends on them, and `make ci` runs without them installed.
+bootstrap-bench:
+	.venv/bin/pip install -r requirements-bench.txt
 
 test:
 	cargo test
@@ -154,6 +164,18 @@ bench-webpoet: ext
 
 bench-smoke: build
 	$(PY) tools/bench_matrix.py --smoke
+
+# The competitive field: Frostwork vs the other fast scraping parsers over a real production-selector
+# corpus. Depends on `ext` for the same reason `bench-webpoet` does. Nothing is timed before its values
+# are checked against parsel/lxml, so a missing or mis-translated competitor column is reported rather
+# than measured. Point CORPUS at a corpus in the `bench_corpus.py` layout; `ENGINE_ARGS="--limit 20"`
+# for a quick look, and `make bench-engines-mem` for the peak-RSS table over the same engines.
+ENGINE_ARGS ?=
+bench-engines: ext
+	$(PY) tools/bench_engines.py $(CORPUS) $(ENGINE_ARGS)
+
+bench-engines-mem: ext
+	$(PY) tools/bench_mem.py --engines $(CORPUS) $(MEM_DOCS)
 
 ci: test gate gate-corpus gate-seq fuzz-smoke py gate-webpoet gate-webpoet-mutate
 	@echo "frostwork: all local gates passed"
