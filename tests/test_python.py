@@ -17,6 +17,24 @@ import frostwork
 from frostwork import Page
 from frostwork._frostwork import Plan as _Plan
 
+# ONE specimen of an unsupported selector, and one fragment of its advisory reason. Tests that need "a
+# selector the engine declines" reach for these rather than inlining an example: `:contains('x')` was
+# inlined a dozen times as that example, and supporting it broke six tests whose subject was strict mode
+# and `--scan` reporting, not `:contains()` at all.
+#
+# A reverse position with a CHILD step into the value tail needs "depth exactly 1 within the span", which
+# the depth-agnostic matcher cannot express (docs/COMPATIBILITY.md) — a structural limit, not a feature
+# waiting to land, so it is a stable specimen.
+UNSUPPORTED_SEL = "li:last-child > b::text"
+UNSUPPORTED_REASON = "reverse position"
+
+
+def test_the_unsupported_specimen_is_still_unsupported():
+    """If a later release supports it, every test using it becomes vacuous — so say so here, once."""
+    bad = frostwork.check([UNSUPPORTED_SEL]).unsupported
+    assert [f.selector for f in bad] == [UNSUPPORTED_SEL]
+    assert UNSUPPORTED_REASON in bad[0].reason
+
 
 @contextlib.contextmanager
 def raises_at_class_definition(match):
@@ -157,6 +175,39 @@ def test_extract_normalizes_python_codec_spellings():
     # `latin-1`/`iso-8859-1` are Python codec names, not WHATWG labels; accept them via codecs.
     assert frostwork.extract(b"<p>caf\xe9</p>", ["p::text"], "latin-1") == [["café"]]
     assert frostwork.extract(b"<p>caf\xe9</p>", ["p::text"], "iso-8859-1") == [["café"]]
+
+
+@pytest.mark.parametrize(
+    "label,name,doc_name",
+    [
+        ("windows-1252", "data-año", "data-a\xf1o"),
+        ("shift_jis", "属性", "属性"),
+        ("gb18030", "属性", "属性"),
+        ("euc-jp", "属性", "属性"),
+        ("big5", "屬性", "屬性"),
+        ("euc-kr", "속성", "속성"),
+    ],
+)
+def test_a_non_ascii_attribute_name_matches_under_a_legacy_encoding(label, name, doc_name):
+    """Attribute VALUES are decoded before any comparison, which is what makes `.café` and
+    `:contains("社")` encoding-agnostic. Attribute NAMES were the one place a selector's UTF-8 still met
+    the page's raw bytes: `[data-año]` matched a UTF-8 page and silently returned nothing for the same
+    document in windows-1252. lxml decodes the whole document before tokenizing, so it matches either
+    way — it is the oracle here, over every predicate and the `::attr()` terminal."""
+    parsel = _oracle()
+    text = f'<p {doc_name}="v">t</p>'
+    body = text.encode(label)
+    queries = [
+        f"[{name}]::text",
+        f'[{name}="v"]::text',
+        f"[{name}]::attr({name})",
+        f'[{name}^="v"]::text',
+    ]
+    theirs = parsel.Selector(text=text)
+    for q in queries:
+        assert frostwork.extract(body, [q], label) == [theirs.css(q).getall()] != [[]], q
+    # and a name the page does NOT carry stays empty in the same encoding
+    assert frostwork.extract(body, [f"[{name}x]::text"], label) == [[]]
 
 
 def test_extract_str_with_non_utf8_label_raises():
@@ -761,7 +812,7 @@ def test_as_node_on_a_field_with_no_element_is_refused():
             type("P", (FrostPage,), {"x": field(selector).as_node()})
 
     with pytest.raises(TypeError, match="is not an element"):
-        type("P", (FrostPage,), {"x": field("div:contains('z')::text").as_node()}, strict=False)
+        type("P", (FrostPage,), {"x": field(UNSUPPORTED_SEL).as_node()}, strict=False)
 
 
 @pytest.mark.webpoet_contract
@@ -1140,7 +1191,7 @@ def test_strict_false_survives_class_recreation():
         @decorate
         class P(FrostPage, strict=False):
             name = field("h1::text")
-            unsupported = field("div:contains('x')::text")
+            unsupported = field(UNSUPPORTED_SEL)
 
         assert P._frostwork_strict is False, decorate
         assert not P.check_schema().ok, decorate
@@ -1158,7 +1209,7 @@ def test_strict_is_not_inherited_by_a_fresh_subclass():
     from frostwork.webpoet import FrostPage, field
 
     class Permissive(FrostPage, strict=False):
-        unsupported = field("div:contains('x')::text")
+        unsupported = field(UNSUPPORTED_SEL)
 
     with pytest.raises(frostwork.UnsupportedSelector):
         class Child(Permissive):
@@ -1623,7 +1674,7 @@ def test_an_override_also_clears_a_stale_strict_failure():
     from frostwork.webpoet import FrostPage, field
 
     class Legacy(FrostPage, strict=False):
-        broken = field("div:contains('x')::text")
+        broken = field(UNSUPPORTED_SEL)
 
     # replacing the unsupported field means this class's own schema is clean — so the strict default holds
     class Fixed(Legacy):
@@ -1997,7 +2048,7 @@ def test_check_audits_a_frostpage_schema_round_trip():
 
     class Exported(FrostPage, strict=False):
         title = field("h1::text")
-        blurb = field("div:contains('x')::text")
+        blurb = field(UNSUPPORTED_SEL)
         offers = Many(".offer", price=field(".//span/text()"))
 
     schema = Exported.frost_schema()
@@ -2183,7 +2234,7 @@ def test_frostpage_check_schema_and_strict_class_def():
 
     class Mixed(FrostPage, strict=False):
         name = field("h1::text")
-        bad = field("div:contains('x')::text")
+        bad = field(UNSUPPORTED_SEL)
         offers = Many(".offer", price=field(".//span/text()"), oops=field("a ~ b::text"))
 
     r = Mixed.check_schema()
@@ -2195,7 +2246,7 @@ def test_frostpage_check_schema_and_strict_class_def():
     with pytest.raises(frostwork.UnsupportedSelector):
         class Broken(FrostPage):
             title = field("h1::text")
-            broken = field("div:contains('z')::text")
+            broken = field(UNSUPPORTED_SEL)
 
     # A supported page defines cleanly under the strict default.
     class Good(FrostPage):
@@ -2542,7 +2593,7 @@ def test_audit_cli_explicit_registry(tmp_path, capsys):
         tmp_path,
         "from frostwork import Page\n"
         "good = Page().field('t', 'h1::text')\n"
-        "ignored = Page().field('x', 'div:contains(\"x\")::text')\n"
+        f"ignored = Page().field('x', '{UNSUPPORTED_SEL}')\n"
         "SCHEMAS = {'chosen': good}\n",
     )
     code = main([target + ":SCHEMAS"])
@@ -2662,7 +2713,7 @@ FIELD = "price"
 
 
 class Shop(scrapy.Spider):
-    rules = (LinkExtractor(restrict_css=[".pagination a", "li:contains('next') a"]),)
+    rules = (LinkExtractor(restrict_css=[".pagination a", "li:last-child > a"]),)
 
     def parse(self, response):
         for row in response.css(".product"):
@@ -2693,7 +2744,7 @@ def test_scan_finds_inline_selectors_without_importing(tmp_path, capsys):
     code = main(["--scan", target, "-v"])
     out = capsys.readouterr().out
     assert code == 1  # unsupported selectors present
-    assert "spider.py:10" in out and ":contains()" in out  # LinkExtractor restrict_css
+    assert "spider.py:10" in out and UNSUPPORTED_REASON in out  # LinkExtractor restrict_css
     assert "'.product'" in out and "'h3::text'" in out  # inline .css()
     assert "'h1.title::text'" in out  # add_css takes (field_name, css) — the SECOND argument
     assert "Many/One" in out  # relative `td/text()` names the rewrite
@@ -2738,14 +2789,14 @@ def test_scan_reads_both_page_object_spellings(tmp_path, capsys):
         "class P(FrostPage):\n"
         "    title = field('h1::text')\n"
         "    cards = Many('.card', name=field('.//h3/text()'))\n"
-        "    broken = field('li:contains(\"x\")::text')\n"
+        f"    broken = field('{UNSUPPORTED_SEL}')\n"
         "p = Page().field('t', 'h2::text').many('rows', '.row', {'c': './/td/text()'})\n",
     )
     assert main(["--scan", target, "-v"]) == 1
     out = capsys.readouterr().out
     for selector in ("'h1::text'", "'.card'", "'.//h3/text()'", "'h2::text'", "'.row'", "'.//td/text()'"):
         assert selector in out, selector
-    assert ":contains()" in out
+    assert UNSUPPORTED_REASON in out
     assert "6/7 literal selector(s) supported" in out
 
 

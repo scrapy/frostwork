@@ -44,7 +44,7 @@ use compile::{
     any_has, any_reverse, any_text_pred, deferrable_has, deferrable_reverse,
     deferrable_text_pred, sibling_pred_boundary,
 };
-use decode::{decode_attr, finalize};
+use decode::{decode_attr, decode_bytes, finalize};
 use deferred::TextMatchState;
 #[cfg(test)]
 use deferred::TextAccum;
@@ -113,6 +113,18 @@ pub fn budget_usage(queries: &[Vec<Selector>], groups: &[GroupInput]) -> (usize,
     // the query count is itself a member budget: a schema of 128 UNSUPPORTED queries (which parse to no
     // members) followed by a valid one otherwise reports 1/128 while silently dropping the valid column.
     (members.max(queries.len()), sib)
+}
+
+/// Does `sel` carry any DEFERRED-close predicate — a reverse position, a `:has()`, or a text-content
+/// predicate? All three resolve at a close rather than in the streaming pass, which is why a comma group
+/// cannot hold one: its members have to interleave in document order.
+///
+/// Exposed so the audit can EXPLAIN that, reading the one routing policy instead of re-deriving it. A
+/// member that carries a deferred predicate is supported as a lone selector and refused as a group
+/// member, which is a different coverage answer from a member that does not compile at all — and
+/// reporting the two as one string is what made this the largest unreadable bucket in the coverage report.
+pub(crate) fn carries_deferred(sel: &Selector) -> bool {
+    compile::any_reverse(sel) || compile::any_has(sel) || compile::any_text_pred(sel)
 }
 
 pub struct OpenElem<'a> {
@@ -664,6 +676,10 @@ impl AttrGate {
 pub struct CompiledSchema {
     entries: Vec<CSel>,
     interesting: Vec<Box<str>>, // attr names any selector references (lowercased)
+    // Is any interesting name non-ASCII (`[data-año]`, `::attr(año)`)? Attribute names arrive as RAW
+    // page bytes, which spell such a name differently in every legacy encoding. Read once per page into
+    // `Matcher::decode_names`; the rule itself is `Matcher::interesting_name`.
+    non_ascii_interesting: bool,
     // One-sided reject so an attribute no selector references costs one bit test instead of a scan.
     // `None` when the schema names too few attributes for that to pay (see `AttrGate::MIN_NAMES`).
     attr_gate: Option<AttrGate>,
@@ -709,6 +725,9 @@ pub struct Matcher<'a> {
     input: &'a [u8],            // for slicing raw-source outer-HTML fragments
     captures: Vec<(usize, usize, Dest)>, // (start, end, dest) raw-source spans, sorted at finish
     enc: &'static Encoding,     // resolved encoding for decoding emitted values
+    // Must a non-ASCII attribute NAME be decoded before it is compared? Only when the schema spells one
+    // that way and the page is byte-scanned under a legacy encoding — see `interesting_name`.
+    decode_names: bool,
     open_instances: Vec<OpenInstance>,      // stack of currently-open container instances (LIFO with elements)
     group_rows: Vec<Vec<(u64, Vec<Vec<String>>)>>, // per group: finished rows (seq, sub-columns), sorted at finish
     next_seq: u64,              // monotonic document-order rank for instances
@@ -1188,6 +1207,7 @@ impl CompiledSchema {
             attr_gate: AttrGate::build(&interesting),
             n_groups: group_specs.len(),
             entries,
+            non_ascii_interesting: interesting.iter().any(|n| !n.is_ascii()),
             interesting,
             has_outer,
             has_sibling,
@@ -1269,6 +1289,7 @@ impl<'a> Matcher<'a> {
             input,
             captures: Vec::new(),
             enc,
+            decode_names: schema.non_ascii_interesting && enc != encoding_rs::UTF_8,
             open_instances: Vec::new(),
             next_seq: 0,
             pending: Vec::new(),
@@ -1599,16 +1620,73 @@ impl<'a> Matcher<'a> {
         (self.results, grouped)
     }
 
-    /// Does any selector reference this attribute? Gated by [`AttrGate`] first, which rejects the
-    /// attributes a schema never asked about — the majority on a real page — without touching the name
-    /// list. A survivor still gets the exact case-insensitive comparison, so the answer is unchanged.
-    fn is_interesting(&self, name: &[u8]) -> bool {
-        if let Some(gate) = &self.schema.attr_gate {
+    /// Does any selector reference this attribute, and under what NAME should the element carry it?
+    /// `None` = not interesting; `Some(n)` = materialize it as `n`.
+    ///
+    /// Gated by [`AttrGate`] first, which rejects the attributes a schema never asked about — the
+    /// majority on a real page — without touching the name list. A survivor still gets the exact
+    /// case-insensitive comparison, so the answer is unchanged.
+    ///
+    /// **An attribute NAME is raw page bytes; a selector's is UTF-8.** Values are decoded before any
+    /// comparison ([`decode_attr`]), which is what makes `.café` and `:contains("社")` encoding-agnostic,
+    /// and names were the one place the two sides still met as bytes: `[data-año]` matched a UTF-8 page
+    /// and silently returned nothing on the same page in windows-1252, where lxml — which decodes the
+    /// whole document before tokenizing — matches. So a non-ASCII name is decoded here and the SCHEMA's
+    /// own spelling is what gets stored, which is what every downstream reader (`OpenElem::attr`, the
+    /// `::attr()` terminal) already compares against.
+    ///
+    /// It is sound to skip the decode on an ASCII name because `is_ascii_compatible` — the same
+    /// predicate that decides what gets transcoded up front — is defined as ASCII bytes mapping to ASCII
+    /// characters *and vice versa*, so no multi-byte sequence in a byte-scanned page can decode to a
+    /// name a schema spells in ASCII. `DECODE_NAMES` is const (see [`Self::materialize_attrs`]), so for
+    /// the schemas that cannot use any of this the branch is not compiled at all.
+    fn interesting_name<const DECODE_NAMES: bool>(&self, name: &'a [u8]) -> Option<&'a [u8]> {
+        let schema: &'a CompiledSchema = self.schema;
+        if DECODE_NAMES && !name.is_ascii() {
+            let decoded = decode_bytes(name, self.enc);
+            let hit = schema.interesting.iter().find(|x| x.eq_ignore_ascii_case(&decoded))?;
+            return Some(hit.as_bytes());
+        }
+        if let Some(gate) = &schema.attr_gate {
             if !gate.admits(name) {
-                return false;
+                return None;
             }
         }
-        self.schema.interesting.iter().any(|x| x.as_bytes().eq_ignore_ascii_case(name))
+        schema
+            .interesting
+            .iter()
+            .any(|x| x.as_bytes().eq_ignore_ascii_case(name))
+            .then_some(name)
+    }
+
+    /// Materialize the attributes some selector references, decoding values lazily (borrowed `Cow` when
+    /// the value is clean valid UTF-8 — the common case, so usually zero allocation).
+    ///
+    /// `DECODE_NAMES` is [`Matcher::decode_names`] lifted to a const, the same shape as
+    /// `compound_matches_impl`'s filter flag. The flag is per PAGE while the check it guards would run
+    /// per ATTRIBUTE, and the schemas that would pay it are the ones that cannot use it — nothing names
+    /// a non-ASCII attribute — so monomorphizing keeps the ordinary path compiled exactly as it was.
+    /// That is a structural argument, not a measured one: as a per-attribute branch the A/B read 3/13
+    /// cells above jitter at 3 reps and 0/12 at 7 (median +0.8%), i.e. a null result either way. The
+    /// const removes the question rather than answering it.
+    fn materialize_attrs<const DECODE_NAMES: bool>(
+        &self,
+        raw_attrs: &[(&'a [u8], Option<&'a [u8]>)],
+    ) -> Vec<(&'a [u8], Cow<'a, str>)> {
+        let mut attrs: Vec<(&'a [u8], Cow<'a, str>)> = Vec::new();
+        for &(an, av) in raw_attrs {
+            if let Some(name) = self.interesting_name::<DECODE_NAMES>(an) {
+                let value = match av {
+                    Some(value) => decode_attr(value, self.enc),
+                    None if is_minimized_boolean_attr(name) => {
+                        Cow::Owned(String::from_utf8_lossy(name).to_ascii_lowercase())
+                    }
+                    None => Cow::Borrowed(""),
+                };
+                attrs.push((name, value));
+            }
+        }
+        attrs
     }
 }
 
@@ -2103,21 +2181,11 @@ impl<'a> TokenSink<'a> for Matcher<'a> {
             // begins (`<head>`) or ends (`<body>`, real or the one synthesized just above)
             self.frame.note_inserted(slot);
         }
-        // materialize only the attributes some selector references, decoding lazily (borrowed Cow
-        // when the value is clean valid UTF-8 — the common case, so usually zero allocation).
-        let mut attrs: Vec<(&'a [u8], Cow<'a, str>)> = Vec::new();
-        for &(an, av) in raw_attrs {
-            if self.is_interesting(an) {
-                let value = match av {
-                    Some(value) => decode_attr(value, self.enc),
-                    None if is_minimized_boolean_attr(an) => {
-                        Cow::Owned(String::from_utf8_lossy(an).to_ascii_lowercase())
-                    }
-                    None => Cow::Borrowed(""),
-                };
-                attrs.push((an, value));
-            }
-        }
+        let attrs = if self.decode_names {
+            self.materialize_attrs::<true>(raw_attrs)
+        } else {
+            self.materialize_attrs::<false>(raw_attrs)
+        };
         // The element's signature is built from the MATERIALIZED attributes only. That is sound because
         // `collect_interesting` adds `class`/`id` to the interesting set whenever any compiled compound
         // references them, so a `req` carrying class/id bits implies this element's `sig` saw the same

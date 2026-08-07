@@ -543,6 +543,37 @@ def workload_columns(n_cols, expressible, keys, parity=None):
     return out
 
 
+def coverage_gap(refusals, oracle_key):
+    """Split each engine's refusals into the ACTIONABLE gap and the ones the oracle shares.
+
+    `refusals[key][i]` is that engine's reason for declining column i, or `None` if it expresses it.
+    A column the oracle also refuses is not a coverage gap — no port would ask for a selector parsel
+    itself rejects — so it is counted separately instead of inflating the engine's own refusal total.
+
+    Returns `{key: (Counter(reason -> n), shared_count)}`, oracle excluded.
+
+    A named function rather than a loop inline in `main` for the same reason `workload_columns` is one:
+    it decides a number that gets published, so `tests/test_gates.py` can seed it. Two independent
+    coverage percentages only BOUND the set difference (between `|refused| - |oracle refused|` and
+    `|refused|`), and quoting the difference of the two totals asserts the optimistic end of that range.
+    """
+    out = {}
+    n = len(refusals[oracle_key])
+    for k, rs in refusals.items():
+        if k == oracle_key:
+            continue
+        kinds, shared = collections.Counter(), 0
+        for j in range(n):
+            if rs[j] is None:
+                continue
+            if refusals[oracle_key][j] is None:
+                kinds[rs[j]] += 1
+            else:
+                shared += 1
+        out[k] = (kinds, shared)
+    return out
+
+
 def assert_same_work(scope, per_engine_columns):
     """Runtime invariant: every engine timed in a scope saw the SAME columns. A table whose rows were
     measured on different work is not a comparison, and the way that happens is an adapter quietly
@@ -621,6 +652,12 @@ def main():
     cols_in_scope = {s: 0 for s in ("W-all", "W-common")}
     expressed = collections.Counter()      # engine -> columns it can run
     refusal_kinds = {k: collections.Counter() for k in keys}
+    # The ACTIONABLE coverage gap: columns the ORACLE expresses and this engine does not. Two
+    # independent percentages against the whole corpus (93.2% vs 97.5%) only bound it — the difference
+    # assumes every refusal this engine makes is one parsel also makes, and a refusal the two SHARE is
+    # not a gap at all. So the set difference is measured rather than inferred from the two totals.
+    gap_kinds = {k: collections.Counter() for k in keys}
+    gap_shared = collections.Counter()      # engine -> columns BOTH refuse (not a gap)
     parity_tally = {k: collections.Counter() for k in keys}
     diverge_kinds = {k: collections.Counter() for k in keys}
     diverge_examples = {k: collections.defaultdict(list) for k in keys}
@@ -650,6 +687,11 @@ def main():
             for r in refusals[k]:
                 if r is not None:
                     refusal_kinds[k][r] += 1
+        # Read from `refusals`, which the CRASH handler below does not touch (it zeroes `expressible`):
+        # the gap is a coverage fact about the selector, not a runtime one about the page.
+        for k, (kinds, shared) in coverage_gap(refusals, ORACLE).items():
+            gap_kinds[k].update(kinds)
+            gap_shared[k] += shared
         total_cols += n
 
         # --- values first, timing second: one untimed run per engine over what it can express ---
@@ -745,6 +787,18 @@ def main():
         for reason, cnt in refusal_kinds[k].most_common(4):
             print(f"      {cnt:>5}  {reason[:96]}")
 
+    print(f"\nCOVERAGE GAP vs {by_key[ORACLE].label} — columns the ORACLE expresses and this engine does"
+          f" not.\n  This is the number to act on: an engine's own refusal total also counts selectors"
+          f" {by_key[ORACLE].label} rejects too, which no port would ever ask for.")
+    for k in keys:
+        if k == ORACLE:
+            continue
+        gap = sum(gap_kinds[k].values())
+        print(f"  {by_key[k].label:22} {gap:>9} gap  ({_pct(gap, total_cols):4.1f}% of all columns)"
+              f"  + {gap_shared[k]} shared refusals")
+        for reason, cnt in gap_kinds[k].most_common(6):
+            print(f"      {cnt:>5}  {reason[:96]}")
+
     print("\nVALUE PARITY vs parsel/lxml — over each engine's own expressible columns")
     print(f"  {'engine':22} {'identical':>12} {'ws-only':>9} {'DIVERGE':>9}  divergence kinds")
     for k in keys:
@@ -810,7 +864,10 @@ def main():
         "engines": [{"key": k, "label": by_key[k].label, "note": by_key[k].note} for k in keys],
         "skipped_engines": [{"engine": l, "reason": r} for l, r in missing],
         "coverage": {k: {"expressible": expressed[k], "of": total_cols,
-                         "refusals": dict(refusal_kinds[k])} for k in keys},
+                         "refusals": dict(refusal_kinds[k]),
+                         "gap_vs_oracle": sum(gap_kinds[k].values()),
+                         "gap_reasons": dict(gap_kinds[k]),
+                         "shared_refusals": gap_shared[k]} for k in keys},
         "parity": {k: dict(parity_tally[k]) for k in keys},
         "parity_kinds": {k: dict(diverge_kinds[k]) for k in keys},
         "parity_examples": {k: {kind: v for kind, v in ex.items()} for k, ex in diverge_examples.items()},

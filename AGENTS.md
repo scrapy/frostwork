@@ -125,6 +125,35 @@ a way it has read 100% while the engine was wrong:
   a gate. Same question for the generators: they can only find bugs in syntax they emit — CSS escapes
   appeared in no generated selector, so that whole surface rode on hand vectors until a review read the
   parser.
+  The same question applies one level down, to each PAIR the gate grades: **a selector the ORACLE answers
+  nowhere can only catch an over-match**, never a lost value. 17 of the conformant basket's selectors are
+  in that state — for some the emptiness IS the assertion (`dl > dt + dt::text` is empty precisely because
+  libxml2 nests a repeated `<dt>`), but `h1, h2` and `h1::text, h2::text, h3::text` are empty because the
+  generator emits no headings at all, so two comma-group spellings exercise nothing. `diff_lxml.py` now
+  records that set and names any arrival, which is how the first `:contains()` case was caught: a selector
+  that read like coverage and would have graded AGREE against a build with no `:contains()` at all.
+- **A number the docs publish needs the same gate as a value the engine returns, and the benchmarks did
+  not have one.** `bench_engines.py` refuses to time a column whose values it has not checked;
+  `bench_matrix.py` had no such rule, and six of the 24 cells it published extracted ZERO values — every
+  1-selector cell (`POOL[0]` is `h1::text` and no generated page had an `<h1>`) plus table-heavy at 1/4/8,
+  where nothing in the first eight selectors matches a `<td>`. The doc's "a one-field schema is the weak
+  case" conclusion was drawn entirely from that column, i.e. from a scan plus a selector that cannot match.
+  `assert_cell_extracts` is the rule now, the published table carries a `vals` column so the workload is
+  visible, and every shape carries a 0-selector PURE-SCAN row — without which the engine's µs is one opaque
+  number and the doc's causal claims about it are unfalsifiable. The first thing that row showed:
+  **deep-nested is the slowest shape at ZERO selectors**, so its cost is element density, not the ancestor
+  walk the doc blamed. And the same "a pool only measures what it contains" rule that governs `ab_bench`
+  applies to what gets PUBLISHED — every shape in the table ran the tag-led pool, so the class-led and
+  attribute-predicate workloads that dominate a real schema had no number anywhere.
+- **A refusal the oracle SHARES is not a coverage gap.** Two independent percentages ("we express 93.2%,
+  parsel 97.5%") only bound the set difference, and quoting their difference asserts the optimistic end.
+  Measured (`coverage_gap`), 266 of the engine's refusals turned out to be selectors cssselect rejects too
+  — and the largest single bucket, 179 columns of "comma group is unsupported", was 95% selectors with an
+  EMPTY member (a trailing comma), i.e. invalid CSS no port would ask for. The real comma-group mechanism
+  cost is a tenth of that. **When one refusal reason dominates, disaggregate it before believing it**: that
+  string covered three unrelated mechanisms, so the biggest apparent gap in the engine was mostly a
+  reporting artifact — the same over-attribution as the truncated-tag bug, in the coverage report instead
+  of the fuzzer.
 - **`make gate-mutate` asks the inverse question: flip one rule cell, does any gate notice?** The first
   sweep found 13% of the table protected by nothing, all from one root cause — the audit's universe was
   drawn from the tags we already thought were special (16 NAMES vs the engine's 19 IDS). Widening it turned

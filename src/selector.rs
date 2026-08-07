@@ -90,7 +90,8 @@ pub struct Compound {
     pub positional: Option<Nth>,  // `:nth-child`/`:nth-of-type` (+ XPath `[N]`); index checked at match
     pub reverse: Option<ReversePos>, // `:last-*`/`:only-*`; resolved at the parent's close (deferred)
     pub has: Option<Has>,         // `:has(<compound>)`; resolved at the subject's own close (deferred)
-    pub text_pred: Option<TextPred>, // XPath `[.="v"]`/`[contains(text(),"v")]`; deferred to own close
+    // XPath `[.="v"]`/`[contains(text(),"v")]` and CSS `:contains("v")`; deferred to the element's own close
+    pub text_pred: Option<TextPred>,
     // `:is(...)`/`:where(...)` matches-any groups. Each inner Vec is one pseudo's comma-list of
     // alternative compounds; the element must match ≥1 alternative in EVERY group (OR within a group,
     // AND across groups). Decided at open like `:not`, so no deferral. Empty = no `:is`/`:where`.
@@ -157,7 +158,7 @@ fn is_css_ident(v: &str) -> bool {
 }
 
 /// Split a query on TOP-LEVEL commas (not inside `[]`, `()`, quotes, or a CSS escape).
-fn split_top_commas(q: &str) -> Vec<&str> {
+pub(crate) fn split_top_commas(q: &str) -> Vec<&str> {
     let b = q.as_bytes();
     let mut parts = Vec::new();
     let mut start = 0usize;
@@ -333,7 +334,9 @@ pub fn parse(query: &str) -> Result<Selector, ()> {
 
     // ---- self vs descendant-or-self scope (mirror cssselect's `_subject`); N/A for a bare node ----
     let mut head;
-    let subtree;
+    // `mut` because the implicit-universal case below re-decides it: an explicit combinator with no
+    // subject compound is scoped like the ATTACHED `*` it stands for, whatever the whitespace said.
+    let mut subtree;
     if matches!(tk, Tk::Outer) {
         head = structural.trim().to_string();
         subtree = false;
@@ -386,6 +389,18 @@ pub fn parse(query: &str) -> Result<Selector, ()> {
             return Err(());
         }
         head = "*".to_string();
+    } else if head.ends_with(['>', '+', '~']) && !matches!(tk, Tk::Outer) {
+        // A value terminal with NO subject compound after an explicit combinator — `dt + ::text`,
+        // `div > ::attr(id)`, `:contains("Price") + ::text`. parsel strips the pseudo-element itself and
+        // hands cssselect the rest, so the terminal reads as attached to an implicit universal: parsel
+        // answers `dt + ::text` and `dt + *::text` identically. Scope is that ATTACHED universal's (the
+        // sibling/child's OWN text), never the subtree collapse — that applies only to a
+        // descendant-combinator `*` (see the `>`/`+`/`~` arm above), and it is why `subtree` is forced
+        // here rather than left as `had_space`.
+        //
+        // A trailing combinator with no terminal at all (`dt +`) stays an error, as cssselect rejects it.
+        head.push('*');
+        subtree = false;
     }
 
     // ---- split into compounds + combinators ----
@@ -615,11 +630,27 @@ fn parse_compound_depth(s: &str, depth: u32) -> Result<Compound, ()> {
             i += 1;
         } else {
             let name = read_name(b, &mut i);
-            // A TAG name must be ASCII, unlike a class/id/attribute name: the tokenizer's tag-name state
-            // is ASCII-only (`tokenizer::is_name_char`), so `café::text` could never match and used to
-            // pass strict schema validation while always returning empty. Reject it instead — an
-            // unsupported selector must be *reported*, not silently empty. (lxml does match these; if
-            // that ever matters, widen the tokenizer rather than re-accepting them here.)
+            // A TAG name must be ASCII, unlike a class/id/attribute name — refused, not silently empty.
+            //
+            // The reason is NOT the tokenizer, which this used to claim: `is_name_char` keeps every byte
+            // that is not whitespace / `>` / `/`, so a non-ASCII tag name tokenizes fine and deleting
+            // these three lines makes `café::text` and `x-é::text` agree with parsel on a UTF-8 page.
+            // Two things stop it, and both are FALSE POSITIVES rather than gaps:
+            //
+            // CASE. cssselect lowercases a type selector with Python's UNICODE `.lower()` while libxml2
+            // lowercases the tree ASCII-only, so `cafÉ` matches `<café>` there and `<CAFÉ>` (which
+            // libxml2 names `cafÉ`) is unmatchable by any selector. ASCII folding — what a browser does,
+            // and what `eq_ignore_ascii_case` does here — therefore returns a value lxml never had.
+            //
+            // ENCODING. A tag is compared as RAW page bytes (`matching.rs`, and `sig::tag_bits` hashes
+            // them at every open), so a legacy page needs the same treatment attribute names get in
+            // `Matcher::interesting_name`. It must be the DECODE direction: encoding the selector into
+            // the page's bytes instead leaves `eq_ignore_ascii_case` folding raw multi-byte sequences,
+            // and in shift_jis 949 character pairs differ only in the ASCII case of a trail byte — `П`
+            // is 0x8450 and `а` is 0x8470, so a selector for one would match the other.
+            //
+            // Measured before refusing: over 30000 crawled pages lxml built a non-ASCII element on 5,
+            // every one of them mojibake or a tag whose separator was an NBSP. Nothing to widen for.
             if !name.is_ascii() {
                 return Err(());
             }
@@ -797,6 +828,18 @@ fn parse_compound_depth(s: &str, depth: u32) -> Result<Compound, ()> {
                     }
                     ("has", Some(inner)) => set_has(&mut c, parse_has_arg(inner, depth + 1)?)?,
                     ("is" | "where", Some(inner)) => parse_is_arg(&mut c, inner, depth + 1)?,
+                    // `:contains()` is cssselect's non-standard extension, and it lowers to the text
+                    // predicate this engine already defers: `xpath_contains_function` emits
+                    // `contains(., "needle")`, i.e. the element's whole string-value. Same node set, same
+                    // machinery, same gate as the XPath spelling — see `TextPred`.
+                    ("contains", Some(a)) => set_text_pred(
+                        &mut c,
+                        TextPred {
+                            axis: TextAxis::StringValue,
+                            op: TextOp::Contains,
+                            needle: parse_contains_arg(a)?,
+                        },
+                    )?,
                     _ => return Err(()), // unsupported pseudo (bad arity, or a non-positional pseudo)
                 }
             }
@@ -845,6 +888,39 @@ fn set_has(c: &mut Compound, has: Has) -> Result<(), ()> {
     }
     c.has = Some(has);
     Ok(())
+}
+
+/// Attach a text-content predicate. A compound carries at most ONE, so a second must be refused rather
+/// than overwrite the first: `p:contains("a"):contains("b")` is an AND to cssselect, and keeping only the
+/// last needle would answer with elements that fail the dropped half — a wrong value, not an empty column.
+fn set_text_pred(c: &mut Compound, tp: TextPred) -> Result<(), ()> {
+    if c.text_pred.is_some() {
+        return Err(());
+    }
+    c.text_pred = Some(tp);
+    Ok(())
+}
+
+/// A `:contains()` argument as cssselect reads it: exactly one STRING or one IDENT token.
+/// `xpath_contains_function` raises `ExpressionError` on anything else — `:contains(2)` (a NUMBER),
+/// `:contains()` (no argument), `:contains(a b)` — so those stay unsupported rather than answered on a
+/// selector Parsel refuses. Quoting/escaping follows the attribute-value rule exactly: escapes are decoded
+/// inside quotes, and an unquoted argument must be a plain CSS identifier.
+fn parse_contains_arg(arg: &str) -> Result<String, ()> {
+    let t = arg.trim();
+    let b = t.as_bytes();
+    if let Some(&q @ (b'"' | b'\'')) = b.first() {
+        // `find_functional_close` is quote-aware, so the argument arrives with balanced quotes; a leading
+        // quote that does not close at the very end means trailing junk (`:contains("a"b)`).
+        if b.len() < 2 || b[b.len() - 1] != q {
+            return Err(());
+        }
+        return unescape_css(&t[1..t.len() - 1]).ok_or(());
+    }
+    if !is_css_ident(t) {
+        return Err(());
+    }
+    Ok(t.to_string())
 }
 
 /// Parse a `:has(<arg>)` argument: a single compound (`:has(a)`, `:has(.price)`, `:has([data-src])`,
@@ -906,9 +982,14 @@ fn parse_is_arg(c: &mut Compound, arg: &str, depth: u32) -> Result<(), ()> {
             return Err(()); // empty member (`:is(.a, , .b)`)
         }
         let alt = parse_compound_depth(part, depth)?; // single compound; parse_compound rejects combinators
+        // `text_pred` is in this list for a reason the others are not: `compile::any_compound` walks
+        // `negations` but NOT `is_groups`, so a `:contains()` inside an alternative is invisible to the
+        // routing check that refuses undeferrable text predicates — the selector would stream as ordinary
+        // matching with the text constraint silently dropped, i.e. OVER-match, not an empty column.
         if alt.positional.is_some()
             || alt.reverse.is_some()
             || alt.has.is_some()
+            || alt.text_pred.is_some()
             || !alt.is_groups.is_empty()
         {
             return Err(());
@@ -1063,6 +1144,72 @@ mod tests {
         assert!(parse("div:has(a:first-child)").is_err()); // positional inner
         assert!(parse("div:has()").is_err()); // empty arg
         assert!(parse("li:last-child:has(a)").is_err()); // has + reverse on one compound
+    }
+
+    #[test]
+    fn a_bare_terminal_after_an_explicit_combinator_is_the_universal_spelling() {
+        // parsel answers `dt + ::text` and `dt + *::text` identically (it strips the pseudo-element and
+        // hands cssselect the rest), and the scope is the sibling's OWN text — not a subtree collapse.
+        for (bare, explicit) in [
+            ("dt + ::text", "dt + *::text"),
+            ("dt+::text", "dt+*::text"),
+            ("dt ~ ::text", "dt ~ *::text"),
+            ("div > ::attr(id)", "div > *::attr(id)"),
+            (r#":contains("Price") + ::text"#, r#"*:contains("Price") + *::text"#),
+        ] {
+            let a = parse(bare).unwrap_or_else(|_| panic!("{bare} should parse"));
+            let b = parse(explicit).unwrap_or_else(|_| panic!("{explicit} should parse"));
+            assert_eq!(a.parts.len(), b.parts.len(), "{bare}");
+            assert_eq!(a.combs, b.combs, "{bare}");
+            assert_eq!(
+                matches!(a.terminal, Terminal::Text { subtree: true }),
+                matches!(b.terminal, Terminal::Text { subtree: true }),
+                "{bare}: subtree scope must match the explicit spelling"
+            );
+        }
+        // A trailing combinator with no terminal is invalid CSS in cssselect too, so it stays an error —
+        // the implicit `*` is the pseudo-element's subject, not a repair for a dangling combinator.
+        assert!(parse("dt +").is_err());
+        assert!(parse("dt >").is_err());
+        assert!(parse("+::text").is_err()); // leading combinator: still no subject on the left
+    }
+
+    fn text_pred_of(q: &str) -> Option<TextPred> {
+        parse(q).ok().and_then(|s| s.parts.last().and_then(|c| c.text_pred.clone()))
+    }
+
+    #[test]
+    fn contains_pseudo_lowers_to_the_text_predicate() {
+        // cssselect emits `contains(., "needle")` — the element's whole string-value, substring op
+        let tp = text_pred_of(r#"div:contains("Price")"#).unwrap();
+        assert_eq!(tp.axis, TextAxis::StringValue);
+        assert_eq!(tp.op, TextOp::Contains);
+        assert_eq!(tp.needle, "Price");
+        // both quote styles, and a bare IDENT — cssselect accepts STRING and IDENT alike
+        assert_eq!(text_pred_of("div:contains('Price')").unwrap().needle, "Price");
+        assert_eq!(text_pred_of("div:contains(Price)").unwrap().needle, "Price");
+        // escapes inside a quoted argument decode, exactly as in an attribute value
+        assert_eq!(text_pred_of(r#"div:contains("\41 bc")"#).unwrap().needle, "Abc");
+        // a `,`/`)` inside the quoted argument is data, not a delimiter
+        assert_eq!(text_pred_of(r#"div:contains("a, b)")"#).unwrap().needle, "a, b)");
+        // an empty needle is always-true in XPath, and cssselect emits `contains(., '')` — supported
+        assert_eq!(text_pred_of(r#"div:contains("")"#).unwrap().needle, "");
+        // composes with the rest of the compound and with a value terminal / descendant tail
+        assert!(text_pred_of(r#"dt.label:contains("Price")::text"#).is_some());
+        assert!(parse(r#"div:contains("x") a::attr(href)"#).is_ok());
+        assert!(parse(r#"dt:contains("Price") + dd::text"#).is_ok());
+
+        // cssselect RAISES on these, so answering them would return values for a selector Parsel refuses
+        assert!(parse("div:contains()").is_err()); // no argument
+        assert!(parse("div:contains(2)").is_err()); // NUMBER, not STRING/IDENT
+        assert!(parse("div:contains(a b)").is_err()); // two tokens
+        assert!(parse(r#"div:contains("a"b)"#).is_err()); // trailing junk after the string
+        // a compound carries ONE text predicate; cssselect ANDs two, so the second must refuse rather
+        // than overwrite the first (keeping the last needle would answer with a dropped constraint)
+        assert!(parse(r#"p:contains("a"):contains("b")"#).is_err());
+        // ...and inside `:is()` the routing check cannot see it (it does not walk `is_groups`), so an
+        // alternative carrying one must be refused at parse or the constraint is silently dropped
+        assert!(parse(r#"div:is(.a:contains("x"), .b)"#).is_err());
     }
 
     fn is_groups(q: &str) -> Vec<Vec<Compound>> {

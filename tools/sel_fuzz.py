@@ -140,6 +140,18 @@ def g_is_alt(rng):
     return p or rng.choice(TAGS)
 
 
+def g_contains(rng):
+    """`:contains(...)` — cssselect's extension, which lowers to `contains(., "needle")`, the same
+    deferred text predicate as the XPath `[contains(.,"v")]` spelling. Both argument tokens are emitted,
+    since cssselect accepts a STRING or an IDENT and raises on anything else: a bare needle is only used
+    when it really is a CSS identifier (`2` is a NUMBER to cssselect, so `:contains(2)` must stay empty).
+    """
+    needle = rng.choice(TEXT_NEEDLES)
+    if needle and needle[0].isalpha() and needle.isalnum() and rng.random() < 0.25:
+        return f":contains({needle})"
+    return f':contains("{needle}")'
+
+
 def g_is(rng):
     # SUPPORTED shape only: `[tag|*]:is(alt, ...)` — a lone `:is`/`:where` on a bare tag/universal
     # (cssselect translates only this shape correctly). Parsel is the oracle.
@@ -152,10 +164,31 @@ def g_is(rng):
 def g_css(rng):
     n = rng.randint(1, 4)
     s = g_compound(rng)
+    # The combinator that introduces the SUBJECT compound, and the selector text up to and including it.
+    # Tracked while building rather than recovered by scanning backwards: an explicit combinator carries
+    # its own spaces (` + `), so a backward scan stops on that space before it ever reaches the `+` — which
+    # is exactly the bug that made this branch emit nothing at all on its first run.
+    subject_comb = None
     for _ in range(n - 1):
-        s += rng.choice(COMBS) + g_compound(rng)
+        comb = rng.choice(COMBS)
+        subject_comb = s + comb
+        s += comb + g_compound(rng)
     if rng.random() < 0.18:
         s += g_has(rng)  # attach `:has(...)` to the SUBJECT compound (before the value terminal)
+    if rng.random() < 0.15:
+        # `:contains()` on the SUBJECT compound. Landing it on the same compound as a `:has()` is
+        # deliberate: two deferred kinds is out of tier, so that pair must grade UNSUPPORTED (empty) and
+        # never WRONG — the negative half of the coverage this adds.
+        s += g_contains(rng)
+    if subject_comb and subject_comb.rstrip()[-1] in "+>~" and rng.random() < 0.15:
+        # Drop the SUBJECT compound and let the value terminal stand on the implicit universal
+        # (`dt + ::text`, `div > ::attr(id)`). parsel strips the pseudo-element before cssselect sees the
+        # selector, so it answers this exactly as the `*` spelling — and the `*` spelling is emitted here
+        # too, so the pair is compared rather than one side assumed. Only an EXPLICIT combinator: after a
+        # descendant one, `E ::text` is parsel's or-self collapse, a different rule already covered.
+        star = "*" if rng.random() < 0.5 else ""
+        term = rng.choice([t for t in TERMS if t])  # a bare element needs a real subject compound
+        return subject_comb + (" " if rng.random() < 0.5 else "") + star + term
     if rng.random() < 0.12:
         # a clean `[tag|*]:is(...)` subject — the shape cssselect translates CORRECTLY, so parsel is a
         # valid oracle. Combined shapes (`div.a:is(...)`, chained `:is`) diverge from cssselect's bug and
@@ -167,7 +200,10 @@ def g_css(rng):
         # valid oracle. (id/attr/:not `:has` inners are cssselect-invalid, so keep the inner type+class.)
         c = rng.choice(TAGS) + (("." + rng.choice(CLASSES)) if rng.random() < 0.4 else "")
         comb = rng.choice([" ~ ", " + "])
-        return f"{c}:has({g_has_inner(rng)}){comb}{g_compound(rng)}" + rng.choice(TERMS)
+        # The same Case-B shape with a text predicate instead of a `:has` — the label→value pattern
+        # (`dt:contains("Price") + dd::text`), which is the reason a scraper reaches for `:contains()`.
+        pred = f":has({g_has_inner(rng)})" if rng.random() < 0.5 else g_contains(rng)
+        return f"{c}{pred}{comb}{g_compound(rng)}" + rng.choice(TERMS)
     return s + rng.choice(TERMS)
 
 

@@ -54,6 +54,43 @@ def _parse_lines(out):
     return results
 
 
+# Basket selectors the ORACLE answers nowhere in the generated corpus. Such a pair can only ever catch the
+# engine INVENTING values (an over-match); it can never catch one losing them, because there is nothing to
+# lose. That is not automatically a defect — for some of these the emptiness IS the assertion:
+# `dl > dt + dt::text` is empty precisely because libxml2 NESTS a repeated `<dt>` instead of closing it, so
+# a value there would mean the tree rule broke. Others are accidental, and those are what this guards:
+# `h1, h2` and `h1::text, h2::text, h3::text` are empty because the generator emits no headings AT ALL, so
+# two comma-group spellings sit in the basket exercising nothing.
+#
+# So the gate is on the SET, not a count: a selector may leave (the generator grew) but a new one may not
+# arrive unnoticed. That is how the first `:contains()` case here was caught — `div:contains(alpha)::attr(id)`
+# reads like coverage and the generator puts no `id` on a `div`, so it would have graded AGREE against a
+# build with no `:contains()` at all.
+ORACLE_EMPTY_BASKET = frozenset({
+    # ACCIDENTAL — the markup the selector needs is absent from the generator, so the spelling tests
+    # nothing. Emitting an `h1`/`h2`/`h3`, or an `id` on a `colgroup`, would recover four pairs.
+    "h1 ~ p::text", "h1, h2", "h1::text, h2::text, h3::text", "table > colgroup::attr(id)",
+    # INTENDED — empty because the tree rules say so, which makes the emptiness the assertion. A repeated
+    # `<dt>`/`<dd>` NESTS rather than closing, so no sibling pair exists to match; if the engine
+    # auto-closed them instead, these would start returning values.
+    "dl > dt + dt::text", "dl > dd + dd::text", "thead + tbody::text", "caption + thead::text",
+    "optgroup + optgroup::text",
+    # INTENDED — `::text` is the element's OWN text nodes, and these elements have none: a table section,
+    # a row and an optgroup hold their text in descendants, and `<input>` is void so it has no text at all.
+    "table > thead::text", "table > tbody::text", "table > tfoot::text", "table > tr::text",
+    "thead > tr::text", "tbody > tr::text", "select > optgroup::text", 'input[value|="v"]::text',
+})
+
+
+def oracle_empty_basket(basket, oracle_counts):
+    """Basket selectors the oracle answered ZERO times, in basket order.
+
+    Separated out so `tests/test_gates.py` can seed it: this decides a gate, and the property it decides
+    ("could this pair have gone red at all?") is invisible in a run that prints only AGREE totals.
+    """
+    return [sel for sel in basket if not oracle_counts.get(sel, 0)]
+
+
 def _crash_check(cases, results, returncode, err):
     """(crashed_cases, diag): nonzero when `differ` died mid-batch or exited nonzero. Without this a
     panic truncates stdout, `zip` silently drops every later case, and the run can still print PASS —
@@ -314,10 +351,14 @@ def main():
     stat["CRASH"] += crashed
     if diag:
         crash_diags.append(("conformant", diag))
+    # Per-selector ORACLE value counts, so the basket's own discriminating power is measured rather than
+    # assumed — see `vacuous_basket`.
+    oracle_vals = defaultdict(int)
     for (body, sels), mine_cols in zip(conf_cases, engine_out):
         for si, sel in enumerate(sels):
             mine = mine_cols[si] if si < len(mine_cols) else []
             theirs = parsel_vals(body, sel)
+            oracle_vals[sel] += len(theirs or [])
             v = verdict(mine, theirs, "CONTROL", sel)
             stat[v] += 1
             stat["pairs"] += 1
@@ -457,9 +498,18 @@ def main():
         for where, diag in crash_diags:
             print(f"    [{where}] {diag}")
 
+    empty = oracle_empty_basket(conformant.BASKET, oracle_vals)
+    unlisted = [sel for sel in empty if sel not in ORACLE_EMPTY_BASKET]
+    print(f"\n  basket selectors the ORACLE answered nowhere: {len(empty)}/{len(conformant.BASKET)} "
+          f"— over-match coverage only (see ORACLE_EMPTY_BASKET)")
+    if unlisted:
+        print("    UNLISTED — added since the set was recorded, and it cannot catch a LOST value:")
+        for sel in unlisted:
+            print(f"      {sel!r}")
+
     gate = stat["DIVERGE"] + stat["CRASH"]
     print(f"\n  GATE: DIVERGE+CRASH = {gate}  ->  {'PASS' if gate == 0 else 'FAIL'}")
-    sys.exit(1 if gate else 0)
+    sys.exit(1 if gate or unlisted else 0)
 
 
 if __name__ == "__main__":

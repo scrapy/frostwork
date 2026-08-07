@@ -42,6 +42,7 @@ level, public Python APIs validate schemas and raise `UnsupportedSelector` by de
 | adjacent / general sibling (`a + b`, `a ~ b`), incl. chains (`a ~ b ~ c`), a descendant/child **base** (`.list li ~ li`), and a trailing descendant/child **step** (`a + b c`, `input + label p::text`) | ✅ supported |
 | `::text` — self (`E::text`) and descendant-or-self (`E ::text`) | ✅ supported (per text node, whitespace kept, entities decoded) |
 | `::attr(name)` — self and descendant-or-self (`E ::attr(x)`) | ✅ supported (entity-decoded) |
+| a value terminal with **no subject compound** after an explicit combinator — `dt + ::text`, `dt ~ ::text`, `div > ::attr(id)` | ✅ supported, and identical to the `*` spelling (`dt + *::text`). Parsel strips the pseudo-element itself before cssselect sees the selector, so the terminal reads as attached to an implicit universal; scope is that element's **own** value, never the subtree collapse (which applies only to a descendant-combinator `*`). A trailing combinator with **no** terminal (`dt +`) stays ∅ unsupported, as cssselect rejects it |
 | bare element → outer HTML (`div`, `.card`) | ≈ divergent — **raw source**, not lxml's reflow (see below) |
 | comma list, same terminal (`h1::text, h2::text` · `.a::attr(href), .b::attr(href)` · `h1, h2`) | ✅ supported (document-order union, per-column de-dup; bare-element members retain the raw-source exception) |
 | comma list, **mixed** value terminals (`a::text, a::attr(href)` · `img::attr(src), img::attr(data-src)`) | ✅ supported (document-order union: `::attr` at element-open in source order, `::text` at text nodes; de-dup by node) |
@@ -55,9 +56,12 @@ level, public Python APIs validate schemas and raise `UnsupportedSelector` by de
 | a QUOTED delimiter inside a functional pseudo's argument — `div:is(#a, [data-x=")"])`, `:not([title='a(b'])`, `:has([data-x="a, b"])`, `:is([class="a,b"])`, and the escaped forms (`[data-x="\)"]`) | ✅ supported — argument boundaries are quote- and escape-aware, so a `)` or `,` inside a value is data. Genuinely unterminated syntax (`:is(#a, [data-x=")"]::attr(id)`) stays ∅ unsupported (empty), matching cssselect's rejection |
 | `:is(...)` / `:where(...)` — a comma-list of compound alternatives (`:is(h1, h2, h3)`, `div:is(.a, .b)`, `a:is([href], [src])`), including combined with other conditions (`div.card:is(.a, .b)`) or chained (`x:is(a, b):is(c, d)`) | ✅ supported — element matches iff it matches ≥1 alternative in EVERY group (OR within a group, AND across groups). `:is`/`:where` are identical (specificity is irrelevant to matching). Agrees with cssselect ≥ 1.5.0; **≈ divergent** for combined/chained forms against cssselect ≤ 1.4.0 — see below |
 | `:is(...)` with a combinator inside an alternative (`:is(.a .b)`, `:is(a + b)`), a positional/reverse/`:has` inside an alternative (`:is(:first-child)`), or a nested `:is` | ∅ unsupported (empty) — cssselect itself rejects the combinator forms |
-| `:contains()`, `::first-line`, other pseudos | ∅ unsupported (empty) |
+| `:contains("v")` — cssselect's extension. One STRING or IDENT argument, on ONE compound of a lone selector. The value may be that element's **own** (`dt:contains("Price")::text`), its **subtree** (`div:contains("x") ::text`), a **descendant's** (`div:contains("x") a::attr(href)`), or a following **sibling's** (`dt:contains("Price") + dd::text` — the label→value pattern) | ✅ supported — cssselect translates it to `contains(., "v")`, so it is the same deferred text predicate as the XPath spelling below and inherits its semantics exactly: `.` is the whole string-value (subtree text concatenated), the match is a **substring** with no whitespace trimming, and `:contains("")` is always-true. Resolved at the element's own close |
+| `:contains()` in any OTHER shape — a **second** one on the same compound (`p:contains("a"):contains("b")`, which cssselect ANDs), one inside `:not()`/`:is()`/`:has()`, a comma group or `Many`/`One` member, alongside a `:has()`/reverse position on the same compound, or a **child** step into the value tail (`div:contains("x") > p::text`) | ∅ unsupported (empty) — use the descendant form for the last one |
+| `:contains()` with a non-STRING/IDENT argument — `:contains()`, `:contains(2)`, `:contains(a b)` | ∅ unsupported (empty) — cssselect's `xpath_contains_function` raises `ExpressionError` on these, so answering them would return values for a selector Parsel refuses |
+| `::first-line`, other pseudos | ∅ unsupported (empty) |
 | `:not()` with a combinator argument (`:not(a b)`), namespaces (`ns\|tag`), `[a=b i]` case flag (cssselect rejects it) | ∅ unsupported (empty) |
-| a **non-ASCII TAG** name (`café::text`, `x-é::text`) | ∅ unsupported (reported, not silently empty) — the tokenizer's tag-name state is ASCII-only, so these can never match. lxml *does* match them, so this is a coverage gap; non-ASCII **class/id/attribute** names (`.café`, `#año`) are fully supported |
+| a **non-ASCII TAG** name (`café::text`, `x-é::text`) | ∅ unsupported (reported, not silently empty) — lxml *does* match them, so this is a coverage gap, and a deliberate one: accepting them would return values lxml never had. cssselect lowercases a type selector with Python's **Unicode** `.lower()` while libxml2 lowercases the tree ASCII-only, so `cafÉ` matches `<café>` there while `<CAFÉ>` is unmatchable by any selector; and a tag is compared as raw page bytes, where ASCII-folding a legacy multi-byte sequence collides real characters (949 pairs in shift_jis — `П` 0x8450 folds onto `а` 0x8470). Measured over 30000 crawled pages, lxml built a non-ASCII element on 5, all mojibake or an NBSP separator. Non-ASCII **class/id/attribute** names (`.café`, `#año`, `[data-año]`, `::attr(año)`) are fully supported, **in every encoding** — see [Encoding](#encoding) |
 
 ## XPath (downward subset)
 
@@ -81,6 +85,7 @@ level, public Python APIs validate schemas and raise `UnsupportedSelector` by de
 | text-content predicate as a SOLE predicate on ONE step — `[.="v"]`, `[contains(.,"v")]`, `[text()="v"]`, `[contains(text(),"v")]` — with an attached `/text()`/`/@a` or bare-element terminal, a descendant `//text()`, or a descendant value step (`//div[contains(.,"x")]//a/@href`) | ✅ supported (resolved at the element's own close). `.` is the whole string-value (subtree text concatenated); `text()` is the direct child text nodes — `=` is existential (ANY node), `contains()` reads only the FIRST. No whitespace trimming (use `normalize-space` for that). `contains(…,"")` is always-true, matching XPath |
 | text-content predicate on a PRECEDING-SIBLING step — `//dt[.="Price"]/following-sibling::dd/text()`, the label→value pattern (also `:has` — `C:has(..) ~ S` / `+ S` in CSS) | ✅ supported — the predicate-bearer `C` closes before the value sibling `S` opens, so `C`'s deferred predicate fires the sibling boundary at its close and `S` emits normally (single sibling combinator; `C` and `S` each a compound/descendant-chain) |
 | text-content predicate in any OTHER shape — combined with another predicate (`//p[@x][text()="y"]`), `!=`/`<`/`>`, `normalize-space(…)`/other functions inside, an `or`-join, or on a NON-subject **ancestor** step (`//div[.="x"]//a` — value from a descendant, which would need deferred descendant emission) | ∅ unsupported (empty) |
+| an UPPERCASE or non-ASCII tag/attribute NAME (`//DIV`, `//rect/@ID`, `//café`, `//p[@data-año]`) | ∅ unsupported (reported, not silently empty). Uppercase matches nothing in lxml either — XPath name-tests compare case-sensitively while libxml2 lowercases every HTML name — so refusing it is parity, not a gap. Non-ASCII is a gap on the ATTRIBUTE half only: the CSS spelling `[data-año]` matches in every encoding and this refuses the same question; a non-ASCII TAG name can never match (see the CSS table) |
 | other functions (`count()`, `string()`, `substring()`, …) | ∅ unsupported (empty) |
 | relative / context steps without a leading `/` or `./` (`td/text()`, `@href`) | ∅ unsupported (empty) |
 | `contains(@a,"")` / `starts-with(@a,"")` — **empty operand** | ≈ divergent — returns **empty** (CSS empty-operand semantics: an empty needle matches nothing), whereas XPath-proper `contains` with `""` is always-true. Non-empty operands match lxml. |
@@ -515,6 +520,25 @@ which encodings those are is asked of `Encoding::is_ascii_compatible` rather tha
 to decode at all — one U+FFFD for the whole document). ISO-2022-JP is the one that bites: inside its
 `ESC $ B` mode a JIS pair is two bytes below 0x80, so `社` is the pair `<R`, and a crawled Japanese page
 tokenized as raw bytes grew an `<r>` start tag out of the middle of a word.
+
+### Extended characters in a SELECTOR
+
+A selector's literals are UTF-8 and a byte-scanned page's are not, so **nothing is ever compared as raw
+bytes across that boundary**: attribute values are decoded with the resolved encoding at element open and
+text with it before the predicate sees it, which is what makes `.café`, `[title="café"]`, `#año` and
+`:contains("社")` answer identically for the same document in UTF-8, windows-1252, shift_jis or UTF-16.
+The same holds for CSS escapes in a quoted value — `[data-x="caf\e9"]` is the character, decoded the way
+cssselect decodes it — and an escape in an *identifier* stays unsupported (see the CSS table).
+
+Attribute **names** are decoded on the same rule, and are the one place where they were not: a name is
+raw page bytes while a selector's is UTF-8, so `[data-año]` (and `::attr(año)`) matched a UTF-8 page and
+silently returned nothing for the same document in windows-1252, where lxml — which decodes the whole
+document before tokenizing — matches. A name a schema spells in ASCII still never needs the decode,
+because `is_ascii_compatible` (the same predicate that decides what gets transcoded up front) is defined
+as ASCII bytes mapping to ASCII characters *and vice versa*.
+
+A non-ASCII TAG name is the remaining gap, and it is **reported rather than silently empty**. It is not
+an encoding limit — see the CSS table for why accepting it would over-match rather than fix anything.
 
 ### Deliberate differences from w3lib
 

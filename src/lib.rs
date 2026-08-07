@@ -1708,6 +1708,47 @@ mod tests {
             v(&["café"])
         );
     }
+    /// An attribute NAME is raw page bytes while a selector's is UTF-8, so a non-ASCII one used to
+    /// agree only on a UTF-8 page: `[data-año]` matched there and returned NOTHING for the same
+    /// document in windows-1252, where lxml — which decodes before tokenizing — matches. Values were
+    /// never affected (they are decoded before comparison), which is what made it silent.
+    #[test]
+    fn encoding_non_ascii_attribute_names_are_decoded_before_comparison() {
+        // windows-1252: `data-año` is `data-a\xf1o`, one byte where UTF-8 writes two
+        let w1252 = b"<p data-a\xf1o=\"v\">t</p>";
+        assert_eq!(
+            extract(w1252, &["[data-año]::text".into()], Some("windows-1252"))[0],
+            v(&["t"])
+        );
+        // the predicate's VALUE and the `::attr()` terminal read the same materialized name
+        assert_eq!(
+            extract(w1252, &["[data-año=\"v\"]::attr(data-año)".into()], Some("windows-1252"))[0],
+            v(&["v"])
+        );
+        // shift_jis: a name whose bytes hold no ASCII at all
+        assert_eq!(
+            extract(
+                "<p 属性=\"v\">t</p>".as_bytes(),
+                &["[属性]::text".into()],
+                Some("utf-8"),
+            )[0],
+            v(&["t"])
+        );
+        assert_eq!(
+            extract(
+                &encoding_rs::SHIFT_JIS.encode("<p 属性=\"v\">t</p>").0,
+                &["[属性]::text".into()],
+                Some("shift_jis"),
+            )[0],
+            v(&["t"])
+        );
+        // a name the page spells in a DIFFERENT legacy encoding still must not match
+        assert_eq!(
+            extract(w1252, &["[data-año]::text".into()], Some("shift_jis"))[0],
+            v(&[])
+        );
+    }
+
     /// ISO-2022-JP is NOT ASCII-compatible, so it has to be transcoded before tokenizing — see
     /// [`prepare_bytes`]. In `ESC $ B` mode a JIS pair is two bytes below 0x80: `社` is `<R`, which a
     /// byte tokenizer reads as a start tag, swallowing the character AND opening an `<r>` element that

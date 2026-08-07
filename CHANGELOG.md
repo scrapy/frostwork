@@ -14,9 +14,20 @@ First public preview.
 - Strict selector validation by default. Unsupported selectors fail before scanning; `strict=False` opts
   into empty columns without invoking a fallback parser.
 - Byte-oriented tokenization, lazy value decoding and browser/WHATWG-oriented charset resolution.
+- Extended characters in a selector answer the same under any encoding. A selector is UTF-8 and a
+  byte-scanned page is not, so both attribute values and attribute NAMES are decoded before comparison —
+  `[data-año]` and `::attr(año)` used to match a UTF-8 page and return nothing for the same document in
+  windows-1252 or shift_jis, where lxml matches. A non-ASCII tag name remains unsupported and reported.
 - Empirical libxml2-compatible tree construction for the supported surface, including optional document
   frames, implied closes, raw-text modes, void elements and malformed markup covered by the compatibility
   contract.
+- CSS `:contains("v")` is supported, with cssselect's semantics: one string/ident argument lowered to
+  `contains(., "v")`, resolved at the element's own close. The value may be the element's own, its subtree,
+  a descendant's or a following sibling's (`dt:contains("Price") + dd::text`). Shapes outside that tier —
+  a second `:contains()` on one compound, one inside `:not()`/`:is()`, or a comma-group member — stay
+  unsupported rather than silently dropping the constraint.
+- A value terminal with no subject compound after an explicit combinator (`dt + ::text`, `div > ::attr(id)`)
+  is supported and answers identically to the `*` spelling, which is how Parsel reads it.
 
 ### Python API and tooling
 
@@ -63,3 +74,8 @@ First public preview.
   sweeps, generated tree-rule tables and mutation testing for gate effectiveness.
 - Reproducible engine, page-object and memory benchmarks against Parsel. Current measurements and caveats
   live only in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+- The competitive benchmark reports the coverage GAP against the oracle — the columns parsel expresses and
+  the engine does not — separately from the engine's own refusal total, which also counts selectors
+  cssselect rejects.
+- The page-shape matrix refuses to publish a cell that extracted no values, carries a pure-scan row per
+  shape, and reports the class-led and attribute-predicate selector pools alongside the tag-led one.

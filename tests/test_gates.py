@@ -913,6 +913,87 @@ def test_the_competitive_benchmark_drops_a_column_an_engine_gets_wrong():
     assert bench_engines.workload_columns(2, cant, keys, clean) == [1]
 
 
+def test_the_differential_notices_a_basket_selector_that_cannot_catch_a_lost_value():
+    """A basket selector the ORACLE answers nowhere can only ever catch an over-match.
+
+    For some that is the point (`dl > dt + dt::text` is empty because libxml2 NESTS a repeated `<dt>`, so a
+    value there means the rule broke). For others it is an accident: `h1, h2` and
+    `h1::text, h2::text, h3::text` are empty because the generator emits no headings at all. The gate is on
+    the recorded SET, so a new arrival is named — which is how `div:contains(alpha)::attr(id)` was caught,
+    a `:contains()` case that would have graded AGREE against a build with no `:contains()` at all.
+    """
+    diff_lxml = pytest.importorskip("diff_lxml")
+
+    basket = ["a::text", "b::text", "c::text"]
+    counts = {"a::text": 5, "b::text": 0, "c::text": 12}
+    assert diff_lxml.oracle_empty_basket(basket, counts) == ["b::text"]
+    # a selector absent from the tally never ran at all, which is the same failure
+    assert diff_lxml.oracle_empty_basket(basket, {"a::text": 1}) == ["b::text", "c::text"]
+    assert diff_lxml.oracle_empty_basket(basket, dict.fromkeys(basket, 1)) == []
+
+    # the recorded set must stay a subset of the basket, or a rename leaves a stale allowance behind
+    import conformant
+    assert diff_lxml.ORACLE_EMPTY_BASKET <= set(conformant.BASKET)
+
+
+def test_the_matrix_refuses_to_publish_a_cell_that_extracted_nothing():
+    """`bench_matrix.py` publishes a page-shape table; a cell whose pool misses the shape entirely times a
+    pure scan and reads as an extraction result.
+
+    Six of the 24 published cells were that — every 1-selector cell (POOL[0] is `h1::text` and no
+    generated page had an `<h1>`) plus table-heavy at 1/4/8, where nothing in the first eight selectors
+    matches a `<td>`. The doc's "a one-field schema is the weak case" conclusion came from that column.
+    """
+    bench_matrix = pytest.importorskip("bench_matrix")
+
+    assert bench_matrix.assert_cell_extracts("article", 8, 2016)
+    # 0 selectors IS the pure-scan floor row, so it is exempt by design
+    assert bench_matrix.assert_cell_extracts("article", 0, 0)
+    with pytest.raises(AssertionError, match="extracted 0 values"):
+        bench_matrix.assert_cell_extracts("table-heavy", 8, 0)
+
+    # The generators must carry what the pool's first selector asks for; the assertion above is what
+    # enforces it per run, so a shape losing its `<h1>` cannot publish a scan under an extraction label.
+    assert "<h1>" in bench_matrix.H1
+    for shape in (bench_matrix.article, bench_matrix.product_listing, bench_matrix.table,
+                  bench_matrix.deep_nested, bench_matrix.class_heavy, bench_matrix.attr_heavy):
+        assert bench_matrix.H1 in shape(20_000).decode(), shape.__name__
+
+
+def test_the_coverage_gap_is_a_set_difference_not_a_difference_of_totals():
+    """A refusal the ORACLE shares is not a coverage gap, and the two facts are not interchangeable.
+
+    Reporting "93.2% vs 97.5%" side by side quotes the difference of two independent totals, which only
+    bounds the real gap; on this corpus 266 of the engine's refusals turned out to be selectors cssselect
+    rejects too, and the largest single refusal bucket was an empty comma-group member — invalid CSS that
+    no port would ask for. So the seeded regression here is an engine whose refusals are ALL shared:
+    its own total looks bad and its gap must be zero.
+    """
+    bench_engines = pytest.importorskip("bench_engines")
+
+    # column 0: both refuse (shared) — column 1: only we refuse (a real gap) — column 2: both express
+    refusals = {
+        "parsel": ["cssselect rejects it", None, None],
+        "frostwork": ["cssselect rejects it", ":contains() is unsupported", None],
+    }
+    got = bench_engines.coverage_gap(refusals, "parsel")
+    assert "parsel" not in got, "the oracle cannot have a gap against itself"
+    kinds, shared = got["frostwork"]
+    assert shared == 1
+    assert dict(kinds) == {":contains() is unsupported": 1}
+    assert sum(kinds.values()) == 1, "the shared refusal must not be counted as a gap"
+
+    # an engine that only ever refuses what the oracle refuses has NO gap, however bad its own total
+    all_shared = {"parsel": ["x", "y"], "frostwork": ["a", "b"]}
+    kinds, shared = bench_engines.coverage_gap(all_shared, "parsel")["frostwork"]
+    assert sum(kinds.values()) == 0 and shared == 2
+
+    # ...and one that refuses what the oracle expresses is all gap
+    all_gap = {"parsel": [None, None], "frostwork": ["a", "b"]}
+    kinds, shared = bench_engines.coverage_gap(all_gap, "parsel")["frostwork"]
+    assert sum(kinds.values()) == 2 and shared == 0
+
+
 def test_the_competitive_benchmark_refuses_to_time_engines_on_different_work():
     """The scopes exist so every row is measured on the same columns. If an adapter quietly drops a
     selector it cannot run, its row gets a cheaper workload and the table silently stops being a

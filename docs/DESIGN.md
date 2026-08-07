@@ -195,7 +195,8 @@ compiles to `E:has(INNER)` and `//INNER/parent::E` to `E:has(> INNER)` — lxml'
 exactly those `:has` matches. (The one *non*-deferred axis, `following-sibling::`, is instead the CSS
 general-sibling relation, so it lowers to a `~` combinator and needs no new machinery at all.)
 
-**Text-content predicates** (`[.="v"]`, `[contains(., "v")]`, `[text()="v"]`, `[contains(text(),"v")]`)
+**Text-content predicates** (`[.="v"]`, `[contains(., "v")]`, `[text()="v"]`, `[contains(text(),"v")]`,
+and CSS `:contains("v")`, which cssselect lowers to `contains(., "v")`)
 are the same deferral: the predicate tests the element's text, known only at close. While the element is
 open its text is buffered — the `.` string-value accumulates every descendant text node (no boundaries),
 while `text()` keeps the *direct* child text nodes as separate pieces (the tokenizer already splits text

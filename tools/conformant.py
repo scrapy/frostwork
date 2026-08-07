@@ -270,6 +270,20 @@ BASKET = [
     "div:has(a) p::text", "div:has(a) a::attr(href)", "div:has(p) span::text",
     "li:has(a) span::text", "//div[contains(.,'alpha')]//text()",
     "//div[contains(.,'alpha')]//a/@href", "//li[contains(.,'beta')]//span/text()",
+    # CSS `:contains()` — cssselect lowers it to `contains(., "v")`, so it shares every value location the
+    # XPath text predicate above has, and each one is listed rather than assumed: own, subtree, descendant,
+    # and the following-sibling (label->value) shape. Both argument tokens cssselect accepts are here too.
+    'p:contains("alpha")::text', 'div:contains("alpha") ::text',
+    'div:contains("alpha") a::attr(href)', 'li:contains("beta") span::text',
+    'dt:contains("alpha") + dd::text', 'dt:contains("alpha") ~ dd::text',
+    'div:contains(alpha)::attr(class)', "span:contains('beta')::text",
+    'div.shared:contains("alpha")::attr(class)', 'td:contains("beta")::text',
+    # a value terminal with no subject compound after an EXPLICIT combinator — the implicit universal.
+    # parsel answers these identically to the `*` spelling, and the corpus writes the label->value pattern
+    # this way (`:contains('Price')+::text`), so both spellings are gated side by side.
+    "dt + ::text", "dt ~ ::text", "dl > ::text", "li + ::text", "td + ::attr(id)",
+    "dt + *::text", "dt ~ *::text", "dl > *::text",
+    ':contains("alpha") + ::text', 'dt:contains("alpha") + ::text',
     # deferred :has() and matches-any pseudos in cssselect-oracle-compatible shapes
     "div:has(span)::attr(id)", "div:has(> p)::attr(class)",
     "*:is(p, span)::text", "*:where(dt, dd)::text",

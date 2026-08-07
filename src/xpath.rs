@@ -32,8 +32,12 @@ use crate::selector::{
 };
 
 fn valid_name(s: &str) -> bool {
-    // ASCII-only AND all-lowercase. Tag/attr NAMES come from the tokenizer's ASCII name scan, so a
-    // non-ASCII name could never match. Lowercase is the subtler rule: libxml2 LOWERCASES every HTML
+    // ASCII-only AND all-lowercase. The ASCII half is right for a TAG name — those come from the
+    // tokenizer's ASCII name scan, so a non-ASCII one could never match — and over-broad for an
+    // ATTRIBUTE name, which the matcher decodes before comparing (`Matcher::interesting_name`), so the
+    // CSS spelling `[data-año]` matches and this refuses the same question. Refused, not silently
+    // empty; widening it means lowering the `@` name scan below too, and proving the parity.
+    // Lowercase is the subtler rule: libxml2 LOWERCASES every HTML
     // name in the tree, while XPath name-tests compare CASE-SENSITIVELY — so an XPath literal carrying
     // any uppercase letter (`//DIV`, `//rect/@ID`, `//svg/@viewBox`) matches nothing in lxml. Reject it
     // here so the query is unsupported (empty column, matching the oracle) instead of case-insensitively

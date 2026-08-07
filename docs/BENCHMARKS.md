@@ -5,9 +5,9 @@ its measured numbers against the parsers scraping actually uses.
 
 | on a real production corpus | Frostwork |
 | --- | --- |
-| vs **Parsel** (what Scrapy uses) | **10.7×** faster, median page |
-| vs **lxml + cssselect** | **7.8×** faster |
-| vs **selectolax / lexbor** | **6.7×** faster |
+| vs **Parsel** (what Scrapy uses) | **10.4×** faster, median page |
+| vs **lxml + cssselect** | **7.0×** faster |
+| vs **selectolax / lexbor** | **6.9×** faster |
 | peak memory, large real pages | **0.5 MB** vs Parsel's 20.7 MB |
 | values identical to lxml | **99.9%** of production columns |
 
@@ -22,22 +22,22 @@ different answers is not a benchmark.
 **own production selectors** — 10 729 (page, selector) columns, ~18 per page. Frostwork does one
 streaming pass; Parsel parses once then queries per field, which is its real reuse pattern.
 
-Scoped to the 9 994 columns Frostwork, Parsel and lxml all express *and* agree on. Speedups are the
+Scoped to the 10 115 columns Frostwork, Parsel and lxml all express *and* agree on. Speedups are the
 **median of the per-page ratios**, with p10/p90, because page shape moves this number more than
 anything else.
 
 |  | median µs/page | vs Parsel (p10 – median – p90) | vs lxml |
 | --- | --- | --- | --- |
-| **Frostwork (`Plan`)** | **603** (772 MB/s) | 7.3× – **13.9×** – 26.9× | **9.2×** |
-| **Frostwork** | **653** (689 MB/s) | 5.3× – **10.7×** – 16.3× | **7.8×** |
-| lxml + cssselect | 4 532 | 1.0× – 1.2× – 3.2× | 1× |
-| Parsel | 5 771 | 1× | — |
+| **Frostwork (`Plan`)** | **645** (699 MB/s) | 7.2× – **13.9×** – 26.9× | **7.6×** |
+| **Frostwork** | **699** (640 MB/s) | 5.1× – **10.4×** – 16.4× | **7.0×** |
+| lxml + cssselect | 4 885 | 1.0× – 1.3× – 3.2× | 1× |
+| Parsel | 5 985 | 1× | — |
 
 `Plan` is what `frostwork.Page` / `FrostPage` run: the schema is compiled once and reused per page.
 The plain row re-parses the selector strings on every call, so it is the pessimistic case.
 
 **Stripping Parsel's Python wrapper does not explain the gap.** Raw lxml with compiled CSS→XPath is
-only ~1.2× faster than Parsel at the median — the wrapper is worth about 20%, and the remaining ~8× is
+only ~1.3× faster than Parsel at the median — the wrapper is worth about 20%, and the remaining ~7× is
 against libxml2 itself.
 
 The corpus is not distributed, but the harness runs against any directory of page snapshots laid out
@@ -70,12 +70,12 @@ the table is scoped to the 7 913 columns all six express *and* answer identicall
 
 | engine | median µs/page | MB/s | vs Parsel (p10 – median – p90) |
 | --- | --- | --- | --- |
-| **Frostwork (`Plan`)** | **453** | 898 | 7.5× – **13.4×** – 26.6× |
-| **Frostwork** | **483** | 810 | 5.5× – **10.4×** – 15.8× |
-| selectolax (lexbor) | 3 248 | 144 | 1.0× – 1.6× – 2.7× |
-| lxml + cssselect | 4 060 | 86 | 1.0× – 1.1× – 3.0× |
-| Parsel | 4 862 | 78 | 1× |
-| bs4 + lxml | 34 030 | 11 | 0.1× – 0.2× – 0.3× |
+| **Frostwork (`Plan`)** | **478** | 837 | 7.4× – **13.7×** – 26.8× |
+| **Frostwork** | **507** | 764 | 5.5× – **10.3×** – 16.0× |
+| selectolax (lexbor) | 3 509 | 133 | 1.0× – 1.6× – 2.7× |
+| lxml + cssselect | 4 434 | 82 | 1.0× – 1.1× – 3.0× |
+| Parsel | 5 210 | 70 | 1× |
+| bs4 + lxml | 34 822 | 11 | 0.1× – 0.2× – 0.3× |
 
 ### Where selectolax's speed actually comes from
 
@@ -101,14 +101,35 @@ The other half of "can I use this?". Of 10 729 production columns:
 | engine | expressible | what it cannot reach |
 | --- | --- | --- |
 | Parsel / lxml + cssselect | 97.5% | 266 columns cssselect itself rejects |
-| **Frostwork** | **93.2%** | mixed-terminal comma groups (179), `:contains()` (137), positional predicates (125), XPath outside the downward subset (110) |
+| **Frostwork** | **94.3%** | positional predicates (125), XPath outside the downward subset (108), the relative child anchor `./x` (33), text-content-predicate shapes (26) |
 | bs4 + lxml | 79.6% | **no XPath at all (1 551)**, universal element part (364), mixed-terminal comma lists (160) |
 | selectolax (lexbor) | 78.6% | the same three, plus 128 its CSS engine rejects |
+
+Read down that column and the gap it implies is not the gap: `lxml + cssselect` refuses 266 and its gap
+against Parsel is **zero** (same translator), while selectolax's 2 298 refusals are a gap of 2 203.
 
 **XPath is the CSS-only engines' cliff**: 14% of this corpus's selectors are XPath and neither
 selectolax nor bs4 has any. Frostwork's declines are listed in the
 [compatibility contract](COMPATIBILITY.md) and reported by `frostwork.check` before a scrape runs, so
 an unsupported selector is a build-time answer rather than a wrong value.
+
+**The number to port against is the GAP, not the column above.** An engine's own refusal total also counts
+selectors the oracle rejects, and those are not a gap — no spider asks for a selector Parsel refuses. The
+set difference is measured (`coverage_gap`, reported per run) rather than inferred from the two
+percentages, which only bound it:
+
+| | columns |
+| --- | --- |
+| Parsel expresses it, Frostwork does not — **the gap** | **342** (3.2%) |
+| both refuse it (invalid CSS, cssselect syntax errors) | 266 |
+
+Two things that difference changed. The largest single refusal bucket used to read "mixed-terminal comma
+groups (179)" and was **95% selectors with an empty member** — a trailing comma, which cssselect rejects
+too; the real comma-group mechanism cost is 13 columns of genuinely mixed terminals plus 16 with a
+deferred member. And of the 137 `:contains()` columns, **121 now run**: 97 from `:contains()` itself and
+the last 24 from the implicit-universal spelling this corpus writes them with
+(`:contains('Kilometer')+::text`), which is a second rule and was refused on its own. The 16 that remain
+are all inside a comma group, where a deferred capture cannot interleave with streamed members.
 
 ### Value parity — the number a speed table hides
 
@@ -194,70 +215,102 @@ where Frostwork's RSS *is* the returned data). It never pays for a tree either w
 ## Page shape — the synthetic matrix
 
 Engine-only throughput (the Rust `bench` binary, no IPC in the timed loop) against Parsel on generated
-pages, to isolate how page shape and selector count move the ratio. Regenerate with
-`.venv/bin/python tools/bench_matrix.py --markdown`.
+pages, to isolate how page shape, **selector KIND** and selector count move the ratio. `sels = 0` is the
+pure-scan floor and `vals` is what the cell actually extracted — both are load-bearing, see *Reading
+these* below. Regenerate with `.venv/bin/python tools/bench_matrix.py --markdown`.
 
 <!-- BEGIN generated: tools/bench_matrix.py --markdown -->
-| page (≈196 KB) | sels | engine µs | engine MB/s | Parsel µs | speedup |
-| --- | --- | --- | --- | --- | --- |
-| **article (text-heavy)** | 1 | 102 | 1973 | 591 | 5.8× |
-|  | 4 | 207 | 970 | 2868 | 13.9× |
-|  | 8 | 306 | 656 | 5855 | 19.1× |
-|  | 16 | 386 | 520 | 6650 | 17.2× |
-|  | 26 | 485 | 413 | 10067 | 20.7× |
-|  | 32 | 586 | 342 | 11542 | 19.7× |
-| **product&#95;listing** | 1 | 442 | 453 | 2801 | 6.3× |
-|  | 4 | 1103 | 182 | 15859 | 14.4× |
-|  | 8 | 1448 | 138 | 22882 | 15.8× |
-|  | 16 | 2202 | 91 | 86205 | 39.1× |
-|  | 26 | 2802 | 72 | 154307 | 55.1× |
-|  | 32 | 3041 | 66 | 154231 | 50.7× |
-| **table-heavy** | 1 | 605 | 331 | 3214 | 5.3× |
-|  | 4 | 1028 | 195 | 13192 | 12.8× |
-|  | 8 | 1214 | 165 | 13455 | 11.1× |
-|  | 16 | 2095 | 96 | 44779 | 21.4× |
-|  | 26 | 2932 | 68 | 81998 | 28.0× |
-|  | 32 | 3544 | 56 | 98003 | 27.7× |
-| **deep-nested** | 1 | 972 | 206 | 3370 | 3.5× |
-|  | 4 | 1359 | 147 | 10642 | 7.8× |
-|  | 8 | 1708 | 117 | 12846 | 7.5× |
-|  | 16 | 2718 | 74 | 39833 | 14.7× |
-|  | 26 | 3712 | 54 | 55186 | 14.9× |
-|  | 32 | 4276 | 47 | 59533 | 13.9× |
+| page (≈196 KB) | sels | vals | engine µs | engine MB/s | Parsel µs | speedup |
+| --- | --- | --- | --- | --- | --- | --- |
+| **article (text-heavy)** | 0 | 0 | 82 | 2440 | 547 | — |
+|  | 1 | 1 | 89 | 2251 | 567 | 6.4× |
+|  | 4 | 757 | 204 | 982 | 2889 | 14.1× |
+|  | 8 | 2017 | 342 | 587 | 5794 | 16.9× |
+|  | 16 | 2017 | 368 | 546 | 6810 | 18.5× |
+|  | 26 | 2773 | 496 | 404 | 10314 | 20.8× |
+|  | 32 | 3277 | 567 | 354 | 11388 | 20.1× |
+| **product&#95;listing** | 0 | 0 | 385 | 520 | 2636 | — |
+|  | 1 | 1 | 420 | 476 | 2770 | 6.6× |
+|  | 4 | 3019 | 1072 | 187 | 15788 | 14.7× |
+|  | 8 | 6037 | 1492 | 134 | 22466 | 15.1× |
+|  | 16 | 15091 | 2230 | 90 | 87091 | 39.1× |
+|  | 26 | 25151 | 2931 | 68 | 159669 | 54.5× |
+|  | 32 | 25151 | 3118 | 64 | 152243 | 48.8× |
+| **table-heavy** | 0 | 0 | 551 | 364 | 3902 | — |
+|  | 1 | 1 | 675 | 297 | 3740 | 5.5× |
+|  | 4 | 4371 | 1494 | 134 | 21266 | 14.2× |
+|  | 8 | 8741 | 2029 | 99 | 30949 | 15.3× |
+|  | 16 | 8741 | 2672 | 75 | 45069 | 16.9× |
+|  | 26 | 13111 | 3481 | 58 | 70383 | 20.2× |
+|  | 32 | 13111 | 4066 | 49 | 71846 | 17.7× |
+| **deep-nested** | 0 | 0 | 891 | 225 | 3295 | — |
+|  | 1 | 1 | 1031 | 194 | 3566 | 3.5× |
+|  | 4 | 726 | 1399 | 143 | 11028 | 7.9× |
+|  | 8 | 1451 | 1782 | 112 | 13369 | 7.5× |
+|  | 16 | 3626 | 2682 | 75 | 40585 | 15.1× |
+|  | 26 | 4351 | 3696 | 54 | 59372 | 16.1× |
+|  | 32 | 4351 | 4518 | 44 | 58509 | 13.0× |
+| **class-led / utility-CSS** | 0 | 0 | 204 | 981 | 1804 | — |
+|  | 1 | 440 | 433 | 463 | 5122 | 11.8× |
+|  | 8 | 3520 | 1013 | 198 | 38721 | 38.2× |
+|  | 32 | 3520 | 1451 | 138 | 100242 | 69.1× |
+| **attr-led / attribute-heavy** | 0 | 0 | 260 | 769 | 2891 | — |
+|  | 1 | 447 | 350 | 572 | 4457 | 12.7× |
+|  | 8 | 1341 | 562 | 357 | 9327 | 16.6× |
+|  | 32 | 1341 | 1198 | 167 | 18970 | 15.8× |
 <!-- END generated -->
 
 **Size sweep** (product listing, 8 selectors) — both scale linearly, so the ratio holds:
 
 | size | engine µs | engine MB/s | Parsel µs | speedup |
 | --- | --- | --- | --- | --- |
-| 19 KB | 144 | 140 | 2 276 | 15.8× |
-| 195 KB | 1 412 | 142 | 24 009 | 17.0× |
-| 976 KB | 7 495 | 134 | 124 622 | 16.6× |
+| 19 KB | 162 | 125 | 2 514 | 15.6× |
+| 195 KB | 1 459 | 137 | 22 715 | 15.6× |
+| 976 KB | 7 000 | 143 | 114 200 | 16.3× |
 
 **Grouped** (`Many`/`One`) — one `.product` container × N sub-fields over the same listing, against
 Parsel's per-container loop. The shared scan keeps growth below the loop:
 
 | subs | engine µs | vals/page | Parsel µs | speedup |
 | --- | --- | --- | --- | --- |
-| 1 | 826 | 1 006 | 13 756 | 16.7× |
-| 3 | 1 121 | 3 018 | 33 366 | 29.8× |
-| 5 | 1 414 | 5 030 | 52 889 | 37.4× |
+| 1 | 886 | 1 006 | 15 852 | 17.9× |
+| 3 | 1 221 | 3 018 | 36 059 | 29.5× |
+| 5 | 1 545 | 5 030 | 54 250 | 35.1× |
 
 ### Reading these
 
+The `vals` column is the point of the table, not decoration: a cell that extracts nothing is timing a
+scan, not an extraction, and `assert_cell_extracts` now refuses to publish one. The **0-selector row is
+the pure-scan floor** — tokenizer, open-element stack and nothing else — so every other cell in a shape
+decomposes into that floor plus matcher work. Parsel's 0-selector cell is its parse.
+
+- **The matcher, not the scan, is where the time goes.** On the class-led page the floor is 204 µs and
+  eight class-led fields cost 1 013 — **80% matching**, rising to 86% at 32 fields. Even one field is
+  already the majority on that shape. The throughput figures below describe the floor; they do not
+  describe a real schema's cost.
 - **The gap widens with field count.** Frostwork's cost grows roughly linearly with selectors and page
   size; Parsel's grows super-linearly once selectors are descendant-heavy (`.product .price`), because
   cssselect translates each to XPath and libxml2 re-walks the tree per query. At 26–32 fields Parsel
-  reaches 98–154 ms where the single pass stays in single-digit ms.
-- **A one-field schema is the weak case** (3.5–6.3×): the scan is paid whether or not there is anything
-  to amortise it over.
-- **Throughput is page-shape-dependent.** Text-dominated pages reach ~2 GB/s because `memchr`
-  bulk-skips text; tag-dense pages run 47–450 MB/s because cost is per element, not per byte.
-- **Deep nesting is the slowest shape** (3.5–14.9×): structural matching walks the ancestor stack per
-  element, so cost rises with depth.
-- **Deferred tails cost extra.** `:has()` and `:last-child` resolve from a re-scan of each winner's
-  span rather than from the streaming pass, so they do not share the scan: one tail field is ~2.9× a
-  plain field and eight are ~4.6×.
+  reaches 71–160 ms where the single pass stays in single-digit ms, and the class-led page at 32 fields
+  is the widest cell in the table at **69×** (100 ms vs 1.5 ms).
+- **A one-field schema is the weak case** (3.5–6.6× on the tag-led shapes): the scan is paid whether or
+  not there is anything to amortise it over. The class-led and attribute-led rows sit higher (11.8×,
+  12.7×) because their first field matches every card rather than once per page.
+- **Throughput is page-shape-dependent, and that is a property of the SCAN.** Text-dominated pages reach
+  ~2.4 GB/s at the floor because `memchr` bulk-skips text; tag-dense pages run 225–520 MB/s because the
+  cost is per element, not per byte.
+- **Deep nesting is the slowest shape (3.5–16.1×) because of element DENSITY, not depth.** Its floor is
+  891 µs against the article's 82 µs on the same 195 KB — a 10.8× spread with **zero selectors and no
+  structural matching at all** — and it carries ~12 bytes per element against the article's ~166. An
+  earlier version of this section blamed the ancestor-stack walk; the pure-scan row is what disproved
+  that. Separating depth from density would need a shape that varies one at constant other, which the
+  harness does not have, so nothing here is evidence about depth itself.
+- **Deferred tails cost extra.** `:has()`, `:contains()` and `:last-child` resolve from a re-scan of each
+  winner's span rather than from the streaming pass, so they do not share the scan: one tail field is
+  ~3.0× a plain field and eight are ~5.1×.
+- **A pool only measures what it contains.** The four page shapes run the tag-led pool; the class-led and
+  attribute-predicate rows exist because a real page object is mostly class-led and neither other pool
+  holds an attribute predicate. `tools/ab_bench.py` carries the same pools crossed with more shapes.
 - **Run-to-run spread is \~5–15% per cell** on the same binary. For anything comparative, A/B two builds
   with `tools/ab_bench.py` (interleaved, min-of-reps, each cell carrying its own jitter) rather than
   comparing absolute figures across runs.
@@ -292,7 +345,7 @@ not repeat. That is why the ratio is 3× at one field and ~29× at twenty.
 **This page shape flatters the ratio.** These are product cards — tag-dense, with descendant selectors
 that libxml2 re-walks per query, the matrix's worst case for Parsel. Growing the page while holding
 fields at 12 gives 27× at 40 KB, **65× at 162 KB and 133× at 347 KB**. Page *size* moves this number
-more than field count does. The real-corpus median (**10.7×**) is the figure to quote for realistic
+more than field count does. The real-corpus median (**10.4×**) is the figure to quote for realistic
 work: real pages are more text-heavy than card-dense, and their production selectors are mostly cheaper
 than the descendant-heavy pool here.
 

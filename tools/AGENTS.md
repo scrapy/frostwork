@@ -20,6 +20,12 @@ items are identical before timing either; `--boundaries` measures the three shap
 curve does not hold, one of which Parsel wins outright, because a benchmark that only reports its good cases
 is a brochure).
 
+Three decision functions across these tools exist because they decide a PUBLISHED number, so
+`tests/test_gates.py` can seed each one: `bench_engines.coverage_gap` (a refusal the oracle shares is not a
+coverage gap — two independent percentages only bound the set difference), `bench_matrix.assert_cell_extracts`
+(a timed cell with selectors must extract values; six published cells extracted none) and
+`diff_lxml.oracle_empty_basket` (a pair the oracle answers nowhere can only catch an over-match).
+
 `bench_engines.py` is the COMPETITIVE benchmark (`make bench-engines CORPUS=<dir>`, competitors pinned in
 `requirements-bench.txt`): the same corpus against selectolax/lexbor, raw lxml+cssselect and bs4+soupsieve,
 because everything else here measures Frostwork against the incumbent rather than against the fast end of

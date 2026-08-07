@@ -14,6 +14,14 @@ contract remains in `COMPATIBILITY.md`; this table is a drift tripwire for headl
 | CSS :has subtree | flat | `div:has(a) ::text` | yes |
 | CSS :has on ancestor | flat | `div:has(a) a::attr(href)` | yes |
 | XPath text-pred descendant | flat | `//div[contains(.,"x")]//a/@href` | yes |
+| CSS :contains | flat | `p:contains("x")::text` | yes |
+| CSS :contains sibling | flat | `dt:contains("x") + dd::text` | yes |
+| CSS :contains descendant | flat | `div:contains("x") a::attr(href)` | yes |
+| CSS :contains doubled | flat | `p:contains("a"):contains("b")::text` | no |
+| CSS :contains non-string arg | flat | `p:contains(2)::text` | no |
+| CSS implicit subject after + | flat | `dt + ::text` | yes |
+| CSS implicit subject after > | flat | `div > ::attr(id)` | yes |
+| CSS dangling combinator | flat | `dt +` | no |
 | XPath reverse subtree | flat | `//li[last()]//text()` | yes |
 | CSS :has | flat | `div:has(a)::text` | yes |
 | CSS widened :has | flat | `div:has([data-x])::attr(id)` | yes |

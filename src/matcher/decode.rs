@@ -20,7 +20,7 @@ use crate::entities;
 /// jitter**, signs mixed — a null result. encoding_rs's UTF-8 validation is already as fast as std's.
 /// What the change is worth is that "decode" now has ONE definition rather than two that had already
 /// drifted apart. Do not re-attempt it as an optimization without a workload that shows a win.
-fn decode_bytes<'a>(bytes: &'a [u8], enc: &'static Encoding) -> Cow<'a, str> {
+pub(super) fn decode_bytes<'a>(bytes: &'a [u8], enc: &'static Encoding) -> Cow<'a, str> {
     if enc == encoding_rs::UTF_8 {
         return match std::str::from_utf8(bytes) {
             Ok(s) => Cow::Borrowed(s),
