@@ -255,9 +255,12 @@ Parsel's per-container loop. The shared scan keeps growth below the loop:
   bulk-skips text; tag-dense pages run 47–450 MB/s because cost is per element, not per byte.
 - **Deep nesting is the slowest shape** (3.5–14.9×): structural matching walks the ancestor stack per
   element, so cost rises with depth.
-- **Deferred tails cost extra.** `:has()` and `:last-child` resolve from a re-scan of each winner's
-  span rather than from the streaming pass, so they do not share the scan: one tail field is ~2.9× a
-  plain field and eight are ~4.6×.
+- **Deferred tails cost extra, per distinct prefix.** `:has()`, `:last-child` and XPath text predicates
+  resolve from a re-scan of each winner's span rather than from the streaming pass, so they do not share
+  the main scan: one tail field is ~2.9× a plain field and eight are ~4.0×. Tails deferring on the SAME
+  compound share one re-scan, which is why two fields read ~2.3× — *below* the one-field ratio, because
+  both sides of that row (`div:has(a) a::attr(href)` and `div:has(a) p::text`) collapse into a single
+  extra pass while the plain baseline pays for two selectors.
 - **Run-to-run spread is \~5–15% per cell** on the same binary. For anything comparative, A/B two builds
   with `tools/ab_bench.py` (interleaved, min-of-reps, each cell carrying its own jitter) rather than
   comparing absolute figures across runs.
