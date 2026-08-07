@@ -26,7 +26,7 @@ Scoped to the 9 994 columns Frostwork, Parsel and lxml all express *and* agree o
 **median of the per-page ratios**, with p10/p90, because page shape moves this number more than
 anything else.
 
-| | median µs/page | vs Parsel (p10 – median – p90) | vs lxml |
+|  | median µs/page | vs Parsel (p10 – median – p90) | vs lxml |
 | --- | --- | --- | --- |
 | **Frostwork (`Plan`)** | **603** (772 MB/s) | 7.3× – **13.9×** – 26.9× | **9.2×** |
 | **Frostwork** | **653** (689 MB/s) | 5.3× – **10.7×** – 16.3× | **7.8×** |
@@ -149,11 +149,11 @@ every engine on the same selectors). Reproduce with `make bench-engines-mem CORP
 | bs4 + lxml | 24.9 MB | 46.1 |
 
 lexbor's tree is the leanest of the four — ~12% under raw libxml2's, ~40% under what Parsel retains.
-It is still a tree: **~25× Frostwork's**, scaling with the page rather than with what you asked for.
+It is still a tree: **\~25× Frostwork's**, scaling with the page rather than with what you asked for.
 
 ### Not measured, and why
 
-- **lol_html** (Cloudflare) is the closest architectural peer — streaming, CSS-driven, no DOM — but a
+- **lol&#95;html** (Cloudflare) is the closest architectural peer — streaming, CSS-driven, no DOM — but a
   Rust crate, not something a Python scraper can swap in.
 - **resiliparse** is a second binding over the same lexbor engine, so it would report binding overhead
   rather than another parser.
@@ -258,16 +258,16 @@ Parsel's per-container loop. The shared scan keeps growth below the loop:
 - **Deferred tails cost extra.** `:has()` and `:last-child` resolve from a re-scan of each winner's
   span rather than from the streaming pass, so they do not share the scan: one tail field is ~2.9× a
   plain field and eight are ~4.6×.
-- **Run-to-run spread is ~5–15% per cell** on the same binary. For anything comparative, A/B two builds
+- **Run-to-run spread is \~5–15% per cell** on the same binary. For anything comparative, A/B two builds
   with `tools/ab_bench.py` (interleaved, min-of-reps, each cell carrying its own jitter) rather than
   comparing absolute figures across runs.
 
 ## Page objects — `FrostPage.to_item()` vs a Parsel `web_poet.WebPage`
 
-Everything above times the selector layer. This times what a scraper actually calls: `await
-page.to_item()` on a whole page object, against the equivalent hand-written `web_poet.WebPage` doing
-Parsel's real thing. Both items are compared field by field before either is timed, and a mismatch
-aborts. Reproduce: `make bench-webpoet`.
+Everything above times the selector layer. This times what a scraper actually calls:
+`await page.to_item()` on a whole page object, against the equivalent hand-written
+`web_poet.WebPage` doing Parsel's real thing. Both items are compared field by field before either is
+timed, and a mismatch aborts. Reproduce: `make bench-webpoet`.
 
 | fields | `FrostPage` ms | Parsel `WebPage` ms | speedup | running-loop ms (`FrostPage` / Parsel) | speedup |
 | --- | --- | --- | --- | --- | --- |
@@ -305,7 +305,7 @@ Three shapes where the curve above does not hold. Reproduce with
 contract is an lxml node, so each match is re-parsed on its own, where Parsel hands over elements from
 a tree it has already built.
 
-| matches | `FrostPage` | Parsel | |
+| matches | `FrostPage` | Parsel |  |
 | --- | --- | --- | --- |
 | 1 | 0.16 ms | 0.16 ms | tie |
 | 3 | 0.19 ms | 0.18 ms | tie |
