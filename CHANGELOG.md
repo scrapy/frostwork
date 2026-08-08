@@ -18,6 +18,9 @@ First public preview.
   byte-scanned page is not, so both attribute values and attribute NAMES are decoded before comparison —
   `[data-año]` and `::attr(año)` used to match a UTF-8 page and return nothing for the same document in
   windows-1252 or shift_jis, where lxml matches. A non-ASCII tag name remains unsupported and reported.
+- Deferred fields whose value comes from a subtree (`:has()`, `:last-child`, XPath text predicates) are
+  resolved by re-scanning each winner's span. Fields deferring on the same compound now share one
+  sub-schema, so that span is re-scanned once for all of them rather than once per field.
 - Empirical libxml2-compatible tree construction for the supported surface, including optional document
   frames, implied closes, raw-text modes, void elements and malformed markup covered by the compatibility
   contract.

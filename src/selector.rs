@@ -4,7 +4,7 @@
 //!   terminals : `::text` (self / `E ::text` subtree), `::attr(name)` (self / `E ::attr` subtree)
 //! Anything outside this subset returns `Err(())` and the query yields an empty column (no fallback).
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum AttrPred {
     Exists(String),            // [a]
     Eq(String, String),        // [a=v]
@@ -20,7 +20,7 @@ pub enum AttrPred {
 /// axis: `false` counts all element siblings (`:nth-child`, XPath `*[N]`); `true` counts same-tag
 /// siblings (`:nth-of-type`, XPath `tag[N]`) and requires a concrete tag on the compound. Only
 /// *forward* positions are here — `:last-*`/`:only-*`/`[last()]` need the parent's close (not this tier).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Nth {
     pub a: i32,
     pub b: i32,
@@ -34,7 +34,7 @@ pub struct Nth {
 /// sibling count, known only at the parent's close, so the matcher defers them (see `matcher::reverse`).
 /// `only` is the special `:only-*` case (the sole (of-type) child: total == 1); `of_type` picks the
 /// axis (same-tag count, requires a concrete tag) vs all element children.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ReversePos {
     pub a: i32,
     pub b: i32,
@@ -48,7 +48,7 @@ pub struct ReversePos {
 /// its descendants aren't known yet — so it is resolved at the subject's OWN close and IGNORED by
 /// `compound_matches`; the matcher routes a `:has` selector to a deferred path or drops it to an empty
 /// column, never to normal matching (which would ignore the constraint and over-match).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Has {
     pub rel: Comb,             // Descendant (`:has(x)`) or Child (`:has(> x)`)
     pub inner: Box<Compound>,  // the (single) compound a descendant/child must match
@@ -73,14 +73,14 @@ pub enum TextOp {
     Contains, // `contains(…, "v")`
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TextPred {
     pub axis: TextAxis,
     pub op: TextOp,
     pub needle: String,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Compound {
     pub tag: Option<String>, // None or Some("*") = universal
     pub id: Option<String>,

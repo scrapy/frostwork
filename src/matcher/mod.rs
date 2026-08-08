@@ -405,6 +405,11 @@ fn collect_positional(sel: &Selector, tags: &mut Vec<Box<[u8]>>, any: &mut bool)
 
 /// A run of compounds joined by descendant/child combinators (a selector split at sibling `+`/`~`
 /// boundaries). The matching predicates over it live in [`matching`].
+///
+/// `PartialEq` is DERIVED rather than hand-written because [`TailPlan`] merges on it: two deferred
+/// entries share a sub-schema only when their prefixes are equal, so a comparison that forgot a field
+/// would hand one column another's values. A derive cannot forget one.
+#[derive(Clone, PartialEq)]
 struct Segment {
     pub(super) parts: Vec<Compound>,
     pub(super) combs: Vec<Comb>, // Descendant | Child only
@@ -454,10 +459,10 @@ struct RevEntry {
     of_type_tag: Option<usize>, // slot in `positional_tags` for the subject tag (of-type variants)
     single_slot: bool,          // keep only the last candidate per parent (last/only), not all
     dead: bool,                 // over the 64 reverse-entry budget: never matches (empty column)
-    // `Some(slot)` when the value is NOT this element's own — a subtree terminal or a value-bearing
-    // descendant. Nothing streams then; the winner's raw span is re-scanned with
-    // `schema.tail_schemas[slot]` at finish. See `split_deferred`.
-    tail: Option<usize>,
+    // Non-`Streamed` when the value is NOT this element's own — a subtree terminal or a value-bearing
+    // descendant. Nothing streams then; the winner's raw span is re-scanned with its tail schema at
+    // finish. See `split_deferred`.
+    tail: Tail,
 }
 
 /// A deferred reverse candidate awaiting its parent's close. `idx` is the subject's 1-based sibling
@@ -495,9 +500,9 @@ struct HasEntry {
     // case (`C:has(..) ~ S`), where a *later* sibling `S` (a normal entry anchored to `bit`) is the
     // value-bearer. `None` = the ordinary flat `:has` column (`col`/`terminal`).
     trigger: Option<usize>,
-    /// As [`RevEntry::tail`]: `Some(slot)` when the value comes from this element's subtree rather than
-    /// the element itself, recovered by re-scanning its span.
-    tail: Option<usize>,
+    /// As [`RevEntry::tail`]: non-`Streamed` when the value comes from this element's subtree rather
+    /// than the element itself, recovered by re-scanning its span.
+    tail: Tail,
 }
 
 /// An XPath text-content-predicate flat selector held out of `entries` (like [`HasEntry`]): its subject
@@ -516,8 +521,8 @@ struct TextEntry {
     // sibling-trigger `bit` on the parent at the subject's close (if the predicate holds) instead of
     // emitting a value; `None` = the ordinary flat text-predicate column.
     trigger: Option<usize>,
-    /// As [`RevEntry::tail`]: `Some(slot)` when the value comes from this element's subtree.
-    tail: Option<usize>,
+    /// As [`RevEntry::tail`]: non-`Streamed` when the value comes from this element's subtree.
+    tail: Tail,
 }
 
 /// One open container instance: a scope for its group's sub-selectors. `buckets[sub]` accumulates the
@@ -538,32 +543,127 @@ enum Dest {
     Grouped { seq: u64, sub: usize }, // seq is globally unique -> identifies the (group, row)
 }
 
-/// A compiled tail: the sub-schema that recovers a deferred winner's values from its raw span, paired
-/// with the output column those values belong to. One per deferred entry that has a tail.
+/// Where a deferred entry's values come from.
+#[derive(Clone, Copy, PartialEq)]
+enum Tail {
+    /// The value is the deferred element's own, so it streams during the pass.
+    Streamed,
+    /// The value is in the element's subtree: this entry pushes each winner's span, re-scanned at finish
+    /// with `tail_schemas[slot]`.
+    Rescan(usize),
+    /// Same prefix as an earlier `Rescan` entry, so this column rides that entry's sub-schema and span
+    /// pushes. Nothing to do during the pass but stay out of the streaming path.
+    Merged,
+}
+
+/// A compiled tail: the sub-schema that recovers deferred winners' values from their raw spans, and the
+/// output column each of its columns feeds. Entries that share a prefix share one of these.
 struct TailSchema {
     schema: CompiledSchema,
-    col: usize,
+    cols: Vec<usize>,
+}
+
+/// One tail sub-schema under construction: the deferred PREFIX whose winners feed it, and a tail
+/// selector + output column per merged entry.
+struct TailGroup {
+    prefix: Segment,
+    members: Vec<Vec<Selector>>,
+    cols: Vec<usize>,
+    /// The one-member schema compiled to answer "is this tail supported?", kept so a group that never
+    /// grows costs exactly one compile.
+    solo: CompiledSchema,
+    /// False once a DEAD entry took this group. A dead entry's column must stay empty, and sharing a
+    /// sub-schema with a live entry would fill it from the live entry's winners.
+    mergeable: bool,
+}
+
+/// Tail sub-schemas grouped by the deferred prefix their winners come from.
+///
+/// Entries with an equal prefix win on exactly the same elements, so ONE re-scan of a winner's span can
+/// answer all their tails. Without the merge the cost of a deferred tail grows with FIELD COUNT:
+/// `div:has(a) a::attr(href)` and `div:has(a) p::text` re-scanned every matching `<div>` twice.
+///
+/// The prefix is what a tier defers ON, which is also why tiers cannot collide here: `deferrable_common`
+/// admits one kind of deferred predicate per selector, so a reverse prefix carries `reverse` exactly
+/// where a `:has` prefix carries `has`, and the two are never equal.
+#[derive(Default)]
+struct TailPlan {
+    groups: Vec<TailGroup>,
+}
+
+impl TailPlan {
+    /// Register one entry's tail against its `prefix`, returning how the entry gets its values, or `None`
+    /// when the tail is UNSUPPORTED — the caller then marks the entry dead, so the audit keeps reporting
+    /// the whole selector unsupported instead of the column silently coming back empty.
+    fn register(
+        &mut self,
+        prefix: &Segment,
+        members: Vec<Selector>,
+        col: usize,
+        mergeable: bool,
+    ) -> Option<Tail> {
+        let solo = CompiledSchema::compile(std::slice::from_ref(&members), &[]);
+        if !solo.flat_col_supported(0) {
+            return None;
+        }
+        if mergeable {
+            // The `MAX_MEMBERS` cap is what keeps merging free of side effects: a tail is one member and
+            // one single-segment entry, so under the cap no column of a merged schema can compile dead
+            // that would have been live alone.
+            if let Some(g) = self.groups.iter_mut().find(|g| {
+                g.mergeable && g.prefix == *prefix && g.members.len() < MAX_MEMBERS
+            }) {
+                g.members.push(members);
+                g.cols.push(col);
+                return Some(Tail::Merged);
+            }
+        }
+        self.groups.push(TailGroup {
+            prefix: prefix.clone(),
+            members: vec![members],
+            cols: vec![col],
+            solo,
+            mergeable,
+        });
+        Some(Tail::Rescan(self.groups.len() - 1))
+    }
+
+    fn finish(self) -> Vec<TailSchema> {
+        self.groups
+            .into_iter()
+            .map(|g| {
+                let schema = if g.members.len() == 1 {
+                    g.solo
+                } else {
+                    CompiledSchema::compile(&g.members, &[])
+                };
+                TailSchema { schema, cols: g.cols }
+            })
+            .collect()
+    }
 }
 
 /// Split a deferred selector at the compound carrying its predicate (`k`).
 ///
 /// Returns the PREFIX segment — compounds `0..=k`, matched in context to find the deferred element — and
-/// the slot of the TAIL schema that recovers the values from that element's span, if the values are not
-/// the element's own. Three cases:
+/// how the entry gets its values: streamed, or from the TAIL schema that re-scans that element's span
+/// (its own, or one shared with an earlier entry of the same prefix). Three cases:
 ///   * value is the element's own (`div:has(a)::attr(id)`) — no tail, the value streams as today;
 ///   * value is its whole subtree (`li:last-child ::text`) — tail is `* ::text`, descendant-or-**self**
 ///     (not `strict_desc`), so the element's own text counts;
 ///   * value is a DESCENDANT's (`div:has(a) a::attr(href)`) — tail is the compounds after `k`, with
 ///     `strict_desc` so the span's root is excluded (a *proper* descendant).
 ///
+/// `mergeable` is false for an entry already known DEAD, which must neither join a group nor be joined.
 /// The `bool` is "the tail is unsupported" — then the caller marks the entry DEAD, so the audit keeps
 /// reporting the whole selector unsupported instead of the column silently coming back empty.
 fn split_deferred(
     sel: &Selector,
     k: usize,
     col: usize,
-    tail_schemas: &mut Vec<TailSchema>,
-) -> (Segment, Option<usize>, bool) {
+    tails: &mut TailPlan,
+    mergeable: bool,
+) -> (Segment, Tail, bool) {
     let full = to_segments(sel).0.into_iter().next().expect("deferrable => 1 segment");
     let prefix = Segment {
         parts: full.parts[..=k].to_vec(),
@@ -580,14 +680,11 @@ fn split_deferred(
             _ => None,
         },
     };
-    let Some(members) = members else { return (prefix, None, false) };
-    let schema = CompiledSchema::compile(std::slice::from_ref(&members), &[]);
-    if !schema.flat_col_supported(0) {
-        return (prefix, None, true);
+    let Some(members) = members else { return (prefix, Tail::Streamed, false) };
+    match tails.register(&prefix, members, col, mergeable) {
+        Some(tail) => (prefix, tail, false),
+        None => (prefix, Tail::Streamed, true),
     }
-    tail_schemas.push(TailSchema { schema, col });
-    let slot = tail_schemas.len() - 1;
-    (prefix, Some(slot), false)
 }
 
 fn to_segments(sel: &Selector) -> (Vec<Segment>, Vec<bool>) {
@@ -1025,23 +1122,26 @@ impl CompiledSchema {
         // Build the deferred reverse entries now that `positional_tags` is final (an of-type reverse
         // reads its subject tag's per-parent count via that slot). Deferred subject masks are `u128`,
         // sharing the advertised 128-member ceiling instead of imposing a hidden 64-entry limit.
-        let mut tail_schemas: Vec<TailSchema> = Vec::new();
+        let mut tails = TailPlan::default();
         // ONE shared member allocation across every tier. `entries` (normal), reverse, `:has` and
         // text-predicate each used their OWN counter, so a 129-member schema of 100 normal members plus
         // 29 reverse selectors left all tiers live even though `budget_usage` reported it over budget and
         // the Python layer rejected it — contradicting COMPATIBILITY.md's promise that an over-budget
         // Rust entry "compiles dead". `entries.len()` is already committed by the time the deferred tiers
         // are built, so seeding from it makes the order explicit: normal members first, then deferred.
+        // Taken BEFORE the tail is registered: `TailPlan` must know an entry is dead to keep it out of a
+        // shared sub-schema, whose columns all get filled from the winners of whoever is live.
         let mut members_used = entries.len();
-        let mut take_member = |dead_already: bool| {
+        let mut over_budget = || {
             let over = members_used >= MAX_MEMBERS;
             members_used += 1;
-            dead_already || over
+            over
         };
         let mut reverse_entries: Vec<RevEntry> = Vec::new();
         for (col, sel) in rev_pending_sels {
             let k = compile::deferrable_reverse_at(sel).expect("routed as deferrable_reverse");
-            let (seg, tail, tail_dead) = split_deferred(sel, k, col, &mut tail_schemas);
+            let over = over_budget();
+            let (seg, tail, tail_dead) = split_deferred(sel, k, col, &mut tails, !over);
             // the reverse position belongs to compound `k`, which need NOT be the subject
             let anchor = &sel.parts[k];
             let rev = anchor.reverse.expect("deferrable_reverse => compound k has reverse");
@@ -1054,7 +1154,7 @@ impl CompiledSchema {
             // `:last-*`/`:only-*` (== nth-last(1)) keep a single candidate; general `:nth-last-*(An+B)`
             // must buffer every matching child (any of them could be the nth from the end).
             let single_slot = rev.only || (rev.a == 0 && rev.b == 1);
-            let dead = take_member(tail_dead);
+            let dead = over || tail_dead;
             reverse_entries.push(RevEntry {
                 col,
                 seg,
@@ -1073,9 +1173,10 @@ impl CompiledSchema {
         let mut has_entries: Vec<HasEntry> = Vec::new();
         for (col, sel) in has_pending_sels {
             let k = compile::deferrable_has_at(sel).expect("routed as deferrable_has");
-            let (seg, tail, tail_dead) = split_deferred(sel, k, col, &mut tail_schemas);
+            let over = over_budget();
+            let (seg, tail, tail_dead) = split_deferred(sel, k, col, &mut tails, !over);
             let has = sel.parts[k].has.clone().expect("deferrable_has => compound k has `:has`");
-            let dead = take_member(tail_dead);
+            let dead = over || tail_dead;
             has_entries.push(HasEntry {
                 col,
                 seg,
@@ -1092,10 +1193,11 @@ impl CompiledSchema {
         let mut text_entries: Vec<TextEntry> = Vec::new();
         for (col, sel) in text_pending_sels {
             let k = compile::deferrable_text_pred_at(sel).expect("routed as deferrable_text_pred");
-            let (seg, tail, tail_dead) = split_deferred(sel, k, col, &mut tail_schemas);
+            let over = over_budget();
+            let (seg, tail, tail_dead) = split_deferred(sel, k, col, &mut tails, !over);
             let pred =
                 sel.parts[k].text_pred.clone().expect("deferrable_text_pred => compound k has text_pred");
-            let dead = take_member(tail_dead);
+            let dead = over || tail_dead;
             text_entries.push(TextEntry {
                 col,
                 seg,
@@ -1106,6 +1208,8 @@ impl CompiledSchema {
                 tail,
             });
         }
+        // Every tail is registered by now (Case-B triggers emit no value), so the groups are final.
+        let tail_schemas = tails.finish();
 
         // Case-B preceding-sibling TRIGGER entries: each carries `C`'s deferred predicate and, at `C`'s
         // close, fires its sibling boundary bit on the parent (instead of emitting) so the later value
@@ -1127,7 +1231,7 @@ impl CompiledSchema {
                     has,
                     dead,
                     trigger: Some(bit),
-                    tail: None, // a trigger emits no value
+                    tail: Tail::Streamed, // a trigger emits no value
                 });
             } else if let Some(pred) = c.text_pred.clone() {
                 let dead = text_entries.len() >= MAX_MEMBERS;
@@ -1138,7 +1242,7 @@ impl CompiledSchema {
                     pred,
                     dead,
                     trigger: Some(bit),
-                    tail: None, // a trigger emits no value
+                    tail: Tail::Streamed, // a trigger emits no value
                 });
             }
         }
@@ -1310,6 +1414,9 @@ impl<'a> Matcher<'a> {
     /// and one discarded by table scope behaves identically standalone. It is the same re-parse
     /// equivalence the differential already proves for outer-HTML node queries.
     ///
+    /// A slot may answer several columns at once: entries sharing a deferred prefix win on the same
+    /// elements, so they share one sub-schema and this pass reads all of their tails from one re-scan.
+    ///
     /// Two details matter. The re-scan runs the REAL engine (`schema.tail_schemas[slot]`), so it inherits
     /// dropped-end-tag coalescing, table scope and implied close rather than re-deriving them — a
     /// hand-rolled collector here would silently re-introduce the split-text bug. And winners NEST (a
@@ -1334,9 +1441,11 @@ impl<'a> Matcher<'a> {
                 continue; // contained in an earlier winner of this slot (or an exact duplicate)
             }
             max_end = e;
-            let (cols, _) = self.schema.tail_schemas[slot].schema.run(&self.input[s..e], self.enc);
-            let vals = cols.into_iter().next().expect("a tail schema has exactly one column");
-            self.results[self.schema.tail_schemas[slot].col].extend(vals);
+            let tail = &self.schema.tail_schemas[slot];
+            let (cols, _) = tail.schema.run(&self.input[s..e], self.enc);
+            for (vals, &col) in cols.into_iter().zip(&tail.cols) {
+                self.results[col].extend(vals);
+            }
         }
     }
 
@@ -1373,12 +1482,17 @@ impl<'a> Matcher<'a> {
                     None => total_children,
                 };
                 for cand in &pend.cands {
-                    if reverse_matches(&re.rev, cand.idx, total) {
-                        if let Some(slot) = re.tail {
-                            // value lives in the winner's subtree: remember the span; re-scanned at
-                            // finish, once nested winners can be de-duplicated against each other
-                            self.tail_spans.push((slot, cand.span.0, cand.span.1));
-                        } else {
+                    if !reverse_matches(&re.rev, cand.idx, total) {
+                        continue;
+                    }
+                    match re.tail {
+                        // value lives in the winner's subtree: remember the span; re-scanned at finish,
+                        // once nested winners can be de-duplicated against each other
+                        Tail::Rescan(slot) => self.tail_spans.push((slot, cand.span.0, cand.span.1)),
+                        // an entry of the same prefix already pushed that span, and the sub-schema they
+                        // share carries this column too
+                        Tail::Merged => {}
+                        Tail::Streamed => {
                             for (off, v) in &cand.vals {
                                 self.pending.push((re.col, *off, v.clone()));
                             }
@@ -1450,16 +1564,21 @@ impl<'a> Matcher<'a> {
                     }
                     continue;
                 }
-                if let Some(slot) = he.tail {
+                match he.tail {
                     // value lives in this element's subtree (`div:has(a) ::text`, `div:has(a) a::attr(..)`)
-                    self.tail_spans.push((slot, e.start, end));
-                } else if matches!(he.terminal, Terminal::OuterHtml) {
-                    let val = decode::raw_source(&self.input[e.start..end], self.enc);
-                    self.pending.push((he.col, e.start, val));
-                } else {
-                    for (eh, off, v) in &e.cold().has_buf {
-                        if *eh == h {
-                            self.pending.push((he.col, *off, v.clone()));
+                    Tail::Rescan(slot) => self.tail_spans.push((slot, e.start, end)),
+                    // an entry of the same prefix already pushed that span, and the sub-schema they
+                    // share carries this column too
+                    Tail::Merged => {}
+                    Tail::Streamed if matches!(he.terminal, Terminal::OuterHtml) => {
+                        let val = decode::raw_source(&self.input[e.start..end], self.enc);
+                        self.pending.push((he.col, e.start, val));
+                    }
+                    Tail::Streamed => {
+                        for (eh, off, v) in &e.cold().has_buf {
+                            if *eh == h {
+                                self.pending.push((he.col, *off, v.clone()));
+                            }
                         }
                     }
                 }
@@ -1492,24 +1611,26 @@ impl<'a> Matcher<'a> {
                     }
                     continue;
                 }
-                if let Some(slot) = te.tail {
+                match te.tail {
                     // value lives in this element's subtree (`//div[contains(.,"x")]/a/@href`)
-                    self.tail_spans.push((slot, e.start, end));
-                    continue;
-                }
-                match te.terminal {
-                    Terminal::OuterHtml => {
-                        let val = decode::raw_source(&self.input[e.start..end], self.enc);
-                        self.pending.push((te.col, e.start, val));
-                    }
-                    Terminal::Attr { .. } | Terminal::Text { .. } => {
-                        for (et, off, v) in &e.cold().txt_emit {
-                            if *et == t {
-                                self.pending.push((te.col, *off, v.clone()));
+                    Tail::Rescan(slot) => self.tail_spans.push((slot, e.start, end)),
+                    // an entry of the same prefix already pushed that span, and the sub-schema they
+                    // share carries this column too
+                    Tail::Merged => {}
+                    Tail::Streamed => match te.terminal {
+                        Terminal::OuterHtml => {
+                            let val = decode::raw_source(&self.input[e.start..end], self.enc);
+                            self.pending.push((te.col, e.start, val));
+                        }
+                        Terminal::Attr { .. } | Terminal::Text { .. } => {
+                            for (et, off, v) in &e.cold().txt_emit {
+                                if *et == t {
+                                    self.pending.push((te.col, *off, v.clone()));
+                                }
                             }
                         }
-                    }
-                    Terminal::NormalizeSpace(_) => {}
+                        Terminal::NormalizeSpace(_) => {}
+                    },
                 }
             }
         }
@@ -1552,10 +1673,15 @@ impl<'a> Matcher<'a> {
                         None => total_children,
                     };
                     for cand in &pend.cands {
-                        if reverse_matches(&re.rev, cand.idx, total) {
-                            if let Some(slot) = re.tail {
-                                self.tail_spans.push((slot, cand.span.0, cand.span.1));
-                            } else {
+                        if !reverse_matches(&re.rev, cand.idx, total) {
+                            continue;
+                        }
+                        match re.tail {
+                            Tail::Rescan(slot) => {
+                                self.tail_spans.push((slot, cand.span.0, cand.span.1))
+                            }
+                            Tail::Merged => {}
+                            Tail::Streamed => {
                                 for (off, v) in &cand.vals {
                                     self.pending.push((re.col, *off, v.clone()));
                                 }
@@ -1836,7 +1962,7 @@ impl<'a> Matcher<'a> {
             }
             subj |= 1u128 << r;
             // A subtree entry streams nothing — its values are recovered from the winner's span later.
-            if let (None, Terminal::Attr { name, subtree: false }) = (re.tail, &re.terminal) {
+            if let (Tail::Streamed, Terminal::Attr { name, subtree: false }) = (re.tail, &re.terminal) {
                 if let Some(v) = self.stack[top].attr(name) {
                     caps.push((r as u32, start, v.to_string()));
                 }
@@ -1857,7 +1983,7 @@ impl<'a> Matcher<'a> {
             let r = m.trailing_zeros();
             m &= m - 1;
             let re = &self.schema.reverse_entries[r as usize];
-            if re.tail.is_none() && matches!(re.terminal, Terminal::Text { subtree: false }) {
+            if re.tail == Tail::Streamed && matches!(re.terminal, Terminal::Text { subtree: false }) {
                 want |= 1u128 << r;
             }
         }
@@ -1888,7 +2014,7 @@ impl<'a> Matcher<'a> {
             }
             subj |= 1u128 << h;
             // a tail entry streams nothing — its values come from the span re-scan at resolution
-            if let (None, Terminal::Attr { name, .. }) = (he.tail, &he.terminal) {
+            if let (Tail::Streamed, Terminal::Attr { name, .. }) = (he.tail, &he.terminal) {
                 if let Some(v) = self.stack[top].attr(name) {
                     caps.push((h as u32, start, v.to_string()));
                 }
@@ -1937,7 +2063,7 @@ impl<'a> Matcher<'a> {
             let h = m.trailing_zeros();
             m &= m - 1;
             let he = &self.schema.has_entries[h as usize];
-            if he.tail.is_none() && matches!(he.terminal, Terminal::Text { subtree: false }) {
+            if he.tail == Tail::Streamed && matches!(he.terminal, Terminal::Text { subtree: false }) {
                 want |= 1u128 << h;
             }
         }
@@ -1966,7 +2092,8 @@ impl<'a> Matcher<'a> {
             }
             subj |= 1u128 << t;
             states.push(TextMatchState::new(t as u32, &te.pred));
-            if let Terminal::Attr { name, .. } = &te.terminal {
+            // a tail entry streams nothing — its values come from the span re-scan at resolution
+            if let (Tail::Streamed, Terminal::Attr { name, .. }) = (te.tail, &te.terminal) {
                 if let Some(v) = self.stack[top].attr(name) {
                     emit.push((t as u32, start, v.to_string()));
                 }
@@ -2002,7 +2129,10 @@ impl<'a> Matcher<'a> {
                 for state in &mut cold.txt_states {
                     let te = &self.schema.text_entries[state.entry as usize];
                     state.update(&te.pred, &out, direct);
-                    if direct && te.tail.is_none() && matches!(te.terminal, Terminal::Text { subtree: false }) {
+                    if direct
+                        && te.tail == Tail::Streamed
+                        && matches!(te.terminal, Terminal::Text { subtree: false })
+                    {
                         emit_entries.push(state.entry);
                     }
                 }
@@ -2726,6 +2856,90 @@ mod sig_wants_tests {
         let sub_seg = sch.groups[0].subs[0].seg.as_ref().expect("single-segment sub");
         assert_ne!(sub_seg.parts[0].req, 0, "sub-field compound never got its req");
         assert_ne!(sch.entries[0].segments[0].parts[0].req, 0, "container never got its req");
+    }
+}
+
+#[cfg(test)]
+mod tail_merge_tests {
+    use super::*;
+
+    /// Lowered through the crate's own front door, so an XPath query routes exactly as `extract` routes
+    /// it — the CSS parser alone yields no entries at all for one, which reads as "no tail".
+    fn schema(queries: &[String]) -> CompiledSchema {
+        let (flat, grouped) = crate::compile_schema(queries, &[]);
+        CompiledSchema::compile(&flat, &grouped)
+    }
+
+    const TAIL_PAGE: &[u8] = br#"<body>
+<div class="card"><a href="/one">One</a><p>first</p></div>
+<div><a href="/two">Two</a><p>second</p></div>
+<div><p>no link</p></div>
+<ul><li><a href="/a">A</a></li><li><a href="/last">Last</a></li></ul>
+</body>"#;
+
+    /// Every column, against the same selector compiled ALONE — which is the unmerged answer.
+    fn agrees_with_each_selector_alone(qs: &[String]) {
+        let merged = crate::extract(TAIL_PAGE, qs, None);
+        for (col, q) in qs.iter().enumerate() {
+            assert!(!merged[col].is_empty(), "{q} must have something to compare");
+            let alone = crate::extract(TAIL_PAGE, std::slice::from_ref(q), None);
+            assert_eq!(merged[col], alone[0], "{q}");
+        }
+    }
+
+    /// Tails whose deferred PREFIX is equal win on the same elements, so they share one sub-schema and
+    /// one re-scan per winner. A shared slot fills EVERY column of its group from those winners, so the
+    /// merge is sound only if the prefix comparison is exact — a loose one hands a column another's
+    /// values.
+    #[test]
+    fn tails_sharing_a_prefix_merge_without_changing_values() {
+        let qs = [
+            "div:has(a) a::attr(href)",
+            "div:has(a) p::text",
+            "div:has(a) ::text",
+            "div:has(p) a::text",      // same subject, different `:has` argument
+            "div.card:has(a) a::text", // same argument, different subject compound
+            "li:last-child a::attr(href)",
+        ]
+        .map(String::from);
+        assert_eq!(
+            schema(&qs).tail_schemas.len(),
+            4,
+            "the three `div:has(a)` tails share one sub-schema"
+        );
+        agrees_with_each_selector_alone(&qs);
+    }
+
+    /// The other two deferred tiers reach the same `split_deferred`, and a fix is the kind of thing that
+    /// lands at one call site — so each tier is asked whether it merges on its own prefixes.
+    #[test]
+    fn text_predicate_and_reverse_tails_merge_on_their_own_prefixes() {
+        let qs = [
+            r#"//div[contains(.,"One")]//a/@href"#,
+            r#"//div[contains(.,"One")]//p/text()"#,
+            r#"//div[contains(.,"second")]//a/@href"#,
+            "li:last-child a::attr(href)",
+            "li:last-child ::text",
+        ]
+        .map(String::from);
+        assert_eq!(schema(&qs).tail_schemas.len(), 3, "one group per distinct prefix");
+        agrees_with_each_selector_alone(&qs);
+    }
+
+    /// A tail entry past the member ceiling compiles DEAD, and a dead column is empty by contract. So it
+    /// must not share a sub-schema with a LIVE entry of the same prefix, whose winners would otherwise
+    /// fill it. `MAX_MEMBERS - 1` plain members leave room for exactly one of two identical tails.
+    #[test]
+    fn an_over_budget_tail_never_shares_a_live_sub_schema() {
+        let mut qs: Vec<String> = (0..MAX_MEMBERS - 1).map(|_| "p::text".to_string()).collect();
+        qs.push("div:has(a) a::attr(href)".to_string());
+        qs.push("div:has(a) a::attr(href)".to_string());
+        let (live, dead) = (MAX_MEMBERS - 1, MAX_MEMBERS);
+        let sch = schema(&qs);
+        assert!(sch.flat_col_supported(live) && !sch.flat_col_supported(dead));
+        let cols = crate::extract(TAIL_PAGE, &qs, None);
+        assert_eq!(cols[live], ["/one", "/two"]);
+        assert!(cols[dead].is_empty(), "an over-budget column stays empty");
     }
 }
 

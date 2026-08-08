@@ -305,9 +305,13 @@ decomposes into that floor plus matcher work. Parsel's 0-selector cell is its pa
   earlier version of this section blamed the ancestor-stack walk; the pure-scan row is what disproved
   that. Separating depth from density would need a shape that varies one at constant other, which the
   harness does not have, so nothing here is evidence about depth itself.
-- **Deferred tails cost extra.** `:has()`, `:contains()` and `:last-child` resolve from a re-scan of each
-  winner's span rather than from the streaming pass, so they do not share the scan: one tail field is
-  ~3.0× a plain field and eight are ~5.1×.
+- **Deferred tails cost extra, per distinct prefix.** `:has()`, `:contains()`, `:last-child` and XPath
+  text predicates resolve from a re-scan of each winner's span rather than from the streaming pass, so
+  they do not share the main scan. Tails deferring on the SAME compound share one re-scan, so the cost
+  tracks the number of distinct prefixes rather than the number of fields — two fields on one compound
+  (`div:has(a) a::attr(href)` and `div:has(a) p::text`) collapse into a single extra pass. **The ratios
+  in the table above predate that sharing and are stale; re-run `tools/bench_engines.py` before quoting
+  one.**
 - **A pool only measures what it contains.** The four page shapes run the tag-led pool; the class-led and
   attribute-predicate rows exist because a real page object is mostly class-led and neither other pool
   holds an attribute predicate. `tools/ab_bench.py` carries the same pools crossed with more shapes.

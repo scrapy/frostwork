@@ -169,13 +169,17 @@ schema; `resolve_tail_spans` runs it). Three things make this work:
 
 Retention per candidate is therefore two integers, and the streaming path is untouched.
 
-That "single bounded extra pass" is **per selector**, though: each deferred tail is its own sub-schema, so
-N tail-bearing fields over the same outer subtree re-scan it N times, losing the multi-selector scan
-sharing the main pass has. Measured on a 200 KB product listing (`bench_matrix`'s `TAIL_POOL`): one tail
-field costs ~2.9× a plain one and eight cost ~5.0×, i.e. the penalty grows with FIELD COUNT. Left as is
-deliberately — the absolute cost is milliseconds and no real schema is tail-heavy yet — but it is now in
-the benchmark so the decision is revisitable. The fix, if it ever matters, is merging tails that share a
-deferred prefix into one sub-schema (their winner spans are identical by construction).
+That extra pass is paid **per deferred prefix, not per field**. The prefix — the compounds up to and
+including the one carrying the predicate — is what decides which elements win, so tails whose prefixes are
+equal win on exactly the same elements and compile to ONE sub-schema (`TailPlan`): a single re-scan of a
+winner's span answers every column of the group. That is the label→value shape,
+`//div[contains(.,"Price")]//a/@href` beside `//div[contains(.,"Price")]//span/text()`, at one re-scan
+rather than two. Two rules make the sharing sound. The prefix comparison is a DERIVED structural equality,
+because a hand-written one that forgot a field would hand one column another's values. And an entry the
+member budget has already killed neither joins a group nor is joined — a shared sub-schema fills every
+column of its group from whichever entry is live, while a dead column must stay empty. What remains grows
+with the number of DISTINCT prefixes, which [BENCHMARKS.md](BENCHMARKS.md) measures against the same count
+of plain fields.
 
 For contrast, the other suspected hot spot in this tier was **rejected by measurement**: `sub_hits` with a
 subtree terminal loops `seg_match` over `floor..=top`, which looks like O(depth² × compounds) per text
