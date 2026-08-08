@@ -7,15 +7,15 @@ enumeration that quietly narrows, or a classifier that files a real character di
 "expected" count, both read exactly like a clean run. `tests/test_gates.py` owns those two failure modes
 and can only do it against real functions.
 
-The history that shaped it, because it is the reason for every choice here:
+Two weaker sweeps this one rules out, because they are the reason for every choice here:
 
-  * The sweep used to SAMPLE — 800 assigned characters per label — and concluded shift_jis / euc-jp /
-    euc-kr / gb18030 were at full parity. They are not. A crawled EUC-JP wiki containing `A1 C1` (the JIS
-    wave dash: U+FF5E to WHATWG and every browser, U+301C to Python's `euc_jp`) walked straight through.
-  * It then enumerated over the sequences the PYTHON codec calls assigned, which is a filter shaped like
-    the oracle's own limitations. `euc_jp` is strict JIS X 0208 with no NEC row 13, so `AD A1` — the `①`
-    of ordinary Japanese prose — was simply skipped, and the whole `WHATWG_ONLY` class below could not be
-    counted, let alone gated. The enumeration is now over the byte space.
+  * SAMPLING — say 800 assigned characters per label — reports shift_jis / euc-jp / euc-kr / gb18030 at
+    full parity. They are not. One `A1 C1` on one crawled EUC-JP wiki (the JIS wave dash: U+FF5E to
+    WHATWG and every browser, U+301C to Python's `euc_jp`) walks straight through such a sample.
+  * ENUMERATING over the sequences the PYTHON codec calls assigned is a filter shaped like the oracle's
+    own limitations. `euc_jp` is strict JIS X 0208 with no NEC row 13, so `AD A1` — the `①` of ordinary
+    Japanese prose — is skipped, and the whole `WHATWG_ONLY` class below cannot be counted, let alone
+    gated. The enumeration here is over the byte space.
 
 Which side is right differs per class, so they are kept apart rather than summed: WHATWG's indexes are
 what browsers implement, so the ENGINE is right for `WHATWG_ONLY` and `PUA_UNASSIGNED`, while
@@ -26,7 +26,7 @@ from __future__ import annotations
 # Every two-byte sequence in the legacy lead/trail space. NOT filtered against a Python codec (see the
 # module docstring), and no byte needs excluding for the markup the probe wraps them in: `<`, `>`, `&`,
 # the whitespace bytes and NUL are all below both ranges. `tests/test_gates.py` asserts that property
-# rather than trusting it — a filter for those bytes used to be written here and was dead code.
+# rather than trusting it; a filter for those bytes written here would be dead code.
 LEAD = range(0x81, 0xFF)
 TRAIL = range(0x40, 0xFF)
 #: bytes that would end the probe's `<p class="c">…</p>` wrapper early, or be stripped from it

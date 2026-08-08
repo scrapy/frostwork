@@ -3,9 +3,46 @@
 //! (stack maintenance, value emission, group routing) lives in the parent module and calls into these.
 //! Keeping the predicates separate makes the matcher's *logic* legible apart from its *bookkeeping*.
 
-use crate::selector::{AttrPred, Comb, Compound, Nth, ReversePos};
+use crate::selector::{AttrOp, Comb, Compound, Nth, ReversePos};
 
 use super::{CSel, OpenElem, Segment};
+
+// ---- attribute-value comparison, with the Selectors 4 `i` flag ------------------------------------
+//
+// CSS defines that flag as ASCII case folding, so every `ci` branch below is a BYTE compare with
+// `eq_ignore_ascii_case` — never a Unicode fold, and never an allocation. Byte slices rather than `&str`
+// slices because a value may be multi-byte: `&a[..v.len()]` panics when that index is not a char
+// boundary, which a page can arrange (`[title^="c" i]` against `title="café"` needs no such slice, but
+// `[title^="ca" i]` against a value whose second byte is a continuation does). A valid-UTF-8 needle can
+// only align on a char boundary anyway, so the byte search is also correct.
+
+fn eq(a: &str, v: &str, ci: bool) -> bool {
+    if ci { a.eq_ignore_ascii_case(v) } else { a == v }
+}
+
+fn starts(a: &str, v: &str, ci: bool) -> bool {
+    if !ci {
+        return a.starts_with(v);
+    }
+    let (a, v) = (a.as_bytes(), v.as_bytes());
+    a.len() >= v.len() && a[..v.len()].eq_ignore_ascii_case(v)
+}
+
+fn ends(a: &str, v: &str, ci: bool) -> bool {
+    if !ci {
+        return a.ends_with(v);
+    }
+    let (a, v) = (a.as_bytes(), v.as_bytes());
+    a.len() >= v.len() && a[a.len() - v.len()..].eq_ignore_ascii_case(v)
+}
+
+fn substr(a: &str, v: &str, ci: bool) -> bool {
+    if !ci {
+        return a.contains(v);
+    }
+    let (a, v) = (a.as_bytes(), v.as_bytes());
+    a.len() >= v.len() && (0..=a.len() - v.len()).any(|i| a[i..i + v.len()].eq_ignore_ascii_case(v))
+}
 
 /// Does 1-based position `p` satisfy `∃k ≥ 0: a·k + b == p`? (the `An+B` membership test)
 fn anpb_matches(a: i32, b: i32, p: u32) -> bool {
@@ -81,19 +118,20 @@ fn compound_matches_impl<const FILTER: bool>(c: &Compound, el: &OpenElem) -> boo
     for p in &c.attrs {
         // Substring/prefix/suffix ops with an EMPTY operand match nothing (CSS spec, verified vs
         // lxml); `~=` with an empty/whitespace operand also never matches (no empty token).
-        let ok = match p {
-            AttrPred::Exists(n) => el.attr(n).is_some(),
-            AttrPred::Eq(n, v) => el.attr(n) == Some(v.as_str()),
-            AttrPred::Prefix(n, v) => !v.is_empty() && el.attr(n).is_some_and(|a| a.starts_with(v.as_str())),
-            AttrPred::Suffix(n, v) => !v.is_empty() && el.attr(n).is_some_and(|a| a.ends_with(v.as_str())),
-            AttrPred::Substr(n, v) => !v.is_empty() && el.attr(n).is_some_and(|a| a.contains(v.as_str())),
+        let (n, v, ci) = (p.name.as_str(), p.value.as_str(), p.ci);
+        let ok = match p.op {
+            AttrOp::Exists => el.attr(n).is_some(),
+            AttrOp::Eq => el.attr(n).is_some_and(|a| eq(a, v, ci)),
+            AttrOp::Prefix => !v.is_empty() && el.attr(n).is_some_and(|a| starts(a, v, ci)),
+            AttrOp::Suffix => !v.is_empty() && el.attr(n).is_some_and(|a| ends(a, v, ci)),
+            AttrOp::Substr => !v.is_empty() && el.attr(n).is_some_and(|a| substr(a, v, ci)),
             // ASCII whitespace only, for the reason spelled out on `OpenElem::has_class` — `[rel~=x]`
             // tokenizes the same way `.x` does, so a U+3000 in the value must not separate tokens.
-            AttrPred::Includes(n, v) => {
-                !v.is_empty() && el.attr(n).is_some_and(|a| a.split_ascii_whitespace().any(|t| t == v))
+            AttrOp::Includes => {
+                !v.is_empty() && el.attr(n).is_some_and(|a| a.split_ascii_whitespace().any(|t| eq(t, v, ci)))
             }
-            AttrPred::DashMatch(n, v) => el.attr(n).is_some_and(|a| {
-                a == v || (a.len() > v.len() && a.starts_with(v.as_str()) && a.as_bytes()[v.len()] == b'-')
+            AttrOp::DashMatch => el.attr(n).is_some_and(|a| {
+                eq(a, v, ci) || (a.len() > v.len() && starts(a, v, ci) && a.as_bytes()[v.len()] == b'-')
             }),
         };
         if !ok {
@@ -659,7 +697,7 @@ mod sig_filter_tests {
         isg.is_groups.push(vec![cmp(None, None, &["x"]), cmp(None, None, &["y"])]);
         assert_eq!(sig::compound_req(&isg, ALL_ON), 0);
         let mut at = cmp(Some("*"), None, &[]);
-        at.attrs.push(AttrPred::Prefix("href".into(), "/".into()));
+        at.attrs.push(AttrPred::new("href", crate::selector::AttrOp::Prefix, "/"));
         assert_eq!(sig::compound_req(&at, ALL_ON), 0);
 
         // ...but a nested compound still gets its OWN req, for its own recursive call

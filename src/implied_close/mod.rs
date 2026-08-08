@@ -5,12 +5,11 @@
 //! `tools/gen_tree_rules.py` from libxml2 over a fixed element universe — nothing in this file may be
 //! derived there, and nothing there may be edited here (`--check` fails on drift).
 //!
-//! There used to be a second, hand-written close table here (`tag`/`tag_id`/`implies_close_id`, ported
-//! from `parsel-stream-core`) ORed with the generated one. Once the generated relation was derived over
-//! the whole universe it closed every pair the ported table did and 163 more, so the port was deleted:
-//! it could only mask the real table, never correct it. Its history is worth keeping in mind — it
-//! asserted a *symmetric* `dd`/`dt` and `rt`/`rp` auto-close because that is the HTML5 rule, and
-//! libxml2 2.14 does neither. The oracle wins here; do not re-port a table over the generated one.
+//! **Do not add a second, hand-written close table ORed with the generated one.** Derived over the whole
+//! element universe, the generated relation closes every pair a ported table would and 163 more, so a
+//! port can only mask it, never correct it — and a port asserts the HTML5 rule, which is a *symmetric*
+//! `dd`/`dt` and `rt`/`rp` auto-close that libxml2 2.14 does not do in either direction. The oracle wins
+//! here.
 
 mod generated;
 

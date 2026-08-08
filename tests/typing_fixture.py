@@ -3,8 +3,8 @@
 Not run as a test; `tests/test_typing.py` feeds this file to mypy and requires zero errors. `assert_type`
 fails at type-check time (never at runtime), so each line below is an assertion about what a user's own
 type checker sees. That is the thing being protected: the package ships `py.typed`, so these annotations
-are a promise, and `field()` previously annotated as `_FrostField` — making correct code an error in the
-user's CI while every test here passed.
+are a promise, and only a type checker can hold them: annotating `field()` as the internal `_FrostField`
+makes correct code an error in the user's CI while every runtime test here passes.
 """
 
 from typing import Any, Dict, List, Optional, assert_type
@@ -108,8 +108,8 @@ def check_instance_types(p: ProductPage) -> None:
 
 
 def check_assignments_are_legal(p: ProductPage) -> None:
-    """The other direction: correct runtime code must not be a type ERROR. This is the shape that used to
-    fail — `x: str = p.name` against an annotation of `_FrostField`."""
+    """The other direction: correct runtime code must not be a type ERROR — `x: str = p.name` against an
+    annotation of `_FrostField` is the shape that fails."""
     a: Optional[str] = p.name
     b: List[str] = p.images
     c: str = p.specs

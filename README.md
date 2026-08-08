@@ -5,10 +5,11 @@ Fast HTML extraction for Python and Rust, without a DOM.
 Frostwork compiles a set of CSS or XPath selectors, scans an HTML response once, and emits only the
 requested values. It does not build a document tree, so working memory tracks parser state and pending
 matches rather than the whole page. Supported results are continuously checked against lxml; the exact
-coverage and known differences are listed in the [compatibility contract](docs/COMPATIBILITY.md).
+coverage and known differences — in **both** directions — are listed in the
+[compatibility contract](docs/COMPATIBILITY.md).
 
-**~8× faster than lxml and ~11× faster than Parsel (what Scrapy uses) at the median on the measured
-production-selector corpus, and ~6.7× faster than selectolax/lexbor on the workload both can express.
+**~14× faster than Parsel (what Scrapy uses) and ~8× faster than lxml at the median on the measured
+production-selector corpus, and ~7× faster than selectolax/lexbor on the workload both can express.
 Often much faster on large, selector-rich product and listing pages, where each of them must traverse a
 DOM per field.**
 
@@ -109,19 +110,40 @@ This repository does not pin or test a Scrapy/Twisted matrix; use
 the injection boundary: every shipped page base is injectable and can be planned as a callback dependency.
 Field processors, groups, response types and schema auditing are covered in the [Python guide](docs/PYTHON.md).
 
-## Limitations
+## How it differs from lxml
 
-- **CSS:** tags, IDs, classes, attribute operators, descendant/child/sibling combinators, `:not()`, `:is()`,
-  `:where()`, subject `:has()`, and structural positions such as `:nth-child()`/`:last-of-type`.
-- **XPath:** downward paths, attribute and text predicates, unions, positional predicates,
-  `following-sibling::`, `ancestor::`, `parent::`, and top-level `normalize-space()`.
-- **Values:** text, attributes, descendant attributes, joined text, and raw outer HTML.
+Frostwork is not a subset of lxml, and not a superset — the set difference runs both ways, and both
+halves are proven by the same gates.
 
-Expressions that cannot be answered without retaining more tree state stay unsupported, and reverse
-positions and `:has()` have placement restrictions. `check()` reports the same verdict for tooling and CI,
-and `frostwork-audit --scan myproject/spiders/` classifies selector literals in code with no Frostwork
-schema yet, without importing it. The [compatibility contract](docs/COMPATIBILITY.md) lists supported,
-divergent and unsupported forms with examples.
+**What it does not answer.** Supported CSS is tags, IDs, classes, attribute operators,
+descendant/child/sibling combinators, `:not()`, `:is()`/`:where()`, subject `:has()`, `:contains()`, and
+structural positions such as `:nth-child()`/`:last-of-type`; supported XPath is downward paths, attribute
+and text predicates, unions, positional predicates, `following-sibling::`, `ancestor::`, `parent::` and
+top-level `normalize-space()`; values are text, attributes, descendant attributes, joined text and raw
+outer HTML. Anything that cannot be answered without retaining more tree state stays unsupported, and
+reverse positions and `:has()` have placement restrictions. An unsupported selector never falls back and
+never guesses — `check()` reports the verdict before a scrape, and `frostwork-audit --scan
+myproject/spiders/` classifies selector literals in existing code without importing it.
+
+**What it answers and lxml does not.** A dozen constructs run here and refuse, truncate or mis-decode
+there:
+
+- **Valid CSS cssselect rejects** — `div:has([data-x])`, `div:has(a, img)`, `p:not(.a, .b)`,
+  `[type=submit i]`. Parsel raises `SelectorSyntaxError`; Frostwork matches them with the semantics the
+  spec defines.
+- **Values libxml2 drops** — names longer than its 100-byte buffer, and everything after a `</html>`,
+  which real pages put *before* the content that matters (one crawled page keeps 14 of its 17 KB there).
+- **Encoding, the widest gap.** `parsel.Selector(body=…)` never sniffs `<meta charset>`;
+  `frostwork.detect_encoding` does, past the `<body>` and unsupported-label cut-offs where w3lib gives
+  up. It reads a UTF-16 body, which lxml's HTML parser cannot parse at all, and decodes with the WHATWG
+  indexes browsers use — where Python's legacy codecs return U+FFFD for 457 euc-jp and 192 big5
+  sequences of ordinary prose.
+- **A schema verdict before the scrape**, and **one pass for the whole schema** — a page object of
+  single-valued fields stops scanning once every field has a value, which a tree parser cannot do.
+
+Three of those return *extra* values, the one direction that can surprise a port. The
+[compatibility contract](docs/COMPATIBILITY.md) lists supported, divergent, beyond and unsupported forms
+with examples, the gate behind each, and the migration caveats.
 
 ## Build, test, benchmark
 

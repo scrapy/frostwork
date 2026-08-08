@@ -79,7 +79,7 @@ SECTIONING = "section article aside header footer nav main figure details hgroup
 INLINE = "span a b em strong small label".split()
 # The table-related element set, used by `tools/diff_fuzz.py` to attribute FOSTER-PARENTING divergences.
 # It is NOT the end-tag scope relation, which is a priority comparison derived from the oracle
-# (`audit_end_scope`) rather than a set of boundary names — one list used to serve both, and that is how
+# (`audit_end_scope`) rather than a set of boundary names. One list serving both is how
 # the ORDER inside the table machinery (`</tr>` may not unwind an open `<tbody>`) went unprobed.
 TABLE_RELATED = "table caption thead tbody tfoot tr td th".split()
 # End-tag SCOPE has no list here any more: it was two of them (which elements can be in the way, which
@@ -91,10 +91,9 @@ TABLE_RELATED = "table caption thead tbody tfoot tr td th".split()
 # wrapper contributes nothing. Two scaffolds for one relation is deliberate: the unknown wrapper isolates
 # the pair, and the real one is the shape a page actually contains.
 #
-# (This block used to exist for a different reason — the engine had a second, coarse tag-id table where
-# `span` stood for "any unrecognized element" and `div` for "the block set", and 40 id-space cells went
-# unasked. That table is gone: the generated name-pair relation closed every pair it did. The probes are
-# kept for the natural-context coverage, not for the ids.)
+# (These probes earn their place through natural-context coverage. They are not an id-space sweep: a
+# coarse tag-id table where `span` stands for "any unrecognized element" and `div` for "the block set"
+# leaves 40 cells unasked, which is why the relation is derived per NAME instead.)
 XPROD_WRAP = dict(WRAP, span="div", div="section")
 
 # ---------------------------------------------------------------- libxml2's start-close PAIR table
@@ -212,7 +211,7 @@ def audit_void(a: Audit):
                          [f"xwrap > {t}::attr(id)", "xwrap::text", f"xwrap > {t}::text"])
         # The four HTML5-era names libxml2 keeps OPEN, asserted by NAME so the contract sentence in
         # COMPATIBILITY.md is testable rather than decorative. Same for the three HTML4 names it treats
-        # as void, which the engine used to let hold children.
+        # as void; letting one hold children is the failure this cell catches.
         for t in NONVOID_CLAIMED:
             html = f"<html><body><xwrap><{t}>A</xwrap></body></html>".encode()
             lx, _ = a.check("void-claim", f"{t} must be NON-void", html, f"{t}::text")
@@ -360,9 +359,9 @@ def audit_frame_synthesis(a: Audit):
     """A document that writes no `<html>`/`<head>`/`<body>` still HAS them — over the whole universe.
 
     `<html>`, `<head>` and `<body>` all have optional start AND end tags, so a conformant page may
-    contain none of them, and libxml2 builds the frame anyway. The engine used to build nothing, so
-    `body h1`, `h1 + p` (top-level siblings need a shared parent) and root-level text were all empty
-    while lxml answered — the largest single entry the divergence list used to carry.
+    contain none of them, and libxml2 builds the frame anyway. Build nothing and `body h1`, `h1 + p`
+    (top-level siblings need a shared parent) and root-level text all come back empty while lxml
+    answers — on ordinary pages, not exotic ones.
 
     Every name is asked where a BARE `<X>` document puts it, because the answer is not the relation it
     resembles: only six names open a `<head>`, while `input`/`noscript`/`template`/`basefont`/`bgsound`/
@@ -532,12 +531,12 @@ def audit_end_scope(a: Audit):
     """Misplaced END-TAG scope, over EVERY (open x closing) pair in the universe.
 
     libxml2's rule is a PRIORITY comparison — a stray end tag may only unwind elements that do not
-    out-rank it — and this audit used to ask about it with two hand-written lists: a "scope candidate"
-    set for the element in the way and four names (`div`/`ul`/`span`/`section`) for the end tag being
-    discarded. Every table-family end tag was therefore missing from the closing side, and with it the
-    whole ORDER inside the table machinery: `</tr>` cannot unwind an open `<tbody>`, and a real page
-    (`<tr><strong><tbody><td>…</strong><tbody></tr>`, from a table generator) lost its cells here while
-    lxml kept the row open. Same failure as rounds 1-4 in docs/TESTING.md, one relation later.
+    out-rank it — so it is asked over the whole universe rather than through hand-written lists. Two
+    lists (a "scope candidate" set for the element in the way, and a few names for the end tag being
+    discarded) leave every table-family end tag off the closing side, and with it the whole ORDER inside
+    the table machinery: `</tr>` cannot unwind an open `<tbody>`, and a real table generator's page
+    (`<tr><strong><tbody><td>…</strong><tbody></tr>`) loses its cells while lxml keeps the row open.
+    Same failure mode as rounds 1-4 in docs/TESTING.md, one relation later.
 
     `<xspacer>` is why the sweep reaches the pairs that matter: `<tbody>` directly inside `<tr>` closes
     the row, so the interesting stack only exists with something between them, and an unknown element is

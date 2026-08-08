@@ -32,6 +32,7 @@ import time
 from parsel import Selector as PS
 
 import frostwork
+from frostwork._frostwork import Plan
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RESULTS = os.path.join(HERE, "results")
@@ -134,6 +135,19 @@ def is_value_bug(kind: str) -> bool:
     return kind in VALUE_BUG_KINDS
 
 
+def _plan_for(queries):
+    """One page object's schema, compiled once — audited FIRST, exactly as a page object is.
+
+    The audit is what the severity classification above rests on: EMPTY and SUBSET are graded as
+    REGRESSIONS rather than coverage gaps precisely because an unsupported selector raises before it can
+    reach the comparison. A bare `Plan` only checks the bitset budget, so it must not be built without
+    this — an unsupported selector would become a silently empty column the gate reads as a value bug, or
+    as a legitimate empty answer.
+    """
+    frostwork.check(list(queries)).raise_for_status()
+    return Plan(list(queries), [])
+
+
 def nonws_equal(a, b):
     """True if two value columns carry the same non-whitespace content (drop empty/ws-only items).
     This is the project's actual bar; the gate's WS check is length-sensitive to empty text nodes."""
@@ -206,11 +220,18 @@ def main():
             body = f.read()
         if not body.strip():
             continue  # empty snapshot — Parsel can't build a Selector from it
+        # The schema is compiled ONCE, outside the timed loop, because that is how a page object runs:
+        # its selectors are declared on a class and `FrostPage` compiles them to a `Plan` at
+        # class-definition time. Re-parsing selector strings per response measures a program nobody
+        # writes. Parsel gets the same treatment on its side — one `Selector` per page, then a query per
+        # field (`parsel_extract`), which is its own real reuse pattern.
+        plan = _plan_for(queries)
+
         # warmup (also validates neither side crashes)
-        fcols = frostwork.extract(body, queries, "utf-8")
+        fcols = plan.extract(body, "utf-8")
         pcols = parsel_extract(body, queries)
 
-        ft = best_of(lambda: frostwork.extract(body, queries, "utf-8"), repeats)
+        ft = best_of(lambda: plan.extract(body, "utf-8"), repeats)
         pt = best_of(lambda: parsel_extract(body, queries), repeats)
 
         n_pages += 1

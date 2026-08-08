@@ -204,15 +204,20 @@ def _same_answer(label: str, a, b) -> None:
 def boundary_cardinality(reps: int, sizes=(220, 2000, 6000)):
     """A FIRST-match field over a selector that matches everything.
 
-    Cardinality is applied in Python, AFTER the native run, so the column holds every match and the shaping
-    throws all but one away — on an outer-HTML column, one whole element's source per match. The `all=True`
-    row is the same field asked for everything, i.e. the work that is NOT wasted, so the pair brackets the
-    waste: they should differ, and they do not.
+    Cardinality reaches the plan (`Plan::compile_first_only`): a page object whose fields are all
+    single-valued stops scanning once each has a value. `all=True` is the same field asked for
+    everything — the work a multi-valued field genuinely needs — so the pair brackets what early exit
+    skips, and the two should differ by roughly the ratio of the page to its first match. The `peak`
+    column is the other half: one retained element source instead of N.
 
-    Measure it before calling it a regression, though. It is WASTE, not a loss: the parsel column is here
-    because a `first` field is the shape where lxml is structurally cheapest (`.get()` serializes only the
-    element it returns), and frostwork still wins it at every size below. What the numbers support is
-    "pushing the limit into the plan is headroom", not "this shape is slower than parsel"."""
+    The parsel column is the honest control, and the comparison that matters: a `first` field is the
+    shape where lxml is structurally cheapest (`.get()` serializes only the element it returns).
+    `all=True` is this engine against itself.
+
+    A red-gate note: the two rows are compared for VALUE equality by `_same_answer` above, not for time,
+    so a silently disarmed early exit would show up here only as a number nobody checks. The behavioural
+    assertions are `src/page.rs::all_first_fields_stop_the_scan_and_keep_the_same_values` and
+    `::an_outer_html_first_field_stops_only_once_no_capture_is_open`."""
     rows = []
     for cards in sizes:
         html = gen_page(cards)
@@ -242,7 +247,7 @@ def boundary_cardinality(reps: int, sizes=(220, 2000, 6000)):
         f_kb = transient_peak_kb(lambda c=First: asyncio.run(c(response=resp).to_item()))
         rows.append(
             (f"{cards} matches, page {len(html) // 1024} KB", f_ms,
-             f"all=True {a_ms:.2f}ms (same work), parsel .get() {p_ms:.2f}ms, peak {f_kb:.0f} KB")
+             f"all=True {a_ms:.2f}ms ({a_ms / f_ms:.0f}x), parsel .get() {p_ms:.2f}ms, peak {f_kb:.0f} KB")
         )
     return rows
 
@@ -373,9 +378,9 @@ def boundary_subtree_size(reps: int, sizes=(1, 30, 250)):
 
 
 def run_boundaries(reps: int) -> None:
-    print(f"  performance boundaries ({reps} reps, median) — one loss, one waste, one parity cost\n")
+    print(f"  performance boundaries ({reps} reps, median) — one loss, one win, one parity cost\n")
     for title, rows in (
-        ("cardinality retention: shaping happens AFTER the native run", boundary_cardinality(reps)),
+        ("cardinality reaches the plan: a single-valued schema stops scanning", boundary_cardinality(reps)),
         ("cold response: reading resp.encoding decodes the whole body", boundary_cold_response(reps)),
         ("node handoff at scale: one subtree parse per match", boundary_node_processors(reps)),
         ("node handoff by subtree SIZE: the parse is the whole subtree", boundary_subtree_size(reps)),

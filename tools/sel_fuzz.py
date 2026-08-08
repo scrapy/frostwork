@@ -167,7 +167,7 @@ def g_css(rng):
     # The combinator that introduces the SUBJECT compound, and the selector text up to and including it.
     # Tracked while building rather than recovered by scanning backwards: an explicit combinator carries
     # its own spaces (` + `), so a backward scan stops on that space before it ever reaches the `+` — which
-    # is exactly the bug that made this branch emit nothing at all on its first run.
+    # is exactly the bug that makes such a generator emit nothing at all.
     subject_comb = None
     for _ in range(n - 1):
         comb = rng.choice(COMBS)
@@ -298,8 +298,8 @@ def _g_caseb_xpath(rng):
 def _g_nonliteral_operand(rng):
     # Comparisons against something that is NOT a quoted literal, which must stay UNSUPPORTED (empty):
     #   * a variable reference (`$v`) — parsel binds those at call time; Frostwork takes no bindings, so
-    #     lxml REJECTS the query here and any non-empty column is an OVERMATCH (this is the shape that
-    #     used to be audited as supported and match an element whose id really was `$v`);
+    #     lxml REJECTS the query here and any non-empty column is an OVERMATCH — the near miss is
+    #     auditing it as supported and matching an element whose id really is `$v`);
     #   * a numeric operand (`[@a=2]`, XPath compares numerically: `a="02"` matches) or a bare-name one
     #     (`[@a=b]`, a node-set compare against child `<b>` elements) — valid for lxml, so the engine's
     #     empty column grades as UNSUPPORTED, but a non-empty one grades WRONG.
@@ -442,17 +442,24 @@ def g_quoted_delim(rng):
     that these shapes must be SUPPORTED (the half that goes red) is a contract sweep:
     `tests/test_python.py::test_quoted_delimiters_in_functional_pseudos_are_supported`.
 
-    `:is()`/`:where()` forms used to keep a BARE base, because cssselect <= 1.4.0 mis-translated an
-    `:is()` whose compound carried any other condition, and the fuzzer's oracle is parsel. cssselect
-    1.5.0 fixed that (`tools/oracle.py` enforces the floor), so the COMBINED and CHAINED forms are now
-    oracle-valid and generated here — a surface that rode on hand vectors for exactly as long as the
-    upstream bug lasted. One of them is a red-gate discriminator for the engine's own semantics rather
+    COMBINED and CHAINED `:is()`/`:where()` forms are generated here, which needs cssselect >= 1.5.0:
+    at <= 1.4.0 it mis-translates an `:is()` whose compound carries any other condition, and the fuzzer's
+    oracle is parsel. `tools/oracle.py` enforces that floor. One of them is a red-gate discriminator for
+    the engine's own semantics rather
     than a coverage probe: `[class*="c"]:is([class*=")"])` is base-AND-fail, so the correct column is
     EMPTY, and an engine that ever regressed to OR semantics would return the whole `[class*="c"]` set
     and grade OVERMATCH.
 
-    `:has()` is still left out: cssselect REJECTS an attribute inner even at 1.5.0, so every correct
-    answer there would grade OVERMATCH. It stays covered by unit vectors.
+    `:has()` is still left out, and so is every other BEYOND-lxml form — a widened `:has()` inner, a
+    `:has()`/`:not()` selector LIST, and the `[a=v i]` case flag. cssselect rejects all of them even at
+    1.5.0, so `theirs is None` and the CORRECT answer grades OVERMATCH: this fuzzer's oracle is parsel,
+    and parsel cannot express what those selectors mean. They are covered instead by the contract sweep
+    in `tests/test_python.py::test_selector_grammar_surface_obeys_the_contract`, which declares each one
+    with its expected values, and by a per-feature test that oracles against the equivalent spelling
+    parsel CAN run (`div:has(a), div:has(img)` for `div:has(a, img)`; `:not(a):not(b)` for `:not(a, b)`;
+    an lxml `translate()` for the case flag). Generating them here would need that per-form oracle inside
+    the fuzzer, which is the same assertion twice — so the rule is: a new beyond-lxml capability is added
+    to the contract sweep, NOT to these generators.
     """
     return rng.choice([
         # DISCRIMINATING: universally-true `:not()`, so the column matches the plain selector's

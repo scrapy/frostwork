@@ -71,10 +71,10 @@ fn compile_one(q: &str) -> Option<Selector> {
         }
     } else {
         let mut members = selector::parse_list(q);
-        // Group containers/sub-fields accept exactly ONE selector. Taking `.next()` here used to
-        // execute the first member of `div, span` and silently discard the rest: a partial, wrong
-        // answer that violated the no-fallback contract. Multi-member CSS is therefore unsupported
-        // in this shape, exactly like multi-member XPath unions/or-expansions.
+        // Group containers/sub-fields accept exactly ONE selector. Taking `.next()` instead would run
+        // the first member of `div, span` and silently discard the rest — a partial, wrong answer, which
+        // the no-fallback contract forbids. Multi-member CSS is therefore unsupported in this shape,
+        // exactly like multi-member XPath unions/or-expansions.
         (members.len() == 1).then(|| members.pop()).flatten()
     }
 }
@@ -111,6 +111,21 @@ fn compile_schema(
     (flat, grouped)
 }
 
+/// The encoding [`extract`] would scan `html` with, as a WHATWG canonical name (`"UTF-8"`,
+/// `"windows-1252"`, `"Shift_JIS"`, …). `label` is the caller/HTTP charset a response supplies, or
+/// `None` to sniff.
+///
+/// The same resolution `extract` runs — BOM → BOM-less UTF-16 prefix → label → 4096-byte
+/// `<meta>`/XML-declaration prescan → UTF-8 — exposed on its own because it is useful without an
+/// extraction, and because nothing else in a scraper's stack answers this question the way a browser
+/// does. Parsel does not sniff at all (`Selector(body=…)` defaults to UTF-8), and w3lib — what Scrapy
+/// uses — differs from browsers in the places tabulated under Encoding in docs/COMPATIBILITY.md. The
+/// answer is always a real encoding: an unresolvable label is ignored rather than propagated, per
+/// WHATWG's "failure, continue".
+pub fn detect_encoding(html: &[u8], label: Option<&str>) -> &'static str {
+    encoding::resolve(html, label).name()
+}
+
 /// The `(member-selector, sibling-bit)` demand of a schema. A caller
 /// that would rather fail loud than get silently-empty columns compares this against
 /// [`MAX_MEMBERS`] / [`MAX_SIB_BITS`]; the Python binding raises `ValueError`.
@@ -138,7 +153,7 @@ pub fn budget_usage(queries: &[String], groups: &[GroupQuery]) -> (usize, usize)
 /// fields are genuinely strings and must be handed over untouched. Deriving that from
 /// [`compile_query`] — the same front-end `extract` and `Plan` use — is the difference between one
 /// definition and a hand-written heuristic that has to keep agreeing with the parser. The heuristic
-/// version of this question already shipped one bug (XPath `/text()` and `/@name` misread as node
+/// version of this question gets it wrong (XPath `/text()` and `/@name` read as node
 /// queries), which is why it is answered here instead.
 ///
 /// A routed query is uniform on the node-vs-scalar axis: [`compile_query`]'s comma/union rule refuses a
@@ -390,11 +405,11 @@ pub fn audit_schema(queries: &[String], groups: &[GroupQuery]) -> SchemaAudit {
 /// is real content), and per-value decoding must not re-strip it (see `matcher::finalize`), so it is
 /// handled here, once per page.
 ///
-/// **The transcode set is asked of `encoding_rs`, not listed here**, and that is the whole point: it was
-/// listed here, as "UTF-16, the only non-ASCII-compatible family", and it was wrong. ISO-2022-JP is not
-/// ASCII-compatible either — inside `ESC $ B` mode a JIS pair is two bytes below 0x80, and `社` is
-/// literally `<R`. A crawled Japanese page tokenized as raw bytes therefore grew a `<r>` start tag out
-/// of the middle of a word and dropped the character; every value downstream of it was wrong. The
+/// **The transcode set is asked of `encoding_rs`, not listed here**, and that is the whole point: no
+/// hand-written list gets it right. "UTF-16, the only non-ASCII-compatible family" is the obvious one
+/// and it is wrong — ISO-2022-JP is not ASCII-compatible either, since inside `ESC $ B` mode a JIS pair
+/// is two bytes below 0x80 and `社` is literally `<R`. Tokenized as raw bytes, a Japanese page grows a
+/// `<r>` start tag out of the middle of a word and every value downstream of it is wrong. The
 /// predicate covers `replacement` too (the label for HZ-GB-2312 and friends), whose whole purpose is
 /// that browsers refuse to decode such a document at all — one U+FFFD and nothing else.
 ///
@@ -488,11 +503,11 @@ const fn is_strip_ws(b: u8) -> bool {
 /// Delete every raw NUL byte from the document, as Parsel/w3lib do before handing bytes to lxml
 /// (`body.replace(b"\x00", b"")`).
 ///
-/// This has to happen before TOKENIZATION, not at value-emit time. The engine used to drop NUL only
-/// from emitted values, so the two sides disagreed about the document's STRUCTURE: `<di\0v>X</di\0v>`
-/// is a `div` to lxml and an element named `di\0v` here, and `div::text` returned nothing — a silently
-/// empty column, not a slightly different string. Attribute names and values, text and tag names are
-/// all covered by doing it once, up front.
+/// This has to happen before TOKENIZATION, not at value-emit time. Dropping NUL only from emitted values
+/// leaves the two sides disagreeing about the document's STRUCTURE: `<di\0v>X</di\0v>` is a `div` to
+/// lxml and an element named `di\0v` here, so `div::text` returns nothing — a silently empty column, not
+/// a slightly different string. Attribute names and values, text and tag names are all covered by doing
+/// it once, up front.
 ///
 /// The ordinary path (no NUL anywhere, which is every real page) costs one `memchr` over the buffer and
 /// no allocation. Only a document that actually contains a NUL is copied.
@@ -503,13 +518,19 @@ fn strip_nul(bytes: Cow<'_, [u8]>) -> Cow<'_, [u8]> {
     Cow::Owned(bytes.iter().copied().filter(|&b| b != 0).collect())
 }
 
-/// A schema compiled ONCE, reusable across any number of pages — the compile-once/extract-many form of
-/// [`extract_grouped`]. Building a `Plan` parses every selector, lowers it to the matcher's internal
-/// form, and computes the interesting-attribute set a single time; each [`Plan::extract`] then only
-/// resolves the page's encoding and runs the streaming pass. For a `Page`/`FrostPage` run over many
-/// responses this removes the per-page recompile — the natural shape, since a schema is defined once
-/// and applied to every page. Unsupported selectors compile to empty columns exactly as one-shot
-/// [`extract`] does (no fallback); the flat/grouped output is identical.
+/// A schema compiled ONCE and run over any number of pages — **how the engine is actually used, and
+/// what every benchmark measures.** Building a `Plan` parses every selector, lowers it to the matcher's
+/// internal form, and computes the interesting-attribute set a single time; each [`Plan::extract`] then
+/// only resolves the page's encoding and runs the streaming pass.
+///
+/// This is not an optimization a caller opts into. A schema is declared once and applied to every
+/// response — a Scrapy/web-poet page object is a *class*, and `frostwork.Page` / `FrostPage` compile
+/// their selectors here at definition time. [`extract`] and [`extract_grouped`] are the one-shot
+/// convenience form for a caller holding selector strings and one document; they compile a `Plan`
+/// internally and throw it away, which no scraper does per response.
+///
+/// Unsupported selectors compile to empty columns exactly as [`extract`] does (no fallback); the
+/// flat/grouped output is identical either way.
 pub struct Plan {
     schema: matcher::CompiledSchema,
     budget: (usize, usize), // (members, sibling-bits) raw demand, computed once at compile
@@ -518,9 +539,29 @@ pub struct Plan {
 impl Plan {
     /// Compile `queries` + `groups` (the same shapes [`extract_grouped`] accepts) once for reuse.
     pub fn compile(queries: &[String], groups: &[GroupQuery]) -> Plan {
+        Self::compile_first_only(queries, groups, &[])
+    }
+
+    /// [`compile`](Plan::compile), plus the caller's per-column cardinality: `first_only[c]` declares
+    /// that column `c`'s consumer keeps only the FIRST value and discards the rest.
+    ///
+    /// That lets the scan STOP once every column has one — a page whose fields all live in the head is
+    /// answered without tokenizing the body. The columns are unchanged apart from the values that would
+    /// have been discarded anyway, so the `Item` a cardinality layer builds is identical.
+    ///
+    /// Declaring it does not force it: a schema whose answer could still change (groups, deferred
+    /// predicates, reverse positions, outer-HTML, `normalize-space`) is not armed, and one column left
+    /// out of `first_only` disarms the whole schema. See `matcher::CompiledSchema::arm_early_exit`.
+    /// `&[]` — what [`compile`](Plan::compile) passes — arms nothing, which is why plain
+    /// [`extract`]/[`extract_grouped`], whose contract is EVERY value, are unaffected.
+    pub fn compile_first_only(queries: &[String], groups: &[GroupQuery], first_only: &[bool]) -> Plan {
         let (flat, grouped) = compile_schema(queries, groups);
         let budget = matcher::budget_usage(&flat, &grouped);
-        Plan { schema: matcher::CompiledSchema::compile(&flat, &grouped), budget }
+        let mut schema = matcher::CompiledSchema::compile(&flat, &grouped);
+        if first_only.iter().any(|&f| f) {
+            schema.arm_early_exit(first_only);
+        }
+        Plan { schema, budget }
     }
 
     /// The `(member, sibling-bit)` budget demand of this plan — see [`budget_usage`]. Computed at
@@ -745,6 +786,99 @@ mod tests {
         }
     }
 
+    /// `:has()` takes a relative selector LIST — `div:has(a, img)`, the shape cssselect#138 names as
+    /// unsupported. `:has(a, b)` is the union of `:has(a)` and `:has(b)` (an element matches if ANY
+    /// member is found), which is what makes the two single-member spellings a usable oracle for it.
+    #[test]
+    fn has_takes_a_selector_list() {
+        let h = "<div id=d1><a>x</a></div><div id=d2><img src=s></div><div id=d3><b>y</b></div>\
+                 <div id=d4><a>z</a><img src=t></div>";
+        // OR across members, in document order, and an element satisfying BOTH appears once
+        assert_eq!(ex(h, "div:has(a, img)::attr(id)"), v(&["d1", "d2", "d4"]));
+        assert_eq!(ex(h, "div:has(img, a)::attr(id)"), v(&["d1", "d2", "d4"]), "member order is irrelevant");
+        // ...and each member alone is the single-compound spelling parsel can evaluate
+        assert_eq!(ex(h, "div:has(a)::attr(id)"), v(&["d1", "d4"]));
+        assert_eq!(ex(h, "div:has(img)::attr(id)"), v(&["d2", "d4"]));
+        // three members, and members of different KINDS (the widened inners) inside one list
+        assert_eq!(ex(h, "div:has(a, img, b)::attr(id)"), v(&["d1", "d2", "d3", "d4"]));
+        assert_eq!(ex(h, "div:has([src], #nope)::attr(id)"), v(&["d2", "d4"]));
+        // child-scoped list: only DIRECT children count, so a nested match does not qualify
+        let nested = "<div id=p><span><a>deep</a></span></div><div id=q><a>direct</a></div>";
+        assert_eq!(ex(nested, "div:has(> a, > img)::attr(id)"), v(&["q"]));
+        assert_eq!(ex(nested, "div:has(a, img)::attr(id)"), v(&["p", "q"]));
+        // a member that matches nothing contributes nothing, and an all-miss list yields an empty column
+        assert_eq!(ex(h, "div:has(a, nosuch)::attr(id)"), v(&["d1", "d4"]));
+        assert_eq!(ex(h, "div:has(nosuch, alsonot)::attr(id)"), Vec::<String>::new());
+        // the list composes with the subtree / descendant value tiers, like a single-compound inner
+        assert_eq!(ex(h, "div:has(a, img) ::text"), v(&["x", "z"]));
+        assert_eq!(ex(h, "div:has(a, img) a::text"), v(&["x", "z"]));
+        // MIXED relative combinators have no faithful `Has` to build, so they are REPORTED, not guessed
+        assert!(!audit_schema(&["div:has(> a, img)::attr(id)".into()], &[]).ok());
+        assert!(audit_schema(&["div:has(a, img)::attr(id)".into()], &[]).ok());
+    }
+
+    /// `:not()` takes a selector list too (Selectors 4). `:not(a, b)` is exactly `:not(a):not(b)` — the
+    /// chained spelling cssselect accepts — so every case here is checked against it.
+    #[test]
+    fn not_takes_a_selector_list() {
+        let h = "<p class=a>A</p><p class=b>B</p><p class=c>C</p><p>D</p>";
+        for (list, chained) in [
+            ("p:not(.a, .b)::text", "p:not(.a):not(.b)::text"),
+            ("p:not(.a, .b, .c)::text", "p:not(.a):not(.b):not(.c)::text"),
+            ("p:not(.a)::text", "p:not(.a)::text"),
+        ] {
+            assert_eq!(ex(h, list), ex(h, chained), "{list}");
+        }
+        assert_eq!(ex(h, "p:not(.a, .b)::text"), v(&["C", "D"]));
+        // a comma inside an attribute VALUE is data, not a member separator
+        let av = "<p title=\"x, y\">A</p><p title=z>B</p>";
+        assert_eq!(ex(av, "p:not([title=\"x, y\"])::text"), v(&["B"]));
+        // an empty member is a syntax error to cssselect, so it is REPORTED rather than ignored
+        assert!(!audit_schema(&["p:not(.a, )::text".into()], &[]).ok());
+        assert!(audit_schema(&["p:not(.a, .b)::text".into()], &[]).ok());
+    }
+
+    /// The Selectors 4 case-sensitivity flag, `[a=v i]`. cssselect rejects it outright, so the oracle is
+    /// the semantics: ASCII folding of the VALUE, on every operator, and nothing else about the compare
+    /// changes (an empty operand still matches nothing; `~=` still splits on ASCII whitespace).
+    #[test]
+    fn attribute_case_insensitive_flag() {
+        let h = "<a id=1 href=\"/Doc.PDF\" rel=\"NoFollow Me\" hreflang=\"EN-us\" type=\"SubMit\">x</a>";
+        for q in [
+            "[type=submit i]",
+            "[type=\"submit\" i]",
+            "[href^=\"/doc\" i]",
+            "[href$=\".pdf\" i]",
+            "[href*=\"OC.p\" i]",
+            "[rel~=nofollow i]",
+            "[hreflang|=en i]",
+        ] {
+            assert_eq!(ex(h, &format!("{q}::attr(id)")), v(&["1"]), "{q}");
+        }
+        // ...and without the flag every one of them is case-SENSITIVE, i.e. matches nothing here
+        for q in ["[type=submit]", "[href^=\"/doc\"]", "[href$=\".pdf\"]", "[href*=\"OC.p\"]",
+                  "[rel~=nofollow]", "[hreflang|=en]"] {
+            assert_eq!(ex(h, &format!("{q}::attr(id)")), Vec::<String>::new(), "{q}");
+        }
+        // `s` is the DEFAULT (case-sensitive), so it parses and changes nothing
+        assert_eq!(ex(h, "[type=\"SubMit\" s]::attr(id)"), v(&["1"]));
+        assert_eq!(ex(h, "[type=\"submit\" s]::attr(id)"), Vec::<String>::new());
+        // the flag folds ASCII ONLY, as CSS defines it — `É`/`é` are one character apart in Unicode and
+        // must not match, or the engine would be doing a Unicode fold no browser does here
+        let acc = "<p id=2 data-x=\"CAFÉ\">t</p>";
+        assert_eq!(ex(acc, "[data-x=\"café\" i]::attr(id)"), Vec::<String>::new());
+        assert_eq!(ex(acc, "[data-x=\"CAFÉ\" i]::attr(id)"), v(&["2"]));
+        // a multi-byte value must not panic a prefix/suffix compare on a non-char-boundary index
+        assert_eq!(ex(acc, "[data-x^=\"ca\" i]::attr(id)"), v(&["2"]));
+        assert_eq!(ex(acc, "[data-x$=\"É\" i]::attr(id)"), v(&["2"]));
+        assert_eq!(ex(acc, "[data-x*=\"AF\" i]::attr(id)"), v(&["2"]));
+        // an empty operand still matches nothing, flag or not (the CSS rule, unchanged)
+        assert_eq!(ex(h, "[href^=\"\" i]::attr(id)"), Vec::<String>::new());
+        // `i` is only a flag after whitespace: `[type=SubMiti]` is a five-character value
+        assert_eq!(ex(h, "[type=SubMiti]::attr(id)"), Vec::<String>::new());
+        assert!(audit_schema(&["[type=submit i]::attr(id)".into()], &[]).ok());
+    }
+
     #[test]
     fn xpath_union_or_and_descendant_attr_values() {
         // union: document-ordered across both members (parsel `//a/text() | //b/text()`)
@@ -778,7 +912,7 @@ mod tests {
         // XPath [N]: tag[N] = of-type; *[N] = nth element child; per-parent
         assert_eq!(ex(h, "//li[2]/text()"), v(&["b"]));
         assert_eq!(ex(h, "//ul/*[3]/text()"), v(&["s"]));
-        // positional INSIDE :not() must turn the counters on too (regression: it once didn't, so the
+        // positional INSIDE :not() must turn the counters on too (miss it and the
         // negation saw index 0 and excluded nothing)
         let li3 = "<ul><li>a</li><li>b</li><li>c</li></ul>";
         assert_eq!(ex(li3, "li:not(:first-child)::text"), v(&["b", "c"]));
@@ -957,17 +1091,17 @@ mod tests {
 
     #[test]
     fn dot_child_anchor_is_unsupported_not_wrong() {
-        // Regression for the `./…` child-anchor over-match: the matcher can't enforce a child anchor
-        // on a segment's first compound, so `./step` used to behave like `.//step` (wrong values).
-        // It is now unsupported -> empty column, never a wrong value.
+        // The `./…` child anchor is UNSUPPORTED, not approximated: the matcher cannot enforce a child
+        // anchor on a segment's first compound, and treating `./step` as `.//step` would return values
+        // the oracle does not have. Empty column, never a wrong value.
         //
         // flat: parsel `./h3/text()` on the doc root is [] (h3 is not a child of the document node);
         // rejecting it (empty column) matches that oracle exactly.
         let html = "<html><body><div><h3>A</h3></div><h3>B</h3></body></html>";
         assert_eq!(ex(html, "./h3/text()"), Vec::<String>::new());
         assert_eq!(ex(html, "./body/h3/text()"), Vec::<String>::new());
-        // grouped direct-child `./h3/text()` used to leak the nested `NEST`; now empty (unsupported),
-        // while the `.//h3/text()` descendant control still collects both, in document order.
+        // grouped direct-child `./h3/text()` is empty (unsupported) rather than leaking the nested
+        // `NEST`, while the `.//h3/text()` descendant control collects both, in document order.
         let ghtml = "<html><body><div class=card><h3>A</h3><div><h3>NEST</h3></div></div></body></html>";
         let rows = grp(ghtml, ".card", &["./h3/text()", ".//h3/text()"]);
         assert_eq!(rows, vec![vec![Vec::<String>::new(), v(&["A", "NEST"])]]);
@@ -1070,8 +1204,8 @@ mod tests {
         );
     }
     // libxml2 2.14 NESTS a same-tag dt/dd repeat instead of auto-closing it (unlike `li`/`td`/`option`
-    // above), and never auto-closes ruby annotations at all. The ported rule table that used to sit
-    // alongside `start_closes` asserted the HTML5 behavior for both and over-closed.
+    // above), and never auto-closes ruby annotations at all. A rule table ported from the HTML5 spec
+    // asserts the opposite for both and over-closes, which is why this one is derived from the oracle.
     #[test]
     fn dt_dd_same_tag_repeat_nests() {
         assert_eq!(ex("<dl><dt>a<dt>b</dl>", "dl > dt::text"), v(&["a"]));
@@ -1192,8 +1326,8 @@ mod tests {
         assert_eq!(ex("<div><table><tr><td>A</table>B</div>", "div::text"), v(&["B"]));
         assert_eq!(ex("<table><tbody><tr><td>A</tbody>B</table>", "td::text"), v(&["A"]));
         // `</body>` closes the document whether the page wrote the `<body>` or the engine synthesized
-        // it. On a bare fragment that used to be an unmatched end tag that coalesced the runs instead —
-        // a documented divergence that document-frame synthesis closed.
+        // it. Without frame synthesis it is an unmatched end tag on a bare fragment, which coalesces the
+        // runs either side instead.
         assert_eq!(ex("<body><div><table><tr><td>A</body>B", "td::text"), v(&["A"]));
         assert_eq!(ex("<div><table><tr><td>A</body>B", "td::text"), v(&["A"]));
         // a non-table container does NOT block, and a </div> matched inside a cell is honoured
@@ -1424,8 +1558,8 @@ mod tests {
     #[test]
     fn unicode_identifiers() {
         // CSS idents admit non-ASCII (class/id/tag), and attribute values with non-ASCII must match
-        // through combinators/brackets (regression: `split_structural` used to mangle multi-byte UTF-8
-        // via `c as char`). Oracle: parsel/cssselect accept all of these. (T6)
+        // through combinators/brackets — `split_structural` must not read bytes as chars (`c as char`),
+        // which mangles multi-byte UTF-8. Oracle: parsel/cssselect accept all of these. (T6)
         assert_eq!(ex("<p class=\"café\">x</p><p class=cafe>y</p>", ".café::text"), v(&["x"]));
         assert_eq!(ex("<p id=\"naïve\">x</p>", "#naïve::text"), v(&["x"]));
         assert_eq!(ex("<i data-k=\"日本\">m</i><i data-k=\"x\">n</i>", "[data-k=\"日本\"]::text"), v(&["m"]));
@@ -1746,10 +1880,11 @@ mod tests {
             v(&["café"])
         );
     }
-    /// An attribute NAME is raw page bytes while a selector's is UTF-8, so a non-ASCII one used to
-    /// agree only on a UTF-8 page: `[data-año]` matched there and returned NOTHING for the same
-    /// document in windows-1252, where lxml — which decodes before tokenizing — matches. Values were
-    /// never affected (they are decoded before comparison), which is what made it silent.
+    /// An attribute NAME is raw page bytes while a selector's is UTF-8, so it must be decoded before the
+    /// comparison or it agrees only on a UTF-8 page: `[data-año]` would match there and return NOTHING
+    /// for the same document in windows-1252, where lxml — which decodes before tokenizing — matches.
+    /// Values are unaffected either way (already decoded before comparison), which is what makes the
+    /// name half silent.
     #[test]
     fn encoding_non_ascii_attribute_names_are_decoded_before_comparison() {
         // windows-1252: `data-año` is `data-a\xf1o`, one byte where UTF-8 writes two
@@ -1890,9 +2025,9 @@ mod tests {
         );
         assert_eq!(ex(h, "noframes a::text"), Vec::<String>::new());
     }
-    /// The rest of libxml2's data modes. Each of these used to tokenize its CONTENT as markup, which is
-    /// worse than losing a value: it fabricates elements that are not in the document (and, because the
-    /// end tag it then honours is the wrong one, desynchronizes every offset after it).
+    /// The rest of libxml2's data modes. Tokenizing any of these elements' CONTENT as markup is worse
+    /// than losing a value: it fabricates elements that are not in the document and then honours the
+    /// wrong end tag, desynchronizing every offset after it.
     #[test]
     fn iframe_noembed_xmp_content_is_raw_text() {
         for t in ["iframe", "noembed", "xmp"] {
@@ -1994,7 +2129,7 @@ mod tests {
         assert_eq!(ex(doc, "html > body > p::text"), v(&["b"]));
         assert_eq!(ex(doc, "body > :first-child::text"), v(&["a"]));
 
-        // a bare fragment gets a body, and root-level text is no longer dropped
+        // a bare fragment gets a body, and root-level text is body text rather than dropped
         assert_eq!(ex("<div>a</div>", "body div::text"), v(&["a"]));
         assert_eq!(ex("abc", "body::text"), v(&["abc"]));
         assert_eq!(ex("abc<div>d</div>", "body::text"), v(&["abc"]));
@@ -2085,10 +2220,10 @@ mod tests {
                    v(&["t"]));
     }
 
-    /// A page whose FIRST tag is `<head>` or `<body>` writes no `<html>` — and still gets one. The frame
-    /// tags used to build only their own part, so the head sat at the root with no parent and a second
-    /// `<html>` was built for whatever followed `</head>`: `html > head`, `html > body` and
-    /// `head + script` were all empty while the values under them looked right.
+    /// A page whose FIRST tag is `<head>` or `<body>` writes no `<html>` — and still gets one. A frame
+    /// tag that builds only its own part leaves the head at the root with no parent and a second `<html>`
+    /// around whatever follows `</head>`, so `html > head`, `html > body` and `head + script` all come
+    /// back empty while the values under them look right.
     #[test]
     fn a_page_whose_first_tag_is_a_frame_part_still_gets_an_html() {
         assert_eq!(ex("<head id=H><title>t</title></head><p>y</p>", "html > head::attr(id)"),
@@ -2348,9 +2483,9 @@ mod tests {
         assert_eq!(ex("<div ==x class=c>y</div>", "div::attr(class)"), v(&["c"]));
     }
 
-    /// A start tag the response ends inside is DROPPED, whole — libxml2 and html5lib agree, and the
-    /// engine used to keep whatever it had scanned. That is the false-positive direction: an element,
-    /// with an attribute value holding the rest of the document, that no other parser reports.
+    /// A start tag the response ends inside is DROPPED, whole — libxml2 and html5lib agree. Keeping
+    /// whatever was scanned is the false-positive direction: an element, with an attribute value holding
+    /// the rest of the document, that no other parser reports.
     #[test]
     fn a_start_tag_cut_off_by_eof_is_dropped() {
         for tail in ["<a", "<a ", "<a href", "<a href=", "<a href=\"x", "<a href='x", "<a href=x"] {

@@ -258,7 +258,7 @@ def test_the_decoder_sweep_is_exhaustive_not_sampled():
     assert min(s[0] for s in cand) == 0x81 and max(s[0] for s in cand) == 0xFE
     assert min(s[1] for s in cand) == 0x40 and max(s[1] for s in cand) == 0xFE
     # no candidate can carry a byte that would break the `<p class="c">…</p>` wrapper, which is a
-    # property of the ranges — the filter that used to say so was dead code below 0x40
+    # property of the ranges themselves — a filter for it would be dead code below 0x40
     assert not [s for s in cand if any(b in D.MARKUP_BYTES for b in s)]
     # it must not be a function of any PYTHON CODEC: filtering on what `euc_jp` calls assigned is exactly
     # how the WHATWG-only class stayed invisible. Both witnesses have to be in it.
@@ -1004,30 +1004,41 @@ def test_the_coverage_gap_is_a_set_difference_not_a_difference_of_totals():
     rejects too, and the largest single refusal bucket was an empty comma-group member — invalid CSS that
     no port would ask for. So the seeded regression here is an engine whose refusals are ALL shared:
     its own total looks bad and its gap must be zero.
+
+    The same asymmetry runs the other way and needs its own bucket: a column the engine expresses and the
+    ORACLE refuses (`div:has([data-x])` and the rest of COMPATIBILITY.md's "Beyond lxml") is neither a gap
+    nor a shared refusal. Expressible% is scored over a column set the oracle defines, so a table built
+    from it alone can only ever report a deficit. `beyond` is the third count.
     """
     bench_engines = pytest.importorskip("bench_engines")
 
-    # column 0: both refuse (shared) — column 1: only we refuse (a real gap) — column 2: both express
+    # 0: both refuse (shared) — 1: only we refuse (gap) — 2: both express — 3: only the ORACLE refuses
     refusals = {
-        "parsel": ["cssselect rejects it", None, None],
-        "frostwork": ["cssselect rejects it", ":contains() is unsupported", None],
+        "parsel": ["cssselect rejects it", None, None, "cssselect rejects :has([x])"],
+        "frostwork": ["cssselect rejects it", ":contains() is unsupported", None, None],
     }
     got = bench_engines.coverage_gap(refusals, "parsel")
     assert "parsel" not in got, "the oracle cannot have a gap against itself"
-    kinds, shared = got["frostwork"]
+    kinds, shared, beyond = got["frostwork"]
     assert shared == 1
+    assert beyond == 1, "a column only the oracle refuses is coverage we have and it does not"
     assert dict(kinds) == {":contains() is unsupported": 1}
     assert sum(kinds.values()) == 1, "the shared refusal must not be counted as a gap"
 
     # an engine that only ever refuses what the oracle refuses has NO gap, however bad its own total
     all_shared = {"parsel": ["x", "y"], "frostwork": ["a", "b"]}
-    kinds, shared = bench_engines.coverage_gap(all_shared, "parsel")["frostwork"]
-    assert sum(kinds.values()) == 0 and shared == 2
+    kinds, shared, beyond = bench_engines.coverage_gap(all_shared, "parsel")["frostwork"]
+    assert sum(kinds.values()) == 0 and shared == 2 and beyond == 0
 
     # ...and one that refuses what the oracle expresses is all gap
     all_gap = {"parsel": [None, None], "frostwork": ["a", "b"]}
-    kinds, shared = bench_engines.coverage_gap(all_gap, "parsel")["frostwork"]
-    assert sum(kinds.values()) == 2 and shared == 0
+    kinds, shared, beyond = bench_engines.coverage_gap(all_gap, "parsel")["frostwork"]
+    assert sum(kinds.values()) == 2 and shared == 0 and beyond == 0
+
+    # ...and one that expresses everything the oracle refuses is all beyond, with no gap to report
+    all_beyond = {"parsel": ["x", "y"], "frostwork": [None, None]}
+    kinds, shared, beyond = bench_engines.coverage_gap(all_beyond, "parsel")["frostwork"]
+    assert sum(kinds.values()) == 0 and shared == 0 and beyond == 2
 
 
 def test_the_competitive_benchmark_refuses_to_time_engines_on_different_work():

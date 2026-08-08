@@ -163,10 +163,24 @@ struct Plan {
 impl Plan {
     /// Compile `flat_queries` + `groups` (the shapes `extract_grouped` accepts). Raises `ValueError`
     /// if the schema exceeds the member / sibling-bit budget.
+    ///
+    /// `first_only[c]` declares that flat column `c`'s consumer keeps only the FIRST value — the
+    /// single-valued cardinality `Page.field` / web-poet `field(all=False)` apply. When every column
+    /// says so and the schema is of an eligible shape, the scan STOPS once each has a value instead of
+    /// running to EOF. The columns are unchanged apart from values the caller was going to discard, so
+    /// the item is identical; see `crate::Plan::compile_first_only` for what disarms it. Omitted (the
+    /// default) means "keep everything", which is what a caller that has not thought about cardinality
+    /// must get.
     #[new]
-    #[pyo3(signature = (flat_queries, groups))]
-    fn new(flat_queries: Vec<String>, groups: Vec<(String, Vec<(String, String)>)>) -> PyResult<Self> {
-        let inner = crate::Plan::compile(&flat_queries, &group_queries(groups));
+    #[pyo3(signature = (flat_queries, groups, first_only=None))]
+    fn new(
+        flat_queries: Vec<String>,
+        groups: Vec<(String, Vec<(String, String)>)>,
+        first_only: Option<Vec<bool>>,
+    ) -> PyResult<Self> {
+        let first_only = first_only.unwrap_or_default();
+        let inner =
+            crate::Plan::compile_first_only(&flat_queries, &group_queries(groups), &first_only);
         budget_error(inner.budget_usage())?;
         Ok(Plan { inner })
     }
@@ -255,6 +269,23 @@ fn resolve_label(label: &str) -> Option<&'static str> {
     canonical_label(label)
 }
 
+/// The encoding `extract` would scan this document with, as a WHATWG canonical name. `encoding` is the
+/// caller/HTTP charset label, or `None` to sniff. See [`crate::detect_encoding`].
+///
+/// An already-decoded `str` is answered `"UTF-8"` without sniffing, for the reason [`Html::encoding`]
+/// gives: those bytes ARE UTF-8, and a `<meta charset>` surviving in a browser snapshot describes the
+/// document the browser already decoded, not the string in hand. Reporting the meta would be reporting
+/// an encoding the caller must not apply.
+#[pyfunction]
+#[pyo3(signature = (html, encoding=None))]
+fn detect_encoding(py: Python<'_>, html: Html<'_>, encoding: Option<&str>) -> PyResult<&'static str> {
+    if let Html::Str(_) = html {
+        html.encoding(py, encoding)?; // refuses a label that would decode those bytes wrongly
+        return Ok("UTF-8");
+    }
+    Ok(crate::detect_encoding(html.as_bytes(), encoding))
+}
+
 /// `Support` as a Python-facing `(supported: bool, reason: Optional[str])` tuple.
 fn support_tuple(s: &crate::Support) -> (bool, Option<String>) {
     (s.is_supported(), s.reason().map(str::to_string))
@@ -314,6 +345,7 @@ fn _frostwork(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(selector_terminals, m)?)?;
     m.add_function(wrap_pyfunction!(selector_node_identity, m)?)?;
     m.add_function(wrap_pyfunction!(resolve_label, m)?)?;
+    m.add_function(wrap_pyfunction!(detect_encoding, m)?)?;
     m.add_class::<Plan>()?;
     Ok(())
 }

@@ -1,8 +1,8 @@
 //! The document frame — `<html>`/`<head>`/`<body>` state and the questions the rules ask about it.
 //!
-//! **Why this is a module.** The frame rules used to read a different combination of two bare bools, a
-//! counter and an inline stack scan at each of six call sites, and four bugs in one 10000-page crawl
-//! sample were each a rule asking a PROXY question instead of the real one:
+//! **Why this is a module.** Spread across six call sites as a different combination of two bare bools,
+//! a counter and an inline stack scan, each rule ends up asking a PROXY question instead of the real one
+//! — four distinct bugs in one 10000-page crawl sample, all of that shape:
 //!
 //! | rule | asked | needed |
 //! |---|---|---|

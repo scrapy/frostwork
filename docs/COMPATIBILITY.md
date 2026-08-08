@@ -2,13 +2,13 @@
 
 Frostwork is a **no-fallback** engine: unlike engines that route anything outside their native subset
 to a full parser (Parsel/lxml) so results always match, Frostwork answers **every** query itself. So a
-query falls into one of three buckets:
+query falls into one of four buckets:
 
 | bucket | meaning |
 |---|---|
 | ✅ **supported** | runs on the streaming engine with the matching, ordering and value semantics stated in its row |
 | ≈ **divergent** | runs, but may differ from lxml on specific documented and bounded constructs |
-| ➕ **beyond** | runs, and answers where lxml/Parsel refuses or loses the value — collected in [Beyond lxml](#beyond-lxml--where-frostwork-answers-more-or-better) |
+| ➕ **beyond** | runs, and answers where lxml/Parsel refuses or loses the value — collected in [Beyond lxml](#beyond-lxml) |
 | ∅ **unsupported** | the engine produces an **empty result**; public Python APIs raise by default and expose this behavior with `strict=False` |
 
 The promise is *close to lxml, always one streaming pass, never a DOM*. Unless a row marks an exception,
@@ -18,8 +18,8 @@ documented raw-source outer-HTML exception.
 
 **Parity is the bar, not the ceiling.** "Close to lxml" is a one-directional phrase and this contract is
 not: a dozen constructs below run *here* and refuse, truncate or mis-decode *there*, from `:has([data-x])`
-to a UTF-16 response body. They are one section — [Beyond lxml](#beyond-lxml--where-frostwork-answers-more-or-better)
-— so a coverage number read off this document is not mistaken for the whole comparison.
+to a UTF-16 response body. They are one section — [Beyond lxml](#beyond-lxml) — so a coverage number
+read off this document is not mistaken for the whole comparison.
 
 For a quick, always-current headline of what runs, see the generated
 [selector support snapshot](SUPPORT_SNAPSHOT.md) (regenerate with
@@ -41,9 +41,11 @@ level, public Python APIs validate schemas and raise `UnsupportedSelector` by de
 | type / universal (`div`, `*`) | ✅ supported |
 | class / id (`.c`, `#i`) | ✅ supported |
 | attribute `[a]`, `[a=v]` | ✅ supported |
-| attribute operators `[a^=v]` `[a$=v]` `[a*=v]` `[a~=v]` `[a\|=v]` | ✅ supported (empty operand matches nothing; case-sensitive — matches lxml) |
+| attribute operators `[a^=v]` `[a$=v]` `[a*=v]` `[a~=v]` `[a\|=v]` | ✅ supported (empty operand matches nothing; case-sensitive by default — matches lxml) |
+| the Selectors 4 case-sensitivity flag — `[type=submit i]`, `[href$=".PDF" i]` (and the no-op `s`, which is the default) | ➕ **beyond** — valid CSS that cssselect rejects (`Expected ']', got <IDENT 'i'>`). ASCII folding of the VALUE, on every operator, exactly as CSS defines it: `[data-x="café" i]` does **not** match `CAFÉ`, because a Unicode fold is not what the flag means. A flag is only a flag after whitespace — `[a=vi]` is the two-character value `vi` — and any other letter (`[a=v x]`) stays ∅ unsupported |
 | attribute value **unquoted**: a CSS identifier only (`[a=v]`, `[a=-v]`, `[a=café]`) | ✅ supported. A non-identifier unquoted value (`[a=2]`, `[href^=/p]`, `[a=$v]`, `[a=--v]`, `[a=a.b]`) is ∅ unsupported (empty) — cssselect rejects those as a syntax error, so answering them would return values for a selector Parsel refuses. Quote it (`[a="2"]`, `[href^="/p"]`). A QUOTED value may hold anything except a lone trailing backslash, and **CSS escapes in it are decoded** the way cssselect decodes them — `[data-x="\61"]` selects `data-x="a"`, not the literal two characters. Same for a `::attr()` argument (`::attr(data-\6b)` = `::attr(data-k)`). An escape in a class / id / **type** / attribute *name* (`.\73 hared`, `#i\31`, `\70`, `[data-\6b]`) is ∅ unsupported (empty) rather than decoded |
 | `:not(<compound>)` incl. compound arg (`a:not(a.x)`) and chained (`:not(.x):not(.y)`) | ✅ supported |
+| `:not()` with a compound LIST — `p:not(.a, .b)` | ➕ **beyond** — Selectors 4, and exactly the chained spelling (`:not(.a):not(.b)`) the element must match none of. cssselect rejects the list and accepts the chain, which is what makes the chain a direct oracle for it. An empty member (`:not(.a, )`) is a syntax error to cssselect and stays ∅ unsupported |
 | descendant (`a b`), child (`a > b`) | ✅ supported |
 | adjacent / general sibling (`a + b`, `a ~ b`), incl. chains (`a ~ b ~ c`), a descendant/child **base** (`.list li ~ li`), and a trailing descendant/child **step** (`a + b c`, `input + label p::text`) | ✅ supported |
 | `::text` — self (`E::text`) and descendant-or-self (`E ::text`) | ✅ supported (per text node, whitespace kept, entities decoded) |
@@ -57,6 +59,7 @@ level, public Python APIs validate schemas and raise `UnsupportedSelector` by de
 | reverse position — `:last-child`, `:last-of-type`, `:only-child`, `:only-of-type`, `:nth-last-child(An+B)`, `:nth-last-of-type(An+B)` — on ONE compound of a lone selector. The value may be that element's **own** (`li:last-child::text`), its **subtree** (`li:last-child ::text`), or a **descendant's** (`li:last-child b::text`) | ✅ supported (resolved at the parent's close; `-of-type` needs a concrete tag). An own-value terminal streams; the other two are recovered afterwards by re-scanning the winner's raw span — see the note below |
 | reverse position in any OTHER shape — a **child** step into the value tail (`li:last-child > b::text`), a comma group, a `Many`/`One` sub-field, or `*`-of-type (`*:nth-last-of-type`) | ∅ unsupported (empty). The child step would need "depth exactly 1 within the span", which the depth-agnostic matcher can't express — use the descendant form |
 | `:has(<compound>)` / `:has(> <compound>)` — on ONE compound of a lone selector; the value may be that element's **own** (`div:has(a)::attr(id)`), its **subtree** (`div:has(a) ::text`), or a **descendant's** (`div:has(a) a::attr(href)`) | ✅ supported (resolved at the subject's own close). The inner is a single compound: tag/`*`, id, classes, attribute predicates, `:not(...)` — `:has(a)`, `:has(.price)`, `:has([data-src])`, `:has(#main)`, `:has(a.buy)`, `:has(:not(.hidden))`, `:has(> img)`. **≈ divergent** for id/attribute/`:not` inners — see below |
+| `:has()` with a relative selector LIST — `div:has(a, img)`, `div:has(> a, > img)`, `div:has([data-x], #main)` | ➕ **beyond** — the shape [scrapy/cssselect#138](https://github.com/scrapy/cssselect/issues/138) names as unsupported. An element matches if ANY member is found, so the column equals the union of the single-member spellings (`div:has(a), div:has(img)`), which is the oracle. Every member is one compound under the same relative combinator; a list MIXING them (`:has(> a, img)`) is ∅ unsupported, since a `:has()` carries one relation and answering it under whichever half arrived first would be a guess |
 | `:has()` on a PRECEDING-SIBLING compound — `C:has(..) ~ S` / `C:has(..) + S` (value from the later sibling `S`) | ✅ supported — same mechanism as the sibling text-predicate: `C`'s `:has` fires the sibling boundary at `C`'s close, `S` emits normally (single sibling combinator) |
 | `:has()` in any OTHER shape — an inner with a **chain/sibling** (`:has(.a .b)`, `:has(a + b)`) or a positional/reverse/`:has`/`:is` inside, multiple `:has`, a **child** step into the value tail (`div:has(a) > p::text`), or a `Many`/`One`/comma member | ∅ unsupported (empty) |
 | a QUOTED delimiter inside a functional pseudo's argument — `div:is(#a, [data-x=")"])`, `:not([title='a(b'])`, `:has([data-x="a, b"])`, `:is([class="a,b"])`, and the escaped forms (`[data-x="\)"]`) | ✅ supported — argument boundaries are quote- and escape-aware, so a `)` or `,` inside a value is data. Genuinely unterminated syntax (`:is(#a, [data-x=")"]::attr(id)`) stays ∅ unsupported (empty), matching cssselect's rejection |
@@ -236,8 +239,8 @@ DOM, no full tree construction). These rules were derived empirically against li
   `</body>`/`</html>` close the document whatever is open. This is one comparison, not a set of boundary
   elements: it is derived and verified as such by `tools/gen_tree_rules.py` over every (open × closing)
   pair in the element universe, and `tools/audit_tree_rules.py` re-checks every pair through the engine
-  by value. Reading it as a set is what cost a crawled page its table cells — the two coarsest cells were
-  right and the order inside the table machinery was missing.
+  by value. Reading it as a set of boundary elements instead costs a crawled page its table cells: the two
+  coarsest cells look right while the order inside the table machinery is missing.
 - **An end tag with no open element to match is DROPPED, and does not split the text node.** libxml2
   discards it and keeps the character data either side as ONE text node, so `<div>A</p>B</div>` yields
   `AB`, not `A` + `B`. Only source-adjacency across the dropped tag is re-joined: a comment, CDATA, PI,
@@ -285,22 +288,21 @@ DOM, no full tree construction). These rules were derived empirically against li
     wrong: in `<script><!--<script></script><div>fake</div></script>` the inner `</script>` only leaves
     the double-escaped state, and there is no real `div`.
   - `listing` and `noscript` **look** like they belong in the list and do not: libxml2 parses their
-    content as markup (it has scripting disabled). The whole element universe is swept for this in
-    `tools/audit_tree_rules.py`, so the set is no longer "the names we thought of".
+    content as markup (it has scripting disabled). `tools/audit_tree_rules.py` sweeps the whole element
+    universe for this, so the set is derived rather than guessed at.
 - **Character references**: libxml2/Parsel-compatible — legacy semicolon-less names, numeric edge
   cases (`&#00`→U+FFFD, win-1252 remap).
 - **A stray `=` where an attribute NAME should start is part of that name**, not a separator —
   `<div = class='x'>` has the class, exactly as libxml2 and html5lib read it (HTML5 calls this
   `unexpected-equals-sign-before-attribute-name`; html5lib names the attribute `U0003D`). Reading it as
-  a separator gave that attribute an empty name, dropped it, and swallowed the real `class` after it as
-  its *value*, so a crawled page's `div::attr(class)` came back a row short.
+  a separator instead gives the attribute an empty name, drops it, and swallows the real `class` after it
+  as its *value* — a crawled page's `div::attr(class)` comes back a row short.
 - **A start tag the response ends inside is dropped, whole** — `…<a href="/p2" class="` yields no
   element and no text, and the text before it is untouched. libxml2 and html5lib agree for every shape
-  (`<a`, `<a href`, `<a href=`, `<a href="x`). This used to be a documented divergence in the other
-  direction — the engine kept the attributes it had already scanned — which reported an `<a>` with an
-  `href` holding the rest of the document that no other parser sees. Truncated responses are not rare in
-  a crawl: one such page cost 6 divergent columns, and the shape was the largest remaining group in
-  `tools/diff_fuzz.py`.
+  (`<a`, `<a href`, `<a href=`, `<a href="x`). Keeping the attributes already scanned instead would
+  report an `<a>` whose `href` holds the rest of the document — an element no other parser has, i.e. a
+  false positive. Truncated responses are not rare in a crawl: one such page accounts for 6 divergent
+  columns and the shape is a major group in `tools/diff_fuzz.py`.
 - **Parsel's own input normalization is reproduced, in Parsel's order.** `Selector(text=…)` parses
   `text.strip().replace("\x00", "")` — trim the ends, then delete NUL — and the engine does the same to
   the whole document before tokenizing. The order matters: parsel's *other* entry point,
@@ -308,8 +310,8 @@ DOM, no full tree construction). These rules were derived empirically against li
   The text path is the one reproduced here, because it is the path a scraper is on — Scrapy's
   `response.selector` and web-poet's `HttpResponse` both build their selector from `response.text`.
   - **Raw NUL is deleted document-wide**, not at value-emit time: a NUL inside a tag or attribute *name*
-    is invisible to lxml (`<di\0v>` is a `div`), so dropping it only from emitted values made the two
-    sides disagree about the document's STRUCTURE and `div::text` came back empty. For UTF-16 input the
+    is invisible to lxml (`<di\0v>` is a `div`), so dropping it only from emitted values would leave the
+    two sides disagreeing about the document's STRUCTURE and `div::text` empty. For UTF-16 input the
     deletion applies to the DECODED text, since in UTF-16 every ASCII character carries a 0x00 byte. A
     character *reference* to NUL (`&#0;`) is a different thing and still becomes U+FFFD.
   - **A leading BOM may be INDENTED.** On a page that indents its doctype — `"    ﻿<!DOCTYPE HTML>"` —
@@ -323,8 +325,7 @@ DOM, no full tree construction). These rules were derived empirically against li
     real characters, and Parsel's decode agrees.
   - **Trailing whitespace is not a text node**, the other half of that same `strip()`. It can only ever
     move whitespace, so it changes no value — but it changes how many a column returns: a page ending
-    `…<option class="c3">\n` gives that option a text node here and none under Parsel. Matching it took
-    the malformed-HTML fuzzer's unexplained-divergence bucket from 22 to 7.
+    `…<option class="c3">\n` gives that option a text node here and none under Parsel.
   - **The whitespace stripped is Python's ASCII set, which includes VERTICAL TAB** (`0x0B`) — not HTML
     whitespace, and not Rust's `is_ascii_whitespace` either, both of which exclude it. It is a real page
     shape and not a curiosity: `0x0B` is not whitespace to libxml2, so an un-stripped leading one is
@@ -367,22 +368,113 @@ DOM, no full tree construction). These rules were derived empirically against li
   comes back as `<i><noframes>&lt;address&gt;x&lt;/address&gt;</noframes></i>` — re-parsing that yields
   the literal text `&lt;address&gt;…`, not what lxml itself parsed. The two engines *agree* on the value
   (`noframes::text` is `<address>x</address>` in both); they differ only in that lxml's outer HTML does
-  not round-trip and the raw source does. It shows up whenever a comparison re-parses both serializations,
-  which is how a crawl sample surfaced it on `<noframes>`, `<noscript>` and `<iframe>` content.
+  not round-trip and the raw source does. It shows up whenever a comparison re-parses both
+  serializations — on real pages, in `<noframes>`, `<noscript>` and `<iframe>` content.
+
+---
+
+## Beyond lxml
+
+Every row here is a query lxml/Parsel **refuses to run**, a value it **loses**, or a character it
+**cannot decode** — and Frostwork returns the browser-correct answer instead. They are collected because
+a one-directional headline ("N% of lxml") reads as a subset claim, and the set difference runs both ways.
+
+None of them is a licence to guess. Each is either valid CSS the oracle's *parser* rejects, or a place
+the oracle is measurably wrong about the document, and each names the gate that holds it — the same
+oracle-bug policy applied consistently: implement the correct behaviour, document the difference, prove
+it, and let the gate go red if upstream converges.
+
+### Selectors the oracle rejects
+
+| construct | Parsel / cssselect 1.5.0 | Frostwork | gate |
+|---|---|---|---|
+| `:has()` with an **id, attribute or `:not()`** inner — `div:has([data-x])`, `div:has(#main)`, `div:has(a[href])`, `section:has(:not(p))` | `SelectorSyntaxError` (part of cssselect's broader `:has()` limits, [scrapy/cssselect#138](https://github.com/scrapy/cssselect/issues/138)) | matched, with correct CSS semantics | `tests/test_python.py::test_has_widened_inners_match_correct_semantics` — a parsel/lxml ancestor walk, since parsel cannot evaluate these directly |
+| `:has()` with a relative selector **LIST** — `div:has(a, img)`, `div:has(> a, > img)` | `SelectorSyntaxError` — the same issue | matched; an element qualifies if ANY member is found | `tests/test_python.py::test_has_selector_list_matches_the_union_of_its_members`, oracled against `div:has(a), div:has(img)` — the union it means, spelled the way cssselect *can* run |
+| `:not()` with a compound **LIST** — `p:not(.a, .b)` | `SelectorSyntaxError` | matched; the element must match none of them | `tests/test_python.py::test_not_selector_list_matches_the_chained_spelling`, oracled against `:not(.a):not(.b)` — exactly equivalent, and accepted |
+| the **case-sensitivity flag** — `[type=submit i]`, `[href$=".PDF" i]` | `SelectorSyntaxError: Expected ']', got <IDENT 'i'>` | ASCII-folded value comparison on every operator, as Selectors 4 defines it | `tests/test_python.py::test_attribute_case_insensitive_flag_matches_an_lxml_fold`, oracled against an lxml `translate()` of the same test |
+| `:is()`/`:where()` **combined or chained** with another condition — `div.card:is(.a, .b)`, `x:is(a, b):is(c, d)` | correct at **≥ 1.5.0**; cssselect **≤ 1.4.0** ORs each alternative onto the base compound, so `div.a:is(.x, .c)` becomes `div[a or x or c]` — an over-match | correct AND-across-groups / OR-within-a-group at every cssselect version, since Frostwork does not depend on one | `tests/test_python.py::test_is_where_matches_correct_and_semantics`, oracled against the comma expansion both versions translate correctly |
+
+Bare type/`*`+class `:has()` inners agree with parsel exactly, so these are coverage the oracle refuses
+rather than semantic differences — and each is oracled against a spelling parsel *can* evaluate, so
+"cssselect cannot parse it" never becomes "nothing checks it". The `:is()` row is listed even though
+cssselect ≥ 1.5.0 agrees, because **the version is the user's, not ours**: a scraper comparing against a
+parsel that carries ≤ 1.4.0 sees Frostwork return the standards-compliant node set, a strict subset of
+that parsel's over-match. Upstream references:
+[scrapy/cssselect#135](https://github.com/scrapy/cssselect/issues/135),
+[#108](https://github.com/scrapy/cssselect/issues/108).
+
+Each has a REFUSAL beside it, because a parser that accepts more is not the same thing as an engine that
+answers more: a `:has()` list mixing relative combinators (`:has(> a, img)`), an empty `:not()` member
+(`:not(.a, )`) and a bogus attribute flag (`[a=v x]`) are all ∅ unsupported and reported. `tools/sel_fuzz.py`
+deliberately does **not** generate any of these forms — its oracle is parsel, so the correct answer would
+grade OVERMATCH; they are covered by
+`tests/test_python.py::test_selector_grammar_surface_obeys_the_contract`, which declares each one with its
+expected values. A new beyond-lxml capability goes in that sweep, not in the fuzzer's generators.
+
+### Values libxml2 loses
+
+| construct | lxml / Parsel | Frostwork | gate |
+|---|---|---|---|
+| an element or attribute **name longer than 100 characters** | libxml2 parses names into a fixed 100-byte buffer and silently keeps the first 100, so the page's real name matches nothing | the whole name, as html5lib and every browser keep it | `tests/test_python.py::test_names_longer_than_libxml2s_buffer_are_kept_whole` |
+| **content after `</html>`** | libxml2 stops building the tree there and discards the rest | kept, under the second root `<html>` libxml2 itself builds for a second `<html>` start tag | `src/lib.rs::content_after_close_html_is_kept`, which pins the browser comparison in both directions |
+| a **FORM FEED between class names** (`class="a&#12;b"`) | one class — cssselect's `.x` goes through `normalize-space(@class)`, which is XML whitespace and has no FF | two classes — HTML's ASCII whitespace set, which has it | `src/lib.rs::class_lists_split_on_ascii_whitespace_only`, which sweeps both separator sets; `[attr~=v]` tokenizes identically and is checked there too |
+| **outer HTML that re-parses to what was parsed** | lxml HTML-*escapes* raw-text content when it serializes, so `<i><noframes><address>x</address></noframes></i>` comes back with `&lt;address&gt;` and does not round-trip | raw source, which does | `tools/diff_lxml.py::verdict`, which re-parses **both** serializations rather than comparing bytes — the comparison that sees it, on `<noframes>`, `<noscript>` and `<iframe>` content |
+
+The first three are **extra values**, which is the one direction that can surprise a port — see the
+migration caveats under **Documented divergences** below, where the `</html>` entry keeps its full
+three-way browser comparison and the 100-character entry explains why a selector copied out of an lxml
+tree can come back empty here.
+
+### Encoding beyond w3lib and Parsel
+
+| construct | Parsel / w3lib | Frostwork | gate |
+|---|---|---|---|
+| **sniffing a `<meta charset>` at all** | `parsel.Selector(body=…)` never looks: it defaults to UTF-8 and every value carries U+FFFD. Scrapy users get sniffing from w3lib, one layer up | BOM → BOM-less UTF-16 → caller label → 4096-byte prescan → UTF-8, with no caller label needed | `tools/enc_check.py` |
+| a declaration **after `<body>`**, or **after an unsupported label** | w3lib's regex has a `\|body` alternative and gives up there, and it stops at its first hit rather than continuing past a label it cannot resolve | honoured — browsers do not stop at `<body>`, and WHATWG treats an unsupported label as "failure, continue" | the difference table under [Encoding](#deliberate-differences-from-w3lib), each row asserted in **both** directions so an upstream fix fails as stale |
+| a declaration **past byte 1024** | w3lib scans 4096 bytes, as Frostwork does — this row is against a *browser's* budget, not w3lib | honoured: WHATWG's 1024 is a streaming budget ("not to stall beyond that") and a whole-buffer engine has nothing to stall on. Legacy pages put `Content-Type` at byte ~1100–1600 behind a producer comment or a block of `og:` metas | `src/encoding.rs`; the window and its reasoning are under [Encoding](#encoding) |
+| a **UTF-16 response body** | lxml's HTML parser cannot parse UTF-16 bytes at all — `Selector(body=…, encoding="utf-16")` returns `[]`/errors | decoded, matching the decode-first result Scrapy uses | `src/lib.rs::encoding_utf16_bom_transcode`, `src/encoding.rs::bomless_utf16_is_detected_from_the_xml_prefix` |
+| legacy bytes the **Python codec leaves undefined** | U+FFFD — `AD A1` is the `①` of ordinary Japanese prose, which strict `euc_jp` has no mapping for | the WHATWG character a browser shows: **457** such sequences in euc-jp, **192** in big5 | `tools/decoder_sweep.py`, swept over every two-byte sequence in each legacy lead/trail space |
+| bytes where the **two indexes disagree** | Python's legacy codecs | WHATWG's: 5 windows-1252 bytes, 11 big5 and 6 euc-jp sequences, and 20 in gb18030 where GB18030-2005 moved characters out of the private use area (`A3A0` is U+3000 here, U+E5E5 there) | same sweep, gated by exact count in both directions |
+
+`iso-8859-1` **means windows-1252** here — the WHATWG label table, what browsers do, and what Scrapy does
+via `w3lib.encoding.resolve_encoding`. A *raw* `parsel.Selector(body=…, encoding="iso-8859-1")` bypasses
+w3lib and applies Python's literal latin-1 codec, so a real page's en dash (`0x96`) is `–` here and in
+Scrapy and `U+0096` there. A harness that grades against raw Parsel is measuring its own oracle
+construction.
+
+### Capabilities with no lxml equivalent
+
+- **`frostwork.detect_encoding(body, label=None)`** returns the encoding a scan would use, as a WHATWG
+  name — the whole resolution above, reachable without extracting anything. Parsel cannot answer it at
+  all (`Selector(body=…)` never sniffs), and w3lib answers differently in the places tabulated below. It
+  is the same function `extract` runs, not a second opinion.
+- **`frostwork.check` / `frostwork-audit`** answer "will this schema run?" *before* a scrape, per selector,
+  with a reason. lxml has no equivalent question to ask — every selector "works", and a wrong one is an
+  empty column at runtime. See [PYTHON.md](PYTHON.md) §4 and [MIGRATION.md](MIGRATION.md).
+- **Early exit on a single-valued schema.** A `Page`/`FrostPage` whose fields are all single-valued stops
+  scanning once every field has a value, so a page whose fields live in the head is answered without
+  tokenizing the body — something no engine that must build a tree first can do. It is not a mode and has
+  no accuracy switch: the values dropped are the ones a single-valued consumer discards anyway, so the
+  item is identical to a full scan's. One `all=True`/`join=` field, one group, or one deferred selector
+  (`:has()`, a reverse position, a text predicate) disarms it, because those answers can still change.
+- **One pass for the whole schema, and no tree**: throughput and a working set that tracks parser state and
+  returned values rather than page size. [BENCHMARKS.md](BENCHMARKS.md) has the numbers and the boundaries.
 
 ---
 
 ## Documented divergences (≈) — where "close" gives way
 
 These run without error but can differ from lxml. They are **0% on conformant/foreign input**; on
-deliberately malformed input the residual differences cluster under the constructs below.
+deliberately malformed input the residual differences cluster under the constructs below. Differences
+that run the *other* way — Frostwork answering where lxml refuses or loses the value — are their own
+section, [Beyond lxml](#beyond-lxml); the three of them that can still cost a port keep their caveat
+here.
 
-Do not read that as "real pages never hit this". An earlier version of this section claimed exactly
-that, and it was wrong twice over: the `dd`/`dt` same-tag close and the dropped-end-tag text split both
-fired on ordinary pages (doc-generator output) while the generated gate read 100% parity. Malformed
-input is not the same thing as rare input. `tools/diff_fuzz.py` now attributes each divergence to one of
-these constructs and reports anything left over as **NOVEL** — that bucket, not this list, is where the
-next bug will be:
+Do not read that as "real pages never hit this". **Malformed input is not the same thing as rare
+input**: ordinary doc-generator output hits the `dd`/`dt` same-tag close and the dropped-end-tag text
+split, and a generated-page gate can read 100% parity while both are wrong. `tools/diff_fuzz.py`
+attributes each divergence to one of these constructs and reports anything left over as **NOVEL** — that
+bucket, not this list, is where the next bug will be:
 
 - **Foster-parenting** — table-scoped elements outside a `<table>` (`<p>…<td>x</td>…`). libxml2
   relocates/ignores them; the engine nests them.
@@ -398,67 +490,40 @@ next bug will be:
 - **Nested `<form>`** — libxml2 *ignores* a `<form>` start tag while another `<form>` is open; the
   engine nests it, so the inner content sits one level deeper (`<div><form><form>x` → `div > *::text`
   is `x` in lxml, empty here).
-- **Names longer than 100 characters — a divergence *in our favor*, and one that can still cost a port.**
-  libxml2 parses element and attribute names into a fixed 100-byte buffer and silently keeps the first
-  100 characters; html5lib (and every browser) keeps the whole name, and so does Frostwork. Found on a
-  crawled page whose templating had run away and emitted `data-wp-` eleven times in front of
-  `oncontextmenu`. The catch is the direction: a spider written against lxml copies the **truncated**
-  name out of the tree it can see, and that selector then matches nothing here — an empty column, the
-  one failure mode worth naming. Selectors are matched as written; the fix is to use the real name from
-  the page source. Emulating a parser's buffer size would mean reporting a name that is not in the
-  document, which is the trade this project refuses everywhere else.
-- **Outer-HTML serialization** (raw source vs reflow — above).
-- **A FORM FEED between class names — a divergence *in our favour*, one cell wide.** A class list is
-  split on HTML's ASCII whitespace (space, tab, LF, **FF**, CR); lxml's `.x` goes through cssselect's
-  `normalize-space(@class)`, which is XML whitespace and has no FF. So `class="a&#12;b"` is two classes
-  here and one there. Everything else about the split now agrees, which is the point of naming this:
-  the engine used to split on *Unicode* whitespace, so a real Japanese page whose
-  `class="ctsListWrap fadein　clearfix"` uses an IDEOGRAPHIC SPACE (U+3000) matched both `.fadein` and
-  `.clearfix` — classes it does not have. `[attr~=v]` tokenizes identically and had the same bug.
+- **Names longer than 100 characters** ([➕](#values-libxml2-loses)) — **the port hazard.** libxml2 keeps
+  the first 100 characters of an element or attribute name; Frostwork, html5lib and every browser keep
+  the whole name. A spider written against lxml copies the **truncated** name out of the tree it can see,
+  and that selector then matches nothing here — an empty column. Selectors are matched as written; the fix
+  is to take the real name from the page source. Emulating a parser's buffer size would mean reporting a
+  name that is not in the document, which is the trade this project refuses everywhere else.
+- **Outer-HTML serialization** (raw source vs reflow — above; the re-parse direction is
+  [➕](#values-libxml2-loses)).
+- **A FORM FEED between class names** ([➕](#values-libxml2-loses)) — one cell wide, and the only cell:
+  everything else about the split agrees. The set is HTML's ASCII whitespace and nothing wider, which is
+  what a page like `class="ctsListWrap fadein　clearfix"` depends on — the separator there is an
+  IDEOGRAPHIC SPACE (U+3000), so those are two class names and not three. `[attr~=v]` tokenizes
+  identically.
 - **Frameset documents.** `<frameset>`/`<frame>`/`<noframes>` sit directly under `<html>` and such a
   document has no `<body>` at all — matched, but a rare enough shape that it is called out rather than
-  assumed. Everything else about the frame is now built (see the synthesis entry in the supported list).
+  assumed. The rest of the frame is synthesized (see the document-frame entry in the supported list).
+- **`:has()` with an id/attribute/`:not` inner** and **`:is()`/`:where()` combined with other conditions**
+  ([➕](#selectors-the-oracle-rejects)) — valid CSS whose *correct* semantics Frostwork implements
+  rather than capping itself at the oracle. `:is()` is the clearest case for that policy: cssselect
+  **≤ 1.4.0** over-matches it (`xpath_matching` folds each alternative into the base condition with
+  `add_condition(..., "or")`) and **≥ 1.5.0** agrees with Frostwork exactly. The test oracles against the
+  equivalent comma expansion, which both versions translate correctly, so it is valid on either side of
+  that line and also asserts the direct evaluation agrees — an upstream regression reopens the divergence
+  loudly rather than passing silently.
+- **Content after `</html>` is KEPT** ([➕](#values-libxml2-loses)) — **only partly browser-equivalent,
+  and the second port hazard.** libxml2 stops building the tree at `</html>` and silently discards
+  everything after it, so `<html><body>…</body></html><div>late</div>` gives lxml/Parsel an empty column
+  for `div::text` while Frostwork returns `late`. Keeping it is deliberate: trailing markup after
+  `</html>` is common in the wild (injected analytics, chat widgets, CDN/proxy-appended snippets), and
+  silently dropping real content is the worse failure for a scraper — same reasoning as `:is()`/`:has()`
+  above and the browser-aligned encoding choices below.
 
-- **`:has()` with an id/attribute/`:not` inner — a divergence *in our favor*.** cssselect only
-  accepts a type/`*`+classes inner inside `:has()` and *raises* `SelectorSyntaxError` on `:has([data-x])`,
-  `:has(#id)`, `:has(a[href])`, `:has(:not(.x))` (part of its broader `:has()` limitations —
-  cf. [scrapy/cssselect#138](https://github.com/scrapy/cssselect/issues/138), which notes `:has(a, b)`
-  selector lists are also unsupported). These are valid CSS, so Frostwork matches them correctly and is
-  simply *more capable* than raw parsel here — no wrong values, just coverage parsel refuses. Bare
-  type/`*`+class inners agree with parsel exactly. Oracled by
-  `tests/test_python.py::test_has_widened_inners_match_correct_semantics` (a parsel/lxml ancestor walk,
-  since parsel can't evaluate these directly). Unlike the `:is()` entry below, this one is still OPEN at
-  the pinned cssselect 1.5.0 — the two were checked together when that pin moved, and only `:is()` closed.
-- **`:is()`/`:where()` combined with other conditions — a divergence that UPSTREAM HAS SINCE CLOSED, and
-  the clearest evidence for the oracle-bug policy.** cssselect **≤ 1.4.0** mis-translates a `:is()` whose
-  compound carries any other condition: its `xpath_matching` ORs each alternative's condition onto the
-  *base* compound's condition, so `div.a:is(.x, .c)` becomes `div[a or x or c]` (matches every `div.a`,
-  `div.x`, or `div.c`) instead of `div[a and (x or c)]`, and chained `:is` ORs all groups together.
-  Frostwork implemented the **correct** CSS semantics (AND across groups, OR within) rather than capping
-  itself at the buggy oracle — and **cssselect 1.5.0 now produces exactly that**, so on the pinned
-  toolchain there is no divergence left to document: `div.a:is(.x, .c)` translates to
-  `div[a and (x or c)]` and parsel agrees with Frostwork on every form (`:is` and `:where`, combined,
-  chained, `[href]`-based and `:not`-based) that
-  `tests/test_python.py::test_is_where_matches_correct_and_semantics` checks.
-  It is kept in this list because the version is the user's, not ours: Frostwork does not depend on
-  cssselect, so a scraper comparing against a parsel that still carries **≤ 1.4.0** will see Frostwork
-  return the standards-compliant node set — a strict subset of that parsel's over-match. Upstream history:
-  [scrapy/cssselect#135](https://github.com/scrapy/cssselect/issues/135),
-  [#108](https://github.com/scrapy/cssselect/issues/108); the old over-match was in `xpath_matching`
-  (`add_condition(..., "or")` folding alternatives into the base). The test oracles against the
-  equivalent comma-expansion — which BOTH cssselect versions translate correctly — so it stays valid
-  whichever side of 1.5.0 the installed cssselect is on, and it asserts the direct evaluation agrees so
-  a future upstream regression reopens the divergence loudly instead of passing silently.
-- **Content after `</html>` is KEPT — a divergence *in our favor*, but only partly browser-equivalent.**
-  libxml2 stops building the tree at `</html>` and silently discards everything after it, so
-  `<html><body>…</body></html><div>late</div>` gives lxml/Parsel an empty column for `div::text` while
-  Frostwork returns `late`. Keeping it is deliberate: trailing markup after `</html>` is common in the
-  wild (injected analytics, chat widgets, CDN/proxy-appended snippets), and silently dropping real
-  content is the worse failure for a scraper — same reasoning as `:is()`/`:has()` above and the
-  browser-aligned encoding choices below.
-
-  **This is not a marginal divergence, and a 1000-page Common Crawl sample is what showed it.** The tag
-  is not always a trailing stray: it is also written in the *wrong place*. One sampled page ends its
+  **This is not a marginal divergence**, as a 1000-page Common Crawl sample shows. The tag is not always
+  a trailing stray: it is also written in the *wrong place*. One sampled page ends its
   head `</head></html><body><header>…` and puts 14 of its 17 KB after the `</html>`; another (a large
   retail page) carries a second `</html>` at the halfway mark. libxml2 keeps 2 elements of 100+ on the
   first and 40 `<a>` of 119 on the second, so a Parsel spider sees a near-empty page where a browser
@@ -494,6 +559,9 @@ next bug will be:
   container (`main .card`, not `.card`) rather than relying on the parser to drop the tail.
 
 ## Encoding
+
+This is the detail behind the encoding rows of [Beyond lxml](#encoding-beyond-w3lib-and-parsel):
+the whole subsystem is a place where Frostwork answers and the oracles do not.
 
 **The policy here is browser/WHATWG correctness, not w3lib parity.** Encoding *sniffing* is oracled
 against `w3lib.encoding.html_to_unicode` (what Scrapy uses) for everything the two agree on, because
@@ -606,12 +674,12 @@ An XML declaration **at** offset 0 *is* honoured, by both, including its precede
     no mapping for. Browsers use the WHATWG index, so this is an oracle limitation rather than a
     divergence to fix; it is counted rather than listed because it runs to hundreds of sequences.
   - Every label is swept over **every two-byte sequence in the legacy lead/trail space**, not over the
-    sequences the Python codec calls assigned — that filter is shaped like the oracle's own limitations
-    and is exactly what hid the class above. Two earlier versions of this gate were weaker: one sampled
-    800 characters per label and reported "full parity" for all of them (a crawled EUC-JP wiki containing
-    one `A1C1` disproved it), and the next enumerated by assignment. `tools/decoder_sweep.py` holds the
-    enumeration, the four disagreement classes and the expected counts; `tools/enc_check.py` gates every
-    one of them in both directions, so neither a new divergence nor one that quietly disappears can pass.
+    sequences the Python codec calls assigned. That filter is shaped like the oracle's own limitations, so
+    it hides exactly the class above; a sample is worse still, since one `A1C1` on one crawled EUC-JP wiki
+    is enough to disprove a "full parity" drawn from 800 characters per label. `tools/decoder_sweep.py`
+    holds the enumeration, the four disagreement classes and the expected counts; `tools/enc_check.py`
+    gates every one of them in both directions, so neither a new divergence nor one that quietly
+    disappears can pass.
   - Sequences **neither** index assigns differ only in how many U+FFFD come back (WHATWG replaces per
     maximal subpart, Python per byte). Counted, not listed: it is not text any real page contains.
 

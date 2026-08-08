@@ -46,6 +46,11 @@ def selector_node_identity(queries: List[str]) -> List[Tuple[Optional[str], bool
 def resolve_label(label: str) -> Optional[str]:
     """Canonical WHATWG encoding name for ``label`` (e.g. ``"UTF-8"``), or ``None`` if unrecognized."""
 
+def detect_encoding(html: Union[bytes, str], encoding: Optional[str] = ...) -> str:
+    """The encoding ``extract`` would scan this document with, as a WHATWG name: BOM → BOM-less UTF-16
+    prefix → ``encoding`` label → 4096-byte ``<meta>``/XML-declaration prescan → UTF-8. A ``str`` is
+    already-decoded text, so the answer is ``"UTF-8"`` without sniffing."""
+
 class Plan:
     """A schema compiled once (budget validated at construction) and reused across pages."""
 
@@ -53,7 +58,11 @@ class Plan:
         self,
         flat_queries: List[str],
         groups: List[Tuple[str, List[Tuple[str, str]]]],
-    ) -> None: ...
+        first_only: Optional[List[bool]] = ...,
+    ) -> None:
+        """``first_only[c]`` declares that flat column ``c``'s consumer keeps only the FIRST value. When
+        every column says so and the schema is eligible, the scan stops as soon as each has one instead
+        of running to EOF; the values a single-valued consumer sees are unchanged."""
     def extract(self, html: Union[bytes, str], encoding: Optional[str] = ...) -> List[List[str]]: ...
     def extract_grouped(
         self, html: Union[bytes, str], encoding: Optional[str] = ...

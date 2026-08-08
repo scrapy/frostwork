@@ -30,12 +30,13 @@ from typing import Any, Callable, Iterable, Iterator, List, Optional, Tuple, Uni
 
 from ._frostwork import Plan as _Plan
 from ._frostwork import audit_schema as _audit_schema
+from ._frostwork import detect_encoding as _detect_encoding
 from ._frostwork import extract as _extract
 from ._frostwork import extract_grouped as _extract_grouped
 from ._frostwork import resolve_label as _resolve_label
 
 __all__ = [
-    "extract", "extract_grouped", "check", "Page", "Item",
+    "extract", "extract_grouped", "check", "detect_encoding", "Page", "Item",
     "SchemaReport", "FieldReport", "GroupReport", "UnsupportedSelector",
 ]
 
@@ -150,6 +151,29 @@ def _validate_grouped(
     selectors: Tuple[str, ...], groups: Tuple[Tuple[str, Tuple[Tuple[str, str], ...]], ...]
 ) -> None:
     check(selectors, groups).raise_for_status()
+
+
+def detect_encoding(html: Bytesish, encoding: Optional[str] = None) -> str:
+    """The encoding :func:`extract` would scan ``html`` with, as a WHATWG name (``"windows-1252"``).
+
+    BOM → BOM-less UTF-16 prefix → ``encoding`` label → 4096-byte ``<meta>``/XML-declaration prescan →
+    UTF-8. Exposed on its own because nothing else in a scraper's stack answers this the way a browser
+    does: ``parsel.Selector(body=…)`` never sniffs (it defaults to UTF-8), and w3lib — what Scrapy
+    uses — stops at ``<body>`` and at the first declaration it cannot resolve. See the Encoding section
+    of docs/COMPATIBILITY.md for the enumerated differences.
+
+    Always returns a real encoding. A label naming none is ignored rather than propagated (WHATWG's
+    "failure, continue"), matching what :func:`extract` then does with the document; the stricter
+    validation :func:`extract` applies to a *caller's* label is deliberately not repeated here, since
+    the question this answers is "what will be used", not "is this input acceptable".
+    """
+    label = encoding
+    if label is not None and _resolve_label(label) is None:
+        try:  # a Python codec spelling (`latin-1`, `utf_8`) is normalized the way `extract` does
+            label = codecs.lookup(label).name
+        except LookupError:
+            label = None
+    return _detect_encoding(_as_scan_input(html), label)
 
 
 def extract(
@@ -527,13 +551,20 @@ class Page:
 
     def _get_plan(self):
         """The schema compiled to a native ``Plan`` ONCE, cached across pages (rebuilt only if the
-        schema changed). This is what turns per-page recompilation into per-schema compilation."""
+        schema changed). This is what turns per-page recompilation into per-schema compilation.
+
+        Per-column cardinality goes down with it, because that is what makes EARLY EXIT sound: a schema
+        of nothing but single-valued fields is finished as soon as each has a value, and the engine can
+        stop tokenizing rather than run to EOF. One ``field_all``/``field_join`` — or one group, or one
+        deferred selector — leaves it unarmed, since those consumers read the whole column.
+        """
         if self._plan is None:
             garg = [
                 (g["container"], [(sn, sel) for sn, (sel, _c) in g["subfields"].items()])
                 for g in self._groups
             ]
-            self._plan = _Plan(self._queries, garg)
+            first_only = [kind == "first" for kind, _sep in self._cards]
+            self._plan = _Plan(self._queries, garg, first_only)
         return self._plan
 
     def field(self, name: str, selector: str, *, map: Optional[Callable] = None) -> "Page":

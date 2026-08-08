@@ -4,7 +4,7 @@ engine's start-close table from that derivation.
 
 Why this exists. `implied_close::start_closes` ports libxml2's `htmlStartClose[]` pair list, and the
 first port was called "complete" while both its source and its audit universe were hand-picked lists of
-names someone remembered. That is the same failure that had already shipped three times here (the
+names someone remembered. That is the failure this file exists to prevent (the
 `dd`/`dt` arm, the missing `colgroup` rule, the tag name `s`), and it shipped again: `head`, `listing`,
 `xmp` and `plaintext` were absent, so `<html><head><title>T</title><body><p>X</p>` left `<body>` nested
 inside `<head>`, and `<div><listing>A<dd>B</dd></div>` put the `<dd>` inside the `<listing>`. A green
@@ -256,13 +256,12 @@ class Oracle:
         """`{(open, closing): blocks}` — with `<open>` open above the element `</closing>` matches, does
         libxml2 DISCARD the end tag instead of unwinding to the match? `None` where nothing can settle it.
 
-        This relation used to be two hand-written cells ("a table-scoped element blocks an ordinary end
-        tag; an open `<div>` does too"), and both the engine's table and the audit's probe list were
-        written from the same memory of libxml2. What neither of them said is that the rule is a
-        comparison, not a set: libxml2 gives each name an END PRIORITY and a stray end tag may only
-        unwind elements whose priority is at most its own. So an open `<tbody>` blocks `</tr>` — a real
-        page shape (`<tr><strong><tbody><td>…</strong><tbody></tr>`, from a table generator) where the
-        engine closed the row and libxml2 kept it open and nested every later row inside it.
+        The rule is a COMPARISON, not a set of boundary elements: libxml2 gives each name an END
+        PRIORITY and a stray end tag may only unwind elements whose priority is at most its own. Written
+        by hand it collapses to two cells ("a table-scoped element blocks an ordinary end tag; an open
+        `<div>` does too") — which loses the ORDER inside the table machinery, where an open `<tbody>`
+        blocks `</tr>`. A real table generator's page (`<tr><strong><tbody><td>…</strong><tbody></tr>`)
+        then has its row closed here and kept open, with every later row nested inside it, by libxml2.
         """
         if self._end_scope is None:
             # `never_open` plus `head`: a misplaced `<head>` is IGNORED rather than inserted, so like
@@ -557,8 +556,8 @@ def render_rust(oracle: Oracle) -> str:
     out.append("        },")
     out.append("    )")
     out.append("}")
-    # exactly one trailing newline: the blank separators between sections used to leave a blank LINE at
-    # EOF, which `git diff --check` reports and no editor puts back.
+    # exactly one trailing newline: the blank separators between sections otherwise leave a blank LINE
+    # at EOF, which `git diff --check` reports and no editor puts back.
     while out and not out[-1]:
         out.pop()
     return "\n".join(out) + "\n"

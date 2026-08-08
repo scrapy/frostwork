@@ -125,10 +125,10 @@ def mutants() -> list[tuple[str, str]]:
     for name in DATA_MODE_NAMES:
         out.append((f"mode:{name}", f"data_mode({name})"))
     # End-tag scope gets one mutant per NAME over the whole universe, not per pair: one table
-    # (`end_priority`) feeds the answer, so there is no second rule to mask the flip the way a hand-written
-    # id table used to mask `start_closes`. It replaced a `scope:<tag_id>` enumeration that could only
-    # reach the 19 ids the engine already had — which is how the ORDER inside the table machinery
-    # (`</tr>` may not unwind a `<tbody>`) went unprobed while this sweep reported full protection.
+    # (`end_priority`) feeds the answer, so there is no second rule to mask the flip the way a second,
+    # overlapping table would. Per NAME rather than per tag-id, because an id enumeration can only reach
+    # the ids the engine already has — leaving the ORDER inside the table machinery (`</tr>` may not
+    # unwind a `<tbody>`) unprobed while the sweep reports full protection.
     for name in PRIORITY_NAMES:
         out.append((f"prio:{name}", f"end_priority({name})"))
     for n in VOID_NAMES:

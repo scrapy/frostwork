@@ -1,7 +1,7 @@
 """One registry of field-processor CASES, shared by the web-poet differential and the surface gate.
 
 Both tools need the same three answers about every processor `zyte_common_items` ships — is it covered,
-what does a page object declare to reach it, and which gate proves it — and they used to answer separately.
+what does a page object declare to reach it, and which gate proves it — answered in one place, not three.
 That drifted twice in the same commit: `description_processor` was declined as reading a side channel
 (it does not; it processes its input and WRITES one) and `gtin_processor` as needing a non-standard
 signature (it is a plain `(value, page)`), so two real processors were excluded from every gate by a

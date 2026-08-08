@@ -195,7 +195,7 @@ def test_a_non_ascii_attribute_name_matches_under_a_legacy_encoding(label, name,
     document in windows-1252. lxml decodes the whole document before tokenizing, so it matches either
     way — it is the oracle here, over every predicate and the `::attr()` terminal.
 
-    Both front-ends, because they answer the same question and used to disagree: the XPath spelling was
+    Both front-ends, because they answer the same question and must not diverge: the XPath spelling is
     refused in EVERY encoding while the CSS one worked."""
     parsel = _oracle()
     text = f'<p {doc_name}="v">t</p>'
@@ -397,7 +397,7 @@ def test_page_many_rich_subspecs_match_webpoet():
 
 
 def test_item_get_on_group_name():
-    # get()/get_all() now surface group values (previously silently None/[]).
+    # get()/get_all() surface group values rather than silently answering None/[].
     grid = b"<div class=card><a>A</a></div><div class=card><a>B</a></div>"
     page = (Page()
             .many("cards", ".card", {"t": "a::text"})
@@ -1114,7 +1114,7 @@ def test_frame_element_node_handoff_end_to_end():
 def test_selector_terminals_is_the_engines_answer_not_a_heuristic():
     """The node-vs-scalar decision comes from the compiler. Guard the XPath rows in particular: a
     query-string heuristic reads `/text()` and `/@href` as node queries because neither carries a
-    `::`-pseudo, which is the bug that shape of code has already shipped once."""
+    `::`-pseudo, which is the bug that shape of code invites."""
     from frostwork._frostwork import selector_terminals
 
     assert selector_terminals(["h1::text", "a::attr(href)", "div.card"]) == ["text", "attr", "outer"]
@@ -1261,7 +1261,7 @@ def test_attrs_define_with_an_injected_dependency():
 
 
 def test_a_field_missing_from_the_plan_explains_itself():
-    """Insurance for any OTHER class-rebuilding decorator: the symptom used to be a bare `KeyError`, which
+    """Insurance for any OTHER class-rebuilding decorator. The symptom without it is a bare `KeyError`, which
     says nothing about the cause."""
     from frostwork.webpoet import FrostPage, field
 
@@ -1462,8 +1462,8 @@ def test_processor_resolution_matches_web_poets_own():
 
     So this does not restate the rule, it DERIVES it: for every combination of `out=` and nested
     `Processors`, ask web-poet (by observing whether a processor actually ran on an equivalent
-    hand-written field) and compare with `_processors_for`'s answer. `out=[]` is the cell that was wrong,
-    and it was wrong in the direction no test was looking."""
+    hand-written field) and compare with `_processors_for`'s answer. `out=[]` is the cell to watch — a
+    restated rule gets it backwards in the direction no other test looks."""
     from web_poet import WebPage
     from web_poet import field as wp_field
 
@@ -1559,9 +1559,9 @@ def test_frost_schema_includes_inherited_and_groups():
 @pytest.mark.webpoet_contract
 def test_a_manual_override_drops_the_inherited_selector():
     """A subclass may replace an inherited Frostwork field with a hand-written `@web_poet.field`. web-poet
-    resolves the field to the nearest declaration, so `to_item()` was already right — but the inherited
-    SELECTOR stayed in the merged schema, so the plan scanned a column nothing reads and `frost_schema()`
-    advertised a selector the page object no longer answers with."""
+    resolves the field to the nearest declaration, so `to_item()` is right regardless — the risk is the
+    inherited SELECTOR staying in the merged schema, which makes the plan scan a column nothing reads and
+    `frost_schema()` advertise a selector the page object does not answer with."""
     from web_poet import field as wp_field
 
     from frostwork.webpoet import FrostPage, Many, field
@@ -1703,9 +1703,9 @@ def test_an_override_also_clears_a_stale_strict_failure():
 @pytest.mark.webpoet_contract
 def test_many_rejects_web_poet_keywords_on_a_subfield():
     """`Many`/`One` shape a row from their subfields; the GROUP is the single `web_poet.field` web-poet
-    knows about, so `out=`/`cached=`/`meta=` on a subfield have nothing to attach to. They were accepted and
-    dropped — a processor silently not running is exactly the failure mode this integration already shipped
-    once — so they are refused at declaration, where the mistake is."""
+    knows about, so `out=`/`cached=`/`meta=` on a subfield have nothing to attach to. Accepting and
+    dropping them means a processor silently not running, which is the failure mode this integration is
+    most exposed to — so they are refused at declaration, where the mistake is."""
     from frostwork.webpoet import FrostPage, Many, One, field
 
     for maker in (Many, One):
@@ -2011,7 +2011,7 @@ def test_check_reports_supported_and_unsupported():
 
 def test_check_reads_a_dict_as_name_to_selector():
     # Regression: `{name: selector}` — the shape Page/FrostPage schemas are written in, and what
-    # `FrostPage.frost_schema()` returns — used to be ITERATED, auditing the field NAMES as selectors.
+    # `FrostPage.frost_schema()` returns — must be READ, not iterated: iterating audits the field NAMES.
     # A bare name like `title` is a valid type selector, so every field reported supported and
     # `report.ok` was True: a silently green audit of a schema that was never looked at.
     good, bad = "h1::text", "div:has(.a .b)::text"
@@ -2094,7 +2094,7 @@ def test_check_rejects_unknown_group_shapes(groups):
 
 
 def test_extract_rejects_dict_queries_rather_than_extracting_the_field_names():
-    # The extraction twin of the audit bug, and worse: iterating `{name: selector}` used to extract
+    # The extraction twin, and worse: iterating `{name: selector}` would extract
     # the NAMES (`title` matched <title>), a silently WRONG value. `extract` returns positional
     # columns, so a named schema means `Page`; a dict here is a caller mistake either way.
     html = b"<html><head><title>T</title></head><body><h1>H</h1></body></html>"
@@ -2532,11 +2532,214 @@ def test_has_widened_inners_match_correct_semantics():
         assert got == has_ids(e_css, f_css, child), frost_sel
 
 
+def test_has_selector_list_matches_the_union_of_its_members():
+    # `:has(a, img)` is a relative selector LIST — valid CSS that cssselect rejects outright
+    # (scrapy/cssselect#138). The oracle is the union of the single-member spellings it DOES accept:
+    # `E:has(a, b)` matches exactly the E-nodes matched by `E:has(a)` or `E:has(b)`.
+    parsel = _oracle()
+    import cssselect
+
+    html = (
+        b"<html><body>"
+        b'<div id="d1"><a>x</a></div>'
+        b'<div id="d2"><img src="s"></div>'
+        b'<div id="d3"><b>y</b></div>'
+        b'<div id="d4"><a>z</a><img src="t"></div>'
+        b'<div id="d5"><span><a>deep</a></span></div>'
+        b"</body></html>"
+    )
+    sel = parsel.Selector(body=html, encoding="utf-8")
+
+    # premise: the list spelling really is a syntax error to cssselect, so parsel cannot answer it
+    with pytest.raises(cssselect.SelectorSyntaxError):
+        sel.css("div:has(a, img)")
+
+    for frost_sel, oracle_sel in [
+        ("div:has(a, img)::attr(id)", "div:has(a), div:has(img)"),
+        ("div:has(img, a)::attr(id)", "div:has(a), div:has(img)"),  # member order is irrelevant
+        ("div:has(a, img, b)::attr(id)", "div:has(a), div:has(img), div:has(b)"),
+        ("div:has(a, nosuch)::attr(id)", "div:has(a)"),  # a member matching nothing adds nothing
+        ("div:has(> a, > img)::attr(id)", "div:has(> a), div:has(> img)"),  # child-scoped list
+    ]:
+        got = frostwork.extract(html, [frost_sel])[0]
+        want = sel.css(oracle_sel).xpath("@id").getall()
+        assert got == want, (frost_sel, got, want)
+
+    # a list MIXING relative combinators has no faithful representation (one `rel` per `:has`), so it is
+    # REPORTED unsupported rather than answered under whichever half arrived first
+    assert not frostwork.check(["div:has(> a, img)::attr(id)"]).ok
+    assert frostwork.check(["div:has(a, img)::attr(id)"]).ok
+
+
+def test_not_selector_list_matches_the_chained_spelling():
+    # `:not(a, b)` is Selectors 4 and cssselect rejects it, but it is exactly `:not(a):not(b)` — which
+    # cssselect accepts — so the chained spelling is a direct oracle.
+    parsel = _oracle()
+    import cssselect
+
+    html = (
+        b"<html><body>"
+        b'<p class="a">A</p><p class="b">B</p><p class="c">C</p><p>D</p>'
+        b'<p title="x, y">E</p>'
+        b"</body></html>"
+    )
+    sel = parsel.Selector(body=html, encoding="utf-8")
+
+    with pytest.raises(cssselect.SelectorSyntaxError):
+        sel.css("p:not(.a, .b)")
+
+    for frost_sel, oracle_sel in [
+        ("p:not(.a, .b)::text", "p:not(.a):not(.b)::text"),
+        ("p:not(.a, .b, .c)::text", "p:not(.a):not(.b):not(.c)::text"),
+        # a comma inside an attribute VALUE is data, not a member separator
+        ('p:not([title="x, y"])::text', 'p:not([title="x, y"])::text'),
+    ]:
+        got = frostwork.extract(html, [frost_sel])[0]
+        assert got == sel.css(oracle_sel).getall(), frost_sel
+
+    assert not frostwork.check(["p:not(.a, )::text"]).ok  # empty member — cssselect rejects it too
+
+
+def test_attribute_case_insensitive_flag_matches_an_lxml_fold():
+    # `[a=v i]` is Selectors 4; cssselect rejects the flag, so the oracle is the equivalent XPath fold
+    # evaluated by lxml itself.
+    parsel = _oracle()
+    import cssselect
+
+    html = (
+        b"<html><body>"
+        b'<a id="1" href="/Doc.PDF" type="SubMit" rel="NoFollow Me">x</a>'
+        b'<a id="2" href="/other.txt" type="reset" rel="nofollow">y</a>'
+        b"</body></html>"
+    )
+    sel = parsel.Selector(body=html, encoding="utf-8")
+    up, lo = "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"
+    fold = f"translate(@type,'{up}','{lo}')"
+
+    with pytest.raises(cssselect.SelectorSyntaxError):
+        sel.css("[type=submit i]")
+
+    assert frostwork.extract(html, ["[type=submit i]::attr(id)"])[0] == sel.xpath(
+        f"//a[{fold}='submit']/@id"
+    ).getall()
+    # ...and the flag really is what makes the difference: without it the same selector matches nothing
+    assert frostwork.extract(html, ["[type=submit]::attr(id)"])[0] == []
+    # every operator honours it, and `~=` still tokenizes on ASCII whitespace
+    for q, want in [
+        ('[href^="/doc" i]::attr(id)', ["1"]),
+        ('[href$=".pdf" i]::attr(id)', ["1"]),
+        ('[href*="OC.p" i]::attr(id)', ["1"]),
+        ("[rel~=nofollow i]::attr(id)", ["1", "2"]),
+    ]:
+        assert frostwork.extract(html, [q])[0] == want, q
+    # `s` is the default and parses as a no-op; the fold is ASCII-only, as CSS defines it
+    assert frostwork.extract(html, ['[type="SubMit" s]::attr(id)'])[0] == ["1"]
+    acc = "<p id=3 data-x='CAFÉ'>t</p>".encode()
+    assert frostwork.extract(acc, ['[data-x="café" i]::attr(id)'])[0] == []
+    assert frostwork.extract(acc, ['[data-x^="ca" i]::attr(id)'])[0] == ["3"]
+    assert frostwork.check(["[type=submit i]::attr(id)"]).ok
+
+
+def test_detect_encoding_reports_what_extract_will_use():
+    # The prescan is reachable on its own. Nothing else in a scraper's stack answers this the way a
+    # browser does: parsel never sniffs, and w3lib stops at `<body>` and at an unresolvable label.
+    for body, label, want in [
+        (b"\xef\xbb\xbf<p>x</p>", None, "UTF-8"),                       # BOM
+        (b"<meta charset=windows-1252><p>x</p>", None, "windows-1252"),
+        (b"<html><body><meta charset=shift_jis>", None, "Shift_JIS"),   # past w3lib's <body> stop
+        (b"<!-- charset=big5 --><meta charset=euc-jp>", None, "EUC-JP"),  # comments are skipped
+        (b"<meta charset=nosuch><meta charset=gbk>", None, "GBK"),      # failure, continue
+        (b"<p>x</p>", "iso-8859-1", "windows-1252"),                    # the WHATWG label table
+        (b"<p>x</p>", "latin-1", "windows-1252"),                       # a Python codec spelling
+        (b"<p>x</p>", "bogus-label", "UTF-8"),                          # unresolvable -> sniff
+        ('<?xml version="1.0"?><p>x</p>'.encode("utf-16-le"), None, "UTF-16LE"),
+        (b"<p>x</p>", None, "UTF-8"),
+        ("<p>café</p>", None, "UTF-8"),  # already-decoded str: those bytes ARE UTF-8
+    ]:
+        assert frostwork.detect_encoding(body, label) == want, (body[:40], label)
+
+    # ...and it is the encoding `extract` actually decoded with, not a second opinion
+    b = b"<meta charset=windows-1252><p>caf\xe9</p>"
+    assert frostwork.detect_encoding(b) == "windows-1252"
+    assert frostwork.extract(b, ["p::text"])[0] == ["café"]
+
+
+def test_single_valued_page_stops_scanning_without_changing_the_item():
+    # EARLY EXIT: a Page whose fields are all single-valued may stop as soon as each has a value. The
+    # observable contract is that the ITEM is unchanged — the values dropped are the ones a
+    # single-valued consumer discards anyway — so every case here compares against the full scan.
+    head = b"<html><head><title>T</title><link rel=canonical href=/a></head><body>"
+    tail = b"<title>LATER</title><link rel=canonical href=/b><p>body</p></body></html>"
+    doc = head + tail
+
+    page = frostwork.Page().field("t", "title::text").field("c", "link::attr(href)")
+    item = page.extract(doc)
+    assert item.to_dict() == {"t": "T", "c": "/a"}
+
+    # the same values a full scan's cardinality reduction gives; `extract` is never armed and still
+    # sees the tail, which is what proves the two are the same answer rather than the same bug
+    cols = frostwork.extract(doc, ["title::text", "link::attr(href)"])
+    assert [c[0] for c in cols] == ["T", "/a"]
+    assert len(cols[0]) == 2
+
+    # one multi-valued field disarms the whole schema
+    both = frostwork.Page().field("t", "title::text").field_all("all", "title::text")
+    assert both.extract(doc).to_dict() == {"t": "T", "all": ["T", "LATER"]}
+    joined = frostwork.Page().field_join("j", "title::text", "|")
+    assert joined.extract(doc).to_dict() == {"j": "T|LATER"}
+
+    # a field that never matches leaves the schema unsatisfied, so the scan runs to EOF and the fields
+    # that DO match are still complete
+    missing = frostwork.Page().field("t", "title::text").field("n", "nosuchtag::text")
+    assert missing.extract(doc).to_dict() == {"t": "T", "n": None}
+
+    # shapes that are not armed still answer correctly (deferred, outer-HTML, grouped)
+    d = b"<div>x<p>a</p><p>b</p></div><div>y<p>c</p></div>"
+    assert frostwork.Page().field("x", "p:last-child::text").extract(d).to_dict() == {"x": "b"}
+    assert frostwork.Page().field("x", "p").extract(d).to_dict() == {"x": "<p>a</p>"}
+    grouped = frostwork.Page().field("x", "div::text").many("rows", "div", {"p": "p::text"})
+    assert grouped.extract(d).to_dict() == {"x": "x", "rows": [{"p": "a"}, {"p": "c"}]}
+
+
+def test_names_longer_than_libxml2s_buffer_are_kept_whole():
+    # libxml2 parses element and attribute names into a fixed 100-byte buffer and silently keeps the
+    # first 100 characters. html5lib and every browser keep the whole name, and so does Frostwork —
+    # a divergence in our favor (docs/COMPATIBILITY.md, "Beyond lxml"). Found on a crawled page whose
+    # templating had run away and emitted `data-wp-` eleven times in front of `oncontextmenu`.
+    #
+    # Both halves are asserted. The oracle's truncation is a PREMISE: if libxml2 ever grows the buffer
+    # the entry stops being a divergence and this test says so instead of passing silently.
+    parsel = _oracle()
+    attr = "data-" + "x" * 110          # 115 chars
+    tag = "x" + "y" * 110
+    html = f"<p {attr}='v'>t</p><{tag}>u</{tag}>".encode()
+    sel = parsel.Selector(body=html, encoding="utf-8")
+
+    # premise: the oracle truncates at 100, so the page's REAL names are absent from its tree
+    assert sel.css(f"[{attr}]").getall() == []
+    assert sel.css(tag).getall() == []
+    assert sel.css(f"[{attr[:100]}]::text").getall() == ["t"]
+    assert sel.css(f"{tag[:100]}::text").getall() == ["u"]
+
+    # ...and Frostwork answers by the name the document actually carries
+    assert frostwork.extract(html, [f"[{attr}]::text"])[0] == ["t"]
+    assert frostwork.extract(html, [f"p::attr({attr})"])[0] == ["v"]
+    assert frostwork.extract(html, [f"{tag}::text"])[0] == ["u"]
+    assert frostwork.extract(html, [f"//p/@{attr}"])[0] == ["v"]
+
+    # THE PORT HAZARD, stated as an assertion: a selector copied out of the lxml tree carries the
+    # truncated name, which is in no document and matches nothing here. An empty column, never a value.
+    assert frostwork.extract(html, [f"[{attr[:100]}]::text"])[0] == []
+    assert frostwork.extract(html, [f"{tag[:100]}::text"])[0] == []
+    # and it is a supported selector, so the emptiness is the page's answer rather than a refusal
+    assert frostwork.check([f"[{attr[:100]}]::text", f"{tag[:100]}::text"]).ok
+
+
 def test_is_where_matches_correct_and_semantics():
     # `:is()` combined with a class/attr/id or another `:is` is implemented with CORRECT AND semantics.
     # This WAS a documented divergence: cssselect <= 1.4.0 mis-translates it, ORing the base condition
     # with the alternatives. Frostwork implemented the correct semantics anyway (the oracle-bug policy),
-    # and cssselect 1.5.0 has since converged on it.
+    # cssselect >= 1.5.0 agrees; <= 1.4.0 does not.
     #
     # The primary oracle is deliberately NOT parsel's direct `.css(":is(...)")` — it is the equivalent
     # comma-EXPANSION, which BOTH cssselect versions translate correctly. That keeps the test valid
@@ -2966,18 +3169,37 @@ def test_selector_grammar_surface_obeys_the_contract():
     other kind inside a value, namespace prefixes, tabs/newlines between combinators, CSS comments, and
     tight combinators. All of these are correct today — two as parity, two as an honest unsupported gap —
     and the test states which, so a change that turns a gap into a WRONG answer fails here.
+
+    "The oracle rejects it, so we must be empty" is the rule for everything EXCEPT the handful of valid
+    CSS constructs Frostwork answers deliberately (docs/COMPATIBILITY.md, "Beyond lxml"). Those are
+    declared with their expected values rather than exempted, because the rule only stays sharp if a new
+    capability has to be written down: loosening the assertion to "or we answer it" would retire the
+    check that catches a genuine over-match.
     """
     parsel = _oracle()
     html = (b'<html><body><p class="shared" data-k="v1" title="it\'s">A</p>'
             b'<p class="shared1">B</p><div><p id="i1">D</p></div></body></html>')
+    beyond = {
+        '[data-k="V1" i]::text': ["A"],          # Selectors 4 case flag
+        "p:not(.shared, .nope)::text": ["B", "D"],  # `:not()` selector list
+        "div:has(p, span) p::text": ["D"],       # `:has()` relative selector list
+    }
+    for sel, want_beyond in beyond.items():
+        with pytest.raises(Exception):  # premise: the oracle really cannot run these
+            parsel.Selector(body=html, encoding="utf-8").css(sel)
+        assert frostwork.check([sel]).fields[0].supported, f"{sel!r}: declared beyond, but refused"
+        assert frostwork.extract(html, [sel])[0] == want_beyond, sel
+
     for sel in [
         "[data-k='v1']::text", "[title='it\\'s']::text", '[title="it\'s"]::text',  # single quotes
         "*|p::text", "|p::text", "html|p::text",                                   # namespace prefixes
         "div  >  p::text", "div\t>\tp::text", "div\n p::text", "  p::text  ",      # internal whitespace
         "p/*c*/::text", "div/*x*/ p::text",                                        # CSS comments
         "div>p::text", "div+p::text", "div~p::text",                               # no space around combs
-        '[data-k="V1" i]::text',                                                   # case-insensitive flag
+        "[data-k=v1 x]::text",                     # a bogus attribute flag is still a syntax error
+        "p:not(.a, )::text", "div:has(> p, span)::text",  # the list forms' own refusals
     ]:
+        assert sel not in beyond
         try:
             want = parsel.Selector(body=html, encoding="utf-8").css(sel).getall()
         except Exception:
@@ -2997,8 +3219,8 @@ def test_xpath_grammar_surface_obeys_the_contract():
     Supported means parity with lxml; unsupported means EMPTY. The interesting half is the shapes no
     generator writes — `position()`, `last()`, `not()`, `!=`, unions of terminals, axes, `string()`,
     `count()`, bare node tests, `//@attr`, `@*`, chained predicates, non-literal operands. That last
-    family is what this branch set out to reject, so it is worth a standing check that rejecting them
-    stayed *empty* rather than drifting into a wrong answer.
+    family is the one this subset deliberately rejects, so it is worth a standing check that the refusal
+    is *empty* rather than a wrong answer.
     """
     parsel = _oracle()
     html = (b'<html><body><div id="d1" class="a b"><p class="x" data-k="v1">one</p>'

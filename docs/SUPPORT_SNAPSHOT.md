@@ -25,6 +25,12 @@ contract remains in `COMPATIBILITY.md`; this table is a drift tripwire for headl
 | XPath reverse subtree | flat | `//li[last()]//text()` | yes |
 | CSS :has | flat | `div:has(a)::text` | yes |
 | CSS widened :has | flat | `div:has([data-x])::attr(id)` | yes |
+| CSS :has list | flat | `div:has(a, img)::attr(id)` | yes |
+| CSS :has mixed-rel list | flat | `div:has(> a, img)::attr(id)` | no |
+| CSS :not list | flat | `p:not(.a, .b)::text` | yes |
+| CSS :not empty member | flat | `p:not(.a, )::text` | no |
+| CSS attr case flag | flat | `[type=submit i]::attr(id)` | yes |
+| CSS attr bogus flag | flat | `[type=submit x]::attr(id)` | no |
 | CSS :is | flat | `div:is(.a, .b)::text` | yes |
 | CSS quoted delimiter | flat | `div:is(#a, [data-x=")"])::attr(id)` | yes |
 | CSS unterminated pseudo | flat | `div:is(#a, [data-x=")"]::attr(id)` | no |

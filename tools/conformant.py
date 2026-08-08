@@ -159,7 +159,7 @@ def _select(rng, depth, ctr):
     for _ in range(rng.randint(1, 4)):
         n = _next(ctr)
         # `<optgroup>` RUNS with an omitted end tag are ordinary markup on real pages, and libxml2
-        # NESTS them (it does not auto-close a same-tag repeat) — previously ungenerated entirely.
+        # NESTS them (it does not auto-close a same-tag repeat).
         # Keep the "did I open one?" answer in a local: sniffing the output for `"optgroup"` also matches
         # `"</optgroup>"`, which appended stray closers into a CONFORMANT page.
         opened = rng.random() < 0.35

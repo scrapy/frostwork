@@ -51,7 +51,11 @@ def main() -> int:
     )
 
     # 2. no fallback, both halves: strict raises before scanning, strict=False gives an empty column
-    unsupported = "div:contains('x')::text"
+    #
+    # `:hover` rather than a selector that is merely unsupported TODAY: a coverage gap closes and the
+    # probe then fails for the best possible reason. A user-interaction pseudo-class has no answer in a
+    # static document, so it can never be implemented into parity and cannot rot that way.
+    unsupported = "p:hover::text"
     try:
         frostwork.extract(PRODUCT, [unsupported])
     except frostwork.UnsupportedSelector:

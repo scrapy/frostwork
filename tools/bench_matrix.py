@@ -221,7 +221,7 @@ def engine_bench_grouped(html_bytes, container, subs):
     return float(parts[2]), float(parts[4]), int(parts[5])
 
 
-# Wall-clock target per timed cell. The iteration count used to be derived from PAGE SIZE
+# Wall-clock target per timed cell. Deriving the iteration count from PAGE SIZE
 # (`4e8 / len(html)`), which is a proxy for cost that breaks the moment a cell's cost is driven by MATCH
 # COUNT instead: giving the table shape links — so the pool would stop extracting nothing — roughly doubled
 # Parsel's time there, and a flat 1500 iterations turned single cells into ten minutes. Budget the thing

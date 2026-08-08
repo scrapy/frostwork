@@ -15,10 +15,16 @@ their own production selectors, which is the mode that matters: the generated ta
 signature filter at −13% to −55% and the corpus scored it at zero, while the tokenizer fix the tables
 could not see was worth −75% on a real page),
 `bench_matrix.py`/`bench_corpus.py`/`bench_mem.py`/
-`bench_webpoet.py` (benchmarks — the last one times `to_item()` at the PAGE-OBJECT level and verifies both
+`bench_webpoet.py` (benchmarks; the last one times `to_item()` at the PAGE-OBJECT level and verifies both
 items are identical before timing either; `--boundaries` measures the three shapes where the healthy-path
 curve does not hold, one of which Parsel wins outright, because a benchmark that only reports its good cases
 is a brochure).
+
+**Every benchmark compiles the schema ONCE, outside the timed loop** — `src/bin/bench.rs` included. A page
+object is a class and its selectors are compiled at class-definition time, so timing a per-response re-parse
+measures a program nobody writes, and its cost falls hardest on the schemas with the most fields. Do not
+add a second "pessimistic" row beside it: publishing a configuration nobody runs reads as honesty and does
+the opposite, inviting the real number to be discounted as the optimistic case. One Frostwork row, compiled.
 
 Three decision functions across these tools exist because they decide a PUBLISHED number, so
 `tests/test_gates.py` can seed each one: `bench_engines.coverage_gap` (a refusal the oracle shares is not a

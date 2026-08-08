@@ -24,12 +24,11 @@
 //!   mode:<name>                   flip data_mode for that name (Normal <-> Rawtext)
 //! ```
 //!
-//! `close:` hooks the EFFECTIVE answer rather than a table, and that is worth keeping even now that only
-//! one table feeds it. Two used to — a hand-written tag-id table ORed with `start_closes` — and they
-//! overlapped, so mutating either alone was MASKED wherever the other closed the same pair: 51 such
-//! mutants survived every gate while the behaviour was in fact protected. (The id table has since been
-//! deleted: the generated relation closed every pair it did.) Mutating the answer costs nothing extra and
-//! keeps the sweep honest if a second table ever reappears.
+//! `close:` hooks the EFFECTIVE answer rather than a table, which matters as soon as more than one table
+//! feeds it. Two overlapping tables — say a hand-written tag-id one ORed with `start_closes` — MASK each
+//! other: mutating either alone is invisible wherever the other closes the same pair, and 51 such mutants
+//! survive every gate while the behaviour is in fact protected. Mutating the answer costs nothing extra
+//! and stays honest whatever feeds it.
 //!
 //! Driven by `tools/mutate_rules.py`; see docs/TESTING.md.
 

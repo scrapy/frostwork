@@ -1,6 +1,7 @@
 """
-Peak-memory + parse-time benchmark for the Frostwork engine: `frostwork.extract` (one streaming
-pass, no DOM) vs Parsel (parse once into an lxml tree, then one query per field).
+Peak-memory + parse-time benchmark for the Frostwork engine: one streaming pass, no DOM, schema
+compiled once (what `Page`/`FrostPage` do) vs Parsel (parse once into an lxml tree, then one query
+per field). Both sides are measured in their real reuse pattern.
 
 Why this exists: the throughput matrix (bench_matrix.py) proves Frostwork is *fast*, but its
 defining property — **no DOM** — is invisible without measuring memory. On a large page from which
@@ -93,9 +94,18 @@ def _child(engine, doc_path, mode, sel_json):
 
     if engine == "frostwork":
         import frostwork
+        from frostwork._frostwork import Plan
+
+        # Compiled ONCE, outside `work`, for the same reason the throughput benches do it: a page
+        # object's selectors are compiled at class-definition time, not per response. It also keeps the
+        # measurement honest in the direction that matters here — the plan is a fixed per-SCHEMA cost, so
+        # counting it inside the per-page peak would attribute schema memory to page size, which is the
+        # exact claim this file exists to test.
+        frostwork.check(list(queries)).raise_for_status()
+        plan = Plan(list(queries), [])
 
         def work():
-            return frostwork.extract(body, queries, "utf-8")
+            return plan.extract(body, "utf-8")
     elif engine == "parsel":
         import parsel
 

@@ -773,7 +773,12 @@ class FrostFields(ItemPage):
             (g.container, [(sn, sf.selector) for sn, sf in g.subfields.items()])
             for g in (cls._frostwork_groups[n] for n in cls._frostwork_group_names)
         ]
-        cls._frostwork_plan = _Plan(flat_queries, garg)
+        # Per-column cardinality goes down with the schema so the engine can EARLY-EXIT a page object
+        # whose fields are all single-valued: it stops as soon as each column has a value instead of
+        # tokenizing to EOF. One `all=True`/`join=` field, one group, one deferred selector disarms it,
+        # and the values are unchanged either way (see `Plan::compile_first_only`).
+        first_only = [cls._frostwork_specs[n][1][0] == "first" for n in cls._frostwork_flat_names]
+        cls._frostwork_plan = _Plan(flat_queries, garg, first_only)
         # Validate at class-definition time, so an unsupported selector fails loudly at import rather than
         # becoming a silently empty field in production. `strict=False` explicitly opts out.
         #

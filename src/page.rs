@@ -140,10 +140,21 @@ impl Page {
     /// want compilation to happen at an explicit initialization boundary.
     pub fn compile(&self) -> CompiledPage {
         CompiledPage {
-            plan: crate::Plan::compile(&self.queries, &[]),
+            plan: self.compile_plan(),
             names: self.names.clone(),
             cards: self.cards.clone(),
         }
+    }
+
+    /// The plan behind both entry points, so the one-shot and compile-once paths cannot differ in what
+    /// they tell the engine. Cardinality is passed down because it is what makes EARLY EXIT sound: a
+    /// schema of nothing but [`Card::First`] fields is finished as soon as each has a value, and the
+    /// engine can stop tokenizing (see [`crate::Plan::compile_first_only`]). Anything else — one
+    /// `field_all`, one `field_join` — leaves the schema unarmed, since those consumers read the whole
+    /// column.
+    fn compile_plan(&self) -> crate::Plan {
+        let first_only: Vec<bool> = self.cards.iter().map(|c| matches!(c, Card::First)).collect();
+        crate::Plan::compile_first_only(&self.queries, &[], &first_only)
     }
 
     /// Fill an [`Item`] from `html` in one streaming pass, sniffing the encoding
@@ -155,7 +166,7 @@ impl Page {
     /// Like [`extract`](Page::extract), but with an explicit caller/HTTP charset label (as Scrapy
     /// passes from the `Content-Type` header); `None` sniffs. See [`crate::extract`].
     pub fn extract_with_encoding(&self, html: &[u8], encoding: Option<&str>) -> Item {
-        let plan = self.plan.get_or_init(|| crate::Plan::compile(&self.queries, &[]));
+        let plan = self.plan.get_or_init(|| self.compile_plan());
         let cols = plan.extract(html, encoding).0;
         Item { names: self.names.clone(), cards: self.cards.clone(), cols }
     }
@@ -489,5 +500,87 @@ mod tests {
         let item = page.extract(product());
         assert_eq!(item.get("css"), item.get("xpath"));
         assert_eq!(item.get("xpath"), Some("/p/1"));
+    }
+
+    /// EARLY EXIT: an all-`Card::First` schema stops scanning once every field has a value. Proven by
+    /// what CANNOT be observed rather than by timing — a page whose tail is appended garbage that would
+    /// change the answer of a field the schema does not declare, and a `field_all` that disarms it.
+    #[test]
+    fn all_first_fields_stop_the_scan_and_keep_the_same_values() {
+        // The head answers both fields; the body then re-answers them and adds a third element.
+        let head = b"<html><head><title>T</title><link rel=canonical href=/a></head><body>";
+        let tail = b"<title>LATER</title><link rel=canonical href=/b><p>body</p></body></html>";
+        let doc = [&head[..], &tail[..]].concat();
+        let first = Page::new().field("t", "title::text").field("c", "link::attr(href)");
+        let item = first.extract(&doc);
+        assert_eq!(item.get("t"), Some("T"));
+        assert_eq!(item.get("c"), Some("/a"));
+
+        // ...and the values are what a FULL scan's cardinality reduction gives, which is the whole
+        // contract: `extract` still sees the tail, and its first values are the same two.
+        let cols = crate::extract(&doc, &["title::text".into(), "link::attr(href)".into()], None);
+        assert_eq!(cols[0].first().map(String::as_str), item.get("t"));
+        assert_eq!(cols[1].first().map(String::as_str), item.get("c"));
+        assert_eq!(cols[0].len(), 2, "extract itself is never armed — it must still see the tail");
+
+        // One multi-valued field disarms the whole schema, because its consumer reads the whole column.
+        let mixed = Page::new().field("t", "title::text").field_all("all", "title::text");
+        let item = mixed.extract(&doc);
+        assert_eq!(item.get_all("all"), ["T".to_string(), "LATER".to_string()]);
+        assert_eq!(item.get("t"), Some("T"));
+
+        // A join field reads the whole column too, and must not be truncated. (`get` is
+        // cardinality-INDEPENDENT — it is always the first value — so the join is read through `to_json`.)
+        let joined = Page::new().field_join("j", "title::text", "|");
+        assert_eq!(joined.extract(&doc).to_json(), r#"{"j":"T|LATER"}"#);
+
+        // A field the page never matches leaves the mask unfilled, so the scan runs to EOF and the
+        // fields that DO match are still complete — an unsatisfiable schema must not lose values.
+        let missing = Page::new().field("t", "title::text").field("nope", "nosuchtag::text");
+        let item = missing.extract(&doc);
+        assert_eq!(item.get("t"), Some("T"));
+        assert_eq!(item.get("nope"), None);
+
+        // Shapes that are NOT armed still answer correctly: a deferred predicate needs a close that may
+        // come after the mask fills, and `normalize-space` accumulates over a whole subtree.
+        let d = b"<div>x<p>a</p><p>b</p></div><div>y<p>c</p></div>";
+        assert_eq!(Page::new().field("x", "p:last-child::text").extract(d).get("x"), Some("b"));
+        assert_eq!(Page::new().field("x", "div:has(p)::text").extract(d).get("x"), Some("x"));
+        assert_eq!(
+            Page::new().field("x", "normalize-space(//div)").extract(d).get("x"),
+            Some("xab")
+        );
+    }
+
+    /// An outer-HTML field IS armed — it is the shape early exit pays best on, since a bare-element
+    /// value retains a whole element's source per match — but only while no capturing element is OPEN.
+    /// NESTING is what makes that a real case rather than a hypothetical: the inner match satisfies the
+    /// column while the outer one is still open, and captures are scattered in START order, so stopping
+    /// there would hand the column the outer element's span measured to end-of-input.
+    #[test]
+    fn an_outer_html_first_field_stops_only_once_no_capture_is_open() {
+        let flat = b"<div class=card>A</div><div class=card>B</div><p>tail</p>";
+        let page = Page::new().field("c", "div.card");
+        assert_eq!(page.extract(flat).get("c"), Some("<div class=card>A</div>"));
+
+        // NESTED: the inner card closes first and satisfies the column while the outer is still open.
+        let nested = b"<div class=card id=out><div class=card id=in>I</div>tail</div><p>after</p>";
+        let got = page.extract(nested);
+        // the full scan's first-by-start value is the OUTER card, with its real end tag
+        let full = crate::extract(nested, &["div.card".to_string()], None);
+        assert_eq!(got.get("c"), full[0].first().map(String::as_str));
+        assert_eq!(
+            got.get("c"),
+            Some("<div class=card id=out><div class=card id=in>I</div>tail</div>"),
+            "a span running to end-of-input would silently swallow the rest of the document"
+        );
+
+        // deeper nesting, and a second field so the mask needs more than the capture
+        let two = Page::new().field("c", "div.card").field("t", "p::text");
+        let doc = b"<div class=card id=a><div class=card id=b><div class=card id=c>x</div></div></div><p>P</p><p>Q</p>";
+        let full = crate::extract(doc, &["div.card".to_string(), "p::text".to_string()], None);
+        let item = two.extract(doc);
+        assert_eq!(item.get("c"), full[0].first().map(String::as_str));
+        assert_eq!(item.get("t"), full[1].first().map(String::as_str));
     }
 }

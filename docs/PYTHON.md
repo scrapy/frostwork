@@ -22,11 +22,10 @@ python -m venv .venv
 `--extras=webpoet` installs the supported web-poet release. Drop it if you only need
 `extract`/`Page`/`frostwork-audit`. Wheels are **abi3** (`abi3-py310`) and support CPython ≥ 3.10.
 
-**3.10 is the floor for everything** — core and extra alike. The core used to run on 3.9, with the
-web-poet extra the stricter half; the floors converged when the wheel moved to `abi3-py310` so the engine
-could borrow a `str`'s UTF-8 view instead of copying the document (`PyUnicode_AsUTF8AndSize` is
-limited-API only from 3.10). Python 3.9 reached end of life in October 2025. The extra supports
-`web-poet >= 0.24.1, < 0.25`, the release line exercised by the integration gates.
+**3.10 is the floor for everything** — core and extra alike. The wheel is `abi3-py310` so the engine can
+borrow a `str`'s UTF-8 view instead of copying the document (`PyUnicode_AsUTF8AndSize` is limited-API
+only from 3.10), and web-poet requires 3.10 as well. Python 3.9 reached end of life in October 2025. The
+extra supports `web-poet >= 0.24.1, < 0.25`, the release line exercised by the integration gates.
 
 ## 1. The primitive
 
@@ -45,6 +44,18 @@ sniffing continues.
 
 Unsupported queries raise `UnsupportedSelector` before the HTML is scanned. Pass `strict=False` for
 permissive empty columns. [COMPATIBILITY.md](COMPATIBILITY.md) defines selector, value and encoding behavior.
+
+`detect_encoding(html, encoding=None)` answers the sniffing half on its own, as a WHATWG name:
+
+```python
+frostwork.detect_encoding(b"<html><body><meta charset=windows-1252>")   # 'windows-1252'
+frostwork.detect_encoding(b"<p>x</p>", "latin-1")                       # 'windows-1252'
+```
+
+It is the same resolution `extract` runs, not a second opinion — useful when the rest of a pipeline needs
+the label too. Parsel cannot answer it (`Selector(body=…)` never looks at `<meta charset>`), and w3lib
+stops at `<body>` and at the first declaration it cannot resolve; see
+[COMPATIBILITY.md](COMPATIBILITY.md#encoding) for the enumerated differences.
 
 ## 2. Declarative `Page` / `Item`
 
@@ -67,6 +78,12 @@ item.to_json()           # same, JSON (UTF-8 preserved)
 
 Build the schema once and reuse the `Page` across responses. The document scan is shared; matching
 work grows with selector count instead of repeating a full parse/query workflow per field.
+
+A schema of nothing but `field(...)` (single-valued) also **stops scanning** once every field has a
+value, so a page whose fields live in the head never tokenizes the body. It is automatic and has no
+accuracy trade-off — the values skipped are the ones a single-valued field discards anyway. One
+`field_all`/`field_join`, one `many`/`one` group, or one deferred selector (`:has()`, `:last-child`, a
+text predicate) turns it off, because those answers can still change further down the page.
 
 Pass `map=fn` to transform a field's shaped value in Python (never in the scan) — e.g.
 `.field("price", ".price::text", map=lambda s: s.lstrip("$"))` or

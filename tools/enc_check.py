@@ -31,7 +31,7 @@ for label, sample in CASES:
             f'<p class="c">{sample}</p><a title="{sample}" href="/x">link</a>'
             f'<div data-v="{sample}">d</div><span>a{sample}b</span></body></html>')
     # A label the oracle toolchain cannot handle is an UNTESTED label, not a passing one. Both arms here
-    # used to `continue` silently, so a codec or parsel change could have dropped a whole charset out of
+    # must not `continue` silently: a codec or parsel change would then drop a whole charset out of
     # the sweep while it went on printing a ratio of the cases that were left.
     try:
         body = html.encode(label)

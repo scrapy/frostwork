@@ -72,9 +72,9 @@ Instead it applies the small set of implied-close rules libxml2 actually uses (`
   repeat auto-closes for some list/table elements and *nests* for others; `<tbody>` closes an open row
   and `<thead>` does not; libxml2's start-close relation is over tag *names* and is finer than any
   grouping the engine might impose, so two elements that look interchangeable behave differently. Any
-  grouping you would reach for by intuition is wrong somewhere. The engine used to carry a second,
-  coarser close table over tag *ids* and OR the two; deriving the name relation made it redundant, and
-  proving that (every id-pair answer already implied by the generated table) let it be deleted.
+  grouping you would reach for by intuition is wrong somewhere. One derived name relation is therefore
+  the whole answer — a coarser table over tag *ids* ORed alongside it adds no decision the generated
+  table does not already imply.
 - **Mutation targets the ANSWER, not a cell.** `tools/mutate_rules.py` flips the *effective* close
   decision for a name pair — and, separately, the data mode for a name — rather than one table entry,
   because a cell whose answer is also reachable another way is masked and the sweep then reports it
@@ -241,9 +241,9 @@ descendant's emission and stays an empty column.
   a large page's scan, but on small pages it dominates: ~3× fewer µs/page on a 244-byte page with 8
   selectors. `extract`/`extract_grouped` remain as one-shot convenience (a throwaway `Plan`).
 - **One-sided signature filter** (`matcher/sig.rs`, described under *Pipeline*) — the matcher's cost is
-  `selectors × elements`, and every pair used to pay string work: a `memcmp` per tag test, and per class
-  test an `attrs` scan plus a fresh split of `class=`. The filter answers "could this compound match at
-  all?" in one AND, which is where a class-led, high-field-count schema gets most of its time back:
+  `selectors × elements`, and the unfiltered form of that pair is string work: a `memcmp` per tag test,
+  and per class test an `attrs` scan plus a fresh split of `class=`. The filter answers "could this
+  compound match at all?" in one AND, which is where a class-led, high-field-count schema saves most:
   −13% at 4 class-led fields, −24% at 8, −41% at 16, −54% at 32 on the utility-CSS page; −10%/−22% at
   8/32 on the product listing; −2% to −19% on the tag-led pools, which use it far less. Each KIND of bit
   is included only above `sig::BITS_MIN` tests of that kind, dropped from both sides together.

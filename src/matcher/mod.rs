@@ -26,7 +26,7 @@ use crate::implied_close::{
     FrameContent,
 };
 use crate::selector::{
-    AttrPred, Comb, Compound, Has, ReversePos, Selector, Terminal, TextPred,
+    Comb, Compound, Has, ReversePos, Selector, Terminal, TextPred,
 };
 #[cfg(test)]
 use crate::selector::{TextAxis, TextOp};
@@ -387,15 +387,7 @@ fn collect_interesting(c: &Compound, out: &mut Vec<Box<str>>) {
         add(out, "id");
     }
     for p in &c.attrs {
-        match p {
-            AttrPred::Exists(n)
-            | AttrPred::Eq(n, _)
-            | AttrPred::Prefix(n, _)
-            | AttrPred::Suffix(n, _)
-            | AttrPred::Substr(n, _)
-            | AttrPred::Includes(n, _)
-            | AttrPred::DashMatch(n, _) => add(out, n),
-        }
+        add(out, &p.name);
     }
     for neg in &c.negations {
         collect_interesting(neg, out);
@@ -763,10 +755,10 @@ fn to_segments(sel: &Selector) -> (Vec<Segment>, Vec<bool>) {
 /// A one-sided reject for attribute MATERIALIZATION, the same shape as the signature filter one level
 /// down: a 64-bit set of the (first byte, length) pairs the schema's "interesting" attribute names have.
 ///
-/// Every raw attribute of every element used to be compared against every interesting name, so the cost
-/// was `attrs × interesting` `eq_ignore_ascii_case` calls per element — and it grew with schema size
-/// exactly where it hurts, since a 32-field attribute-led schema names about 30 attributes while a real
-/// element carries half a dozen the schema never asked for. One bit test rejects those.
+/// Unfiltered, every raw attribute of every element is compared against every interesting name:
+/// `attrs × interesting` `eq_ignore_ascii_case` calls per element, growing with schema size exactly where
+/// it hurts, since a 32-field attribute-led schema names about 30 attributes while a real element carries
+/// half a dozen the schema never asked for. One bit test rejects those.
 ///
 /// One-sided in the same direction and for the same reason as `sig`: a set bit is NECESSARY, never
 /// sufficient, so a survivor still faces the exact comparison. A false negative here would silently drop
@@ -853,6 +845,10 @@ pub struct CompiledSchema {
     // deferred (preceding-sibling-predicate) boundary fires only at its `C`'s close, not at open. All
     // ones when no Case-B selector is compiled — the hot sibling path is then unchanged.
     trig_immediate_mask: u64,
+    // EARLY EXIT. `stop_mask` is the set of live flat columns that must each hold a value before the scan
+    // may stop; 0 disarms it, which is the default and every path that has not opted in. See
+    // `arm_early_exit` for what makes a schema eligible and `Matcher::done` for the per-token test.
+    stop_mask: u128,
     // What the compiled compounds require of an element signature (see `sig::Wants`) — derived by the
     // same walk that fills the `req`s, so the two cannot disagree. That is the whole safety argument
     // for letting the scan build LESS than a full signature: a kind of bit no `req` asks for can be
@@ -878,6 +874,14 @@ pub struct Matcher<'a> {
     // by member; lxml orders a union by document position. Flushed sorted and deduped on `(col, offset)`,
     // which is a node identity only because `uniform_node_terminal` gates the column.
     mixed: Vec<(usize, usize, String)>,
+    // EARLY EXIT: which of `schema.stop_mask`'s columns already hold a value. `done()` is
+    // `satisfied == stop_mask`, and `stop_mask == 0` (the default) makes that permanently false, so an
+    // unarmed schema pays one `u128` compare per markup token and nothing else.
+    satisfied: u128,
+    // How many elements with a pending outer-HTML capture are OPEN. Stopping while one is would make
+    // `finish_grouped` close it at end-of-input and hand its column a span the element does not have;
+    // see `CompiledSchema::arm_early_exit`. Only maintained for an armed schema.
+    open_captures: usize,
     open_instances: Vec<OpenInstance>,      // stack of currently-open container instances (LIFO with elements)
     group_rows: Vec<Vec<(u64, Vec<Vec<String>>)>>, // per group: finished rows (seq, sub-columns), sorted at finish
     next_seq: u64,              // monotonic document-order rank for instances
@@ -1014,13 +1018,9 @@ impl CompiledSchema {
                 // debug, silently alias bit `n & 63` in release (cross-selector contamination -> wrong
                 // values). A dead entry keeps its column but never matches: deterministic empty.
                 // `col >= MAX_MEMBERS` matters as much as the member count: `text_cols`/`cap` address
-                // output columns by BIT (`1u128 << cs.col`), so a query past column 127 could never be
-                // delivered. It used to compile live and return empty while the audit called it
-                // supported — the one outcome the no-fallback contract rules out.
-                // `col >= MAX_MEMBERS` matters as much as the member count: `text_cols`/`cap` address
-                // output columns by BIT (`1u128 << cs.col`), so a query past column 127 could never be
-                // delivered — it used to compile live and return empty while the audit called it
-                // supported, the one outcome the no-fallback contract rules out. `emit == false` entries
+                // output columns by BIT (`1u128 << cs.col`), so a query past column 127 can never be
+                // delivered. Left live it would compile, return empty, and be reported SUPPORTED by the
+                // audit — the one outcome the no-fallback contract rules out. `emit == false` entries
                 // (group containers, `col == usize::MAX`) address no output column and are exempt.
                 let dead = entries.len() >= MAX_MEMBERS
                     || (emit && col >= MAX_MEMBERS)
@@ -1422,8 +1422,69 @@ impl CompiledSchema {
             text_entries,
             tail_schemas,
             trig_immediate_mask,
+            stop_mask: 0,
             wants,
         }
+    }
+
+    /// Arm EARLY EXIT for a schema whose caller wants at most the FIRST value of every column.
+    ///
+    /// `first_only[c]` says column `c`'s consumer discards everything after the first value — the
+    /// `One`/`Card::First` cardinality the `Page` layer applies. When that holds for every live column
+    /// and the schema is of an eligible shape, the scan may stop as soon as each of them has a value:
+    /// the remaining tokens can only append values the caller is going to throw away, so the ITEM is
+    /// identical to a full scan's. This is not an approximation and there is no flag to trade accuracy
+    /// for speed — a schema that could still change its answer is simply not armed.
+    ///
+    /// `extract()` itself is never armed, and cannot be: it returns EVERY value of every column, so
+    /// stopping would truncate its output. Cardinality lives one layer up, which is why this is opt-in
+    /// from there rather than derived here.
+    ///
+    /// Eligibility is deliberately narrow, and each clause is a way the answer could still change after
+    /// the mask fills:
+    /// - **no groups** — a `Many` row set is unbounded by construction;
+    /// - **no deferred entries** (`:has()`, reverse positions, text predicates) — those are decided at a
+    ///   close that may not have happened, and a reverse position is *defined* by the end of the parent;
+    /// - **no `normalize-space`** — its scalar accumulates across a whole subtree, so a column holding
+    ///   one is not finished when it is first non-empty;
+    /// - **no mixed columns** — their values are buffered and merged at finish, so `results[col]` says
+    ///   nothing about whether the column is satisfied yet;
+    /// - **every live column named**, since a column outside `first_only` still wants everything.
+    ///
+    /// An outer-HTML column IS eligible, and is the one that pays best (a bare-element value retains a
+    /// whole element's source per match), but it needs a second, RUNTIME condition — see
+    /// `Matcher::done`. Its value is recorded when the element closes and scattered into the column at
+    /// finish, so satisfaction is knowable during the pass; what is not safe is stopping while a
+    /// capturing element is still OPEN, because `finish_grouped` would then close it at end-of-input and
+    /// give the column a span the element does not have. Nesting makes that concrete: with
+    /// `field("div.card")` over `<div class=card><div class=card>…</div>`, the inner card satisfies the
+    /// column while the outer one is open, and captures are scattered in START order — so the outer
+    /// card's bogus EOF-length span would land FIRST, which is the value the caller reads.
+    ///
+    /// A dead (over-budget) column is excluded rather than blocking: it can never receive a value, so
+    /// requiring one would disarm the mechanism instead of just never firing.
+    pub fn arm_early_exit(&mut self, first_only: &[bool]) {
+        self.stop_mask = 0;
+        let eligible = self.groups.is_empty()
+            && self.reverse_entries.is_empty()
+            && self.has_entries.is_empty()
+            && self.text_entries.is_empty()
+            && !self.has_ns
+            && self.mix_cols == 0;
+        if !eligible {
+            return;
+        }
+        let mut mask: u128 = 0;
+        for cs in &self.entries {
+            if cs.dead {
+                continue; // never receives a value; see above
+            }
+            if !cs.emit || cs.col >= 128 || first_only.get(cs.col).copied() != Some(true) {
+                return; // a column that wants more than its first value (or has no bit to track it)
+            }
+            mask |= 1u128 << cs.col;
+        }
+        self.stop_mask = mask;
     }
 
     /// Run this compiled schema over one page's `bytes` (already encoding-resolved / transcoded), with
@@ -1488,6 +1549,8 @@ impl<'a> Matcher<'a> {
             enc,
             decode_names: schema.non_ascii_interesting && enc != encoding_rs::UTF_8,
             mixed: Vec::new(),
+            satisfied: 0,
+            open_captures: 0,
             open_instances: Vec::new(),
             next_seq: 0,
             pending: Vec::new(),
@@ -1549,6 +1612,12 @@ impl<'a> Matcher<'a> {
     /// self-close / EOF), so instance lifetime tracks element lifetime with no depth scan.
     fn close_elem(&mut self, e: OpenElem, end: usize) {
         let mut cols = e.cap_cols;
+        if cols != 0 && self.schema.stop_mask != 0 {
+            // This element is no longer open, so its capture is final. EARLY EXIT reads both facts:
+            // the columns it satisfies, and that one fewer capturing element is open (see `done`).
+            self.satisfied |= cols;
+            self.open_captures -= 1;
+        }
         while cols != 0 {
             let col = cols.trailing_zeros() as usize;
             cols &= cols - 1;
@@ -1863,6 +1932,12 @@ impl<'a> Matcher<'a> {
             self.mixed.push((col, off, v));
         } else {
             self.results[col].push(v);
+            // EARLY EXIT bookkeeping. `stop_mask` is 0 unless the schema was armed, and a schema is only
+            // armed when every live column funnels its values through here (no outer-HTML capture, no
+            // deferred resolution, no mixed buffer), so this is the one place satisfaction can be seen.
+            if self.schema.stop_mask != 0 && col < 128 {
+                self.satisfied |= 1u128 << col;
+            }
         }
     }
 
@@ -2337,6 +2412,18 @@ impl<'a> Matcher<'a> {
 }
 
 impl<'a> TokenSink<'a> for Matcher<'a> {
+    /// Every column the caller declared `first_only` now holds a value, so no remaining token can change
+    /// what the caller sees. `stop_mask == 0` for an unarmed schema and `satisfied` starts at 0, so this
+    /// is `0 == 0`... which would be `true`, hence the explicit disarm: an unarmed schema must never
+    /// stop, least of all before it starts.
+    fn done(&self) -> bool {
+        self.schema.stop_mask != 0
+            && self.satisfied == self.schema.stop_mask
+            // ...and no capturing element is still open, or closing the stack at finish would give its
+            // column an end-of-input span. See `CompiledSchema::arm_early_exit`.
+            && self.open_captures == 0
+    }
+
     /// A doctype leaves no node AND does not end the surrounding text node, so it is absorbed into the
     /// pending node's gap the way a dropped end tag is: the runs either side of it are ONE node.
     fn invisible_markup(&mut self, from: usize, to: usize) {
@@ -2391,8 +2478,8 @@ impl<'a> TokenSink<'a> for Matcher<'a> {
         }
         // A start tag that ENDED the head also STARTS the body, and everything from here on — including
         // the remaining `<meta>`/`<link>`/`<title>` — belongs to it. libxml2 and html5lib agree on this
-        // exactly; the engine used to close the head correctly and then leave the content under `<html>`,
-        // which is what made `head + body`, `html > body` and `:first-child` disagree.
+        // exactly. Closing the head correctly but leaving the content under `<html>` is the near miss
+        // here, and it is what makes `head + body`, `html > body` and `:first-child` disagree.
         //
         // Only for an IMPLICIT end. After an explicit `</head>` the two oracles part company (libxml2
         // leaves a following `<meta>` at `<html>` level, html5lib puts it back in the head), so that path
@@ -2518,6 +2605,9 @@ impl<'a> TokenSink<'a> for Matcher<'a> {
                 }
             }
             self.stack[top].cap_cols = cap;
+            if cap != 0 && self.schema.stop_mask != 0 {
+                self.open_captures += 1;
+            }
             // grouped outer-HTML sub-fields: stamp the destination NOW (capture is materialized at
             // close, by which time the current-instance pointer would be gone).
             for ii in 0..self.open_instances.len() {
@@ -2698,17 +2788,17 @@ impl<'a> Matcher<'a> {
     /// Open whatever part of the document frame this token needs and the page did not write.
     ///
     /// `<html>`, `<head>` and `<body>` all have optional start AND end tags, so a conformant document
-    /// may contain none of them — and libxml2 builds the frame regardless. Without this the engine had
-    /// nothing to anchor `body h1` on, no shared parent to make `h1 + p` siblings, and nowhere to put
-    /// root-level text, which is the largest divergence the contract used to list.
+    /// may contain none of them — and libxml2 builds the frame regardless, so this does too. Without it
+    /// there is nothing to anchor `body h1` on, no shared parent to make `h1 + p` siblings, and nowhere
+    /// to put root-level text.
     ///
     /// Which part a given start tag opens is [`frame_content`], derived from the oracle over the whole
     /// element universe. The frame tags themselves open no PART — but they still need the element they
     /// belong in: a page whose first tag is `<head>` or `<body>` writes no `<html>`, and libxml2 (and
-    /// html5lib, and every browser) still wraps it in one. Leaving that out put the `<head>` at the root
-    /// with no parent and then built a SECOND, later `<html>` for whatever followed `</head>`, so
-    /// `html > head`, `html > body` and `head + script` were all empty against lxml while the values
-    /// underneath them looked right. Real pages do this — one crawled page opens with a bare `<head>`.
+    /// html5lib, and every browser) still wraps it in one. Leaving that out puts the `<head>` at the root
+    /// with no parent and builds a SECOND, later `<html>` around whatever follows `</head>`, so
+    /// `html > head`, `html > body` and `head + script` all come back empty against lxml while the values
+    /// underneath them look right. Real pages do this — a crawled page can open with a bare `<head>`.
     fn ensure_frame(&mut self, name: &[u8], frame: Option<usize>, at: usize) {
         // The `<html>` comes FIRST, before the body check: content after `</html>` still needs an element
         // to sit in, and libxml2 gives it one — a SECOND ROOT `<html>`, which is the same shape it builds

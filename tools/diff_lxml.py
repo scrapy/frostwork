@@ -166,7 +166,7 @@ def parsel_vals(html, sel, enc="utf-8"):
 def is_node_query(sel):
     """A bare-element / outer-HTML query (no value terminal) returns element markup, not a scalar.
     Value terminals are the CSS pseudos `::text` / `::attr(...)` AND their XPath forms `/text()`,
-    `//text()`, `/@name` — the latter were previously misclassified as node queries, routing XPath
+    `//text()`, `/@name`. Misclassifying the latter as node queries routes XPath
     scalar results through the outer-HTML reparse path where `parsel.Selector(text="1")` guesses JSON
     (numeric text) and raises, spuriously reporting DIVERGE on equal values."""
     s = sel.strip()
@@ -260,7 +260,7 @@ def gen_grouped(rng):
     one pass exercises cross-group routing in text()/emit_attrs, which single-group never touched).
     Returns (html_bytes, groups) where groups = [(container, subs), ...]. Weighted toward the
     divergence-prone cases: nested same-class + empty containers, implied-close (`<li>`), void (`img`),
-    and XPath containers/subs — all previously uncovered."""
+    and XPath containers/subs."""
     cards = "".join(_card(rng) for _ in range(rng.randint(0, 4)))
     close_li = rng.random() < 0.5
     lis = "".join(_li(rng, close_li) for _ in range(rng.randint(0, 4)))
@@ -525,10 +525,9 @@ def main():
     print(f"  CRASH          {stat['CRASH']:>8}   <-- gate: must be 0\n")
 
     print("  by family:   family                 pairs   AGREE   WS  SKIP-EXP  DIVERGE")
-    # Preferred order first, then EVERY remaining family that actually recorded pairs. The list used to
-    # be hand-written and closed, so a family absent from it counted toward the gate while being
-    # invisible in the report — the encoding rows landed in exactly that hole. Deriving the tail means a
-    # new generator cannot be silently unlisted.
+    # Preferred order first, then EVERY remaining family that actually recorded pairs. A hand-written,
+    # closed list lets a family count toward the gate while being INVISIBLE in the report; deriving the
+    # tail means a new generator cannot be silently unlisted.
     preferred = [n for n, _, _ in FAMILIES] + [
         "(conformant)", "(foreign)", "(grouped)", "(grouped-unsupported)"
     ]

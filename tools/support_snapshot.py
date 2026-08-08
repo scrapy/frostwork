@@ -30,6 +30,14 @@ ROWS = [
     ("XPath reverse subtree", "flat", "//li[last()]//text()", True),
     ("CSS :has", "flat", "div:has(a)::text", True),
     ("CSS widened :has", "flat", "div:has([data-x])::attr(id)", True),
+    # beyond-lxml forms: valid CSS cssselect rejects. Each has a twin below that must stay `no`, so the
+    # row proves a capability rather than just a parser that accepts more.
+    ("CSS :has list", "flat", "div:has(a, img)::attr(id)", True),
+    ("CSS :has mixed-rel list", "flat", "div:has(> a, img)::attr(id)", False),
+    ("CSS :not list", "flat", "p:not(.a, .b)::text", True),
+    ("CSS :not empty member", "flat", "p:not(.a, )::text", False),
+    ("CSS attr case flag", "flat", "[type=submit i]::attr(id)", True),
+    ("CSS attr bogus flag", "flat", "[type=submit x]::attr(id)", False),
     ("CSS :is", "flat", "div:is(.a, .b)::text", True),
     # a `)` inside a QUOTED value is data, not the end of the pseudo; the malformed twin must stay no
     ("CSS quoted delimiter", "flat", 'div:is(#a, [data-x=")"])::attr(id)', True),

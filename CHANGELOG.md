@@ -15,12 +15,12 @@ First public preview.
   into empty columns without invoking a fallback parser.
 - Byte-oriented tokenization, lazy value decoding and browser/WHATWG-oriented charset resolution.
 - Extended characters in a selector answer the same under any encoding. A selector is UTF-8 and a
-  byte-scanned page is not, so both attribute values and attribute NAMES are decoded before comparison —
-  `[data-año]` and `::attr(año)` used to match a UTF-8 page and return nothing for the same document in
-  windows-1252 or shift_jis, where lxml matches. A non-ASCII tag name remains unsupported and reported.
+  byte-scanned page is not, so both attribute values and attribute NAMES are decoded before comparison:
+  `[data-año]` and `::attr(año)` answer identically for the same document in UTF-8, windows-1252 or
+  shift_jis. A non-ASCII tag name is unsupported and reported.
 - Deferred fields whose value comes from a subtree (`:has()`, `:last-child`, XPath text predicates) are
-  resolved by re-scanning each winner's span. Fields deferring on the same compound now share one
-  sub-schema, so that span is re-scanned once for all of them rather than once per field.
+  resolved by re-scanning each winner's span. Fields deferring on the same compound share one sub-schema,
+  so that span is re-scanned once for all of them rather than once per field.
 - Empirical libxml2-compatible tree construction for the supported surface, including optional document
   frames, implied closes, raw-text modes, void elements and malformed markup covered by the compatibility
   contract.
@@ -35,6 +35,16 @@ First public preview.
   unsupported rather than silently dropping the constraint.
 - A value terminal with no subject compound after an explicit combinator (`dt + ::text`, `div > ::attr(id)`)
   is supported and answers identically to the `*` spelling, which is how Parsel reads it.
+- Three constructs that are valid CSS and that cssselect rejects outright are supported, each oracled
+  against a spelling parsel can evaluate: a `:has()` relative selector LIST (`div:has(a, img)`, the union
+  of its members), a `:not()` compound LIST (`p:not(.a, .b)`, the chained `:not(.a):not(.b)`), and the
+  Selectors 4 case-sensitivity flag (`[type=submit i]`, an ASCII fold on every operator). Each has its
+  own refusal: a `:has()` list mixing relative combinators, an empty `:not()` member and a bogus flag
+  letter stay unsupported and reported.
+- A `Page` whose fields are all single-valued STOPS scanning once every field has a value, instead of
+  running to the end of the document. The values skipped are the ones a single-valued consumer discards,
+  so the item is identical to a full scan's; a multi-valued or joined field, a group, or a deferred
+  selector turns it off. `extract`/`extract_grouped` never arm it — their contract is every value.
 
 ### Python API and tooling
 
@@ -43,20 +53,22 @@ First public preview.
   not pre-encode a second copy of the document per response; the engine borrows CPython's UTF-8 view of
   the string. A `str` is scanned as UTF-8, so an `encoding` label naming a different encoding is refused
   rather than silently decoding those bytes wrongly.
+- `frostwork.detect_encoding(html, encoding=None)` reports the encoding a scan would use, as a WHATWG
+  name — the BOM/prescan resolution on its own, without extracting. Parsel cannot answer it (it never
+  sniffs `<meta charset>`) and w3lib answers differently in the places the compatibility contract
+  enumerates.
 - `frostwork.check` and `frostwork-audit` for static schema validation; `frostwork-audit --scan` finds
   selector literals in existing Scrapy code without importing it.
 - `frostwork.check` reads a `dict` as `{name: selector}` (and `{name: (container, subfields)}` for groups,
-  the shapes `FrostPage.frost_schema()` returns) instead of iterating it. Iterating audited the field
-  *names* as selectors, and a bare name like `title` is a valid type selector, so `report.ok` came back
-  `True` for a schema that had never been looked at. Any other shape raises `TypeError` naming the
-  accepted ones, and `extract`/`extract_grouped` reject a `dict` of queries outright, their columns
-  being positional.
+  the shapes `FrostPage.frost_schema()` returns) rather than iterating it, since iterating a dict would
+  audit the field *names* as selectors and a bare name like `title` is a valid type selector. Any other
+  shape raises `TypeError` naming the accepted ones, and `extract`/`extract_grouped` reject a `dict` of
+  queries outright, their columns being positional.
 - `Item.empty_fields()` distinguishes supported selectors that matched nothing from unsupported coverage
   gaps already rejected by the audit.
 - An abi3 wheel targeting CPython 3.10 and newer, which is also the floor for the optional web-poet
-  integration. The two used to differ: the core ran on 3.9 while web-poet required 3.10. They converged
-  when the wheel moved to `abi3-py310` so the engine could borrow a `str`'s UTF-8 view (below);
-  `PyUnicode_AsUTF8AndSize` is limited-API only from 3.10, and Python 3.9 reached end of life in October
+  integration. `abi3-py310` is what lets the engine borrow a `str`'s UTF-8 view (below), since
+  `PyUnicode_AsUTF8AndSize` is limited-API only from 3.10; Python 3.9 reached end of life in October
   2025.
 
 ### web-poet integration
@@ -83,6 +95,8 @@ First public preview.
   live only in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 - The competitive benchmark reports the coverage GAP against the oracle — the columns parsel expresses and
   the engine does not — separately from the engine's own refusal total, which also counts selectors
-  cssselect rejects.
+  cssselect rejects, and separately again from the REVERSE gap: the columns the engine expresses and
+  cssselect rejects. Expressible% alone is scored over a column set the oracle defines, so it can only
+  ever show a deficit.
 - The page-shape matrix refuses to publish a cell that extracted no values, carries a pure-scan row per
   shape, and reports the class-led and attribute-predicate selector pools alongside the tag-led one.

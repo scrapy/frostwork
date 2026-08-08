@@ -37,6 +37,16 @@ pub trait TokenSink<'a> {
     fn invisible_markup(&mut self, from: usize, to: usize) {
         let _ = (from, to);
     }
+
+    /// May [`tokenize`] stop? Asked once per markup token, and answered `false` by every sink that has
+    /// no notion of "enough" — including this default, which the optimizer folds away.
+    ///
+    /// Stopping is the sink's decision alone: the tokenizer has no idea what a schema wants, and a sink
+    /// that answers `true` while its answer could still change would silently truncate the document.
+    /// See `matcher::CompiledSchema::arm_early_exit` for the only implementation that ever does.
+    fn done(&self) -> bool {
+        false
+    }
 }
 
 /// Byte classes for the tokenizer's three inner scan loops, as one table lookup instead of the four-
@@ -45,8 +55,8 @@ pub trait TokenSink<'a> {
 /// element-dense page.
 ///
 /// The table is the single definition of each set; the predicates below read it, so a set cannot drift
-/// between the loop that scans a name and the predicate that ends it — which is exactly how the two
-/// name scanners disagreed before (see [`is_name_char`]).
+/// between the loop that scans a name and the predicate that ends it — the way two independent name
+/// scanners do (see [`is_name_char`]).
 mod cls {
     pub const WS: u8 = 1 << 0;
     /// Ends an ATTRIBUTE name: whitespace, `=`, `>`, `/`.
@@ -95,15 +105,14 @@ fn is_ws(c: u8) -> bool {
 /// whitespace, `>` and `/` — and keeps every other byte, so `<p<img src=s>` is one element NAMED
 /// `p<img` rather than a `<p>` with a strange attribute, and `<p.x>` is not a `<p>` either.
 ///
-/// Restricting this to `[A-Za-z0-9_:-]` (which is what it used to be) does not merely mis-name such an
-/// element, it invents one that is not in the document: the name came out as `p`, so a `p` selector
-/// matched and returned a value lxml never had. A FALSE POSITIVE is the one outcome the no-fallback
+/// Restricting this to `[A-Za-z0-9_:-]` does not merely mis-name such an element, it invents one that is
+/// not in the document: the name comes out as `p`, so a `p` selector matches and returns a value lxml
+/// never had. A FALSE POSITIVE is the one outcome the no-fallback
 /// rule is meant to exclude — an unsupported query is allowed to return nothing, a supported one is not
-/// allowed to return something that is not there. A crawled page writing `<p<mip-img …>` is what
-/// surfaced it.
+/// allowed to return something that is not there. Real pages write this: `<p<mip-img …>`.
 ///
-/// `find_raw_end` already ended a rawtext close tag on exactly this set, so the tokenizer's two name
-/// scanners used to disagree with each other as well as with the oracle.
+/// `find_raw_end` ends a rawtext close tag on exactly this set, so anything narrower here leaves the
+/// tokenizer's two name scanners disagreeing with each other as well as with the oracle.
 fn is_name_char(c: u8) -> bool {
     !cls::is(c, cls::TAG_NAME_END)
 }
@@ -189,7 +198,7 @@ fn skip_to_gt(b: &[u8], from: usize) -> usize {
 ///
 /// The appropriate end tag gets a start tag's ATTRIBUTE states here too — see `scan_attrs`. Ending it
 /// at the first `>` instead was the same bug in a second place, and it is the malformed-HTML fuzzer's
-/// new `end_tag_attr` mutation that turned it up on its first run: `<title>x</title\nsrc='y:>` has no
+/// the fuzzer's `end_tag_attr` mutation covers: `<title>x</title\nsrc='y:>` has no
 /// later `'`, so libxml2 reads the whole rest of the document as that attribute's value and keeps
 /// nothing, while the engine closed the title and kept the page.
 fn find_raw_end<'a>(
@@ -345,6 +354,20 @@ pub fn tokenize<'a, S: TokenSink<'a>>(b: &'a [u8], sink: &mut S) {
                         let after = handle_markup(kind, b, p, sink, &mut attr_buf);
                         i = after;
                         text_from = after;
+                        // EARLY EXIT. Checked here — after a whole token, never inside one — so the sink
+                        // is always left on a token boundary with a consistent stack, exactly as it would
+                        // be at EOF. `finish` then closes what is open and returns; the tail of the
+                        // document simply never happens.
+                        //
+                        // This runs per markup token on EVERY page, including the schemas that can never
+                        // stop, so it is held to the same rule as the matcher's pre-filters: cheaper than
+                        // what it guards, for the callers that cannot use it. Measured with `ab_bench.py`
+                        // against a build with the branch compiled out — median -0.1% over 26 cells, one
+                        // cell above its own jitter and that one FASTER. The unarmed cost is a `u128`
+                        // compare against a mask that is 0 (`Matcher::done`).
+                        if sink.done() {
+                            return;
+                        }
                     }
                 }
             }
@@ -544,12 +567,11 @@ fn handle_start<'a, S: TokenSink<'a>>(
     if !terminated {
         // EOF before the closing `>`: the tag is DROPPED, whole. Not emitted, and not turned back into
         // text either — libxml2 and html5lib agree on that for every shape (`<a`, `<a href`, `<a href=`,
-        // `<a href="x`), and the text before it is untouched. The engine used to emit whatever it had
-        // scanned, which is the FALSE-POSITIVE direction: on a crawled page cut off inside
-        // `<a href="login.…` it reported an `<a>` element, with an `href` holding the rest of the
-        // document, that no other parser sees at all. Truncated responses are not a rare shape in a
-        // crawl — this was 6 divergent columns on one page and the largest remaining group in the
-        // malformed-HTML fuzzer.
+        // `<a href="x`), and the text before it is untouched. Emitting whatever was scanned is the
+        // FALSE-POSITIVE direction: a page cut off inside `<a href="login.…` would report an `<a>`
+        // element, with an `href` holding the rest of the document, that no other parser sees at all.
+        // Truncated responses are not a rare shape in a crawl — one such page is worth 6 divergent
+        // columns, and it is a major group in the malformed-HTML fuzzer.
         return n;
     }
 
@@ -681,7 +703,7 @@ src="http:></a><div id='HTML3'><i>" >y"#),
     }
 
     /// ...and the RAWTEXT/RCDATA and SCRIPT closers get those states too — three call sites, one rule.
-    /// The fuzzer's `end_tag_attr` mutation found these two on its first run, after the plain end tag
+    /// The fuzzer's `end_tag_attr` mutation reaches these two, which the plain end tag
     /// above was already fixed.
     #[test]
     fn rawtext_end_tag_attributes_are_scanned_too() {

@@ -11,7 +11,7 @@ behind) and graded by three DETECTORS:
   * `surface` — the derived upstream-surface snapshot, which asserts properties no value comparison can see
 
 Every mutation DECLARES which detectors must catch it, and the report fails when the caught set differs —
-"something noticed" would let a mutation the differential used to catch become unit-only, and a differential
+"something noticed" would let a mutation the differential is declared to catch pass as unit-only, and a differential
 losing a column looks exactly like a unit vector doing its job. Several are expected to be caught by `unit`
 alone; that is a finding rather than a gap, and the entry says why (the real zyte processors are too lenient
 to discriminate a wrong node end-to-end; a multi-generation override needs three classes no schema generates).
@@ -261,7 +261,7 @@ def _mut_accept_unstated_processor_input():
 
 
 # (name, apply, the detectors that must catch it). The expected set is checked for EQUALITY: "some detector
-# noticed" would let a mutation the differential used to catch become unit-only, and a differential losing a
+# noticed" would let a mutation the differential is declared to catch pass as unit-only, and a differential losing a
 # column looks exactly like a unit vector doing its job.
 MUTATIONS = [
     ("drop-__set_name__", _mut_drop_set_name, {"diff", "unit"}),
@@ -548,8 +548,8 @@ def main() -> None:
     unit_only = [n for n, _f, exp in MUTATIONS if exp == {"unit"}]
     print(f"  expected unit-only (generated pairs cannot discriminate these): {unit_only}")
     if wrong_provenance:
-        print("\n  PROVENANCE CHANGED -> a detector that used to catch these no longer does. The mutation is")
-        print("  still caught, so a survivor count cannot see this; it means a gate lost a column:")
+        print("\n  PROVENANCE MISMATCH -> the detectors that caught these are not the ones declared. The")
+        print("  mutation is still caught, so a survivor count cannot see it; it means a gate lost a column:")
         for name, want, caught in wrong_provenance:
             print(f"    {name}: expected exactly {'+'.join(want) or '-'}, got {'+'.join(caught) or '-'}")
     if survivors:

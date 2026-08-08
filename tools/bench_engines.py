@@ -9,11 +9,9 @@ because Parsel is not the fast end of the field. selectolax/lexbor is.
 Engines (each parses once per page, then answers one query per field — every one's real reuse
 pattern):
 
-  frostwork            `frostwork.extract`: ONE streaming pass, no DOM. Re-parses the selector
-                       strings on every call, which is the pessimistic case; it is what
-                       `bench_corpus.py` measures, so it stays the headline row.
-  frostwork-plan       the same engine through a `Plan` compiled once per page object — what
-                       `frostwork.Page`/`FrostPage` actually do.
+  frostwork            ONE streaming pass, no DOM, schema compiled once — what `frostwork.Page` /
+                       `FrostPage` do, and the only way a scraper runs (a page object is a class; its
+                       selectors are compiled at class-definition time, not per response).
   parsel               the incumbent, and this file's PARITY ORACLE.
   lxml+cssselect       parsel's tree and translation without parsel's Python wrapper. Without this
                        row, "N× faster than Parsel" could be N× faster than a wrapper rather than
@@ -26,7 +24,7 @@ WHAT MAKES THIS A BENCHMARK RATHER THAN A BROCHURE
 
 1. Nothing is timed before its values are checked. Every engine's every column is compared against
    Parsel with `diff_lxml.verdict` — the differential gate's own comparator, imported, not a second
-   copy of it (a second comparator is a second standard, and this repo has paid for that twice).
+   copy of it — a second comparator is a second standard.
    lexbor is an HTML5 parser and libxml2 is not, so on real malformed pages they disagree; how often
    they disagree ON PRODUCTION SELECTORS is a number this file exists to print.
 
@@ -225,26 +223,17 @@ class Engine:
 
 
 class Frostwork(Engine):
+    """One streaming pass, no DOM, with the schema compiled ONCE.
+
+    There is no second "selectors re-parsed per call" row, and that is deliberate rather than
+    flattering. A Scrapy/web-poet page object is a class: its selectors are declared at class-definition
+    time and `FrostPage` compiles them into a `Plan` there, once per process. Nothing in a real scraper
+    re-parses a selector string per response, so timing that measured a program nobody writes — and
+    taxed exactly the cells with the most selectors, which is where the number mattered most.
+    """
+
     key, label = "frostwork", "frostwork"
-    note = "one streaming pass, no DOM; selectors re-parsed per call"
-    full_coverage = True
-
-    def refusal(self, sel):
-        return _frostwork_refusal(sel)
-
-    def run(self, body, queries):
-        # `strict=False`: the caller already filtered to supported selectors via `expressible`, and a
-        # cached validation lookup inside the timed loop would measure this harness, not the engine.
-        cols = []
-        for batch in _batches(list(queries)):
-            if batch:
-                cols.extend(frostwork.extract(body, batch, "utf-8", strict=False))
-        return cols
-
-
-class FrostworkPlan(Engine):
-    key, label = "frostwork-plan", "frostwork (Plan)"
-    note = "same engine, schema compiled once per page object (what Page/FrostPage do)"
+    note = "one streaming pass, no DOM; schema compiled once (what Page/FrostPage do)"
     full_coverage = True
 
     def __init__(self):
@@ -407,7 +396,7 @@ class BeautifulSoup4(Engine):
         return cols
 
 
-ENGINES = [Frostwork(), FrostworkPlan(), Parsel(), Lxml(), Selectolax(), BeautifulSoup4()]
+ENGINES = [Frostwork(), Parsel(), Lxml(), Selectolax(), BeautifulSoup4()]
 ORACLE = "parsel"
 
 
@@ -544,33 +533,43 @@ def workload_columns(n_cols, expressible, keys, parity=None):
 
 
 def coverage_gap(refusals, oracle_key):
-    """Split each engine's refusals into the ACTIONABLE gap and the ones the oracle shares.
+    """Split every (engine, column) coverage disagreement with the oracle into its three kinds.
 
     `refusals[key][i]` is that engine's reason for declining column i, or `None` if it expresses it.
     A column the oracle also refuses is not a coverage gap — no port would ask for a selector parsel
     itself rejects — so it is counted separately instead of inflating the engine's own refusal total.
 
-    Returns `{key: (Counter(reason -> n), shared_count)}`, oracle excluded.
+    Returns `{key: (Counter(reason -> n), shared_count, beyond_count)}`, oracle excluded:
+      * `kinds`  — the oracle expresses it, this engine does not. THE GAP, by reason.
+      * `shared` — neither expresses it. Not a gap.
+      * `beyond` — this engine expresses it and the ORACLE does not.
 
     A named function rather than a loop inline in `main` for the same reason `workload_columns` is one:
     it decides a number that gets published, so `tests/test_gates.py` can seed it. Two independent
     coverage percentages only BOUND the set difference (between `|refused| - |oracle refused|` and
     `|refused|`), and quoting the difference of the two totals asserts the optimistic end of that range.
+
+    `beyond` exists because the same asymmetry runs the other way and had no bucket at all. Expressible%
+    is scored over a column set the ORACLE defines, so a selector cssselect rejects and this engine
+    answers — `div:has([data-x])` and the rest of COMPATIBILITY.md's "Beyond lxml" — was counted as
+    `shared` when both refused and dropped on the floor when only the oracle did. A published coverage
+    table that can only ever report a deficit is measuring one direction of a set difference.
     """
     out = {}
     n = len(refusals[oracle_key])
     for k, rs in refusals.items():
         if k == oracle_key:
             continue
-        kinds, shared = collections.Counter(), 0
+        kinds, shared, beyond = collections.Counter(), 0, 0
         for j in range(n):
+            oracle_refused = refusals[oracle_key][j] is not None
             if rs[j] is None:
-                continue
-            if refusals[oracle_key][j] is None:
-                kinds[rs[j]] += 1
-            else:
+                beyond += oracle_refused
+            elif oracle_refused:
                 shared += 1
-        out[k] = (kinds, shared)
+            else:
+                kinds[rs[j]] += 1
+        out[k] = (kinds, shared, beyond)
     return out
 
 
@@ -658,6 +657,7 @@ def main():
     # not a gap at all. So the set difference is measured rather than inferred from the two totals.
     gap_kinds = {k: collections.Counter() for k in keys}
     gap_shared = collections.Counter()      # engine -> columns BOTH refuse (not a gap)
+    gap_beyond = collections.Counter()      # engine -> columns IT expresses and the oracle does not
     parity_tally = {k: collections.Counter() for k in keys}
     diverge_kinds = {k: collections.Counter() for k in keys}
     diverge_examples = {k: collections.defaultdict(list) for k in keys}
@@ -689,9 +689,10 @@ def main():
                     refusal_kinds[k][r] += 1
         # Read from `refusals`, which the CRASH handler below does not touch (it zeroes `expressible`):
         # the gap is a coverage fact about the selector, not a runtime one about the page.
-        for k, (kinds, shared) in coverage_gap(refusals, ORACLE).items():
+        for k, (kinds, shared, beyond) in coverage_gap(refusals, ORACLE).items():
             gap_kinds[k].update(kinds)
             gap_shared[k] += shared
+            gap_beyond[k] += beyond
         total_cols += n
 
         # --- values first, timing second: one untimed run per engine over what it can express ---
@@ -795,7 +796,8 @@ def main():
             continue
         gap = sum(gap_kinds[k].values())
         print(f"  {by_key[k].label:22} {gap:>9} gap  ({_pct(gap, total_cols):4.1f}% of all columns)"
-              f"  + {gap_shared[k]} shared refusals")
+              f"  + {gap_shared[k]} shared refusals"
+              f"  + {gap_beyond[k]} BEYOND (it expresses, the oracle refuses)")
         for reason, cnt in gap_kinds[k].most_common(6):
             print(f"      {cnt:>5}  {reason[:96]}")
 
@@ -867,7 +869,8 @@ def main():
                          "refusals": dict(refusal_kinds[k]),
                          "gap_vs_oracle": sum(gap_kinds[k].values()),
                          "gap_reasons": dict(gap_kinds[k]),
-                         "shared_refusals": gap_shared[k]} for k in keys},
+                         "shared_refusals": gap_shared[k],
+                         "beyond_oracle": gap_beyond[k]} for k in keys},
         "parity": {k: dict(parity_tally[k]) for k in keys},
         "parity_kinds": {k: dict(diverge_kinds[k]) for k in keys},
         "parity_examples": {k: {kind: v for kind, v in ex.items()} for k, ex in diverge_examples.items()},

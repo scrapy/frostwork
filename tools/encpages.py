@@ -15,7 +15,7 @@ Two rules this generator has to keep, both of them lessons the repo already paid
 
 * **A selector the ORACLE answers nowhere can only catch an over-match.** Every positive selector
   here is emitted with `True` so the harness can assert lxml actually returned something; a family of
-  always-empty columns would grade AGREE against an engine that had been ripped out.
+  always-empty columns would grade AGREE against an engine with the feature ripped out.
 * **The alphabet is per ENCODING, derived by asking the codec.** A hand-written word list that
   windows-1252 cannot represent would silently degrade to a `?` and test nothing — `usable()` drops
   a label whose words do not round-trip instead.

@@ -183,7 +183,7 @@ def c_end_tag_priority(rng):
     """The OTHER half of end-tag scope: a TABLE-FAMILY end tag blocked by a higher-priority element.
 
     `table_scope` above only ever emits an ordinary end tag (`</div>`, `</span>`) crossing a table, which
-    is the coarse half of the rule and the only half the engine used to implement. libxml2 compares END
+    is the coarse half of the rule, and the half an engine implements first. libxml2 compares END
     PRIORITIES, so `</tr>` cannot unwind an open `<tbody>` either — and a real crawled page emitting
     `<tr><strong><tbody>` rows lost every cell after its first `</tr>`. The `<strong>` is load-bearing:
     put the section directly inside the row and its start tag closes the row itself, so the end tag has no

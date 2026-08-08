@@ -4,15 +4,40 @@
 //!   terminals : `::text` (self / `E ::text` subtree), `::attr(name)` (self / `E ::attr` subtree)
 //! Anything outside this subset returns `Err(())` and the query yields an empty column (no fallback).
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AttrOp {
+    Exists,    // [a]
+    Eq,        // [a=v]
+    Prefix,    // [a^=v]
+    Suffix,    // [a$=v]
+    Substr,    // [a*=v]
+    Includes,  // [a~=v]  (whitespace-separated list contains v)
+    DashMatch, // [a|=v]  (v, or starts with "v-")
+}
+
+/// One `[name op value]` test. `value` is unused (and empty) for [`AttrOp::Exists`].
+///
+/// `ci` is the Selectors 4 case-sensitivity flag (`[a=v i]`), which folds the VALUE comparison
+/// ASCII-case-insensitively; the NAME is always compared case-insensitively, since HTML lowercases it.
+/// cssselect rejects the flag outright (`Expected ']', got <IDENT 'i'>`), so this is coverage the oracle
+/// refuses rather than a semantic difference — see docs/COMPATIBILITY.md, "Beyond lxml". The flag is
+/// ASCII-only by the CSS definition, which is also what keeps it cheap: no case table, no allocation.
 #[derive(Clone, Debug, PartialEq)]
-pub enum AttrPred {
-    Exists(String),            // [a]
-    Eq(String, String),        // [a=v]
-    Prefix(String, String),    // [a^=v]
-    Suffix(String, String),    // [a$=v]
-    Substr(String, String),    // [a*=v]
-    Includes(String, String),  // [a~=v]  (whitespace-separated list contains v)
-    DashMatch(String, String), // [a|=v]  (v, or starts with "v-")
+pub struct AttrPred {
+    pub name: String,
+    pub op: AttrOp,
+    pub value: String,
+    pub ci: bool,
+}
+
+impl AttrPred {
+    pub fn new(name: impl Into<String>, op: AttrOp, value: impl Into<String>) -> Self {
+        Self { name: name.into(), op, value: value.into(), ci: false }
+    }
+
+    pub fn exists(name: impl Into<String>) -> Self {
+        Self::new(name, AttrOp::Exists, "")
+    }
 }
 
 /// A forward positional constraint: the element's 1-based index among its siblings must satisfy
@@ -318,9 +343,9 @@ pub fn parse(query: &str) -> Result<Selector, ()> {
             .unwrap_or(name);
         // The argument is an attribute NAME, and cssselect DECODES escapes in it, so `::attr(data-\6b)`
         // asks for `data-k`. Decode first, then validate: `is_ident_name` only inspects the leading
-        // character, so an escape further in used to pass validation and then be matched literally —
-        // support promised, empty column returned. Validate the DECODED name (cssselect raises
-        // ExpressionError for `::attr(1)`, and `::attr(\31)` decodes to exactly that).
+        // character, so validating the RAW name lets an escape further in pass and then be matched
+        // literally — support promised, empty column returned. Validate the DECODED name (cssselect
+        // raises ExpressionError for `::attr(1)`, and `::attr(\31)` decodes to exactly that).
         let name = unescape_css(name).ok_or(())?;
         if !is_ident_name(&name) {
             return Err(());
@@ -632,10 +657,10 @@ fn parse_compound_depth(s: &str, depth: u32) -> Result<Compound, ()> {
             let name = read_name(b, &mut i);
             // A TAG name must be ASCII, unlike a class/id/attribute name — refused, not silently empty.
             //
-            // The reason is NOT the tokenizer, which this used to claim: `is_name_char` keeps every byte
-            // that is not whitespace / `>` / `/`, so a non-ASCII tag name tokenizes fine and deleting
-            // these three lines makes `café::text` and `x-é::text` agree with parsel on a UTF-8 page.
-            // Two things stop it, and both are FALSE POSITIVES rather than gaps:
+            // The reason is NOT the tokenizer: `is_name_char` keeps every byte that is not whitespace /
+            // `>` / `/`, so a non-ASCII tag name tokenizes fine and deleting these three lines makes
+            // `café::text` and `x-é::text` agree with parsel on a UTF-8 page. Two things stop it, and
+            // both are FALSE POSITIVES rather than gaps:
             //
             // CASE. cssselect lowercases a type selector with Python's UNICODE `.lower()` while libxml2
             // lowercases the tree ASCII-only, so `cafÉ` matches `<café>` there and `<CAFÉ>` (which
@@ -682,7 +707,7 @@ fn parse_compound_depth(s: &str, depth: u32) -> Result<Compound, ()> {
                     // `#a#b` -> []). Encode the extra id as an id-equality pred so the compound can never
                     // match, WITHOUT erroring: erroring would wrongly poison a comma group (`x, #a#b`
                     // must still yield x's matches). A repeated same id (`#a#a`) is a harmless no-op.
-                    Some(prev) if *prev != name => c.attrs.push(AttrPred::Eq("id".to_string(), name)),
+                    Some(prev) if *prev != name => c.attrs.push(AttrPred::new("id", AttrOp::Eq, name)),
                     _ => c.id = Some(name),
                 }
             }
@@ -697,7 +722,7 @@ fn parse_compound_depth(s: &str, depth: u32) -> Result<Compound, ()> {
                 }
                 if i < n && b[i] == b']' {
                     i += 1;
-                    c.attrs.push(AttrPred::Exists(name));
+                    c.attrs.push(AttrPred::exists(name));
                     continue;
                 }
                 // operator: = ^= $= *= ~= |=
@@ -753,19 +778,32 @@ fn parse_compound_depth(s: &str, depth: u32) -> Result<Compound, ()> {
                 while i < n && is_ws(b[i]) {
                     i += 1;
                 }
+                // Selectors 4 case-sensitivity flag: `[a=v i]` (or `I`) folds the value comparison.
+                // `s`/`S` (case-SENSITIVE) is the default in HTML for every attribute this engine sees,
+                // so it is accepted and ignored rather than refused. Whitespace before it is required —
+                // `[a=vi]` is the two-character value `vi`, which the value scan above already consumed.
+                let mut ci = false;
+                if i < n && matches!(b[i], b'i' | b'I' | b's' | b'S') && (i + 1 >= n || b[i + 1] == b']' || is_ws(b[i + 1])) {
+                    ci = matches!(b[i], b'i' | b'I');
+                    i += 1;
+                    while i < n && is_ws(b[i]) {
+                        i += 1;
+                    }
+                }
                 if i >= n || b[i] != b']' {
                     return Err(());
                 }
                 i += 1;
-                c.attrs.push(match op {
-                    b'=' => AttrPred::Eq(name, val),
-                    b'^' => AttrPred::Prefix(name, val),
-                    b'$' => AttrPred::Suffix(name, val),
-                    b'*' => AttrPred::Substr(name, val),
-                    b'~' => AttrPred::Includes(name, val),
-                    b'|' => AttrPred::DashMatch(name, val),
+                let op = match op {
+                    b'=' => AttrOp::Eq,
+                    b'^' => AttrOp::Prefix,
+                    b'$' => AttrOp::Suffix,
+                    b'*' => AttrOp::Substr,
+                    b'~' => AttrOp::Includes,
+                    b'|' => AttrOp::DashMatch,
                     _ => unreachable!(),
-                });
+                };
+                c.attrs.push(AttrPred { name, op, value: val, ci });
             }
             b':' => {
                 // Supported pseudos: `:not(<compound>)`, the FORWARD positional pseudo-classes
@@ -795,12 +833,24 @@ fn parse_compound_depth(s: &str, depth: u32) -> Result<Compound, ()> {
                         if inner.is_empty() || inner.contains(":not(") {
                             return Err(()); // empty, or nested :not() (cssselect rejects)
                         }
-                        // the arg is a compound (no combinators) — parse_compound errors on a space/`>`
-                        let neg = parse_compound_depth(inner, depth + 1)?;
-                        if !neg.is_groups.is_empty() {
-                            return Err(()); // `:not(:is(...))` — rare and unverified vs the oracle; decline
+                        // Selectors 4 allows a selector LIST here, and `:not(a, b)` is exactly
+                        // `:not(a):not(b)` — the element must match NONE of them. cssselect rejects the
+                        // list spelling and accepts the chained one, so this is the same node set under a
+                        // syntax the oracle refuses, which is why the chained form is a usable oracle for
+                        // it. Splitting is quote/bracket-aware, so a comma inside an attribute value
+                        // (`:not([data-x="a, b"])`) is data rather than a separator.
+                        for part in split_top_commas(inner) {
+                            let part = part.trim();
+                            if part.is_empty() {
+                                return Err(()); // empty member (`:not(.a, )`), as cssselect rejects
+                            }
+                            // each member is a compound (no combinators) — parse_compound errors on ` `/`>`
+                            let neg = parse_compound_depth(part, depth + 1)?;
+                            if !neg.is_groups.is_empty() {
+                                return Err(()); // `:not(:is(...))` — rare and unverified vs the oracle
+                            }
+                            c.negations.push(neg);
                         }
-                        c.negations.push(neg);
                     }
                     ("first-child", None) => set_positional(&mut c, Nth { a: 0, b: 1, of_type: false })?,
                     ("first-of-type", None) => set_positional(&mut c, Nth { a: 0, b: 1, of_type: true })?,
@@ -923,44 +973,73 @@ fn parse_contains_arg(arg: &str) -> Result<String, ()> {
     Ok(t.to_string())
 }
 
-/// Parse a `:has(<arg>)` argument: a single compound (`:has(a)`, `:has(.price)`, `:has([data-src])`,
-/// `:has(a.buy#x)`, `:has(:not(.hidden))`), optionally child-scoped (`:has(> img)`). The inner may carry
-/// a tag/`*`, id, classes, attribute predicates, and `:not(...)` — anything `compound_matches` decides
-/// structurally at open. Rejected: a descendant/sibling CHAIN (`:has(.a .b)`, `:has(a + b)`), a comma
-/// list, and a positional/reverse/`:has`/`:is`/text inside (those need per-parent or deferred machinery
-/// the `:has` path doesn't carry).
+/// Parse a `:has(<arg>)` argument: a relative selector LIST whose members are each one compound
+/// (`:has(a)`, `:has(.price)`, `:has([data-src])`, `:has(a.buy#x)`, `:has(:not(.hidden))`,
+/// `:has(a, img)`), optionally child-scoped (`:has(> img)`, `:has(> a, > img)`). A member may carry a
+/// tag/`*`, id, classes, attribute predicates, and `:not(...)` — anything `compound_matches` decides
+/// structurally at open. Rejected: a descendant/sibling CHAIN (`:has(.a .b)`, `:has(a + b)`), a
+/// positional/reverse/`:has`/`:is`/text inside (those need per-parent or deferred machinery the `:has`
+/// path doesn't carry), and a list that MIXES relative combinators (`:has(> a, img)`) — [`Has`] carries
+/// one `rel` for the whole argument, so a mixed list has no faithful representation and is refused
+/// rather than answered under whichever half arrived first.
 ///
-/// cssselect (still 1.5.0) accepts only a type/`*`+classes inner and RAISES on an id/attribute/`:not` inside
-/// `:has()` (a limitation tracked with its broader `:has()` gaps upstream). Frostwork implements the
-/// standards-correct behavior for those, so it is intentionally MORE capable than parsel here — a
-/// divergence in our favor (see docs/COMPATIBILITY.md). Bare type/`*`+class inners agree with parsel.
+/// A multi-member list is lowered to ONE wrapper compound carrying the members as a single
+/// `:is()`-style matches-any group, because `compound_matches` — which is what evaluates the inner at
+/// the subject's close — already implements exactly that OR. The wrapper contributes no signature bits
+/// of its own (`sig::compound_req` reads tag/id/classes and the wrapper has none), so the one-sided
+/// filter becomes a no-op for it while each member is still filtered by its own recursive call: slower
+/// than a single-compound inner, never wrong. A one-member list keeps the bare compound, so the
+/// common `:has(a)` shape is unchanged and still filterable.
+///
+/// cssselect (still 1.5.0) accepts only a type/`*`+classes inner and RAISES on an id/attribute/`:not`
+/// inside `:has()`, and on a selector list — the limitations tracked in scrapy/cssselect#138. Frostwork
+/// implements the standards-correct behavior for those, so it is intentionally MORE capable than parsel
+/// here (docs/COMPATIBILITY.md, "Beyond lxml"). Bare type/`*`+class inners agree with parsel exactly.
 fn parse_has_arg(arg: &str, depth: u32) -> Result<Has, ()> {
     let arg = arg.trim();
-    // The comma and combinator checks are UNQUOTED-only: a `,`/space inside an attribute value is data
-    // (`:has([data-x="a, b"])` is one compound), while a real comma or combinator still declines.
-    if arg.is_empty() || arg.contains(":has(") || has_unquoted(arg, b",") {
+    if arg.is_empty() || arg.contains(":has(") {
         return Err(());
     }
-    let (rel, rest) = match arg.strip_prefix('>') {
-        Some(r) => (Comb::Child, r.trim()),
-        None => (Comb::Descendant, arg),
+    // Splitting is quote/bracket-aware, so a `,` inside an attribute value is data
+    // (`:has([data-x="a, b"])` is one member); the combinator check below is UNQUOTED-only for the
+    // same reason.
+    let mut rel: Option<Comb> = None;
+    let mut alts = Vec::new();
+    for part in split_top_commas(arg) {
+        let part = part.trim();
+        let (member_rel, rest) = match part.strip_prefix('>') {
+            Some(r) => (Comb::Child, r.trim()),
+            None => (Comb::Descendant, part),
+        };
+        match rel {
+            None => rel = Some(member_rel),
+            Some(seen) if seen == member_rel => {}
+            Some(_) => return Err(()), // mixed `:has(> a, img)` — see above
+        }
+        // One compound per member: any whitespace or combinator char means a chain/sibling.
+        if rest.is_empty() || has_unquoted(rest, b" \t\n\r>+~") {
+            return Err(());
+        }
+        let inner = parse_compound_depth(rest, depth)?;
+        // Each member is matched by `compound_matches` at open (no per-parent counter, no deferral), so
+        // a positional/reverse/`:has`/`:is`/text-predicate inside is unsupported (empty column) — but
+        // tag/id/class/attr/`:not` are all fine.
+        if inner.positional.is_some()
+            || inner.reverse.is_some()
+            || inner.has.is_some()
+            || inner.text_pred.is_some()
+            || !inner.is_groups.is_empty()
+        {
+            return Err(());
+        }
+        alts.push(inner);
+    }
+    let rel = rel.ok_or(())?;
+    let inner = if alts.len() == 1 {
+        alts.pop().ok_or(())?
+    } else {
+        Compound { is_groups: vec![alts], ..Default::default() }
     };
-    // A single compound only: any whitespace or combinator char means a chain/sibling (unsupported).
-    if rest.is_empty() || has_unquoted(rest, b" \t\n\r>+~") {
-        return Err(());
-    }
-    let inner = parse_compound_depth(rest, depth)?;
-    // The inner is matched by `compound_matches` at open (no per-parent counter, no deferral), so a
-    // positional/reverse/`:has`/`:is`/text-predicate inside is unsupported (empty column) — but tag/id/
-    // class/attr/`:not` are all fine.
-    if inner.positional.is_some()
-        || inner.reverse.is_some()
-        || inner.has.is_some()
-        || inner.text_pred.is_some()
-        || !inner.is_groups.is_empty()
-    {
-        return Err(());
-    }
     Ok(Has { rel, inner: Box::new(inner) })
 }
 
@@ -1067,7 +1146,7 @@ mod tests {
         }
         assert!(matches!(
             parse("i[a=\"2\"]").unwrap().parts[0].attrs.as_slice(),
-            [AttrPred::Eq(name, val)] if name == "a" && val == "2"
+            [AttrPred { name, op: AttrOp::Eq, value, ci: false }] if name == "a" && value == "2"
         ));
     }
 
@@ -1136,10 +1215,29 @@ mod tests {
         assert!(has("div:has(a[href])").is_some()); // tag + attribute inner
         assert!(has("div:has(:not(.empty))").is_some()); // `:not` inner
         assert!(has("div:has(> [data-src])").is_some()); // child-scoped attribute inner
+        // a relative selector LIST is supported too (cssselect#138 — the oracle rejects it). It lowers
+        // to ONE wrapper compound holding the members as a matches-any group, so the wrapper pins no tag
+        // and each member is its own filterable question.
+        let h = has("div:has(a, img)").unwrap();
+        assert_eq!(h.rel, Comb::Descendant);
+        assert_eq!(h.inner.tag, None, "the wrapper pins no name — the members do");
+        assert_eq!(h.inner.is_groups.len(), 1);
+        assert_eq!(h.inner.is_groups[0].len(), 2);
+        assert_eq!(h.inner.is_groups[0][0].tag.as_deref(), Some("a"));
+        assert_eq!(h.inner.is_groups[0][1].tag.as_deref(), Some("img"));
+        let h = has("div:has(> a, > img)").unwrap(); // all-child list
+        assert_eq!(h.rel, Comb::Child);
+        assert_eq!(h.inner.is_groups[0].len(), 2);
+        assert!(has("div:has([data-x], #id)").is_some()); // widened inners inside a list
+        assert!(has("div:has([data-x=\"a, b\"])").is_some()); // a comma in a VALUE is data, not a split
+        // ...but a ONE-member list keeps the bare compound, so the common shape stays filterable
+        assert!(has("div:has(a)").unwrap().inner.is_groups.is_empty());
         // unsupported (empty column, never wrong): a chain, positional/reverse/`:has`/`:is` inside
         assert!(parse("div:has(.a .b)").is_err()); // descendant chain inside
         assert!(parse("div:has(a + b)").is_err()); // sibling inside
-        assert!(parse("div:has(a, b)").is_err()); // comma list inside
+        assert!(parse("div:has(> a, img)").is_err()); // MIXED relative combinators — one `rel` per Has
+        assert!(parse("div:has(a, )").is_err()); // empty member
+        assert!(parse("div:has(a, .b .c)").is_err()); // a chain in a later member
         assert!(parse("div:has(:has(a))").is_err()); // nested :has
         assert!(parse("div:has(a:first-child)").is_err()); // positional inner
         assert!(parse("div:has()").is_err()); // empty arg
@@ -1321,8 +1419,8 @@ mod support_boundary_tests {
         let v = |q: &str| {
             parse(q).ok().and_then(|s| {
                 s.parts.last().and_then(|c| {
-                    c.attrs.first().map(|p| match p {
-                        AttrPred::Eq(_, val) => val.clone(),
+                    c.attrs.first().map(|p| match p.op {
+                        AttrOp::Eq => p.value.clone(),
                         _ => String::new(),
                     })
                 })

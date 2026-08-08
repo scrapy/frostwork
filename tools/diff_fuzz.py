@@ -343,7 +343,7 @@ def main():
     # down; raising it needs a reason.
     #
     # 0.10% -> 0.05%: "NUL inside a tag name" left this list when raw NUL started being deleted before
-    # tokenization (the engine used to drop it only from emitted values), and the data modes
+    # tokenization (dropping it only from emitted values disagrees about STRUCTURE), and the data modes
     # (`iframe`/`noembed`/`xmp`/`plaintext`) took the fabricated-element cases with them. Measured over
     # seeds 0-3 at 6000 iters: 0.0097%, 0.0143%, 0.0133%, 0.0128% of ~1.1M pairs — so 0.05% keeps ~3.5x
     # headroom over the worst seed while halving the room a future regression can hide in.

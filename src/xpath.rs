@@ -28,7 +28,7 @@
 //! column, no fallback).
 
 use crate::selector::{
-    AttrPred, Comb, Compound, Has, Nth, ReversePos, Selector, Terminal, TextAxis, TextOp, TextPred,
+    AttrOp, AttrPred, Comb, Compound, Has, Nth, ReversePos, Selector, Terminal, TextAxis, TextOp, TextPred,
 };
 
 /// The rules an XPath name literal must satisfy to be answerable here, shared by the tag and attribute
@@ -42,7 +42,7 @@ use crate::selector::{
 /// cssselect lowercases, so uppercase CSS names are meant to match.
 ///
 /// **No namespace prefix.** `svg:rect`, `@x:y` need a prefix->URI binding and there is no API to supply
-/// one, so lxml raises "undefined namespace prefix"; `//div/@x:y` used to RETURN a value for an
+/// one, so lxml raises "undefined namespace prefix". Accepting `//div/@x:y` would return a value for an
 /// expression the oracle refuses to run.
 ///
 /// **A valid XML name start** — not a digit, hyphen or dot (lxml: invalid expression).
@@ -62,8 +62,9 @@ fn valid_name(s: &str) -> bool {
 
 /// An ATTRIBUTE name. Non-ASCII is allowed, unlike a tag: the matcher decodes an attribute name before
 /// comparing it (`Matcher::interesting_name`), so `//p[@data-año]` and `//p/@año` answer in any
-/// encoding, exactly as the CSS spellings `[data-año]` / `::attr(año)` do. This used to share the tag
-/// rule and refuse them, which left the two front-ends disagreeing about the same question.
+/// encoding, exactly as the CSS spellings `[data-año]` / `::attr(año)` do. It is a separate rule from
+/// the tag one deliberately: sharing it would refuse these and leave the two front-ends disagreeing
+/// about the same question.
 fn valid_attr_name(s: &str) -> bool {
     valid_name_impl::<true>(s)
 }
@@ -595,15 +596,15 @@ fn parse_predicate_alts(pred: &str) -> Option<Vec<Vec<AttrPred>>> {
 /// `AttrPred`. Anything else (positional, `text()`, function) is unsupported. The compared value must be
 /// a QUOTED string literal: XPath gives `[@a=2]` numeric semantics (`number(@a)=2`, so `a="02"` matches)
 /// and `[@a=b]` node-set semantics (compare against child `<b>` elements' string-value), neither of which
-/// a byte compare against the raw text `2`/`b` reproduces — both used to yield wrong values (see
-/// `single_literal`), so an unquoted operand is now unsupported (empty column).
+/// a byte compare against the raw text `2`/`b` reproduces (see `single_literal`). Both would be wrong
+/// values, so an unquoted operand is unsupported — an empty column instead.
 fn parse_one_attr(t: &str, out: &mut Vec<AttrPred>) -> Option<()> {
     if let Some(inner) = t.strip_prefix("contains(").and_then(|r| r.strip_suffix(")")) {
         let (name, val) = fn_args(inner)?;
-        out.push(AttrPred::Substr(name, val));
+        out.push(AttrPred::new(name, AttrOp::Substr, val));
     } else if let Some(inner) = t.strip_prefix("starts-with(").and_then(|r| r.strip_suffix(")")) {
         let (name, val) = fn_args(inner)?;
-        out.push(AttrPred::Prefix(name, val));
+        out.push(AttrPred::new(name, AttrOp::Prefix, val));
     } else {
         // not `@name…` -> positional / text() / function predicate -> unsupported
         let rest = t.strip_prefix('@')?;
@@ -613,13 +614,13 @@ fn parse_one_attr(t: &str, out: &mut Vec<AttrPred>) -> Option<()> {
                 return None;
             }
             let val = single_literal(rest[eq + 1..].trim())?;
-            out.push(AttrPred::Eq(name.to_string(), val));
+            out.push(AttrPred::new(name, AttrOp::Eq, val));
         } else {
             let name = rest.trim();
             if !valid_attr_name(name) {
                 return None;
             }
-            out.push(AttrPred::Exists(name.to_string()));
+            out.push(AttrPred::exists(name));
         }
     }
     Some(())
@@ -854,9 +855,9 @@ mod tests {
         assert!(ok("//svg//rect"));
         assert!(ok("//a[@data-k=\"V\"]")); // uppercase VALUE is fine (values are case-sensitive in both)
     }
-    /// An ATTRIBUTE name may be non-ASCII, a TAG name may not — the split the two front-ends used to
-    /// disagree about, since the CSS spellings `[data-año]` / `::attr(año)` were already supported.
-    /// Every form here was checked against lxml, which answers all of them (`//p/@Ñ` included: libxml2
+    /// An ATTRIBUTE name may be non-ASCII, a TAG name may not — the same split the CSS spellings
+    /// `[data-año]` / `::attr(año)` make, since the two front-ends must answer one question one way.
+    /// Every form here is checked against lxml, which answers all of them (`//p/@Ñ` included: libxml2
     /// lowercases ASCII only, so a non-ASCII uppercase survives in the tree and XPath's case-sensitive
     /// compare finds it).
     #[test]

@@ -308,7 +308,7 @@ def gen_schema(rng, idx: int = 0) -> dict:
             cards[name] = ("all", None)  # this processor's input is a LIST of strings
         elif _proc in VALUE_INPUT_PROCESSORS:
             # a generic processor takes the field's value, so any cardinality is legal; a bare-element field
-            # hands it HTML SOURCE, which is the contract the node inference used to break
+            # hands it HTML SOURCE, which is the contract a guessed node inference breaks
             cards[name] = ("first", None) if is_node_query(sel) else rng.choice(
                 [("first", None), ("all", None), ("join", " ")]
             )
@@ -1138,7 +1138,7 @@ def main() -> None:
         for key, name, got, want, snip in examples:
             print(f"    [{key}] {name}\n        frostwork={got}\n        parsel   ={want}\n        html: {snip!r}")
 
-    # A green run is only worth the columns it actually graded, and that used to be reported rather than
+    # A green run is only worth the columns it actually graded, so that is GATED rather than
     # gated: a shape that produced nothing but ORACLE-SKIPs, a processor row whose expected value was empty
     # everywhere, and a combination the generator never emitted all exited 0.
     kinds = INPUT_KINDS if args.browser else ("http",)

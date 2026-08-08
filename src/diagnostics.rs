@@ -105,22 +105,25 @@ fn xpath_reason(qt: &str) -> String {
 
 fn css_reason(qt: &str) -> String {
     // A comma group is asked about FIRST, and per member. Every probe below substring-matches the WHOLE
-    // query, so a group holding one `:has()` member used to report the `:has()` shape rules even when that
-    // member is supported alone and the real refusal is that a group cannot hold a deferred predicate at
-    // all. Split with the parser's own splitter, so a comma inside `:is(.a, .b)` is not a group.
+    // query, so without this a group holding one `:has()` member reports the `:has()` shape rules even
+    // when that member is supported alone and the real refusal is that a group cannot hold a deferred
+    // predicate at all. Split with the parser's own splitter, so a comma inside `:is(.a, .b)` is not a
+    // group.
     let members = crate::selector::split_top_commas(qt);
     if members.len() > 1 {
         return comma_group_reason(&members);
     }
     let lower = qt.to_ascii_lowercase();
     let msg = if lower.contains(":has(") {
-        ":has() is supported as `:has(<compound>)` / `:has(> <compound>)` on ONE compound of a lone \
-         selector — the value may be that element's own (`div:has(a)::attr(id)`), its subtree \
-         (`div:has(a) ::text`), or a DESCENDANT's (`div:has(a) a::attr(href)`). The inner may be a \
-         tag/`*`/id/class/attribute/`:not` compound (id/attribute/`:not` inners are a divergence in our \
-         favor; cssselect rejects them). Unsupported: a chain/sibling inside (`:has(.a .b)`, \
-         `:has(a + b)`), a comma list, a nested/second `:has`, a positional inner, a group member, or a \
-         CHILD step into the value tail (`div:has(a) > p::text` — use the descendant form)"
+        ":has() is supported on ONE compound of a lone selector, as a relative selector LIST whose \
+         members are each one compound — `:has(a)`, `:has(> img)`, `:has(a, img)`, `:has(> a, > img)`. \
+         The value may be that element's own (`div:has(a)::attr(id)`), its subtree \
+         (`div:has(a) ::text`), or a DESCENDANT's (`div:has(a) a::attr(href)`). A member may be a \
+         tag/`*`/id/class/attribute/`:not` compound (id/attribute/`:not` members and the list itself are \
+         a divergence in our favor; cssselect rejects them). Unsupported: a chain/sibling inside \
+         (`:has(.a .b)`, `:has(a + b)`), a list MIXING relative combinators (`:has(> a, img)`), a \
+         nested/second `:has`, a positional inner, a group member, or a CHILD step into the value tail \
+         (`div:has(a) > p::text` — use the descendant form)"
     } else if lower.contains(":is(") || lower.contains(":where(") {
         ":is()/:where() alternatives must be plain compounds (tag/`*`/class/id/attr/`:not`); a \
          combinator (`:is(a b)`), a positional/reverse/`:has` inside an alternative, or a nested `:is` \
@@ -154,9 +157,7 @@ fn css_reason(qt: &str) -> String {
          unsupported; name the element (`li:nth-of-type(2)`) — that form is supported"
     } else if lower.contains(":not(") && not_arg_has_combinator(qt) {
         ":not() with a combinator argument (e.g. `:not(a b)`) is unsupported; a compound argument \
-         (`:not(.x)`) is fine"
-    } else if has_case_flag(qt) {
-        "case-insensitive attribute flag (`[a=b i]`) is unsupported"
+         (`:not(.x)`) and a compound LIST (`:not(.x, .y)`) are both fine"
     } else if has_namespace_prefix(qt) {
         "namespace prefix (`ns|tag`) is unsupported"
     } else if lower.contains("::before") || lower.contains("::after") {
@@ -315,15 +316,6 @@ fn each_predicate(qt: &str) -> impl Iterator<Item = &str> {
     out.into_iter()
 }
 
-/// Is there a `[attr=val i]` / `[attr=val s]` case flag (a trailing ` i`/` s` before `]`)?
-fn has_case_flag(qt: &str) -> bool {
-    each_predicate(qt).any(|p| {
-        let t = p.trim_end();
-        (t.ends_with(" i") || t.ends_with(" s") || t.ends_with(" I") || t.ends_with(" S"))
-            && t.contains('=')
-    })
-}
-
 /// A `|` used as a namespace separator inside a compound (not the XPath union, handled elsewhere).
 fn has_namespace_prefix(qt: &str) -> bool {
     // crude: a `|` not doubled (`||` is the CSS column combinator, still unsupported but distinct)
@@ -391,7 +383,6 @@ mod tests {
         assert!(reason("li:nth-last-child(2)").contains("nth"));
         assert!(reason("li:last-child").contains("position"));
         assert!(reason("div:not(a b)").contains("combinator argument"));
-        assert!(reason("a[href='x' i]").contains("case-insensitive"));
         assert!(reason("svg|rect").contains("namespace"));
         assert!(reason("div::before").contains("pseudo-element"));
         assert!(reason("div:hover").contains("pseudo"));

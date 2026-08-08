@@ -78,11 +78,10 @@ Its generated inputs cover:
 - **legacy-encoding pages asked with non-ASCII selector literals** (`tools/encpages.py`), one family per
   charset label.
 
-That last one closed an axis the harness did not have. Both selector-construction sites hardcoded
-`encoding="utf-8"`, so no generated pair had ever crossed the byte/UTF-8 boundary a selector literal sits
-on — and that is precisely where a silent value loss shipped: an attribute NAME arrives as raw page bytes
-while a selector's is UTF-8, so `[data-año]` matched a UTF-8 page and returned nothing for the same
-document in windows-1252. The label is now sent on both sides (the protocol's `ENC` field to the engine,
+That last one is the axis a UTF-8-only generator cannot reach. A selector literal sits on a byte/UTF-8
+boundary — an attribute NAME arrives as raw page bytes while a selector's is UTF-8 — and that boundary is
+where a value is lost silently: `[data-año]` can match a UTF-8 page and return nothing for the same
+document in windows-1252. So the label is sent on both sides (the protocol's `ENC` field to the engine,
 `PS(body=…, encoding=…)` to the oracle) across eight labels, with the literals placed in every position
 that reaches the boundary: class, id, attribute name, attribute value and element text, in both the CSS
 and the XPath spelling.
@@ -116,7 +115,7 @@ necessary because `encoding_rs` follows WHATWG indexes while Parsel ultimately u
 ### Corpus checks
 
 `make gate-corpus` runs the same value verdict over `tests/corpus`, a small vendored set of self-authored
-fixtures shaped like previously troublesome real markup.
+fixtures shaped like the real markup that breaks parsers.
 
 For a real corpus, use:
 
@@ -212,13 +211,13 @@ check can fail.
 ## The abi3 floor, and the dependency-free smoke test
 
 The wheel is `abi3-py310`, so CPython 3.10 must keep working, and the floor job runs the same
-`pytest tests/` as every other interpreter. That is new. At the old 3.9 floor it could not: `parsel`,
-`web-poet` *and* `pytest` each require ≥ 3.10, so the job ran `tools/abi3_smoke.py` as a stand-in and the
-floor was never covered by the real suite. Raising the floor turned the weakest job in CI into a full one
-— and the first run there found a live bug (`RuntimeError` wrapping the `TypeError` a marker on a
-non-Frostwork base raises, on every Python before 3.12; see PYTHON.md).
+`pytest tests/` as every other interpreter. The floor and the test toolchain have to agree for that to be
+possible: `parsel`, `web-poet` *and* `pytest` each require ≥ 3.10, so a lower floor leaves its own job
+unable to run the real suite and covered by a stand-in instead. Exception chaining is one thing that
+costs — a marker on a non-Frostwork base raises `TypeError`, wrapped in a `RuntimeError` on every Python
+before 3.12 (see PYTHON.md) — and only the full suite on the floor interpreter sees it.
 
-`tools/abi3_smoke.py` still runs there, now for the thing it is the only witness to: the core works with
+`tools/abi3_smoke.py` runs there too, for the thing it is the only witness to: the core works with
 **no Python dependencies installed at all** — importing the extension, extraction, `Page`/`Item`, groups,
 audit and source scanning, standard library only. A venv holding parsel and web-poet cannot show that.
 Value parity remains the job of the oracle-backed jobs.
