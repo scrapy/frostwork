@@ -30,6 +30,7 @@ from parsel import Selector as PS
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from families import FAMILIES, build_page  # tagged construct generators
 import conformant  # content-model-aware generator (the clean invariant gate)
+import encpages  # legacy-encoding pages x non-ASCII selector literals (the byte/UTF-8 boundary)
 import foreign  # svg/math/template foreign-content generator (also a clean parity gate)
 import oracle  # oracle-toolchain guard: the verdicts only mean anything against libxml2 >= 2.14
 
@@ -106,8 +107,11 @@ def _crash_check(cases, results, returncode, err):
     return crashed, diag
 
 
-def run_engine(cases, strict_budget=True):
+def run_engine(cases, strict_budget=True, enc=""):
     """cases: list of (html_bytes, [selectors]) -> (results, crashed_cases, diag).
+
+    `enc` is the charset label sent in the protocol's ENC field for every case in the batch; empty
+    (the default) means sniff, which is what every family except the encoding one wants.
 
     results[i] holds the value-columns for cases[i] (truncated if the engine crashed mid-batch).
 
@@ -123,7 +127,8 @@ def run_engine(cases, strict_budget=True):
                             stderr=subprocess.PIPE, env=env)
     # protocol: ENC \t HEXHTML \t sels...   (empty ENC = sniff)
     payload = "".join(
-        "\t" + html.hex() + ("\t" if sels else "") + "\t".join(sels) + "\n" for html, sels in cases
+        enc + "\t" + html.hex() + ("\t" if sels else "") + "\t".join(sels) + "\n"
+        for html, sels in cases
     ).encode()
     out, err = proc.communicate(payload)
     results = _parse_lines(out)
@@ -150,9 +155,9 @@ def is_xpath(sel):
     return s.startswith("/") or s.startswith("./") or s.startswith("normalize-space(")
 
 
-def parsel_vals(html, sel):
+def parsel_vals(html, sel, enc="utf-8"):
     try:
-        s = PS(body=html, encoding="utf-8")
+        s = PS(body=html, encoding=enc)
         return (s.xpath(sel) if is_xpath(sel) else s.css(sel)).getall()
     except Exception:
         return None
@@ -298,6 +303,8 @@ def main():
     ap.add_argument("--conformant", type=int, default=4000, help="content-model-conformant docs (gate)")
     ap.add_argument("--foreign", type=int, default=1500, help="svg/math/template foreign-content docs (gate)")
     ap.add_argument("--grouped", type=int, default=3000, help="single-pass Many/One grouped cases (gate)")
+    ap.add_argument("--encoding", type=int, default=250,
+                    help="legacy-encoding pages PER LABEL, with non-ASCII selector literals (gate)")
     ap.add_argument("--adversarial", type=int, default=0,
                     help="unconstrained grammar docs (measures SKIP-set distance; not a gate)")
     ap.add_argument("--seed", type=int, default=0)
@@ -365,6 +372,49 @@ def main():
             fam_div["(conformant)"][v] += 1
             if v in ("DIVERGE", "CRASH") and len(examples) < args.show:
                 examples.append(("conformant", sel, mine[:5], (theirs or [])[:5], body.decode()[:240]))
+
+    # ---- ENCODING: the same document in a legacy charset, asked with non-ASCII selector literals ----
+    # The one axis this harness did not have. Both selector-construction sites hardcoded utf-8, so no
+    # generated pair had ever crossed the byte/UTF-8 boundary a selector literal sits on — which is
+    # exactly where a silent value loss shipped (`[data-año]` matched a UTF-8 page and returned nothing
+    # for the same document in windows-1252). The label is sent on BOTH sides: the protocol's ENC field
+    # to the engine, `PS(body=…, encoding=…)` to the oracle.
+    #
+    # `expect` is not decoration. A selector the oracle answers nowhere can only catch an over-match, so
+    # a family of always-empty columns would grade AGREE against an engine with the feature removed —
+    # the positives assert lxml returned something, and a violation is a HARNESS error (loud), not a
+    # divergence.
+    enc_oracle_empty = []
+    for label in encpages.LABELS:
+        enc_cases = [encpages.generate(rng, label) for _ in range(args.encoding)]
+        if not enc_cases:
+            break
+        engine_out, crashed, diag = run_engine(
+            [(b, [s for s, _e in sels]) for b, _l, sels in enc_cases], enc=label
+        )
+        stat["CRASH"] += crashed
+        if diag:
+            crash_diags.append((f"encoding:{label}", diag))
+        for (body, _l, sels), mine_cols in zip(enc_cases, engine_out):
+            for si, (sel, expect_nonempty) in enumerate(sels):
+                mine = mine_cols[si] if si < len(mine_cols) else []
+                theirs = parsel_vals(body, sel, enc=label)
+                if expect_nonempty and not theirs:
+                    enc_oracle_empty.append((label, sel))
+                v = verdict(mine, theirs, "CONTROL", sel)
+                stat[v] += 1
+                stat["pairs"] += 1
+                fam_div[f"(encoding:{label})"][v] += 1
+                if v in ("DIVERGE", "CRASH") and len(examples) < args.show:
+                    examples.append((f"encoding:{label}", sel, mine[:5], (theirs or [])[:5],
+                                     body.decode(label)[:240]))
+    if enc_oracle_empty:
+        uniq = sorted(set(enc_oracle_empty))
+        print(f"HARNESS ERROR: {len(uniq)} encoding selectors the ORACLE answered nowhere, which can "
+              f"only catch an over-match:", file=sys.stderr)
+        for label, sel in uniq[:8]:
+            print(f"  {label}  {sel}", file=sys.stderr)
+        sys.exit(2)
 
     # ---- FOREIGN: svg/math/template subtrees; libxml2 treats them as ordinary elements, so this is a
     # clean parity gate over a species conformant.py never emits (self-closing SVG leaves, camelCase
@@ -475,9 +525,14 @@ def main():
     print(f"  CRASH          {stat['CRASH']:>8}   <-- gate: must be 0\n")
 
     print("  by family:   family                 pairs   AGREE   WS  SKIP-EXP  DIVERGE")
-    order = [n for n, _, _ in FAMILIES] + [
+    # Preferred order first, then EVERY remaining family that actually recorded pairs. The list used to
+    # be hand-written and closed, so a family absent from it counted toward the gate while being
+    # invisible in the report — the encoding rows landed in exactly that hole. Deriving the tail means a
+    # new generator cannot be silently unlisted.
+    preferred = [n for n, _, _ in FAMILIES] + [
         "(conformant)", "(foreign)", "(grouped)", "(grouped-unsupported)"
     ]
+    order = preferred + sorted(k for k in fam_div if k not in set(preferred))
     for name in order:
         d = fam_div[name]
         p = sum(d.values())

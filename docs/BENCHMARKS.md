@@ -16,6 +16,14 @@ controlled: treat a ratio as meaningful and an absolute µs as comparable only i
 **Nothing is timed before its values are checked against lxml** — a benchmark of two engines computing
 different answers is not a benchmark.
 
+**Provenance, because the sections are not all the same vintage.** The page-shape matrix, size sweep,
+grouped and deferred-tail figures below are from one `tools/bench_matrix.py` run on the current build.
+The **production-corpus** and **competitive-field** tables in the next two sections are older: their
+corpus is not distributed and is not present on the machine this build was measured on, so they were
+not re-run. They predate the shared-tail-prefix change, which can only reduce Frostwork's time on a
+schema with several deferred fields on one compound — so treat those ratios as a floor, and re-run
+`make bench-engines CORPUS=<dir>` where the corpus exists before quoting one as current.
+
 ## Real production pages
 
 587 real pages across 116 page objects (363 MB, median 468 KB, max 3.7 MB), each extracted with its
@@ -222,60 +230,60 @@ these* below. Regenerate with `.venv/bin/python tools/bench_matrix.py --markdown
 <!-- BEGIN generated: tools/bench_matrix.py --markdown -->
 | page (≈196 KB) | sels | vals | engine µs | engine MB/s | Parsel µs | speedup |
 | --- | --- | --- | --- | --- | --- | --- |
-| **article (text-heavy)** | 0 | 0 | 82 | 2440 | 547 | — |
-|  | 1 | 1 | 89 | 2251 | 567 | 6.4× |
-|  | 4 | 757 | 204 | 982 | 2889 | 14.1× |
-|  | 8 | 2017 | 342 | 587 | 5794 | 16.9× |
-|  | 16 | 2017 | 368 | 546 | 6810 | 18.5× |
-|  | 26 | 2773 | 496 | 404 | 10314 | 20.8× |
-|  | 32 | 3277 | 567 | 354 | 11388 | 20.1× |
-| **product&#95;listing** | 0 | 0 | 385 | 520 | 2636 | — |
-|  | 1 | 1 | 420 | 476 | 2770 | 6.6× |
-|  | 4 | 3019 | 1072 | 187 | 15788 | 14.7× |
-|  | 8 | 6037 | 1492 | 134 | 22466 | 15.1× |
-|  | 16 | 15091 | 2230 | 90 | 87091 | 39.1× |
-|  | 26 | 25151 | 2931 | 68 | 159669 | 54.5× |
-|  | 32 | 25151 | 3118 | 64 | 152243 | 48.8× |
-| **table-heavy** | 0 | 0 | 551 | 364 | 3902 | — |
-|  | 1 | 1 | 675 | 297 | 3740 | 5.5× |
-|  | 4 | 4371 | 1494 | 134 | 21266 | 14.2× |
-|  | 8 | 8741 | 2029 | 99 | 30949 | 15.3× |
-|  | 16 | 8741 | 2672 | 75 | 45069 | 16.9× |
-|  | 26 | 13111 | 3481 | 58 | 70383 | 20.2× |
-|  | 32 | 13111 | 4066 | 49 | 71846 | 17.7× |
-| **deep-nested** | 0 | 0 | 891 | 225 | 3295 | — |
-|  | 1 | 1 | 1031 | 194 | 3566 | 3.5× |
-|  | 4 | 726 | 1399 | 143 | 11028 | 7.9× |
-|  | 8 | 1451 | 1782 | 112 | 13369 | 7.5× |
-|  | 16 | 3626 | 2682 | 75 | 40585 | 15.1× |
-|  | 26 | 4351 | 3696 | 54 | 59372 | 16.1× |
-|  | 32 | 4351 | 4518 | 44 | 58509 | 13.0× |
-| **class-led / utility-CSS** | 0 | 0 | 204 | 981 | 1804 | — |
-|  | 1 | 440 | 433 | 463 | 5122 | 11.8× |
-|  | 8 | 3520 | 1013 | 198 | 38721 | 38.2× |
-|  | 32 | 3520 | 1451 | 138 | 100242 | 69.1× |
-| **attr-led / attribute-heavy** | 0 | 0 | 260 | 769 | 2891 | — |
-|  | 1 | 447 | 350 | 572 | 4457 | 12.7× |
-|  | 8 | 1341 | 562 | 357 | 9327 | 16.6× |
-|  | 32 | 1341 | 1198 | 167 | 18970 | 15.8× |
+| **article (text-heavy)** | 0 | 0 | 83 | 2414 | 536 | — |
+|  | 1 | 1 | 91 | 2196 | 556 | 6.1× |
+|  | 4 | 757 | 205 | 978 | 2823 | 13.8× |
+|  | 8 | 2017 | 310 | 648 | 5602 | 18.1× |
+|  | 16 | 2017 | 381 | 527 | 6704 | 17.6× |
+|  | 26 | 2773 | 492 | 408 | 10037 | 20.4× |
+|  | 32 | 3277 | 569 | 353 | 11500 | 20.2× |
+| **product&#95;listing** | 0 | 0 | 390 | 514 | 2645 | — |
+|  | 1 | 1 | 424 | 472 | 2727 | 6.4× |
+|  | 4 | 3019 | 1032 | 194 | 15414 | 14.9× |
+|  | 8 | 6037 | 1411 | 142 | 22189 | 15.7× |
+|  | 16 | 15091 | 2062 | 97 | 82018 | 39.8× |
+|  | 26 | 25151 | 2796 | 72 | 147966 | 52.9× |
+|  | 32 | 25151 | 3078 | 65 | 148499 | 48.2× |
+| **table-heavy** | 0 | 0 | 569 | 352 | 3674 | — |
+|  | 1 | 1 | 636 | 315 | 3543 | 5.6× |
+|  | 4 | 4371 | 1822 | 110 | 22175 | 12.2× |
+|  | 8 | 8741 | 2062 | 97 | 31202 | 15.1× |
+|  | 16 | 8741 | 2515 | 80 | 42315 | 16.8× |
+|  | 26 | 13111 | 3435 | 58 | 70088 | 20.4× |
+|  | 32 | 13111 | 4100 | 49 | 71018 | 17.3× |
+| **deep-nested** | 0 | 0 | 890 | 225 | 3194 | — |
+|  | 1 | 1 | 1005 | 199 | 3317 | 3.3× |
+|  | 4 | 726 | 1379 | 145 | 10582 | 7.7× |
+|  | 8 | 1451 | 1721 | 116 | 12694 | 7.4× |
+|  | 16 | 3626 | 2590 | 77 | 39708 | 15.3× |
+|  | 26 | 4351 | 3466 | 58 | 55681 | 16.1× |
+|  | 32 | 4351 | 4441 | 45 | 55961 | 12.6× |
+| **class-led / utility-CSS** | 0 | 0 | 193 | 1040 | 1742 | — |
+|  | 1 | 440 | 425 | 471 | 4650 | 10.9× |
+|  | 8 | 3520 | 912 | 220 | 36670 | 40.2× |
+|  | 32 | 3520 | 1426 | 140 | 96664 | 67.8× |
+| **attr-led / attribute-heavy** | 0 | 0 | 246 | 814 | 2986 | — |
+|  | 1 | 447 | 331 | 606 | 4178 | 12.6× |
+|  | 8 | 1341 | 588 | 341 | 8828 | 15.0× |
+|  | 32 | 1341 | 1069 | 188 | 16840 | 15.8× |
 <!-- END generated -->
 
 **Size sweep** (product listing, 8 selectors) — both scale linearly, so the ratio holds:
 
 | size | engine µs | engine MB/s | Parsel µs | speedup |
 | --- | --- | --- | --- | --- |
-| 19 KB | 162 | 125 | 2 514 | 15.6× |
-| 195 KB | 1 459 | 137 | 22 715 | 15.6× |
-| 976 KB | 7 000 | 143 | 114 200 | 16.3× |
+| 19 KB | 146 | 139 | 2 268 | 15.6× |
+| 195 KB | 1 416 | 142 | 22 391 | 15.8× |
+| 976 KB | 7 034 | 142 | 113 841 | 16.2× |
 
 **Grouped** (`Many`/`One`) — one `.product` container × N sub-fields over the same listing, against
 Parsel's per-container loop. The shared scan keeps growth below the loop:
 
 | subs | engine µs | vals/page | Parsel µs | speedup |
 | --- | --- | --- | --- | --- |
-| 1 | 886 | 1 006 | 15 852 | 17.9× |
-| 3 | 1 221 | 3 018 | 36 059 | 29.5× |
-| 5 | 1 545 | 5 030 | 54 250 | 35.1× |
+| 1 | 855 | 1 006 | 14 042 | 16.4× |
+| 3 | 1 172 | 3 018 | 33 869 | 28.9× |
+| 5 | 1 444 | 5 030 | 54 262 | 37.6× |
 
 ### Reading these
 
@@ -284,34 +292,34 @@ scan, not an extraction, and `assert_cell_extracts` now refuses to publish one. 
 the pure-scan floor** — tokenizer, open-element stack and nothing else — so every other cell in a shape
 decomposes into that floor plus matcher work. Parsel's 0-selector cell is its parse.
 
-- **The matcher, not the scan, is where the time goes.** On the class-led page the floor is 204 µs and
-  eight class-led fields cost 1 013 — **80% matching**, rising to 86% at 32 fields. Even one field is
+- **The matcher, not the scan, is where the time goes.** On the class-led page the floor is 193 µs and
+  eight class-led fields cost 912 — **79% matching**, rising to 86% at 32 fields. Even one field is
   already the majority on that shape. The throughput figures below describe the floor; they do not
   describe a real schema's cost.
 - **The gap widens with field count.** Frostwork's cost grows roughly linearly with selectors and page
   size; Parsel's grows super-linearly once selectors are descendant-heavy (`.product .price`), because
   cssselect translates each to XPath and libxml2 re-walks the tree per query. At 26–32 fields Parsel
-  reaches 71–160 ms where the single pass stays in single-digit ms, and the class-led page at 32 fields
-  is the widest cell in the table at **69×** (100 ms vs 1.5 ms).
-- **A one-field schema is the weak case** (3.5–6.6× on the tag-led shapes): the scan is paid whether or
-  not there is anything to amortise it over. The class-led and attribute-led rows sit higher (11.8×,
-  12.7×) because their first field matches every card rather than once per page.
+  reaches 70–148 ms where the single pass stays in single-digit ms, and the class-led page at 32 fields
+  is the widest cell in the table at **68×** (97 ms vs 1.4 ms).
+- **A one-field schema is the weak case** (3.3–6.4× on the tag-led shapes): the scan is paid whether or
+  not there is anything to amortise it over. The class-led and attribute-led rows sit higher (10.9×,
+  12.6×) because their first field matches every card rather than once per page.
 - **Throughput is page-shape-dependent, and that is a property of the SCAN.** Text-dominated pages reach
-  ~2.4 GB/s at the floor because `memchr` bulk-skips text; tag-dense pages run 225–520 MB/s because the
+  ~2.4 GB/s at the floor because `memchr` bulk-skips text; tag-dense pages run 225–514 MB/s because the
   cost is per element, not per byte.
-- **Deep nesting is the slowest shape (3.5–16.1×) because of element DENSITY, not depth.** Its floor is
-  891 µs against the article's 82 µs on the same 195 KB — a 10.8× spread with **zero selectors and no
+- **Deep nesting is the slowest shape (3.3–16.1×) because of element DENSITY, not depth.** Its floor is
+  890 µs against the article's 83 µs on the same ~196 KB — a 10.7× spread with **zero selectors and no
   structural matching at all** — and it carries ~12 bytes per element against the article's ~166. An
   earlier version of this section blamed the ancestor-stack walk; the pure-scan row is what disproved
   that. Separating depth from density would need a shape that varies one at constant other, which the
   harness does not have, so nothing here is evidence about depth itself.
-- **Deferred tails cost extra, per distinct prefix.** `:has()`, `:contains()`, `:last-child` and XPath
-  text predicates resolve from a re-scan of each winner's span rather than from the streaming pass, so
-  they do not share the main scan. Tails deferring on the SAME compound share one re-scan, so the cost
-  tracks the number of distinct prefixes rather than the number of fields — two fields on one compound
-  (`div:has(a) a::attr(href)` and `div:has(a) p::text`) collapse into a single extra pass. **The ratios
-  in the table above predate that sharing and are stale; re-run `tools/bench_engines.py` before quoting
-  one.**
+- **Deferred tails cost extra, per distinct PREFIX rather than per field.** `:has()`, `:contains()`,
+  `:last-child` and XPath text predicates resolve from a re-scan of each winner's span rather than from
+  the streaming pass, so they do not share the main scan: against the same count of plain fields, one
+  tail field is 2.9× and eight are 4.0×. Tails deferring on the same compound share one re-scan, which
+  is why **two fields read 2.3× — *below* the one-field ratio**: both sides of that row
+  (`div:has(a) a::attr(href)` and `div:has(a) p::text`) collapse into a single extra pass while the
+  plain baseline pays for two selectors. Four distinct prefixes are back up at 3.6×.
 - **A pool only measures what it contains.** The four page shapes run the tag-led pool; the class-led and
   attribute-predicate rows exist because a real page object is mostly class-led and neither other pool
   holds an attribute predicate. `tools/ab_bench.py` carries the same pools crossed with more shapes.

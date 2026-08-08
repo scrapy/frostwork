@@ -99,6 +99,42 @@ def test_differential_verdict_flags_a_value_regression():
     assert verdict([" a "], ["a"], "CONTROL", "p::text") == "WS"
 
 
+def test_the_encoding_axis_actually_crosses_the_byte_boundary():
+    """The encoding family exists because both selector-construction sites in `diff_lxml.py` hardcoded
+    utf-8, so no generated pair had ever asked a non-ASCII selector literal of a non-UTF-8 page — the
+    gap a silent value loss shipped through. Three ways it could read green while testing nothing, all
+    asserted here:
+
+    * a label whose alphabet does not survive the codec (the words would encode to `?` and the case
+      would be ASCII wearing a label);
+    * a document that is byte-identical to its UTF-8 form (nothing crossed the boundary);
+    * selectors carrying no non-ASCII at all, or no over-match half — a positive-only family can only
+      catch a lost value, never a false one.
+    """
+    import random
+
+    import encpages
+
+    assert encpages.LABELS, "no usable labels: every alphabet failed its codec round-trip"
+    assert "windows-1252" in encpages.LABELS and "shift_jis" in encpages.LABELS
+
+    rng = random.Random(0)
+    for label in encpages.LABELS:
+        body, lab, sels = encpages.generate(rng, label)
+        assert lab == label
+        # the bytes must actually differ from UTF-8, or the label is decoration
+        assert body != body.decode(label).encode("utf-8"), label
+        assert not body.isascii(), label
+        # and the selectors must reach the boundary, on both front-ends, both polarities
+        assert any(not s.isascii() and s.startswith("//") for s, _e in sels), label
+        assert any(not s.isascii() and not s.startswith("//") for s, _e in sels), label
+        assert any(e for _s, e in sels) and any(not e for _s, e in sels), label
+
+    # a label the codec cannot represent is dropped rather than silently degraded
+    assert not encpages.usable("ascii")
+    assert not encpages.usable("no-such-codec")
+
+
 def test_differential_batches_stay_inside_the_member_budget():
     """An over-budget batch returns empty columns for the surplus, which reads as divergence in every one
     of them — so the harness must batch below the engine's advertised limit."""

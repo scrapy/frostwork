@@ -193,21 +193,35 @@ def test_a_non_ascii_attribute_name_matches_under_a_legacy_encoding(label, name,
     `:contains("社")` encoding-agnostic. Attribute NAMES were the one place a selector's UTF-8 still met
     the page's raw bytes: `[data-año]` matched a UTF-8 page and silently returned nothing for the same
     document in windows-1252. lxml decodes the whole document before tokenizing, so it matches either
-    way — it is the oracle here, over every predicate and the `::attr()` terminal."""
+    way — it is the oracle here, over every predicate and the `::attr()` terminal.
+
+    Both front-ends, because they answer the same question and used to disagree: the XPath spelling was
+    refused in EVERY encoding while the CSS one worked."""
     parsel = _oracle()
     text = f'<p {doc_name}="v">t</p>'
     body = text.encode(label)
-    queries = [
+    css = [
         f"[{name}]::text",
         f'[{name}="v"]::text',
         f"[{name}]::attr({name})",
         f'[{name}^="v"]::text',
     ]
+    xpath = [
+        f"//p[@{name}]/text()",
+        f'//p[@{name}="v"]/text()',
+        f"//p/@{name}",
+        f"//p//@{name}",
+        f'//p[contains(@{name},"v")]/text()',
+        f'//p[starts-with(@{name},"v")]/text()',
+    ]
     theirs = parsel.Selector(text=text)
-    for q in queries:
+    for q in css:
         assert frostwork.extract(body, [q], label) == [theirs.css(q).getall()] != [[]], q
-    # and a name the page does NOT carry stays empty in the same encoding
+    for q in xpath:
+        assert frostwork.extract(body, [q], label) == [theirs.xpath(q).getall()] != [[]], q
+    # and a name the page does NOT carry stays empty in the same encoding, both spellings
     assert frostwork.extract(body, [f"[{name}x]::text"], label) == [[]]
+    assert frostwork.extract(body, [f"//p[@{name}x]/text()"], label) == [[]]
 
 
 def test_extract_str_with_non_utf8_label_raises():

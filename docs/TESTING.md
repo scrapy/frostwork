@@ -74,11 +74,33 @@ Its generated inputs cover:
 - content-model-valid trees;
 - optional-end-tag and implied-close families;
 - foreign-content shapes (`svg`, `math`, `template`);
-- flat extraction and grouped `Many`/`One` extraction.
+- flat extraction and grouped `Many`/`One` extraction;
+- **legacy-encoding pages asked with non-ASCII selector literals** (`tools/encpages.py`), one family per
+  charset label.
+
+That last one closed an axis the harness did not have. Both selector-construction sites hardcoded
+`encoding="utf-8"`, so no generated pair had ever crossed the byte/UTF-8 boundary a selector literal sits
+on — and that is precisely where a silent value loss shipped: an attribute NAME arrives as raw page bytes
+while a selector's is UTF-8, so `[data-año]` matched a UTF-8 page and returned nothing for the same
+document in windows-1252. The label is now sent on both sides (the protocol's `ENC` field to the engine,
+`PS(body=…, encoding=…)` to the oracle) across eight labels, with the literals placed in every position
+that reaches the boundary: class, id, attribute name, attribute value and element text, in both the CSS
+and the XPath spelling.
+
+Two properties the family has to keep, and `tests/test_gates.py` asserts both. Its alphabet is checked to
+round-trip through the codec — a word the encoding cannot represent becomes `?` and would test ASCII while
+wearing the label — and each case carries an over-match half, because a selector the ORACLE answers nowhere
+can only catch a false positive, never a lost value.
 
 The generator records documented exceptions separately from unexplained differences. A generated family is
 useful only if it discriminates: when adding one, run it against the pre-fix build or an equivalent mutant
-and confirm that it fails for the intended reason.
+and confirm that it fails for the intended reason. The encoding family was checked that way against both
+regressions it exists for — undecoded attribute names (400 of 720 pairs per label) and ASCII-only XPath
+attribute names (160 of 720).
+
+One report-shape lesson came with it: the by-family table's row order was a hand-written closed list, so a
+new family counted toward the gate while being **invisible** in the output. The tail is derived from the
+recorded families now.
 
 ### Encoding
 

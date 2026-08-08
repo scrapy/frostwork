@@ -132,6 +132,17 @@ a way it has read 100% while the engine was wrong:
   generator emits no headings at all, so two comma-group spellings exercise nothing. `diff_lxml.py` now
   records that set and names any arrival, which is how the first `:contains()` case was caught: a selector
   that read like coverage and would have graded AGREE against a build with no `:contains()` at all.
+  **And "what syntax does it emit" has a twin: what INPUT does it emit.** Both of `diff_lxml.py`'s
+  selector-construction sites hardcoded `encoding="utf-8"`, so in a harness that grades millions of pairs
+  no generated page had ever been anything but UTF-8 — and a selector literal's raw-bytes-vs-UTF-8 boundary
+  is where a silent value loss shipped (`[data-año]` matched a UTF-8 page and returned NOTHING for the same
+  document in windows-1252, where lxml matches). No pair could have caught it, and the XPath spelling of
+  the same question was refused in every encoding. `tools/encpages.py` is that axis now, one family per
+  label, literals in every position that crosses the boundary. When a gate's INPUTS are all one shape, ask
+  what the shape is hiding before trusting the pair count. Two smaller traps it walked into on the way: the
+  by-family report order was a hand-written closed list, so the new families counted toward the gate while
+  being INVISIBLE in the output (derive the tail), and a generator alphabet must be proven to round-trip
+  through its codec or the words degrade to `?` and the case tests ASCII while wearing the label.
 - **A number the docs publish needs the same gate as a value the engine returns, and the benchmarks did
   not have one.** `bench_engines.py` refuses to time a column whose values it has not checked;
   `bench_matrix.py` had no such rule, and six of the 24 cells it published extracted ZERO values — every

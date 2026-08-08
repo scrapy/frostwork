@@ -31,27 +31,41 @@ use crate::selector::{
     AttrPred, Comb, Compound, Has, Nth, ReversePos, Selector, Terminal, TextAxis, TextOp, TextPred,
 };
 
+/// The rules an XPath name literal must satisfy to be answerable here, shared by the tag and attribute
+/// spellings; they differ only in whether non-ASCII is allowed (`NON_ASCII`).
+///
+/// **All-lowercase, in ASCII.** libxml2 LOWERCASES every HTML name in the tree — ASCII only, so a `Ñ`
+/// survives as written — while XPath name-tests compare CASE-SENSITIVELY. An ASCII uppercase letter
+/// (`//DIV`, `//rect/@ID`, `//svg/@viewBox`) therefore matches nothing in lxml, and accepting it would
+/// over-match through the matcher's `eq_ignore_ascii_case`. A non-ASCII uppercase is the opposite case
+/// and must be KEPT: lxml answers `//p/@Ñ`, because neither side folded it. CSS is unaffected —
+/// cssselect lowercases, so uppercase CSS names are meant to match.
+///
+/// **No namespace prefix.** `svg:rect`, `@x:y` need a prefix->URI binding and there is no API to supply
+/// one, so lxml raises "undefined namespace prefix"; `//div/@x:y` used to RETURN a value for an
+/// expression the oracle refuses to run.
+///
+/// **A valid XML name start** — not a digit, hyphen or dot (lxml: invalid expression).
+fn valid_name_impl<const NON_ASCII: bool>(s: &str) -> bool {
+    let ok = |b: u8| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.') || (NON_ASCII && b >= 0x80);
+    let starts_ok = matches!(s.as_bytes().first(), Some(&b) if matches!(b, b'a'..=b'z' | b'_') || (NON_ASCII && b >= 0x80));
+    !s.is_empty() && starts_ok && s.bytes().all(ok)
+}
+
+/// A TAG name-test. ASCII-only, and the reason is the SELECTOR side rather than the tokenizer: see the
+/// type-selector arm of `selector::parse_compound`, which refuses the CSS spelling for the same two
+/// reasons (a case rule that would over-match, and a raw-byte tag comparison). Refused, not silently
+/// empty.
 fn valid_name(s: &str) -> bool {
-    // ASCII-only AND all-lowercase. The ASCII half is right for a TAG name — those come from the
-    // tokenizer's ASCII name scan, so a non-ASCII one could never match — and over-broad for an
-    // ATTRIBUTE name, which the matcher decodes before comparing (`Matcher::interesting_name`), so the
-    // CSS spelling `[data-año]` matches and this refuses the same question. Refused, not silently
-    // empty; widening it means lowering the `@` name scan below too, and proving the parity.
-    // Lowercase is the subtler rule: libxml2 LOWERCASES every HTML
-    // name in the tree, while XPath name-tests compare CASE-SENSITIVELY — so an XPath literal carrying
-    // any uppercase letter (`//DIV`, `//rect/@ID`, `//svg/@viewBox`) matches nothing in lxml. Reject it
-    // here so the query is unsupported (empty column, matching the oracle) instead of case-insensitively
-    // over-matching via the matcher's `eq_ignore_ascii_case`. CSS is unaffected (cssselect lowercases,
-    // so uppercase CSS names are meant to match). Non-ASCII attribute *values* are handled downstream.
-    // A NAMESPACE PREFIX (`svg:rect`, `@x:y`) needs a prefix->URI binding, and there is no API to supply
-    // one, so lxml raises "undefined namespace prefix" - `//div/@x:y` used to RETURN the attribute value
-    // for an expression the oracle refuses to run. Reject the colon until bindings exist.
-    // A leading digit / hyphen / dot is not a valid XML name start either (lxml: invalid expression).
-    let ok_chars = |s: &str| {
-        s.bytes().all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.'))
-    };
-    let starts_ok = matches!(s.as_bytes().first(), Some(b'a'..=b'z' | b'_'));
-    !s.is_empty() && starts_ok && ok_chars(s)
+    valid_name_impl::<false>(s)
+}
+
+/// An ATTRIBUTE name. Non-ASCII is allowed, unlike a tag: the matcher decodes an attribute name before
+/// comparing it (`Matcher::interesting_name`), so `//p[@data-año]` and `//p/@año` answer in any
+/// encoding, exactly as the CSS spellings `[data-año]` / `::attr(año)` do. This used to share the tag
+/// rule and refuse them, which left the two front-ends disagreeing about the same question.
+fn valid_attr_name(s: &str) -> bool {
+    valid_name_impl::<true>(s)
 }
 
 /// Cap on how many members one query may expand to (union parts × per-step `or` alternatives). Real
@@ -139,10 +153,10 @@ fn split_terminal(q: &str) -> Option<(&str, Terminal)> {
         Some((p, Terminal::Text { subtree: false }))
     } else if let Some(idx) = q.rfind("//@") {
         let name = &q[idx + 3..];
-        valid_name(name).then(|| (&q[..idx], Terminal::Attr { name: name.to_string(), subtree: true }))
+        valid_attr_name(name).then(|| (&q[..idx], Terminal::Attr { name: name.to_string(), subtree: true }))
     } else if let Some(idx) = q.rfind("/@") {
         let name = &q[idx + 2..];
-        valid_name(name).then(|| (&q[..idx], Terminal::Attr { name: name.to_string(), subtree: false }))
+        valid_attr_name(name).then(|| (&q[..idx], Terminal::Attr { name: name.to_string(), subtree: false }))
     } else {
         Some((q, Terminal::OuterHtml))
     }
@@ -595,14 +609,14 @@ fn parse_one_attr(t: &str, out: &mut Vec<AttrPred>) -> Option<()> {
         let rest = t.strip_prefix('@')?;
         if let Some(eq) = rest.find('=') {
             let name = rest[..eq].trim();
-            if !valid_name(name) {
+            if !valid_attr_name(name) {
                 return None;
             }
             let val = single_literal(rest[eq + 1..].trim())?;
             out.push(AttrPred::Eq(name.to_string(), val));
         } else {
             let name = rest.trim();
-            if !valid_name(name) {
+            if !valid_attr_name(name) {
                 return None;
             }
             out.push(AttrPred::Exists(name.to_string()));
@@ -616,7 +630,7 @@ fn parse_one_attr(t: &str, out: &mut Vec<AttrPred>) -> Option<()> {
 fn fn_args(inner: &str) -> Option<(String, String)> {
     let comma = inner.find(',')?;
     let name = inner[..comma].trim().strip_prefix('@')?.trim();
-    if !valid_name(name) {
+    if !valid_attr_name(name) {
         return None;
     }
     let val = single_literal(inner[comma + 1..].trim())?;
@@ -839,6 +853,31 @@ mod tests {
         assert!(ok("//div/@id")); // lowercase equivalents unaffected
         assert!(ok("//svg//rect"));
         assert!(ok("//a[@data-k=\"V\"]")); // uppercase VALUE is fine (values are case-sensitive in both)
+    }
+    /// An ATTRIBUTE name may be non-ASCII, a TAG name may not — the split the two front-ends used to
+    /// disagree about, since the CSS spellings `[data-año]` / `::attr(año)` were already supported.
+    /// Every form here was checked against lxml, which answers all of them (`//p/@Ñ` included: libxml2
+    /// lowercases ASCII only, so a non-ASCII uppercase survives in the tree and XPath's case-sensitive
+    /// compare finds it).
+    #[test]
+    fn non_ascii_attribute_names_compile_and_non_ascii_tags_do_not() {
+        assert!(ok("//p[@data-año]")); // predicate, exists
+        assert!(ok("//p[@data-año=\"v\"]")); // predicate, equality
+        assert!(ok("//p[contains(@data-año,\"v\")]"));
+        assert!(ok("//p[starts-with(@data-año,\"v\")]"));
+        assert!(ok("//p/@año")); // terminal
+        assert!(ok("//p//@año")); // descendant terminal
+        assert!(ok("//p[@ñx]")); // a name STARTING non-ASCII
+        assert!(ok("//p[@属性]")); // and one with no ASCII at all
+        assert!(ok("//p/@Ñ")); // non-ASCII uppercase: neither side folds it
+        // the refusals that must survive the widening
+        assert!(!ok("//p[@AÑO]")); // ASCII uppercase still over-matches libxml2's lowercased tree
+        assert!(!ok("//p[@data-AÑO]"));
+        assert!(!ok("//p[@-año]")); // invalid XML name start (lxml raises)
+        assert!(!ok("//p[@1año]"));
+        assert!(!ok("//p[@x:año]")); // namespace prefix: no binding API
+        assert!(!ok("//café")); // TAG names stay ASCII — see `selector::parse_compound`
+        assert!(!ok("//x-é/text()"));
     }
     #[test]
     fn absolute_single_slash_anchors_to_html_root() {
