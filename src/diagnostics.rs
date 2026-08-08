@@ -131,9 +131,13 @@ fn css_reason(qt: &str) -> String {
          (`:contains(\"Price\")`), on ONE compound of a lone selector, with the value being that \
          element's own (`dt:contains(\"Price\")::text`), its subtree (`div:contains(\"x\") ::text`), a \
          DESCENDANT's (`div:contains(\"x\") a::attr(href)`), or a following SIBLING's \
-         (`dt:contains(\"Price\") + dd::text`). Unsupported: a second `:contains()` on the same compound \
-         (cssselect ANDs them), one inside `:not()`/`:is()`, a comma group or `Many`/`One` member, or a \
-         CHILD step into the value tail (`div:contains(\"x\") > p::text` — use the descendant form)"
+         (`dt:contains(\"Price\") + dd::text`). In a COMMA GROUP it must be the element's own value and \
+         the group must name one kind of node — all `::text`, or all `::attr` with the SAME name \
+         (`h2::text, p:contains(\"x\")::text`) — since the column is merged by document offset. \
+         Unsupported: a second `:contains()` on the same compound (cssselect ANDs them), one inside \
+         `:not()`/`:is()`, a `Many`/`One` member, a comma group whose members name different nodes or \
+         whose value comes from a subtree, or a CHILD step into the value tail \
+         (`div:contains(\"x\") > p::text` — use the descendant form)"
     } else if lower.contains(":nth-last-")
         || lower.contains(":last-child")
         || lower.contains(":last-of-type")

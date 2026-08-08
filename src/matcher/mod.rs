@@ -127,6 +127,50 @@ pub(crate) fn carries_deferred(sel: &Selector) -> bool {
     compile::any_reverse(sel) || compile::any_has(sel) || compile::any_text_pred(sel)
 }
 
+/// Do all of a comma group's members select the same KIND of node, so that a value's document offset
+/// identifies the node it came from?
+///
+/// True for an all-`::text` group (a text node IS its offset) and for an all-`::attr(NAME)` group naming
+/// ONE attribute (that attribute node is the element's offset). False as soon as two members could
+/// produce distinct nodes at the same offset — two different attributes of one element, or an attribute
+/// alongside text — because the mixed-column merge dedupes on `(column, offset)` and would drop one of
+/// them. lxml returns both, in source order.
+/// Is this deferred member's value its OWN element's, rather than one recovered by re-scanning the
+/// element's subtree? Exactly `split_deferred`'s `Tail::Streamed` case, asked before the split so the
+/// router can decide without registering a tail.
+///
+/// A mixed comma group needs this. A tail value comes out of a NESTED run over `input[s..e]`
+/// (`resolve_tail_spans`), which returns plain columns — the values carry no document offset at all, and
+/// the offsets inside that run are span-relative rather than document-relative. There is nothing to
+/// merge or dedupe on, so `h2::text, div:contains("x") ::text` is refused rather than ordered by
+/// arrival. Giving the nested run an offset per value would make it work, and is the change to make if
+/// this shape ever turns up in a real schema.
+fn deferred_value_is_own(sel: &Selector, k: usize) -> bool {
+    compile::tail_selector(sel, k).is_none()
+        && !matches!(
+            sel.terminal,
+            Terminal::Text { subtree: true } | Terminal::Attr { subtree: true, .. }
+        )
+}
+
+fn uniform_node_terminal(members: &[Selector]) -> bool {
+    let mut attr: Option<&str> = None;
+    let mut text = false;
+    for sel in members {
+        match &sel.terminal {
+            Terminal::Text { .. } => text = true,
+            Terminal::Attr { name, .. } => match attr {
+                None => attr = Some(name),
+                Some(seen) if seen.eq_ignore_ascii_case(name) => {}
+                Some(_) => return false,
+            },
+            // an element/outer-HTML or normalize-space member has no offset-identified node here
+            Terminal::OuterHtml | Terminal::NormalizeSpace(_) => return false,
+        }
+    }
+    !(text && attr.is_some())
+}
+
 pub struct OpenElem<'a> {
     // `pub(super)` fields are the ones the read-only matching kernel (`matching`) reads.
     pub(super) tag: &'a [u8], // raw bytes (possibly mixed-case); matched case-insensitively
@@ -777,6 +821,9 @@ pub struct CompiledSchema {
     // page bytes, which spell such a name differently in every legacy encoding. Read once per page into
     // `Matcher::decode_names`; the rule itself is `Matcher::interesting_name`.
     non_ascii_interesting: bool,
+    // Columns whose members MIX streamed and deferred-close selectors, so their values must be merged
+    // by document offset instead of appended. Bit c = column c; see `Matcher::mixed`.
+    mix_cols: u128,
     // One-sided reject so an attribute no selector references costs one bit test instead of a scan.
     // `None` when the schema names too few attributes for that to pay (see `AttrGate::MIN_NAMES`).
     attr_gate: Option<AttrGate>,
@@ -825,6 +872,12 @@ pub struct Matcher<'a> {
     // Must a non-ASCII attribute NAME be decoded before it is compared? Only when the schema spells one
     // that way and the page is byte-scanned under a legacy encoding — see `interesting_name`.
     decode_names: bool,
+    // Values for MIXED columns (`schema.mix_cols`), held as `(col, offset, value)` until finish. A comma
+    // group can carry both a streamed member and a deferred-close one, and the two produce their values
+    // at different times — during the pass, and at the subject's close. Appending would order the column
+    // by member; lxml orders a union by document position. Flushed sorted and deduped on `(col, offset)`,
+    // which is a node identity only because `uniform_node_terminal` gates the column.
+    mixed: Vec<(usize, usize, String)>,
     open_instances: Vec<OpenInstance>,      // stack of currently-open container instances (LIFO with elements)
     group_rows: Vec<Vec<(u64, Vec<Vec<String>>)>>, // per group: finished rows (seq, sub-columns), sorted at finish
     next_seq: u64,              // monotonic document-order rank for instances
@@ -929,6 +982,7 @@ impl CompiledSchema {
         let mut entries = Vec::new();
         let mut n_sib = 0usize;
         let mut interesting: Vec<Box<str>> = Vec::new();
+        let mut mix_cols: u128 = 0;
         let mut has_outer = false;
         // note the attr name / outer-html use of one selector's terminal
         let note_terminal = |t: &Terminal, interesting: &mut Vec<Box<str>>, has_outer: &mut bool| {
@@ -1049,6 +1103,44 @@ impl CompiledSchema {
                     }
                     continue;
                 }
+            }
+            // A comma group MIXING a deferred text predicate with ordinary members
+            // (`h2::text, p:contains("x")::text`). Both kinds can share one column because the merge is
+            // by document OFFSET (see `Matcher::mixed`) rather than by arrival: a streamed value emits
+            // during the pass and a deferred one only at its element's close, so appending the second
+            // after the first — which is what the flat path does — would order the column by member
+            // instead of by document position. lxml orders a union by node position and DEDUPES it.
+            //
+            // Only when `uniform_node_terminal` holds, which is what makes the offset a node IDENTITY
+            // and therefore a sound dedupe key. It is not one in general: `p::attr(id),
+            // p:contains("a")::attr(class)` selects two DISTINCT attribute nodes on one element, which
+            // lxml returns both of (in source order) and which share the element's offset — a mixed
+            // column keyed on offset alone would collapse them into one. Refused rather than
+            // approximated.
+            if members.len() > 1
+                && i < MAX_MEMBERS
+                && members.iter().any(any_text_pred)
+                && members.iter().all(|s| {
+                    match compile::deferrable_text_pred_at(s) {
+                        Some(k) => deferred_value_is_own(s, k),
+                        None => !(any_reverse(s) || any_has(s) || any_text_pred(s)),
+                    }
+                })
+                && uniform_node_terminal(members)
+            {
+                for sel in members {
+                    for c in &sel.parts {
+                        collect_interesting(c, &mut interesting);
+                    }
+                    note_terminal(&sel.terminal, &mut interesting, &mut has_outer);
+                    if any_text_pred(sel) {
+                        text_pending_sels.push((i, sel));
+                    } else {
+                        push_entry(sel, i, true, &mut entries, &mut n_sib);
+                    }
+                }
+                mix_cols |= 1u128 << i;
+                continue;
             }
             if members.iter().any(|s| any_has(s) || any_text_pred(s)) {
                 continue; // unsupported `:has` / text-pred form -> empty column
@@ -1312,6 +1404,7 @@ impl CompiledSchema {
             n_groups: group_specs.len(),
             entries,
             non_ascii_interesting: interesting.iter().any(|n| !n.is_ascii()),
+            mix_cols,
             interesting,
             has_outer,
             has_sibling,
@@ -1394,6 +1487,7 @@ impl<'a> Matcher<'a> {
             captures: Vec::new(),
             enc,
             decode_names: schema.non_ascii_interesting && enc != encoding_rs::UTF_8,
+            mixed: Vec::new(),
             open_instances: Vec::new(),
             next_seq: 0,
             pending: Vec::new(),
@@ -1694,8 +1788,8 @@ impl<'a> Matcher<'a> {
             if !self.pending.is_empty() {
                 let mut pend = std::mem::take(&mut self.pending);
                 pend.sort_by_key(|&(col, off, _)| (col, off));
-                for (col, _off, v) in pend {
-                    self.results[col].push(v);
+                for (col, off, v) in pend {
+                    self.emit_flat(col, off, v);
                 }
             }
         }
@@ -1723,6 +1817,20 @@ impl<'a> Matcher<'a> {
                 }
             }
         }
+        // MIXED columns last: their values arrived from the streaming pass AND from deferred closes, so
+        // the column is ordered here by document offset rather than by arrival. Dedupe is on
+        // `(col, offset)` — the same NODE reached by two members of the group is one node in lxml's
+        // union (`p::text, p:contains("a")::text` is `['alpha','beta']`, not three values), and the
+        // column's terminals are uniform, so an offset names exactly one node. Sorted stably, so two
+        // values that legitimately share an offset keep the order they were produced in.
+        if !self.mixed.is_empty() {
+            let mut mixed = std::mem::take(&mut self.mixed);
+            mixed.sort_by_key(|&(col, off, _)| (col, off));
+            mixed.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
+            for (col, _off, v) in mixed {
+                self.results[col].push(v);
+            }
+        }
         // `normalize-space(...)` columns are scalar: exactly one value (the first matched node's
         // normalized string-value, or "" if nothing matched — matching XPath's `['']`). ns entries
         // never push during the stream, so each such column is set here to its single value.
@@ -1744,6 +1852,18 @@ impl<'a> Matcher<'a> {
             })
             .collect();
         (self.results, grouped)
+    }
+
+    /// Deliver one flat value. A MIXED column's values are buffered with their document offset and
+    /// merged at finish (see [`Self::mixed`]); every other column appends, which is already document
+    /// order because the streaming pass emits in it.
+    #[inline]
+    fn emit_flat(&mut self, col: usize, off: usize, v: String) {
+        if self.schema.mix_cols >> col & 1 != 0 {
+            self.mixed.push((col, off, v));
+        } else {
+            self.results[col].push(v);
+        }
     }
 
     /// Does any selector reference this attribute, and under what NAME should the element carry it?
@@ -1862,7 +1982,7 @@ impl<'a> Matcher<'a> {
         // so the same attribute node selected by several members appears once. `::text` members of the
         // same column emit separately in `text()`; both stream in document order, so the merged column
         // matches lxml's union. Collect first, then push, to keep the `self.stack` borrow read-only.
-        let mut pushes: Vec<(usize, String)> = Vec::new();
+        let mut pushes: Vec<(usize, usize, String)> = Vec::new();
         {
             let el = &self.stack[top];
             let mut done: Vec<(usize, &[u8])> = Vec::new(); // (col, attr-name) already emitted here
@@ -1886,12 +2006,12 @@ impl<'a> Matcher<'a> {
                         continue;
                     }
                     done.push((cs.col, aname));
-                    pushes.push((cs.col, entry.1.to_string()));
+                    pushes.push((cs.col, el.start, entry.1.to_string()));
                 }
             }
         }
-        for (col, v) in pushes {
-            self.results[col].push(v);
+        for (col, off, v) in pushes {
+            self.emit_flat(col, off, v);
         }
         if self.schema.has_ns {
             self.ns_attr(top);
@@ -2728,13 +2848,13 @@ impl<'a> Matcher<'a> {
             return;
         }
         if colmask.count_ones() == 1 {
-            self.results[colmask.trailing_zeros() as usize].push(out); // common case: move, no clone
+            self.emit_flat(colmask.trailing_zeros() as usize, off, out); // common case: move, no clone
         } else {
             let mut m = colmask;
             while m != 0 {
                 let col = m.trailing_zeros() as usize;
                 m &= m - 1;
-                self.results[col].push(out.clone());
+                self.emit_flat(col, off, out.clone());
             }
         }
     }

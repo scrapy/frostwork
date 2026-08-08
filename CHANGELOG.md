@@ -26,8 +26,12 @@ First public preview.
   contract.
 - CSS `:contains("v")` is supported, with cssselect's semantics: one string/ident argument lowered to
   `contains(., "v")`, resolved at the element's own close. The value may be the element's own, its subtree,
-  a descendant's or a following sibling's (`dt:contains("Price") + dd::text`). Shapes outside that tier —
-  a second `:contains()` on one compound, one inside `:not()`/`:is()`, or a comma-group member — stay
+  a descendant's or a following sibling's (`dt:contains("Price") + dd::text`). A comma group may mix it
+  with ordinary members (`h2::text, p:contains("x")::text`) when the value is the element's own and every
+  member names one kind of node; the column is merged by document offset and deduped by node, so member
+  order does not change it. Shapes outside that tier —
+  a second `:contains()` on one compound, one inside `:not()`/`:is()`, or a comma group whose members
+  name different nodes — stay
   unsupported rather than silently dropping the constraint.
 - A value terminal with no subject compound after an explicit combinator (`dt + ::text`, `div > ::attr(id)`)
   is supported and answers identically to the `*` spelling, which is how Parsel reads it.

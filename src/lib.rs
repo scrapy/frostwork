@@ -871,6 +871,44 @@ mod tests {
         assert_eq!(ex(h, "h1::text, li:last-child::text"), Vec::<String>::new()); // reverse in a comma group
     }
 
+    /// A comma group may MIX a deferred text-predicate member with streamed ones. The two produce their
+    /// values at different times — during the pass, and at the subject's close — so the column is merged
+    /// by document OFFSET and deduped by node. Every expectation here was read off parsel.
+    #[test]
+    fn comma_group_mixing_a_deferred_member_merges_in_document_order() {
+        let h = "<h2>Head</h2><p id=a class=a>alpha</p><p id=b class=b>beta</p>";
+        // disjoint members: DOCUMENT order, not member order — both spellings give the same column
+        assert_eq!(ex(h, "h2::text, p:contains(\"alpha\")::text"), v(&["Head", "alpha"]));
+        assert_eq!(ex(h, "p:contains(\"alpha\")::text, h2::text"), v(&["Head", "alpha"]));
+        // overlapping members: `p::text` and the `:contains` member select the SAME text node, and a
+        // union is node-deduped — three pushes, two values
+        assert_eq!(ex(h, "p::text, p:contains(\"alpha\")::text"), v(&["alpha", "beta"]));
+        assert_eq!(ex(h, "p:contains(\"alpha\")::text, p::text"), v(&["alpha", "beta"]));
+        // one attribute NAME across the group: the attr node is the element's offset, so it dedupes
+        assert_eq!(ex(h, "p::attr(id), p:contains(\"alpha\")::attr(id)"), v(&["a", "b"]));
+        // three members, one deferred
+        assert_eq!(
+            ex("<h2>H</h2><p>alpha</p><span>s</span>", "h2::text, span::text, p:contains(\"alpha\")::text"),
+            v(&["H", "alpha", "s"])
+        );
+        // and two deferred members with no streamed one at all
+        assert_eq!(ex(h, "p:contains(\"alpha\")::text, p:contains(\"zzz\")::text"), v(&["alpha"]));
+
+        // REFUSED, because an offset would not name one node. Two different attributes of one element
+        // are two nodes in lxml's union (it returns both, in source order) sharing the element's offset,
+        // so a `(col, offset)` dedupe would drop one.
+        assert!(!audit_schema(&["p::attr(id), p:contains(\"alpha\")::attr(class)".into()], &[]).ok());
+        assert!(!audit_schema(&["p::text, p:contains(\"alpha\")::attr(id)".into()], &[]).ok());
+        // and a member whose value comes from a SUBTREE re-scan carries no document offset at all
+        assert!(!audit_schema(&["h2::text, div:contains(\"alpha\") ::text".into()], &[]).ok());
+        assert!(!audit_schema(&["h2::text, div:contains(\"alpha\") a::attr(href)".into()], &[]).ok());
+        // the other deferred tiers stay out of a comma group
+        assert!(!audit_schema(&["h2::text, div:has(a) p::text".into()], &[]).ok());
+        assert!(!audit_schema(&["h2::text, li:last-child::text".into()], &[]).ok());
+        // every refusal above is REPORTED, so none of them is a silently empty column
+        assert!(audit_schema(&["h2::text, p:contains(\"alpha\")::text".into()], &[]).ok());
+    }
+
     /// `:has()` and text-content predicates share the reverse tier's span re-scan, so their values may
     /// also come from the subject's SUBTREE (`div:has(a) ::text`) or from a value-bearing DESCENDANT
     /// (`div:has(a) a::attr(href)`) — the common "link inside a card that has an image" shape.

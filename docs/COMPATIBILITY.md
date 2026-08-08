@@ -8,12 +8,18 @@ query falls into one of three buckets:
 |---|---|
 | ✅ **supported** | runs on the streaming engine with the matching, ordering and value semantics stated in its row |
 | ≈ **divergent** | runs, but may differ from lxml on specific documented and bounded constructs |
+| ➕ **beyond** | runs, and answers where lxml/Parsel refuses or loses the value — collected in [Beyond lxml](#beyond-lxml--where-frostwork-answers-more-or-better) |
 | ∅ **unsupported** | the engine produces an **empty result**; public Python APIs raise by default and expose this behavior with `strict=False` |
 
 The promise is *close to lxml, always one streaming pass, never a DOM*. Unless a row marks an exception,
 the correctness bar is non-whitespace value parity with lxml (libxml2 2.14), not the HTML5 spec. A ✅ row
 that can return a bare element covers selector matching and ordering; that value still inherits the
 documented raw-source outer-HTML exception.
+
+**Parity is the bar, not the ceiling.** "Close to lxml" is a one-directional phrase and this contract is
+not: a dozen constructs below run *here* and refuse, truncate or mis-decode *there*, from `:has([data-x])`
+to a UTF-16 response body. They are one section — [Beyond lxml](#beyond-lxml--where-frostwork-answers-more-or-better)
+— so a coverage number read off this document is not mistaken for the whole comparison.
 
 For a quick, always-current headline of what runs, see the generated
 [selector support snapshot](SUPPORT_SNAPSHOT.md) (regenerate with
@@ -57,7 +63,10 @@ level, public Python APIs validate schemas and raise `UnsupportedSelector` by de
 | `:is(...)` / `:where(...)` — a comma-list of compound alternatives (`:is(h1, h2, h3)`, `div:is(.a, .b)`, `a:is([href], [src])`), including combined with other conditions (`div.card:is(.a, .b)`) or chained (`x:is(a, b):is(c, d)`) | ✅ supported — element matches iff it matches ≥1 alternative in EVERY group (OR within a group, AND across groups). `:is`/`:where` are identical (specificity is irrelevant to matching). Agrees with cssselect ≥ 1.5.0; **≈ divergent** for combined/chained forms against cssselect ≤ 1.4.0 — see below |
 | `:is(...)` with a combinator inside an alternative (`:is(.a .b)`, `:is(a + b)`), a positional/reverse/`:has` inside an alternative (`:is(:first-child)`), or a nested `:is` | ∅ unsupported (empty) — cssselect itself rejects the combinator forms |
 | `:contains("v")` — cssselect's extension. One STRING or IDENT argument, on ONE compound of a lone selector. The value may be that element's **own** (`dt:contains("Price")::text`), its **subtree** (`div:contains("x") ::text`), a **descendant's** (`div:contains("x") a::attr(href)`), or a following **sibling's** (`dt:contains("Price") + dd::text` — the label→value pattern) | ✅ supported — cssselect translates it to `contains(., "v")`, so it is the same deferred text predicate as the XPath spelling below and inherits its semantics exactly: `.` is the whole string-value (subtree text concatenated), the match is a **substring** with no whitespace trimming, and `:contains("")` is always-true. Resolved at the element's own close |
-| `:contains()` in any OTHER shape — a **second** one on the same compound (`p:contains("a"):contains("b")`, which cssselect ANDs), one inside `:not()`/`:is()`/`:has()`, a comma group or `Many`/`One` member, alongside a `:has()`/reverse position on the same compound, or a **child** step into the value tail (`div:contains("x") > p::text`) | ∅ unsupported (empty) — use the descendant form for the last one |
+| `:contains()` as a **comma-group member** (`h2::text, p:contains("x")::text`) | ✅ supported when the member's value is its OWN element's and every member names the same KIND of node — all `::text`, or all `::attr` with the same name. The column is merged by document offset and deduped by node, so member order does not affect it and a node both members select appears once, exactly as in lxml's union |
+| `:contains()` in a comma group whose members name DIFFERENT nodes (`p::attr(id), p:contains("x")::attr(class)`, `p::text, p:contains("x")::attr(id)`) or whose value comes from a SUBTREE (`h2::text, div:contains("x") ::text`, `h2::text, div:contains("x") a::attr(href)`) | ∅ unsupported (empty) — two attributes of one element are two distinct nodes sharing that element's offset, which lxml returns both of, so an offset-keyed merge cannot tell them apart; and a subtree value comes from a nested re-scan whose values carry no document offset at all. Refused rather than ordered by arrival |
+| `:contains()` in any OTHER shape — a **second** one on the same compound (`p:contains("a"):contains("b")`, which cssselect ANDs), one inside `:not()`/`:is()`, a `Many`/`One` member, alongside a `:has()`/reverse position on the same compound, or a **child** step into the value tail (`div:contains("x") > p::text`) | ∅ unsupported (empty) — use the descendant form for the last one. The `:is()`/`:not()` refusal is a SAFETY one rather than an omission: `compile::any_compound` walks `negations` but not `is_groups`, so accepting it would stream the selector as ordinary matching with the text constraint silently DROPPED — an over-match, which is the one outcome no-fallback exists to prevent |
+| `:contains()` inside `:has()` (`div:has(p:contains("x"))`) | ∅ unsupported (empty) — and **not a coverage gap**: cssselect cannot parse a pseudo-class inside `:has()` at all (`SelectorSyntaxError: Expected an argument, got <DELIM ':'>`), so Parsel refuses it too. A refusal the oracle shares is parity |
 | `:contains()` with a non-STRING/IDENT argument — `:contains()`, `:contains(2)`, `:contains(a b)` | ∅ unsupported (empty) — cssselect's `xpath_contains_function` raises `ExpressionError` on these, so answering them would return values for a selector Parsel refuses |
 | `::first-line`, other pseudos | ∅ unsupported (empty) |
 | `:not()` with a combinator argument (`:not(a b)`), namespaces (`ns\|tag`), `[a=b i]` case flag (cssselect rejects it) | ∅ unsupported (empty) |

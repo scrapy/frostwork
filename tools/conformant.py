@@ -284,6 +284,17 @@ BASKET = [
     "dt + ::text", "dt ~ ::text", "dl > ::text", "li + ::text", "td + ::attr(id)",
     "dt + *::text", "dt ~ *::text", "dl > *::text",
     ':contains("alpha") + ::text', 'dt:contains("alpha") + ::text',
+    # A comma group MIXING a deferred member with streamed ones. These two kinds produce their values at
+    # different times — during the pass, and at the subject's close — so the column has to be merged by
+    # document offset and deduped by node, not appended. Both member ORDERS are here because appending
+    # gives the right answer for one of them by luck; the overlapping pair (`p::text` and
+    # `p:contains(...)::text` select the same text node) is what a missing dedupe shows up in; and the
+    # attribute row uses ONE attribute name because two names on one element are distinct nodes at the
+    # same offset, which is the shape this deliberately refuses.
+    'p::text, p:contains("alpha")::text', 'p:contains("alpha")::text, p::text',
+    'span::text, p:contains("alpha")::text', 'p:contains("alpha")::text, span::text',
+    'div::attr(class), div:contains("alpha")::attr(class)',
+    'dt::text, dd:contains("alpha")::text, span::text',
     # deferred :has() and matches-any pseudos in cssselect-oracle-compatible shapes
     "div:has(span)::attr(id)", "div:has(> p)::attr(class)",
     "*:is(p, span)::text", "*:where(dt, dd)::text",
