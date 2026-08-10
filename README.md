@@ -170,4 +170,4 @@ Frostwork is usable from source but not yet published to PyPI.
 
 ## License
 
-BSD-3-Clause. See [LICENSE](LICENSE).
+Apache-2.0. See [LICENSE](LICENSE).
