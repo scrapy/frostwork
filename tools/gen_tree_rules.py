@@ -2,9 +2,10 @@
 tools/gen_tree_rules.py — derive libxml2's tree-construction rules from the ORACLE, and generate the
 engine's start-close table from that derivation.
 
-Why this exists. `implied_close::start_closes` ports libxml2's `htmlStartClose[]` pair list, and the
-first port was called "complete" while both its source and its audit universe were hand-picked lists of
-names someone remembered. That is the failure this file exists to prevent (the
+Why this exists. `implied_close::start_closes` reproduces what libxml2's `htmlStartClose[]` pair list
+DOES, derived by probing the oracle's output. The first such table was called "complete" while both
+the list it drew from and its audit universe were names someone remembered. That is the failure this
+file exists to prevent (the
 `dd`/`dt` arm, the missing `colgroup` rule, the tag name `s`), and it shipped again: `head`, `listing`,
 `xmp` and `plaintext` were absent, so `<html><head><title>T</title><body><p>X</p>` left `<body>` nested
 inside `<head>`, and `<div><listing>A<dd>B</dd></div>` put the `<dd>` inside the `<listing>`. A green
@@ -247,7 +248,7 @@ class Oracle:
     def _probe_close_head(inc: str) -> bool:
         """The `head` column: does the incoming tag stay in `<head>` or end it? Needs its own probe —
         `<head>` cannot appear inside the body-context wrapper above, which is exactly why the whole
-        column was missing from the first port."""
+        column was missing from the first hand-written table."""
         html = f'<html><head><title>T</title><{inc} id="Z">bbb</head><body>zz</body></html>'
         return not _vals(html, [f"head > {inc}::attr(id)"])[0]
 

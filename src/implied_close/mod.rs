@@ -1,4 +1,4 @@
-//! HTML tree-construction rules — the ones Frostwork ports (see the contract in
+//! HTML tree-construction rules — the ones Frostwork reproduces (see the contract in
 //! `docs/COMPATIBILITY.md`). They drive an *inline stack reshape* in the matcher rather than a
 //! detect-and-reparse. This file is the HAND-WRITTEN half: the rules that combine the derived tables and
 //! the name lookup they share. The tables themselves are in `generated.rs`, written by
@@ -6,10 +6,10 @@
 //! derived there, and nothing there may be edited here (`--check` fails on drift).
 //!
 //! **Do not add a second, hand-written close table ORed with the generated one.** Derived over the whole
-//! element universe, the generated relation closes every pair a ported table would and 163 more, so a
-//! port can only mask it, never correct it — and a port asserts the HTML5 rule, which is a *symmetric*
-//! `dd`/`dt` and `rt`/`rp` auto-close that libxml2 2.14 does not do in either direction. The oracle wins
-//! here.
+//! element universe, the generated relation closes every pair a hand-written one would and 163 more,
+//! so a hand-written table can only mask it, never correct it — and it asserts the HTML5 rule, which is
+//! a *symmetric* `dd`/`dt` and `rt`/`rp` auto-close that libxml2 2.14 does not do in either direction.
+//! The oracle wins here.
 
 mod generated;
 

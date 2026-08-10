@@ -98,7 +98,7 @@ XPROD_WRAP = dict(WRAP, span="div", div="section")
 
 # ---------------------------------------------------------------- libxml2's start-close PAIR table
 # The section below walks a surface the id-based cross product structurally cannot: libxml2 decides
-# "does this start tag close that open element?" from a hardcoded NAME-pair list (`htmlStartClose`),
+# "does this start tag close that open element?" as a NAME-pair relation (its `htmlStartClose[]`),
 # and it distinguishes names the engine's tag ids lump together — `<td>` closes an open `<b>` but not an
 # open `<em>`; `<table>` closes an open `<h1>` but not an open `<div>`. The mutation sweep
 # (tools/mutate_rules.py) is what exposed this: 40 id-space cells survived every gate because no gate

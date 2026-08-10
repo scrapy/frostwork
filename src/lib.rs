@@ -1378,7 +1378,7 @@ mod tests {
         assert_eq!(ex("<table><tbody><tr><td>A</tbody>B</table>", "td::text"), v(&["A"]));
     }
 
-    /// The names the hand-written start-close port left out. All three were found by widening the
+    /// The names the hand-written start-close table left out. All three were found by widening the
     /// audit's universe to every element name rather than the ones someone remembered, and each is
     /// ordinary legacy markup: `<listing>`/`<xmp>` in man-page and README-to-HTML output, and a
     /// `<title>` after an unclosed `<p>`.

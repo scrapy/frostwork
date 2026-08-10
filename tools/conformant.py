@@ -4,9 +4,9 @@ HTML content model allows, table cells only inside tables, options only inside s
 only phrasing, no head-only elements in the body — with optional end tags omitted **only where HTML
 permits** (`li`/`dt`/`dd`/`option`/`td`/`tr`/`p`).
 
-The point: on such input the engine and lxml apply the *same* rules (Frostwork ported lxml's implied
-close), so they must agree byte-for-byte. That makes the differential a clean gate — any DIVERGE on
-this generator is a true engine bug, not tree-construction leakage (unlike the unconstrained grammar
+The point: on such input the engine and lxml apply the *same* rules (Frostwork reproduces lxml's
+implied close), so they must agree byte-for-byte. That makes the differential a clean gate — any
+DIVERGE on this generator is a true engine bug, not tree-construction leakage (unlike the grammar
 in diff_parity, which emits stray `<td>`/`<title>`/misnested formatting that libxml2 reshapes).
 
 Deterministic given an rng. `generate(rng) -> bytes`; `BASKET` is a supported-selector basket.
