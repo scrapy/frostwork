@@ -109,9 +109,6 @@ SHARED_PRESCAN_CASES = [
     # pages in one 1000-page Common Crawl sample put their Content-Type at byte 1080/1532/1611 behind a
     # producer comment or a block of og: metas, and every value on them came back full of U+FFFD.
     ("declaration past byte 1024", b"<!--" + b"x" * 1100 + b'--><meta charset="windows-1252">', W1252),
-    # ...but the window is still bounded, and at the same place w3lib bounds it, so a declaration past
-    # 4096 is not a declaration in either. Keeps "widen it" from silently becoming "unbounded".
-    ("declaration past byte 4096", b"<!--" + b"x" * 4200 + b'--><meta charset="windows-1252">', W1252),
 ]
 # XML-declaration compatibility. These need the declaration at offset 0 (where an XML declaration is the
 # only thing that may appear), so they are whole documents rather than `<head>` fragments. Browsers honour
@@ -158,7 +155,16 @@ for label, doc in SHARED_DOC_CASES:
 _U32LE = b"\xff\xfe\x00\x00" + '<html><body><p class="c">café</p></body></html>'.encode("utf-32-le")
 _U16LE_NOBOM = '<?xml version="1.0"?><html><body><p class="c">café</p></body></html>'.encode("utf-16-le")
 _U16BE_NOBOM = '<?xml version="1.0"?><html><body><p class="c">café</p></body></html>'.encode("utf-16-be")
+_DEEP = (b"<html><head><!--" + b"x" * 4200 + b'--><meta charset="windows-1252"></head><body>'
+         + W1252 + b"</body></html>")
 BROWSER_DIFFERENCES = [
+    ("a HEAD declaration is honoured at any depth",
+     _DEEP, ["café"], ["caf�"],
+     "w3lib stops at 4096 and Frostwork used to stop there too, for no reason but w3lib parity. "
+     "WHATWG's 1024 is a STREAMING budget ('not to stall beyond that'), and a browser that meets the "
+     "<meta charset> after it runs 'change the encoding' and re-decodes what it already has. Measured "
+     "in Chrome at 1KB/4KB/16KB/64KB/256KB/1MB — honoured at every one, so in the head there is no "
+     "bound to match. The BODY half of the rule is the opposite and is gated separately below"),
     ("charset inside a COMMENT is ignored",
      b"<html><head><!-- <meta charset=big5> --></head><body>" + U8 + b"</body></html>",
      ["café"], ["caf矇"],
@@ -224,6 +230,35 @@ for name, doc, want_mine, want_w3, why in BROWSER_DIFFERENCES:
     ok_row = mine == want_mine and w3 == want_w3
     print(f"browser difference [{name}]: mine={mine} w3lib={w3} -> {'OK' if ok_row else 'MISMATCH'}")
     print(f"    why: {why}")
+
+# ---- the BODY half of the depth rule: a declaration past the floor is not a declaration ----------
+# The head half (above) says "no bound". The body half is the opposite, and both are MEASURED in
+# Chrome rather than read off the standard: a <meta charset> in the body is honoured at byte 0, 100
+# and 512 and IGNORED from 1024 on, because once real content is parsed the browser will not
+# re-decode. Getting this half wrong is invisible to the head cases — an unbounded scan passes every
+# one of them while honouring body declarations no browser honours.
+#
+# Frostwork and w3lib AGREE on the ignored cases, for different reasons (w3lib's regex gives up at
+# `body`; Frostwork bounds the re-decode at the head). Asserted directly rather than as a w3lib
+# difference, since the agreement is a coincidence of two different rules and w3lib is not the target.
+def _body_meta_page(pad):
+    doc = b"<!DOCTYPE html><html><head><title>t</title></head><body>"
+    while len(doc) < pad:
+        doc += b"<p>lorem ipsum dolor sit amet consectetur</p>"
+    return doc + b'<meta charset="windows-1252">' + W1252 + b"</body></html>"
+
+
+for _pad, _want, _why in [(0, ["café"], "inside the 1024-byte floor"),
+                          (100, ["café"], "inside the floor"),
+                          (512, ["café"], "inside the floor"),
+                          (1024, ["caf�"], "past the floor, in the body"),
+                          (4096, ["caf�"], "past the floor, in the body"),
+                          (64 * 1024, ["caf�"], "past the floor, in the body")]:
+    _mine = engine(_body_meta_page(_pad), ["p.c::text"], None)[0]
+    _ok = _mine == _want
+    if not _ok:
+        fails.append(("body-depth", f"a BODY declaration at ~{_pad} bytes ({_why})", _mine, _want))
+    print(f"body declaration at ~{_pad} bytes ({_why}): mine={_mine} -> {'OK' if _ok else 'MISMATCH'}")
 
 # ---------------------------------------------------------------- DECODER divergence from Parsel
 # The engine decodes with `encoding_rs` (the WHATWG Encoding Standard — what browsers do). Parsel decodes

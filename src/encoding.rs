@@ -12,22 +12,6 @@
 
 use encoding_rs::Encoding;
 
-/// Simplified HTML5 `<meta>` charset prescan over the document head ([`PRESCAN_WINDOW`] bytes). The
-/// `charset` token is only honored INSIDE a `<meta …>` tag — WHATWG's prescan (and w3lib, which
-/// Scrapy uses) require attribute context, so a `<!-- saved from url … charset=windows-1252 -->`
-/// banner or `charset=big5` in early visible text must NOT switch the decode. Within a meta tag the
-/// loose `charset=` scan still covers both bare `charset=` and `http-equiv`+`content="…; charset=…"`.
-/// Start of an unclosed `<!--` before `at`, if `at` sits inside a comment.
-///
-/// Comment boundaries come from the TOKENIZER's own `scan_comment`, not a second copy here. A local
-/// `-->`-only search missed the abrupt closes libxml2 honours (`<!-->`, `<!--->`, and `--!>`), so a
-/// perfectly live `<meta charset>` after one of them looked like it was still commented out and the
-/// declaration was ignored. One implementation, differential-proven, used by both.
-fn last_comment_open_before(head: &[u8], at: usize) -> Option<usize> {
-    let open = memchr::memmem::rfind(&head[..at], b"<!--")?;
-    (crate::tokenizer::scan_comment(head, open) > at).then_some(open)
-}
-
 /// Tokenize one `<meta …>` tag's attributes, bounded, starting just past `<meta`. Returns
 /// `(attributes, offset just past the tag)`. Names are lowercased; values are returned as-is.
 ///
@@ -147,18 +131,136 @@ fn is_ws(c: u8) -> bool {
     matches!(c, b' ' | b'\t' | b'\n' | b'\r' | 0x0c)
 }
 
+/// WHATWG's prescan budget, and the measured floor below which a browser honours a declaration
+/// wherever it sits — including inside the body. See [`meta_prescan`] for the measurement.
+const PRESCAN_FLOOR: usize = 1024;
+
+/// Elements that may appear in `<head>`. A start tag outside this set is the one that ENDS the head
+/// and starts the body, which is where a browser stops re-decoding (see [`meta_prescan`]).
+fn is_head_element(name: &[u8]) -> bool {
+    // `head` and `html` are here because they nest the head rather than end it.
+    const HEAD: [&[u8]; 10] = [
+        b"html", b"head", b"title", b"base", b"link", b"meta", b"style", b"script", b"noscript",
+        b"template",
+    ];
+    HEAD.iter().any(|h| h.eq_ignore_ascii_case(name))
+}
+
+/// Elements whose CONTENT is text, not markup. A `<div>` inside `<script>` is a string, and to a
+/// browser it is never a tag — so it neither ends the head nor declares anything. Skipping them is
+/// not optional: an inline `<script>` in the head holding an HTML string (`document.write('<div>')`,
+/// a JSON-LD blob) is ordinary, and reading its text as tags ends the head early and throws away the
+/// page's real declaration.
+fn is_raw_text(name: &[u8]) -> bool {
+    const RAW: [&[u8]; 4] = [b"script", b"style", b"title", b"textarea"];
+    RAW.iter().any(|r| r.eq_ignore_ascii_case(name))
+}
+
+/// Position just past `</name>`, or the end of the document if it never closes.
+fn skip_raw_text(head: &[u8], lt: usize, name: &[u8]) -> usize {
+    let mut i = lt + 1 + name.len();
+    while let Some(rel) = memchr::memmem::find(&head[i..], b"</") {
+        let close = i + rel;
+        match head.get(close + 2..close + 2 + name.len()) {
+            Some(n) if n.eq_ignore_ascii_case(name) => {
+                return memchr::memchr(b'>', &head[close..])
+                    .map(|g| close + g + 1)
+                    .unwrap_or(head.len());
+            }
+            Some(_) => i = close + 2,
+            None => return head.len(),
+        }
+    }
+    head.len()
+}
+
+/// The tag name starting at `lt` (the `<`), if this is a START tag. `None` for `</x>`, `<!x`, `<?x`.
+fn start_tag_name(head: &[u8], lt: usize) -> Option<&[u8]> {
+    let first = *head.get(lt + 1)?;
+    if !first.is_ascii_alphabetic() {
+        return None;
+    }
+    let mut e = lt + 1;
+    while e < head.len() && !is_ws(head[e]) && !matches!(head[e], b'>' | b'/') {
+        e += 1;
+    }
+    Some(&head[lt + 1..e])
+}
+
+/// Simplified HTML5 `<meta>` charset prescan, over the WHOLE document. The `charset` token is only
+/// honored INSIDE a `<meta …>` tag — WHATWG's prescan (and w3lib, which Scrapy uses) require
+/// attribute context, so a `<!-- saved from url … charset=windows-1252 -->` banner or `charset=big5`
+/// in early visible text must NOT switch the decode.
+///
+/// Comment boundaries come from the TOKENIZER's own `scan_comment`, not a second copy here. A local
+/// `-->`-only search missed the abrupt closes libxml2 honours (`<!-->`, `<!--->`, and `--!>`), so a
+/// perfectly live `<meta charset>` after one of them looked like it was still commented out and the
+/// declaration was ignored. One implementation, differential-proven, used by both.
+///
+/// ONE left-to-right pass, allocation-free, skipping comments on the way past them.
+///
+/// Both properties are load-bearing. Lowercasing the document to search it would be an allocation and
+/// a memcpy the size of the page on every label-less parse; and finding each `<meta` first, then
+/// searching BACKWARDS for an enclosing comment, is `O(document)` per hit — fine inside a small
+/// window, quadratic over a megabyte of `<meta>`s. `<` is the only byte that can start either token,
+/// and `memchr` over it is one SIMD pass.
+///
+/// # How far it scans
+///
+/// **The first [`PRESCAN_FLOOR`] bytes unconditionally, and past that only while still in the
+/// `<head>`.** Both halves are measured in Chrome rather than read off the standard, because the two
+/// disagree — the browser is the standard here (see the encoding rule in AGENTS.md):
+///
+/// * a declaration in the **head** is honoured at 1 KB, 4 KB, 16 KB, 64 KB, 256 KB and **1 MB** —
+///   the prescan's byte budget is not a correctness cap, because a browser that meets the `<meta>`
+///   later runs "change the encoding" and re-decodes what it already has.
+/// * a declaration in the **body** is honoured at byte 0, 100 and 512 and IGNORED from 1024 on —
+///   once real content is parsed the browser will not re-decode, so past the floor the head is the
+///   boundary.
+///
+/// A flat 4096-byte window (w3lib's number, and what this used to be) is wrong in both directions:
+/// it drops the head declarations real pages carry behind a producer comment or a block of `og:`
+/// metas, and it honours body declarations no browser does. It also cost a measured ~35µs on every
+/// label-less page — one whole extra pass over the document — which the head bound gives back.
 fn meta_prescan(head: &[u8]) -> Option<&'static Encoding> {
     if let Some(enc) = xml_decl_encoding(head) {
         return enc.into();
     }
-    let lower: Vec<u8> = head.iter().map(|b| b.to_ascii_lowercase()).collect();
     let mut mfrom = 0usize;
-    while let Some(mrel) = memchr::memmem::find(&lower[mfrom..], b"<meta") {
-        let hit = mfrom + mrel;
-        // a COMMENT declares nothing: `<!-- <meta charset=big5> -->` must not switch the decode
-        if let Some(c) = last_comment_open_before(head, hit) {
-            mfrom = crate::tokenizer::scan_comment(head, c);
+    // Raised to `max(PRESCAN_FLOOR, here)` the moment a tag ends the head; `MAX` while still inside it.
+    let mut limit = usize::MAX;
+    while let Some(rel) = memchr::memchr(b'<', &head[mfrom..]) {
+        let hit = mfrom + rel;
+        if hit >= limit {
+            return None;
+        }
+        // The head ends at `</head>` or at the first start tag that may not appear in it — and with
+        // it ends the browser's willingness to re-decode, once past the floor.
+        if let Some(name) = start_tag_name(head, hit) {
+            if is_raw_text(name) {
+                mfrom = skip_raw_text(head, hit, name).max(hit + 1);
+                continue;
+            }
+            if !is_head_element(name) {
+                limit = limit.min(PRESCAN_FLOOR.max(hit));
+            }
+        } else if head[hit..].len() >= 7 && head[hit..hit + 7].eq_ignore_ascii_case(b"</head>") {
+            limit = limit.min(PRESCAN_FLOOR.max(hit));
+        }
+        // a COMMENT declares nothing: `<!-- <meta charset=big5> -->` must not switch the decode.
+        // `scan_comment` owns the abrupt-close shapes (`<!-->`, `--!>`); `.max` guarantees progress.
+        if head[hit..].starts_with(b"<!--") {
+            mfrom = crate::tokenizer::scan_comment(head, hit).max(hit + 1);
             continue;
+        }
+        match head.get(hit + 1..hit + 5) {
+            Some(name) if name.eq_ignore_ascii_case(b"meta") => {}
+            // no 4 bytes left to compare: no later `<` can match either
+            None => return None,
+            Some(_) => {
+                mfrom = hit + 1;
+                continue;
+            }
         }
         let tag_start = hit + b"<meta".len();
         // require a tag-name terminator so `<metadata …>` is not a meta tag
@@ -191,14 +293,10 @@ fn meta_prescan(head: &[u8]) -> Option<&'static Encoding> {
     None
 }
 
-/// How far into the document a `<meta>`/XML-declaration charset is still a declaration. Matches w3lib,
-/// the sniffing oracle; see the note in [`resolve`] for why WHATWG's 1024 is not the number to use.
-const PRESCAN_WINDOW: usize = 4096;
-
-/// BOM → BOM-less UTF-16 XML prefix → caller/HTTP label → `<meta>`/XML-declaration prescan (first
-/// [`PRESCAN_WINDOW`] bytes) → UTF-8. The intentional differences from w3lib (Scrapy's decoder) are in
-/// the encoding section of docs/COMPATIBILITY.md and gated in `tools/enc_check.py`; each one is a place
-/// where w3lib and browsers disagree and Frostwork follows the browser.
+/// BOM → BOM-less UTF-16 XML prefix → caller/HTTP label → `<meta>`/XML-declaration prescan (the whole
+/// document) → UTF-8. The intentional differences from w3lib (Scrapy's decoder) are in the encoding
+/// section of docs/COMPATIBILITY.md and gated in `tools/enc_check.py`; each one is a place where w3lib
+/// and browsers disagree and Frostwork follows the browser.
 ///
 /// No UTF-32: the WHATWG Encoding Standard has no UTF-32, and neither does any browser, so a UTF-32 BOM
 /// is not a BOM here. w3lib does recognize it (its BOM table predates the standard).
@@ -228,17 +326,22 @@ pub fn resolve(html: &[u8], override_label: Option<&str>) -> &'static Encoding {
             return enc;
         }
     }
-    // WHATWG's 1024 is a STREAMING budget, not a correctness cap — user agents are "encouraged to use the
-    // prescan algorithm ... on the first 1024 bytes, but not to stall beyond that", i.e. do not block
-    // first paint waiting for more bytes off the network. Frostwork is handed the whole document at once
-    // and has nothing to stall on, so that budget buys nothing here and only loses pages: a legacy site
-    // that opens with a producer comment or a block of `og:` metas puts its `Content-Type` past byte 1024,
-    // and the page then decoded as UTF-8 with a U+FFFD in every value. So the window matches w3lib's 4096
-    // ("we allow for more"), which is also what libxml2's own sniffing finds on those pages.
+    // The prescan is NOT bounded by a byte window, because a browser's is not. WHATWG's 1024 is a
+    // STREAMING budget — user agents are "encouraged to use the prescan algorithm ... on the first 1024
+    // bytes, but not to stall beyond that", i.e. do not block first paint waiting for more bytes off the
+    // network — and a browser that meets a `<meta charset>` after it simply runs "change the encoding"
+    // and re-decodes what it already has. Measured rather than assumed: Chrome honours a declaration at
+    // 1 KB, 4 KB, 16 KB, 64 KB, 256 KB and 1 MB alike, so there is no bound to match. Frostwork holds the
+    // whole document and has nothing to stall on either.
+    //
+    // A window is therefore a divergence from the browser, and this subsystem has no budget for one (see
+    // the encoding rule in AGENTS.md). The old 4096 was w3lib's number, which cost real pages: a legacy
+    // site that opens with a producer comment or a block of `og:` metas puts its `Content-Type` past it
+    // and the page decoded as UTF-8 with a U+FFFD in every value.
     //
     // Deliberately NOT stopped at `<body>` (w3lib's regex does), because a real page can carry a late
     // `<meta charset>` inside the body and browsers still honour it.
-    if let Some(enc) = meta_prescan(&html[..html.len().min(PRESCAN_WINDOW)]) {
+    if let Some(enc) = meta_prescan(html) {
         return enc;
     }
     encoding_rs::UTF_8
@@ -415,21 +518,18 @@ mod w3lib_oracle_tests {
         assert_eq!(text, "Milano\u{2013}Malpensa");
     }
 
-    /// A declaration is honoured wherever it is in the head, not only in the first 1024 bytes.
+    /// How far a declaration is still a declaration — both halves measured in Chrome, because the
+    /// browser is the standard for encoding and it does not match WHATWG's suggested budget.
     ///
-    /// Found on real pages, three in one 1000-page Common Crawl sample: a legacy site opens with a
-    /// producer comment or a block of `og:`/`keywords` `<meta>`s and the `Content-Type` lands at byte
-    /// 1080/1532/1611. The engine read 1024, missed it, and decoded a whole windows-1252 page as UTF-8 —
-    /// U+FFFD in every value on the page, which is what 57 of that sample's divergences were.
+    /// In the HEAD: honoured at any depth. Found on real pages, three in one 1000-page Common Crawl
+    /// sample — a legacy site opens with a producer comment or a block of `og:`/`keywords` metas and
+    /// the `Content-Type` lands at byte 1080/1532/1611. The engine read 1024, missed it, and decoded a
+    /// whole windows-1252 page as UTF-8, which is what 57 of that sample's divergences were.
     ///
-    /// The 1024 in WHATWG is a STREAMING budget, not a correctness cap: user agents are "encouraged to
-    /// use the prescan algorithm ... on the first 1024 bytes, but **not to stall beyond that**" — i.e. do
-    /// not block first paint waiting for more bytes off the network. Frostwork is handed the whole
-    /// document at once and has nothing to stall on, so the budget buys nothing and only loses pages.
-    /// Both oracles honour these declarations: w3lib reads 4096 ("we allow for more"), and libxml2's own
-    /// sniffing decodes all three pages' titles correctly.
+    /// In the BODY: honoured only within the first 1024 bytes. Past that the browser has committed to
+    /// content it will not re-decode, and neither do we.
     #[test]
-    fn a_declaration_past_1024_bytes_is_still_honoured() {
+    fn a_head_declaration_is_honoured_at_any_depth() {
         let pad = |n: usize| -> Vec<u8> {
             let mut v = b"<html><head><!--".to_vec();
             v.resize(v.len() + n, b'x');
@@ -438,24 +538,124 @@ mod w3lib_oracle_tests {
         };
         let decl = br#"<meta http-equiv="Content-Type" content="text/html; charset=iso-8859-1">"#;
 
-        // the shape the crawl found: filler, then the declaration past the old window
+        // the shape the crawl found: filler, then the declaration past WHATWG's streaming budget
         let mut late = pad(1100);
         late.extend_from_slice(decl);
         assert!(late.iter().position(|&b| b == b'C').unwrap() > 1024);
         assert_eq!(resolve(&late, None), encoding_rs::WINDOWS_1252);
 
-        // still found at the far edge of the widened window...
-        let mut edge = pad(3900);
-        edge.extend_from_slice(decl);
-        assert_eq!(resolve(&edge, None), encoding_rs::WINDOWS_1252);
-
-        // ...and the window is still bounded, so a declaration past it is not a declaration
-        let mut beyond = pad(4200);
-        beyond.extend_from_slice(decl);
-        assert_eq!(resolve(&beyond, None), encoding_rs::UTF_8);
+        // ...and past every depth a bounded window would have cut off. Each was measured in Chrome.
+        for depth in [3900usize, 4200, 16 * 1024, 64 * 1024, 256 * 1024, 1024 * 1024] {
+            let mut deep = pad(depth);
+            deep.extend_from_slice(decl);
+            assert_eq!(
+                resolve(&deep, None),
+                encoding_rs::WINDOWS_1252,
+                "a HEAD declaration at depth {depth} must still be a declaration"
+            );
+        }
 
         // an explicit caller/HTTP label still outranks any prescan, near or far
         assert_eq!(resolve(&late, Some("big5")), encoding_rs::BIG5);
+    }
+
+    /// An inline `<script>`/`<style>` in the head holds TEXT, not markup: the `<div>` in
+    /// `document.write('<div>')` is a string, so it neither ends the head nor declares anything.
+    /// Reading raw-text content as tags ended the head at the first HTML string in an analytics
+    /// snippet and threw away the page's real declaration.
+    #[test]
+    fn raw_text_content_is_not_markup() {
+        let decl = br#"<meta charset="windows-1252">"#;
+        let pad = b"<!--".to_vec();
+        let far = |inner: &[u8]| -> Vec<u8> {
+            let mut v = b"<html><head>".to_vec();
+            v.extend_from_slice(inner);
+            v.extend_from_slice(&pad);
+            v.resize(v.len() + 1100, b'x');
+            v.extend_from_slice(b"-->");
+            v.extend_from_slice(decl);
+            v
+        };
+        // each of these would have "started the body" if its content were read as markup
+        for inner in [
+            &b"<script>document.write('<div class=\"x\">hi</div>');</script>"[..],
+            &b"<style>/* <p> */ .a{color:red}</style>"[..],
+            &b"<title>A <b>bold</b> title</title>"[..],
+            &b"<script>var s = '</scr' + 'ipt><p>';</script>"[..],
+        ] {
+            assert_eq!(
+                resolve(&far(inner), None),
+                encoding_rs::WINDOWS_1252,
+                "raw-text content must not end the head: {:?}",
+                std::str::from_utf8(inner).unwrap()
+            );
+        }
+        // an unclosed <script> swallows the rest of the document, declaration included — which is
+        // what a browser does too
+        let mut unclosed = b"<html><head><script>x".to_vec();
+        unclosed.extend_from_slice(decl);
+        assert_eq!(resolve(&unclosed, None), encoding_rs::UTF_8);
+    }
+
+    /// The other half: once the BODY has started, a declaration past the 1024-byte floor is ignored,
+    /// because a browser will not re-decode content it has already parsed. Measured in Chrome at body
+    /// offsets 0, 100, 512 (honoured) and 1024, 2048, 4096, 64K, 512K (ignored).
+    #[test]
+    fn a_body_declaration_counts_only_within_the_floor() {
+        let page = |pad: usize| -> Vec<u8> {
+            let mut v = b"<!DOCTYPE html><html><head><title>t</title></head><body>".to_vec();
+            while v.len() < pad {
+                v.extend_from_slice(b"<p>lorem ipsum dolor sit amet consectetur</p>");
+            }
+            v.extend_from_slice(br#"<meta charset="windows-1252">"#);
+            v
+        };
+        for near in [0usize, 100, 512] {
+            assert_eq!(
+                resolve(&page(near), None),
+                encoding_rs::WINDOWS_1252,
+                "a BODY declaration at {near} is inside the floor and is honoured"
+            );
+        }
+        for far in [1024usize, 2048, 4096, 64 * 1024] {
+            assert_eq!(
+                resolve(&page(far), None),
+                encoding_rs::UTF_8,
+                "a BODY declaration at {far} is past the floor and declares nothing"
+            );
+        }
+    }
+
+    /// The unbounded single-pass scan must still match the tag NAME in any case, reject a
+    /// look-alike, survive a truncated tail, and skip an arbitrary number of comments on the way.
+    #[test]
+    fn the_unbounded_scan_matches_only_real_meta_tags() {
+        assert_eq!(resolve(b"<p><META charset=big5>", None), encoding_rs::BIG5);
+        assert_eq!(resolve(b"<p><MeTa charset=big5>", None), encoding_rs::BIG5);
+        assert_eq!(resolve(b"<metadata charset=big5>", None), encoding_rs::UTF_8);
+        assert_eq!(resolve(b"<p><div><met", None), encoding_rs::UTF_8); // truncated tail
+        assert_eq!(
+            resolve(b"<html><head><title>x</title><meta charset=big5>", None),
+            encoding_rs::BIG5
+        );
+        // Many comments, each holding a decoy: none declares anything, and the real one after them is
+        // still reached because all of it is still the HEAD. This is the shape that was O(document)
+        // per hit before the rewrite — 500 backwards `rfind`s over a growing buffer.
+        let mut many = b"<html><head>".to_vec();
+        for _ in 0..500 {
+            many.extend_from_slice(b"<!-- <meta charset=shift_jis> --><link rel=x>");
+        }
+        many.extend_from_slice(b"<meta charset=big5>");
+        assert_eq!(resolve(&many, None), encoding_rs::BIG5);
+
+        // ...and the same shape with BODY content in it stops at the floor instead, because the
+        // first `<p>` ends the head.
+        let mut body = b"<html><head>".to_vec();
+        for _ in 0..500 {
+            body.extend_from_slice(b"<!-- <meta charset=shift_jis> --><p>x</p>");
+        }
+        body.extend_from_slice(b"<meta charset=big5>");
+        assert_eq!(resolve(&body, None), encoding_rs::UTF_8);
     }
 
     /// The WHATWG Encoding Standard has no UTF-32, so a UTF-32 BOM is not a BOM. w3lib recognizes one.

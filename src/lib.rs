@@ -115,7 +115,7 @@ fn compile_schema(
 /// `"windows-1252"`, `"Shift_JIS"`, …). `label` is the caller/HTTP charset a response supplies, or
 /// `None` to sniff.
 ///
-/// The same resolution `extract` runs — BOM → BOM-less UTF-16 prefix → label → 4096-byte
+/// The same resolution `extract` runs — BOM → BOM-less UTF-16 prefix → label → browser-bounded
 /// `<meta>`/XML-declaration prescan → UTF-8 — exposed on its own because it is useful without an
 /// extraction, and because nothing else in a scraper's stack answers this question the way a browser
 /// does. Parsel does not sniff at all (`Selector(body=…)` defaults to UTF-8), and w3lib — what Scrapy

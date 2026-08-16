@@ -133,11 +133,15 @@ there:
   spec defines.
 - **Values libxml2 drops** — names longer than its 100-byte buffer, and everything after a `</html>`,
   which real pages put *before* the content that matters (one crawled page keeps 14 of its 17 KB there).
-- **Encoding, the widest gap.** `parsel.Selector(body=…)` never sniffs `<meta charset>`;
-  `frostwork.detect_encoding` does, past the `<body>` and unsupported-label cut-offs where w3lib gives
-  up. It reads a UTF-16 body, which lxml's HTML parser cannot parse at all, and decodes with the WHATWG
-  indexes browsers use — where Python's legacy codecs return U+FFFD for 457 euc-jp and 192 big5
-  sequences of ordinary prose.
+- **Encoding, the widest gap — and the one place the browser, not lxml, is the standard.**
+  `parsel.Selector(body=…)` never sniffs `<meta charset>`; `frostwork.detect_encoding` does, at any
+  depth and past the `<body>` and unsupported-label cut-offs where w3lib gives up. It reads a UTF-16
+  body, which lxml's HTML parser cannot parse at all, and decodes with the WHATWG indexes browsers use
+  — where Python's legacy codecs return U+FFFD for 457 euc-jp and 192 big5 sequences of ordinary prose.
+  The rule is **never diverge from the browser**: a price is right when it matches what the site shows
+  a person, so where Frostwork's text differs from Scrapy's on an oddly-encoded page, Frostwork is the
+  one agreeing with the browser. Every such difference is
+  [tabulated with its reason](docs/COMPATIBILITY.md#the-rule-never-diverge-from-the-browser).
 - **A schema verdict before the scrape**, and **one pass for the whole schema** — a page object of
   single-valued fields stops scanning once every field has a value, which a tree parser cannot do.
 

@@ -429,9 +429,9 @@ tree can come back empty here.
 
 | construct | Parsel / w3lib | Frostwork | gate |
 |---|---|---|---|
-| **sniffing a `<meta charset>` at all** | `parsel.Selector(body=…)` never looks: it defaults to UTF-8 and every value carries U+FFFD. Scrapy users get sniffing from w3lib, one layer up | BOM → BOM-less UTF-16 → caller label → 4096-byte prescan → UTF-8, with no caller label needed | `tools/enc_check.py` |
+| **sniffing a `<meta charset>` at all** | `parsel.Selector(body=…)` never looks: it defaults to UTF-8 and every value carries U+FFFD. Scrapy users get sniffing from w3lib, one layer up | BOM → BOM-less UTF-16 → caller label → a `<meta>` prescan bounded the way a BROWSER bounds it → UTF-8, with no caller label needed | `tools/enc_check.py` |
 | a declaration **after `<body>`**, or **after an unsupported label** | w3lib's regex has a `\|body` alternative and gives up there, and it stops at its first hit rather than continuing past a label it cannot resolve | honoured — browsers do not stop at `<body>`, and WHATWG treats an unsupported label as "failure, continue" | the difference table under [Encoding](#deliberate-differences-from-w3lib), each row asserted in **both** directions so an upstream fix fails as stale |
-| a declaration **past byte 1024** | w3lib scans 4096 bytes, as Frostwork does — this row is against a *browser's* budget, not w3lib | honoured: WHATWG's 1024 is a streaming budget ("not to stall beyond that") and a whole-buffer engine has nothing to stall on. Legacy pages put `Content-Type` at byte ~1100–1600 behind a producer comment or a block of `og:` metas | `src/encoding.rs`; the window and its reasoning are under [Encoding](#encoding) |
+| a declaration **deep in the `<head>`** | ignored past 4096 bytes | honoured at any depth — measured in Chrome at 1KB/4KB/16KB/64KB/256KB **and 1MB**. A browser meeting the `<meta>` after its prescan budget runs "change the encoding" and re-decodes, so the budget is not a correctness cap. Legacy pages put `Content-Type` at byte ~1100–1600 behind a producer comment or a block of `og:` metas | `src/encoding.rs`; reasoning under [Encoding](#encoding) |
 | a **UTF-16 response body** | lxml's HTML parser cannot parse UTF-16 bytes at all — `Selector(body=…, encoding="utf-16")` returns `[]`/errors | decoded, matching the decode-first result Scrapy uses | `src/lib.rs::encoding_utf16_bom_transcode`, `src/encoding.rs::bomless_utf16_is_detected_from_the_xml_prefix` |
 | legacy bytes the **Python codec leaves undefined** | U+FFFD — `AD A1` is the `①` of ordinary Japanese prose, which strict `euc_jp` has no mapping for | the WHATWG character a browser shows: **457** such sequences in euc-jp, **192** in big5 | `tools/decoder_sweep.py`, swept over every two-byte sequence in each legacy lead/trail space |
 | bytes where the **two indexes disagree** | Python's legacy codecs | WHATWG's: 5 windows-1252 bytes, 11 big5 and 6 euc-jp sequences, and 20 in gb18030 where GB18030-2005 moved characters out of the private use area (`A3A0` is U+3000 here, U+E5E5 there) | same sweep, gated by exact count in both directions |
@@ -563,14 +563,47 @@ bucket, not this list, is where the next bug will be:
 This is the detail behind the encoding rows of [Beyond lxml](#encoding-beyond-w3lib-and-parsel):
 the whole subsystem is a place where Frostwork answers and the oracles do not.
 
-**The policy here is browser/WHATWG correctness, not w3lib parity.** Encoding *sniffing* is oracled
-against `w3lib.encoding.html_to_unicode` (what Scrapy uses) for everything the two agree on, because
-Parsel itself never looks at `<meta>` — `parsel.Selector(body=…)` just defaults to UTF-8, so oracling a
-prescan against it is vacuous. But w3lib is the oracle, not the target: where w3lib and browsers
-disagree, Frostwork follows the browser and the difference is enumerated below and *asserted* in
-`tools/enc_check.py` (which is split into a shared-with-w3lib set and an explicit difference table, each
-row checked in both directions so a difference that gets fixed upstream fails as stale). Same policy as
-the cssselect and Parsel-decoder divergences above.
+### The rule: never diverge from the browser
+
+**On encoding, Frostwork targets what a browser actually renders — not w3lib, not lxml, not Parsel,
+and not a reading of a spec.** This is the one subsystem where the usual oracle does not decide the
+answer. The reason is what a scraper is *for*: a price, a title or an address is correct when it
+matches what the site shows a person, so a value that differs from the browser is wrong even when
+every Python library agrees with it. There is no divergence budget here and no "acceptable local
+difference" — those exist for tree construction (foster parenting, the adoption agency), not for
+this.
+
+What that means in practice, for anyone porting a scraper *to* Frostwork: **where Frostwork's text
+differs from Scrapy's, on a page whose encoding is at all unusual, Frostwork is very likely the one
+matching the browser** — the differences are enumerated in the table below, each with the reason and
+each asserted in `tools/enc_check.py` in *both* directions, so a row cannot rot into silent
+agreement if an upstream library is fixed.
+
+**What the rule covers.** It governs *which bytes become which characters*: BOM handling, the
+`<meta>`/XML-declaration prescan, label resolution, and the decoder indexes. It does **not** reach
+past that into what happens to the characters afterwards — Parsel's input normalization
+(`text.strip()`, NUL deletion) and libxml2's tree construction (foster parenting, the adoption
+agency) are separate contracts with their own oracle, documented above, and they keep it.
+
+That boundary is load-bearing in exactly one place, so it is worth naming: a **UTF-32LE** document
+(`FF FE 00 00`). The *encoding* decision matches the browser already — those first two bytes are the
+UTF-16LE BOM, there is no UTF-32 in the Encoding Standard, and Frostwork reads UTF-16LE just as
+Chrome does. What differs afterwards is NUL: Chrome's tokenizer turns each one into U+FFFD, so no
+tag ever opens and the document renders as literal text, while Frostwork deletes NUL document-wide
+because Parsel does and parses the tags. That is the normalization contract behaving as specified,
+not an encoding divergence, and it is left as it is — a scraper's `response.text` really has been
+NUL-stripped before it reaches any selector.
+
+The rule has teeth: applying it moved the `<meta charset>` prescan off w3lib's 4096-byte window and
+onto the browser's actual boundary, which turned out to be **two** rules and neither of them a flat
+window — see the depth rows below.
+
+Encoding *sniffing* is still oracled against `w3lib.encoding.html_to_unicode` (what Scrapy uses) for
+everything the two agree on, because Parsel itself never looks at `<meta>` — `parsel.Selector(body=…)`
+just defaults to UTF-8, so oracling a prescan against it is vacuous. But w3lib is **evidence, not the
+target**. Claims about "what browsers do" are settled by measuring a browser, not by quoting the
+standard at it: `~/src/encoding-hacks` runs exact bytes and exact HTTP headers past a real browser
+and twelve scraper stacks side by side, and that is where a row in the table below comes from.
 
 Resolution order (`src/encoding.rs`):
 
@@ -580,14 +613,23 @@ Resolution order (`src/encoding.rs`):
    the BOM checks on the same reasoning WHATWG gives a BOM priority: the bytes are unambiguous, and no
    ASCII-compatible document can begin with a NUL.
 3. **caller / HTTP charset label**.
-4. **prescan of the first 4096 bytes** — an XML declaration's `encoding=` (only at offset 0) and
-   `<meta charset>` / `<meta http-equiv=content-type>`, in document order. Same window as w3lib. WHATWG
-   suggests 1024, but that number is a *streaming* budget — user agents are "encouraged to use the
-   prescan algorithm … on the first 1024 bytes, but **not to stall beyond that**", i.e. not to delay
-   first paint waiting for more bytes off the network. Frostwork is handed the whole document at once
-   and has nothing to stall on, so the budget buys nothing and costs real pages: legacy sites that open
-   with a producer comment or a block of `og:` metas put their `Content-Type` at byte ~1100–1600, and
-   the page then decoded as UTF-8 with a U+FFFD in every value.
+4. **prescan, bounded the way a browser bounds it** — an XML declaration's `encoding=` (only at offset
+   0) and `<meta charset>` / `<meta http-equiv=content-type>`, in document order. The bound is **the
+   first 1024 bytes unconditionally, and past that only while still inside `<head>`**. It is two rules
+   because a browser has two, and both were measured rather than read off the standard:
+   - **In the `<head>`, at any depth** — honoured in Chrome at 1KB, 4KB, 16KB, 64KB, 256KB and 1MB.
+     WHATWG's 1024 is a *streaming* budget ("not to stall beyond that", i.e. do not delay first paint
+     waiting for bytes off the network), and a browser that meets the `<meta>` after it runs "change
+     the encoding" and re-decodes. A flat window costs real pages: legacy sites that open with a
+     producer comment or a block of `og:` metas put their `Content-Type` at byte ~1100–1600, and the
+     page then decoded as UTF-8 with a U+FFFD in every value.
+   - **In the `<body>`, only within the first 1024 bytes** — honoured in Chrome at byte 0, 100 and 512
+     and ignored from 1024 on. Once real content is parsed the browser will not re-decode it.
+
+   w3lib's flat 4096 is wrong in both directions, and so was Frostwork's copy of it: it dropped the
+   head declarations real pages carry, and honoured body declarations no browser honours. Bounding at
+   the head is also what makes this free — an unbounded scan measured a flat ~35µs per label-less page,
+   one extra pass over the document, and the head bound gives all of it back.
 5. **UTF-8** default.
 
 Structural tokenization runs on raw bytes for every ASCII-compatible encoding — a byte below 0x80 *is*
@@ -625,6 +667,8 @@ gated in `tools/enc_check.py`.
 
 | behaviour | w3lib | Frostwork | why |
 |---|---|---|---|
+| a `<meta charset>` deep in the **head** | ignored past 4096 bytes | honoured at any depth (measured in Chrome to 1MB) | a browser meeting it after its prescan budget runs "change the encoding" and re-decodes; the budget is a *streaming* one |
+| a `<meta charset>` deep in the **body** | ignored (its regex gives up at `body`) | ignored too, past the first 1024 bytes | measured: Chrome honours a body declaration at byte 0/100/512 and ignores it from 1024 on — once real content is parsed it will not re-decode. The two agree here, for different reasons |
 | a `<meta charset>` after `<body>` | ignored (its regex has a `\|body` alternative and gives up there) | honoured | browsers do not stop at `<body>`, and real pages carry late declarations |
 | `charset=` inside a `<!-- comment -->` | honoured (no comment handling) | ignored | WHATWG's prescan and every browser skip comments |
 | an unsupported charset label | stops at the first regex hit, so a later valid declaration is lost | **continues** and takes the next valid one | WHATWG: an unsupported label is "failure, continue" |

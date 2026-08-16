@@ -308,6 +308,16 @@ a way it has read 100% while the engine was wrong:
 - **Correctness bar = value-parity with lxml, proven by the differential.** Before claiming a
   selector/feature works, run `tools/diff_lxml.py`; the gate is **0 non-whitespace DIVERGE (+ 0
   CRASH)**. An LLM converges on a *correct* parser only against the pass/fail loop, not plausibility.
+- **ENCODING is the exception: the browser is the standard, and there is no divergence budget.**
+  Everywhere else the oracle is lxml/Parsel. For anything that decides *which bytes become which
+  characters* — BOM handling, the `<meta>` prescan, label resolution, the decoder indexes — the
+  target is what a browser actually renders, and w3lib, lxml, Parsel and the spec are all evidence
+  rather than authority. A scraper exists to see what the user sees, so a value that differs from
+  the browser is wrong even when every Python oracle agrees with it. Where an oracle disagrees,
+  implement the browser's answer and assert the oracle's in `tools/enc_check.py`'s difference table
+  so an upstream fix fails as stale. **Measure the browser, do not quote the spec at it**:
+  `~/src/encoding-hacks` is the differential lab for that (real browser vs twelve scraper stacks
+  over exact bytes and headers), and it is where a claim about "browser behaviour" gets settled.
 - **Close to libxml2 2.14, NOT the HTML5 spec.** Tree construction (implied end tags, void set,
   `<p>`-closing) is matched *empirically* to libxml2 — it is the oracle. See `implied_close/`.
 - **No fallback.** An unsupported query returns an empty column — never an error, never a wrong value.

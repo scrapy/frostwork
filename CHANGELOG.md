@@ -13,7 +13,18 @@ First public preview.
 - Compile-once `Plan`/`Page` APIs, named fields and grouped `Many`/`One` extraction.
 - Strict selector validation by default. Unsupported selectors fail before scanning; `strict=False` opts
   into empty columns without invoking a fallback parser.
-- Byte-oriented tokenization, lazy value decoding and browser/WHATWG-oriented charset resolution.
+- Byte-oriented tokenization, lazy value decoding and browser-oriented charset resolution. **On
+  encoding the standard is the browser** — not w3lib, lxml, Parsel or a reading of a spec — because a
+  scraped value is correct when it matches what the site shows a person. Every difference from those
+  libraries is tabulated with its reason in the compatibility contract and asserted in both directions,
+  so an upstream fix fails as stale rather than passing silently.
+- The `<meta charset>` prescan is bounded the way a **browser** bounds it, not the way w3lib does.
+  A declaration in the `<head>` is honoured at any depth (Chrome measured at 1KB→1MB: a browser that
+  meets the tag after its prescan budget re-decodes, so the budget is not a correctness cap); a
+  declaration in the `<body>` counts only within the first 1024 bytes (Chrome honours one at byte
+  0/100/512 and ignores it from 1024 on). The previous flat 4096-byte cap was w3lib's number and was
+  wrong in both directions — it dropped head declarations real pages carry behind a producer comment
+  or a block of `og:` metas, and honoured body declarations no browser does.
 - Extended characters in a selector answer the same under any encoding. A selector is UTF-8 and a
   byte-scanned page is not, so both attribute values and attribute NAMES are decoded before comparison:
   `[data-año]` and `::attr(año)` answer identically for the same document in UTF-8, windows-1252 or
