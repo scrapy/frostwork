@@ -18,6 +18,12 @@ use encoding_rs::Encoding;
 /// A substring scan cannot do this job and got it wrong in BOTH directions: `data-http-equiv` looked
 /// like `http-equiv`, a `charset=` inside any attribute value looked like a declaration, and the first
 /// raw `>` "ended" the tag even inside a quoted value.
+///
+/// `from_utf8_lossy` is lossless *for this purpose* even though the document's encoding is still unknown
+/// here — that is what the prescan is deciding. What it reads is an encoding LABEL, and every label is
+/// ASCII, matched ASCII-case-insensitively. A non-ASCII byte becomes U+FFFD, which matches no label and
+/// no attribute name this cares about, so a mangled byte can only turn "not a declaration" into "still
+/// not a declaration" — the answer a browser reaches too.
 fn meta_attrs(head: &[u8], from: usize) -> (Vec<(String, String)>, usize) {
     const WS: [u8; 5] = [b' ', b'\t', b'\n', b'\r', 0x0c];
     let n = head.len();
