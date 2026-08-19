@@ -107,6 +107,8 @@ def tables(which):
     # where boxing that state could cost rather than pay.
     t["tail"] = ("deferred-tail selectors (:has / :last-child)", bm.product_listing(med),
                  [1, 2, 4, 8], bm.TAIL_POOL)
+    t["reverse-values"] = ("attached reverse-position values", bm.reverse_values(med),
+                           [1, 2, 4, 8], bm.REVERSE_VALUE_POOL)
     # A pure scan with no selectors must stay flat: per-element cost shows here with nothing to
     # amortize it.
     t["scan"] = ("pure scan (0 selectors -- must stay flat)", bm.class_heavy(med), [0], [])
@@ -114,7 +116,7 @@ def tables(which):
 
 
 ALL = ["class-led", "tag-led", "desc-led", "desc-deep", "attr-led", "attr-page", "listing",
-       "listing-class", "article", "deep", "table", "tail", "scan"]
+       "listing-class", "article", "deep", "table", "tail", "reverse-values", "scan"]
 
 
 def corpus_cells(corpus_dir, limit):

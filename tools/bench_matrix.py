@@ -50,6 +50,17 @@ TAIL_POOL = [
     "li:last-child a::attr(href)", "div:has(a) ::text",
 ]
 
+# Reverse-position selectors whose values are ATTACHED to the provisional subject. Unlike TAIL_POOL's
+# `li:last-child a::attr(href)`, these stream decoded values into `rev_buf`, promote them when the
+# subject closes, and commit only the candidates that win at their parent's close. Kept separate so a
+# change to that ownership path cannot hide behind the tail re-scan workload.
+REVERSE_VALUE_POOL = [
+    "li:last-child::text", "li:last-child::attr(data-id)",
+    "li:nth-last-child(2)::text", "li:nth-last-child(odd)::text",
+    "li:last-of-type::text", "li:nth-last-of-type(2)::attr(data-id)",
+    "li:only-child::text", "li:only-of-type::attr(data-id)",
+]
+
 # CLASS-LED, high field count — where per-(element, selector) work dominates: every class-led compound
 # asks the element for its `class=` and looks for its own token. The tag-led POOL above barely exercises
 # that, so a change to class/id comparison is invisible there. Most fields deliberately DON'T match,
@@ -132,6 +143,18 @@ def product_listing(size):
         body.append(card); n += len(card)
     return (f'<!DOCTYPE html><html><head><title>Shop</title></head><body>{H1}'
             f'<div class="grid">{"".join(body)}</div></body></html>').encode()
+
+
+def reverse_values(size):
+    """Sibling groups whose reverse-position winners emit attached text and attribute values."""
+    block = ('<ul><li data-id="a">Alpha<li data-id="b">Bravo'
+             '<li data-id="c">Charlie</ul>'
+             '<ol><li data-id="only">Only</ol>')
+    body, n = [], 0
+    while n < size:
+        body.append(block); n += len(block)
+    return (f'<!DOCTYPE html><html><head><title>Reverse</title></head><body>{H1}'
+            f'{"".join(body)}</body></html>').encode()
 
 
 def table(size):

@@ -253,6 +253,27 @@ static NO_COLD: ColdState = ColdState {
     txt_emit: Vec::new(),
 };
 
+/// Retain one decoded value for every set entry bit. Each entry ultimately owns a `String`, so clone
+/// for all but the final destination and move the original there; the common one-entry case copies
+/// nothing.
+fn fan_out_value(
+    values: &mut Vec<(u32, usize, String)>,
+    mut entries: u128,
+    offset: usize,
+    value: String,
+) {
+    debug_assert_ne!(entries, 0);
+    loop {
+        let entry = entries.trailing_zeros();
+        entries &= entries - 1;
+        if entries == 0 {
+            values.push((entry, offset, value));
+            return;
+        }
+        values.push((entry, offset, value.clone()));
+    }
+}
+
 impl<'a> OpenElem<'a> {
     /// A freshly opened element: the tokenizer's facts, plus the signature DERIVED from the
     /// materialized `attrs`. The only constructor — the scan and the unit-test builders both go through
@@ -2187,12 +2208,7 @@ impl<'a> Matcher<'a> {
             return;
         }
         let out = val.finalize(self.input.encoding());
-        let mut w = want;
-        while w != 0 {
-            let r = w.trailing_zeros();
-            w &= w - 1;
-            self.stack[top].cold_mut().rev_buf.push((r, off, out.clone()));
-        }
+        fan_out_value(&mut self.stack[top].cold_mut().rev_buf, want, off, out);
     }
 
     /// Register PROVISIONAL `:has()` subject matches for `stack[top]` (structural — `compound_matches`
@@ -2267,12 +2283,7 @@ impl<'a> Matcher<'a> {
             return;
         }
         let out = val.finalize(self.input.encoding());
-        let mut w = want;
-        while w != 0 {
-            let h = w.trailing_zeros();
-            w &= w - 1;
-            self.stack[top].cold_mut().has_buf.push((h, off, out.clone()));
-        }
+        fan_out_value(&mut self.stack[top].cold_mut().has_buf, want, off, out);
     }
 
     /// Register PROVISIONAL text-content-predicate subject matches for `stack[top]` (structural), create
