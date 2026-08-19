@@ -45,6 +45,7 @@ use compile::{
     deferrable_text_pred, sibling_pred_boundary,
 };
 use decode::{decode_attr, decode_bytes, finalize};
+pub(crate) use decode::EncodedInput;
 use deferred::TextMatchState;
 #[cfg(test)]
 use deferred::TextAccum;
@@ -862,9 +863,10 @@ pub struct Matcher<'a> {
     schema: &'a CompiledSchema,
     results: Vec<Vec<String>>,
     stack: Vec<OpenElem<'a>>,
-    input: &'a [u8],            // for slicing raw-source outer-HTML fragments
+    // The document bytes and the encoding that decodes them, as one value (`EncodedInput`).
+    // Raw-source outer-HTML fragments are sliced out of it; emitted values are decoded with it.
+    input: EncodedInput<'a>,
     captures: Vec<(usize, usize, Dest)>, // (start, end, dest) raw-source spans, sorted at finish
-    enc: &'static Encoding,     // resolved encoding for decoding emitted values
     // Must a non-ASCII attribute NAME be decoded before it is compared? Only when the schema spells one
     // that way and the page is byte-scanned under a legacy encoding — see `interesting_name`.
     decode_names: bool,
@@ -1487,12 +1489,12 @@ impl CompiledSchema {
         self.stop_mask = mask;
     }
 
-    /// Run this compiled schema over one page's `bytes` (already encoding-resolved / transcoded), with
-    /// `enc` the encoding used to decode emitted values. One streaming pass; the schema is untouched
-    /// and reusable. Returns `(flat_columns, grouped)` — see [`Matcher::finish_grouped`].
-    pub fn run(&self, bytes: &[u8], enc: &'static Encoding) -> (FlatColumns, Vec<GroupRows>) {
-        let mut m = Matcher::new(self, bytes, enc);
-        crate::tokenizer::tokenize(bytes, &mut m);
+    /// Run this compiled schema over one page's [`EncodedInput`] (already encoding-resolved /
+    /// transcoded). One streaming pass; the schema is untouched and reusable. Returns
+    /// `(flat_columns, grouped)` — see [`Matcher::finish_grouped`].
+    pub fn run(&self, input: EncodedInput) -> (FlatColumns, Vec<GroupRows>) {
+        let mut m = Matcher::new(self, input);
+        crate::tokenizer::tokenize(input.bytes(), &mut m);
         m.finish_grouped()
     }
 
@@ -1533,9 +1535,9 @@ impl CompiledSchema {
 }
 
 impl<'a> Matcher<'a> {
-    /// Per-page scan state over a compiled `schema` and the document `input` (borrowed for raw-source
-    /// outer-HTML spans); `enc` decodes emitted values. Prefer [`CompiledSchema::run`].
-    pub fn new(schema: &'a CompiledSchema, input: &'a [u8], enc: &'static Encoding) -> Matcher<'a> {
+    /// Per-page scan state over a compiled `schema` and one document's [`EncodedInput`], borrowed for
+    /// the length of the scan. Prefer [`CompiledSchema::run`].
+    pub fn new(schema: &'a CompiledSchema, input: EncodedInput<'a>) -> Matcher<'a> {
         Matcher {
             results: vec![Vec::new(); schema.n_flat_cols],
             group_rows: vec![Vec::new(); schema.n_groups],
@@ -1546,8 +1548,7 @@ impl<'a> Matcher<'a> {
             stack: Vec::new(),
             input,
             captures: Vec::new(),
-            enc,
-            decode_names: schema.non_ascii_interesting && enc != encoding_rs::UTF_8,
+            decode_names: schema.non_ascii_interesting && input.encoding() != encoding_rs::UTF_8,
             mixed: Vec::new(),
             satisfied: 0,
             open_captures: 0,
@@ -1599,7 +1600,7 @@ impl<'a> Matcher<'a> {
             }
             max_end = e;
             let tail = &self.schema.tail_schemas[slot];
-            let (cols, _) = tail.schema.run(&self.input[s..e], self.enc);
+            let (cols, _) = tail.schema.run(self.input.sub(s..e));
             for (vals, &col) in cols.into_iter().zip(&tail.cols) {
                 self.results[col].extend(vals);
             }
@@ -1734,7 +1735,7 @@ impl<'a> Matcher<'a> {
                     // share carries this column too
                     Tail::Merged => {}
                     Tail::Streamed if matches!(he.terminal, Terminal::OuterHtml) => {
-                        let val = decode::raw_source(&self.input[e.start..end], self.enc);
+                        let val = self.input.raw_source(e.start..end);
                         self.pending.push((he.col, e.start, val));
                     }
                     Tail::Streamed => {
@@ -1782,7 +1783,7 @@ impl<'a> Matcher<'a> {
                     Tail::Merged => {}
                     Tail::Streamed => match te.terminal {
                         Terminal::OuterHtml => {
-                            let val = decode::raw_source(&self.input[e.start..end], self.enc);
+                            let val = self.input.raw_source(e.start..end);
                             self.pending.push((te.col, e.start, val));
                         }
                         Terminal::Attr { .. } | Terminal::Text { .. } => {
@@ -1875,7 +1876,7 @@ impl<'a> Matcher<'a> {
             // pop order is inner-first, so sort by start before scattering.
             self.captures.sort_by_key(|&(start, _, _)| start);
             for (start, end, dest) in std::mem::take(&mut self.captures) {
-                let val = decode::raw_source(&self.input[start..end], self.enc);
+                let val = self.input.raw_source(start..end);
                 match dest {
                     Dest::Flat(col) => self.results[col].push(val),
                     Dest::Grouped { seq, sub } => {
@@ -1964,7 +1965,7 @@ impl<'a> Matcher<'a> {
     fn interesting_name<const DECODE_NAMES: bool>(&self, name: &'a [u8]) -> Option<&'a [u8]> {
         let schema: &'a CompiledSchema = self.schema;
         if DECODE_NAMES && !name.is_ascii() {
-            let decoded = decode_bytes(name, self.enc);
+            let decoded = decode_bytes(name, self.input.encoding());
             let hit = schema.interesting.iter().find(|x| x.eq_ignore_ascii_case(&decoded))?;
             return Some(hit.as_bytes());
         }
@@ -1998,7 +1999,7 @@ impl<'a> Matcher<'a> {
         for &(an, av) in raw_attrs {
             if let Some(name) = self.interesting_name::<DECODE_NAMES>(an) {
                 let value = match av {
-                    Some(value) => decode_attr(value, self.enc),
+                    Some(value) => decode_attr(value, self.input.encoding()),
                     None if is_minimized_boolean_attr(name) => {
                         Cow::Owned(String::from_utf8_lossy(name).to_ascii_lowercase())
                     }
@@ -2185,7 +2186,7 @@ impl<'a> Matcher<'a> {
         if want == 0 {
             return;
         }
-        let out = val.finalize(self.enc);
+        let out = val.finalize(self.input.encoding());
         let mut w = want;
         while w != 0 {
             let r = w.trailing_zeros();
@@ -2265,7 +2266,7 @@ impl<'a> Matcher<'a> {
         if want == 0 {
             return;
         }
-        let out = val.finalize(self.enc);
+        let out = val.finalize(self.input.encoding());
         let mut w = want;
         while w != 0 {
             let h = w.trailing_zeros();
@@ -2311,7 +2312,7 @@ impl<'a> Matcher<'a> {
     /// Stream this text node through every open predicate state it belongs to. Only direct text values
     /// that may become terminal output are retained; descendant predicate input stays bounded.
     fn text_event(&mut self, top: usize, val: TextVal<'_>, off: usize) {
-        let out = val.finalize(self.enc);
+        let out = val.finalize(self.input.encoding());
         for e in 0..=top {
             if self.stack[e].txt_subj == 0 {
                 continue;
@@ -2341,7 +2342,7 @@ impl<'a> Matcher<'a> {
     /// Feed this text node into the `normalize-space(...)` accumulators: append to any open element
     /// string-value (`//el`), and capture the first matched text node for a `text()` inner.
     fn ns_text(&mut self, top: usize, val: TextVal<'_>) {
-        let enc = self.enc;
+        let enc = self.input.encoding();
         for k in 0..self.schema.entries.len().min(128) {
             let inner = match &self.schema.entries[k].terminal {
                 Terminal::NormalizeSpace(inner) => &**inner,
@@ -2848,9 +2849,9 @@ impl<'a> Matcher<'a> {
             if p.gap_end == start && p.allows_entities == allows_entities {
                 // decode this run on its own and append the STRING — see `PendingText`
                 if p.joined.is_empty() {
-                    p.joined = finalize(&p.bytes, allows_entities, self.enc);
+                    p.joined = finalize(&p.bytes, allows_entities, self.input.encoding());
                 }
-                p.joined.push_str(&finalize(text, allows_entities, self.enc));
+                p.joined.push_str(&finalize(text, allows_entities, self.input.encoding()));
                 p.gap_end = start + text.len();
                 return;
             }
@@ -2930,7 +2931,7 @@ impl<'a> Matcher<'a> {
         if colmask == 0 && gtargets.is_empty() {
             return;
         }
-        let out = val.finalize(self.enc);
+        let out = val.finalize(self.input.encoding());
         for (ii, sub_idx) in gtargets {
             self.open_instances[ii].buckets[sub_idx].push(out.clone());
         }

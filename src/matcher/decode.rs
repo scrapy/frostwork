@@ -2,12 +2,70 @@
 //! `String`/`Cow` the engine emits. Pure `bytes + encoding -> value` with no dependency on any matcher
 //! type — it runs only for values that actually match (a small fraction of the document), so the
 //! whole-document decode/validation the old `&str` path paid up front is gone.
+//!
+//! [`EncodedInput`] carries that `bytes + encoding` pair as one value, keeping document-range
+//! operations tied to the encoding chosen for the prepared buffer.
 
 use std::borrow::Cow;
+use std::ops::Range;
 
 use encoding_rs::Encoding;
 
 use crate::entities;
+
+/// A document's bytes together with the encoding that decodes **those bytes**.
+///
+/// The engine scans a page in its own encoding instead of converting the whole document to UTF-8 first,
+/// so "which encoding" is a property of one particular buffer and has to travel with it.
+/// `crate::prepare_bytes` picks the pair: usually the page's own encoding over borrowed input, but a
+/// non-ASCII-compatible page (UTF-16, ISO-2022-JP) is transcoded first and paired with UTF-8 instead.
+/// Carried as two separate values those two cases can be crossed, and reading a transcoded buffer under
+/// the label the page declared garbles every value on it.
+///
+/// A small `Copy` borrowed view that owns nothing. The prepared `Cow` remains alive in
+/// `Plan::extract` for the scan, while elements borrow slices from this view, so it must not own the
+/// buffer itself.
+///
+/// [`sub`](Self::sub) and [`raw_source`](Self::raw_source) always slice this input rather than accept
+/// an independently supplied byte buffer. A value that already arrives as a slice (an attribute
+/// value, a text run) passes [`encoding`](Self::encoding) to the free functions below.
+#[derive(Clone, Copy)]
+pub(crate) struct EncodedInput<'a> {
+    bytes: &'a [u8],
+    encoding: &'static Encoding,
+}
+
+impl<'a> EncodedInput<'a> {
+    /// Pair a prepared buffer with the encoding that decodes it. Called once per page, by the entry
+    /// point that produced both.
+    pub(crate) fn new(bytes: &'a [u8], encoding: &'static Encoding) -> Self {
+        Self { bytes, encoding }
+    }
+
+    /// The whole buffer — for the tokenizer, which reads bytes and never decodes.
+    pub(super) fn bytes(self) -> &'a [u8] {
+        self.bytes
+    }
+
+    pub(super) fn encoding(self) -> &'static Encoding {
+        self.encoding
+    }
+
+    pub(super) fn len(self) -> usize {
+        self.bytes.len()
+    }
+
+    /// The same document narrowed to `range`, same encoding: one element's span, re-scanned by a
+    /// sub-schema to recover a deferred value.
+    pub(super) fn sub(self, range: Range<usize>) -> Self {
+        Self { bytes: &self.bytes[range], encoding: self.encoding }
+    }
+
+    /// Decode `range` of this document as an outer-HTML value (see the free `raw_source` below).
+    pub(super) fn raw_source(self, range: Range<usize>) -> String {
+        raw_source(&self.bytes[range], self.encoding)
+    }
+}
 
 /// Bytes -> `str` under the resolved encoding, with UTF-8 short-circuited. For UTF-8
 /// `decode_without_bom_handling` is *defined* to equal `from_utf8_lossy`, so `from_utf8` answers valid

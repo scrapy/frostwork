@@ -574,8 +574,9 @@ impl Plan {
     /// passes from `Content-Type`); `None` sniffs (BOM → `<meta>` → UTF-8). Returns `(flat_columns,
     /// grouped)` — byte-identical to [`extract_grouped`] with the same schema.
     pub fn extract(&self, html: &[u8], encoding: Option<&str>) -> (FlatColumns, Vec<GroupRows>) {
+        // Keep the prepared `Cow` alive here: the matcher borrows its bytes for the whole scan.
         let (bytes, value_enc) = prepare_bytes(html, encoding);
-        self.schema.run(&bytes, value_enc)
+        self.schema.run(matcher::EncodedInput::new(&bytes, value_enc))
     }
 }
 
