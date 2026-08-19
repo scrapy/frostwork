@@ -3,7 +3,7 @@
 All notable user-facing changes will be recorded here. Frostwork will follow semantic versioning after its
 first public release.
 
-## 0.1.0 — unreleased
+## 0.1.0 (unreleased)
 
 First public preview.
 

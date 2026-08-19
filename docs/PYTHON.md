@@ -20,7 +20,8 @@ python -m venv .venv
 ```
 
 `--extras=webpoet` installs the supported web-poet release. Drop it if you only need
-`extract`/`Page`/`frostwork-audit`. Wheels are **abi3** (`abi3-py310`) and support CPython ≥ 3.10.
+`extract`/`Page`/`frostwork-audit`. Wheels are **abi3** (`abi3-py310`): one wheel runs on CPython ≥ 3.10
+(tested up to the 3.15 prerelease).
 
 **3.10 is the floor for everything** — core and extra alike. The wheel is `abi3-py310` so the engine can
 borrow a `str`'s UTF-8 view instead of copying the document (`PyUnicode_AsUTF8AndSize` is limited-API
