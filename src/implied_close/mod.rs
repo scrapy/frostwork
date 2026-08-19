@@ -92,6 +92,13 @@ pub fn data_mode_of(name: &[u8]) -> crate::tokenizer::DataMode {
     lookup(name, crate::tokenizer::DataMode::Normal, data_mode)
 }
 
+/// Case-insensitive [`frame_content`] for a raw tag name. An unrecognized name opens a `<body>`, which is
+/// the generated table's own catch-all, so this answers identically for every input — including a name
+/// too long to be recognized and one that is not valid UTF-8.
+pub fn frame_content_of(name: &[u8]) -> FrameContent {
+    lookup(name, FrameContent::Body, frame_content)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

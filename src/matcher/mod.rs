@@ -22,7 +22,7 @@ use frame::{
     tag_is_redundant, DocumentFrame,
 };
 use crate::implied_close::{
-    blocks_end_tag, classify, end_tag_discardable, frame_content, start_closes,
+    blocks_end_tag, classify, end_tag_discardable, frame_content_of, start_closes,
     FrameContent,
 };
 use crate::selector::{
@@ -2506,8 +2506,7 @@ impl<'a> TokenSink<'a> for Matcher<'a> {
         if popped_head
             && frame.is_none()
             && !self.frame.body_established()
-            && frame_content(&String::from_utf8_lossy(name).to_ascii_lowercase())
-                == FrameContent::Body
+            && frame_content_of(name) == FrameContent::Body
         {
             self.start_tag(b"body", &[], false, span_start, span_start);
         }
@@ -2835,7 +2834,7 @@ impl<'a> Matcher<'a> {
         // Inside a frameset there is no head for head content to go in, so libxml2 opens a BODY for it —
         // the same one it opens for ordinary content there. Only the six `Head` names are affected; the
         // rest already matched.
-        let part = frame_content(&String::from_utf8_lossy(name).to_ascii_lowercase());
+        let part = frame_content_of(name);
         let part = match part {
             FrameContent::Head if frameset_is_open(&self.stack) => FrameContent::Body,
             other => other,
