@@ -112,6 +112,10 @@ jobs:
           python-version: ${{ matrix.python }}
           allow-prereleases: ${{ matrix.prerelease || false }}
       - run: python -m venv .venv
+      # lxml has no prebuilt wheel yet for a prerelease CPython either, so pip falls back to a source
+      # build, which needs these headers.
+      - if: matrix.prerelease
+        run: sudo apt-get update && sudo apt-get install -y libxml2-dev libxslt1-dev
       - run: .venv/bin/pip install -r requirements-test.txt
       # web-poet pulls two mypyc/C test deps whose published wheels don't load on a prerelease CPython
       - if: matrix.prerelease
