@@ -334,7 +334,7 @@ Write the changelog entry for the new version under a `## X.Y.Z (unreleased)` he
 
 ```bash
 bump-my-version bump minor    # major/minor/patch — rewrites Cargo.toml, Cargo.lock, pyproject.toml,
-                              # dates the changelog heading, commits and tags v<new version>
+                              # dates the changelog heading, commits and tags <new version>
 git push --follow-tags
 ```
 
