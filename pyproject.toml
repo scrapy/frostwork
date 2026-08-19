@@ -85,13 +85,11 @@ features = ["python"]
 module-name = "frostwork._frostwork"
 python-source = "python"
 
-# Release: `bump-my-version bump minor` rewrites the version everywhere it is duplicated, dates the
-# changelog heading, commits and tags; pushing the tag is what triggers .github/workflows/publish.yml.
 [tool.bumpversion]
 current_version = "0.0.0"
 commit = true
 tag = true
-tag_name = "v{new_version}"
+tag_name = "{new_version}"
 
 [[tool.bumpversion.files]]
 filename = "Cargo.toml"
