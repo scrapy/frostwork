@@ -53,10 +53,10 @@ webpoet = ["web-poet>=0.24.1,<0.25"]
 frostwork-audit = "frostwork.audit:main"
 
 [project.urls]
-Homepage = "https://github.com/shaneaevans/frostwork"
-Repository = "https://github.com/shaneaevans/frostwork"
-Documentation = "https://github.com/shaneaevans/frostwork#readme"
-Issues = "https://github.com/shaneaevans/frostwork/issues"
+Homepage = "https://github.com/scrapy/frostwork"
+Repository = "https://github.com/scrapy/frostwork"
+Documentation = "https://github.com/scrapy/frostwork#readme"
+Issues = "https://github.com/scrapy/frostwork/issues"
 
 # The package ships `py.typed`, so its annotations are a promise to every user's type checker.
 # `make py` and CI run `mypy python/frostwork tests/typing_fixture.py`; `tests/test_typing.py` additionally

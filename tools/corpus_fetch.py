@@ -90,7 +90,7 @@ DEFAULT_URLS = [
     "https://httpbin.org/html",
 ]
 
-UA = "frostwork-corpus-fetch/0.1 (+https://github.com/shaneaevans/frostwork; local parity testing)"
+UA = "frostwork-corpus-fetch/0.1 (+https://github.com/scrapy/frostwork; local parity testing)"
 
 
 def fetch(url: str, timeout: float = 20.0) -> bytes:
