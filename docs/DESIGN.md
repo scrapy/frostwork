@@ -22,30 +22,81 @@ bytes ─▶ tokenizer (TokenSink: start/text/end) ─▶ corrected-stack matche
 ```
 
 - **Tokenizer** (`tokenizer.rs`) — a minimal, correctness-first HTML tokenizer over **raw `&[u8]`**.
-  It implements only the states needed to avoid a *global* offset desync: rawtext/RCDATA
-  (`script`/`style`/`textarea`/`title`), comments, CDATA/DOCTYPE/PI skipping, attribute parsing, and
-  "`<`-not-a-tag as text". It emits borrowed byte slices through a source-agnostic `TokenSink` trait —
-  so the matcher is decoupled from it and the tokenizer can be swapped/optimised independently.
+  It implements only the states needed to avoid a *global* offset desync: every one of libxml2's DATA
+  MODES (raw text, RCDATA, PLAINTEXT, plus script's escaped/double-escaped states), comments,
+  CDATA/DOCTYPE/PI skipping, attribute parsing, and "`<`-not-a-tag as text". A missing data mode is the
+  worst class of bug available here — it *fabricates* elements out of an element's text content and then
+  honours the wrong end tag — so WHICH names take which mode is not written here at all: it is derived
+  from the oracle over the whole element universe and rendered into `implied_close::data_mode`, and this
+  file owns only the states themselves. It emits borrowed byte slices through a source-agnostic `TokenSink` trait — so the
+  matcher is decoupled from it and the tokenizer can be swapped/optimised independently.
 - **Matcher** (`matcher/`) — maintains an open-element stack **reshaped by HTML implied-end-tag
   rules** so combinators match the tree lxml *would* build. Each open element carries a `matched`
   bitset (subject-match per selector) and per-parent `seen`/`prev` frames for sibling combinators.
   Descendant/child are resolved by a right-to-left ancestor walk; `+`/`~` (incl. chains) by the frames.
+  That walk is `O(depth x compounds)`: within a segment the ancestor chain is a **path**, so matching is
+  anchored glob matching — group maximal `>`-runs into contiguous blocks and place each at the deepest
+  feasible position, right to left. Greedy is sound because a deeper placement leaves strictly more room
+  above (exchange argument), and grouping `>`-runs is what makes it sound: greedy on individual compounds
+  gets `a > b c` against `<a><b><b><c>` wrong. Searching combinations instead was exponential.
+  Before any of that runs, each `(element, compound)` pair meets a **one-sided signature filter**
+  (`matcher/sig.rs`, the shape of WebKit/Blink's `SelectorFilter`): at open, an element hashes its tag
+  name, `id` and each `class` token to two bits each of a `u64`; each compiled compound carries the same
+  bits for its own positive tag/id/classes; `compound_matches` opens with `el.sig & c.req != c.req →
+  false`. One AND rejects most pairs before a string is touched. A set bit is **necessary, never
+  sufficient** — collisions produce false positives, which cost only the exact comparisons that always
+  ran, while a false negative would be a silently dropped value. So the hash must mirror each
+  predicate's own equality: the tag is ASCII-folded on both sides (`eq_ignore_ascii_case`), `id` and
+  class tokens are hashed verbatim (`==`), the class list is split by the **one** tokenizer the
+  membership predicate uses (ASCII whitespace, so `class="a\u{3000}b"` is one token on both sides), and
+  nothing is contributed by `:not()` (inverted), `:is()` (an OR), attribute predicates, or positions.
 - **Selectors** — `selector.rs` parses the CSS subset; `xpath.rs` compiles the **downward** XPath
   subset to the *same* `Selector` model (so XPath and CSS share matching + performance).
 
 ## Semantics: match libxml2 2.14, not the HTML5 spec
 
 Frostwork runs the HTML5 *tokenizer* faithfully but not the HTML5 *tree-construction* algorithm.
-Instead it applies the small set of implied-close rules libxml2 actually uses (`implied_close.rs`,
-derived empirically against lxml):
+Instead it applies the small set of implied-close rules libxml2 actually uses (`implied_close/`).
+**The rules themselves are enumerated once**, under "Tree-construction contract" in
+[COMPATIBILITY.md](COMPATIBILITY.md). What follows is why they take the shape they do:
 
-- **Implied end tags**: `li`; `dd`/`dt`; `option`/`optgroup`; `td`/`th`/`tr` + table sections; `rt`/`rp`.
-  An open `<p>` is closed by *any* block-level or list/table-item start tag.
-- **`<p>`-closing set** = the HTML4 block list (`div`, `p`, `h1`–`h6`, `ul`, `ol`, `dl`, `menu`, `dir`,
-  `center`, `address`, `blockquote`, `fieldset`, `form`, `pre`, `table`, `hr`) — **not** the HTML5
-  sectioning elements (`section`/`article`/`header`/…), which libxml2 leaves inside `<p>`.
-- **Void set** = `area base br col hr img input link meta param` — libxml2 2.14 treats
-  `embed`/`source`/`track`/`wbr` as **non-void**, so Frostwork does too.
+- **The tables are DERIVED, not written.** `tools/gen_tree_rules.py` measures the whole (open ×
+  incoming) start-close relation, the end-tag scope priorities, the void set and the per-element data
+  mode against libxml2 over a fixed element universe, and *generates* the Rust. Three successive
+  hand-written ports each omitted names, and with them whole rules — a code-generation problem, not a
+  diligence problem. So the source of truth is the oracle, `implied_close/generated.rs` is its output
+  (rewritten whole, `--check` gates on drift), and a prose list of tag names anywhere else is a fourth
+  copy waiting to go stale. `implied_close/mod.rs` is the hand-written half, kept in a separate file so
+  the boundary is a file boundary.
+- **No rule is uniform per family**, which is why generation matters more here than it looks. A same-tag
+  repeat auto-closes for some list/table elements and *nests* for others; `<tbody>` closes an open row
+  and `<thead>` does not; libxml2's start-close relation is over tag *names* and is finer than any
+  grouping the engine might impose, so two elements that look interchangeable behave differently. Any
+  grouping you would reach for by intuition is wrong somewhere. One derived name relation is therefore
+  the whole answer — a coarser table over tag *ids* ORed alongside it adds no decision the generated
+  table does not already imply.
+- **Mutation targets the ANSWER, not a cell.** `tools/mutate_rules.py` flips the *effective* close
+  decision for a name pair — and, separately, the data mode for a name — rather than one table entry,
+  because a cell whose answer is also reachable another way is masked and the sweep then reports it
+  protected.
+- **The document frame is built when the page omits it, and ignored when the page misplaces it.** Both
+  halves are needed and they are different mechanisms: `<html>`/`<head>`/`<body>` all have optional
+  start *and* end tags, so a conformant document may contain none of them and libxml2 frames it anyway
+  (`Matcher::ensure_frame` over the oracle-derived `frame_content`) — while a frame tag written in the
+  *wrong place* is ignored, with a phantom-entry counter so its matching end tag pops the ignored tag
+  instead of closing the document. The state and the questions the rules ask about it live in
+  `matcher/frame.rs`, each named once: four crawl-found frame bugs were a rule asking a *proxy* question
+  ("is this tag a frame tag") instead of the real one ("is anything open to hold what follows").
+- **Scope is what keeps a malformed page local, and it is an ORDER rather than a set.** libxml2 discards
+  a misplaced end tag while anything out-ranking it is still open above its match, so unbalanced markup
+  around a table truncates one field instead of desynchronizing the rest of the document. Reading it as
+  a set of boundary elements is what lost a crawled page its table cells: the two coarsest answers (a
+  table blocks an ordinary end tag; so does an open `<div>`) were right, and the order *inside* the
+  table machinery was simply absent — from the engine, the audit's probe list and the mutation sweep
+  alike. When a rule turns out to be coarser than reality, widen the derivation first; a sweep over the
+  wrong shape is a green light for the wrong thing.
+- None of these arms had differential coverage until `tools/audit_tree_rules.py` enumerated them cell by
+  cell against lxml. Add a row there when you add a rule; docs/TESTING.md has what that turned up.
 
 **Guiding principle — local divergence, never global desync.** Accepted divergences are always *local*
 (one field differs). The states that would cause a *global* offset desync (rawtext, comment/CDATA
@@ -54,14 +105,20 @@ adoption agency, deep-`<p>`) is accepted and documented, because libxml2 barely 
 
 ## Values
 
-- `::text` / `text()` — per text node, whitespace preserved, entities decoded (Parsel-identical).
-- `::attr(x)` / `@attr` — entity-decoded attribute value.
+`::text` and `::attr` are Parsel-identical (one value per text node, whitespace kept, entities decoded);
+COMPATIBILITY.md states that contract. The three below are *choices*, so they are argued here:
+
 - **Outer HTML** (bare element / node query) — the element's **raw source bytes**, a deliberate
   divergence from lxml's tree *reflow* (which normalizes quotes/case/whitespace and synthesizes omitted
   end tags). Raw source is cheaper, faithful, and **re-parse-equivalent**.
-- **Encoding** — resolved BOM → caller label → `<meta charset>` → UTF-8. Tokenization stays on raw
-  bytes for every ASCII-compatible encoding; only emitted values are decoded (`encoding_rs`). UTF-16
-  is transcoded up front.
+- **Encoding** — resolved BOM (incl. the BOM-less UTF-16 `<?` prefix) → caller label → prescan of the
+  document head (`<meta charset>` and an XML declaration) → UTF-8. Tokenization stays on raw bytes for
+  every ASCII-compatible encoding; only emitted values are decoded (`encoding_rs`). UTF-16 is transcoded
+  up front. The target is browser/WHATWG behaviour, not w3lib parity — see COMPATIBILITY.md for the
+  prescan window (and why it is not WHATWG's 1024) and the table of deliberate differences.
+- **Raw NUL** is deleted from the whole document before tokenizing, as Parsel/w3lib do. It has to be
+  before, not at emit time: a NUL inside a tag or attribute *name* is invisible to lxml, so dropping it
+  only from values made the two sides disagree about the tree. One `memchr` on the ordinary path.
 
 ## Deferred-to-close constraints: positions, `:has()`, upward axes
 
@@ -79,11 +136,55 @@ promoted to the parent (for `:last-*`/`:only-*` a single slot, overwritten — o
 candidate can win, so resolution is O(1) per parent; `:nth-last-*` buffers each matching child, bounded
 by that parent's subtree); at the parent's close the total is read from the counter frame and qualifying
 values are committed. Because a nested last-child resolves before an outer one, committed values carry a
-byte offset and are re-sorted into document order at finish. Reverse is scoped to the selector's
-**subject** with an **attached** `::text`/`::attr` terminal: a detached subtree terminal would inherit
-lxml's merging of text nodes made adjacent by restructuring (a divergence that also affects plain
-`div ::text`), and a `Many`/`One` sub-field or non-subject compound is out of this tier — all yield an
-empty column, never a wrong value.
+byte offset and are re-sorted into document order at finish. Reverse is scoped to a single segment; a
+`Many`/`One` sub-field or a comma member is out of this tier and yields an empty column, never a wrong
+value.
+
+**Where the value lives is a separate question from which predicate defers**, and all three deferred
+tiers (reverse, `:has()`, text-predicate) share one answer. The value may be the deferred element's own
+(`li:last-child::text`, `div:has(a)::attr(id)`) — that streams as described above. But it may also be its
+whole **subtree** (`li:last-child ::text`, `div:has(a) ::text`) or a **descendant's**
+(`li:last-child b::text`, `div:has(a) a::attr(href)`), and neither can stream: the engine would have to
+buffer a whole subtree per candidate until resolution, which is exactly the retention the no-tree design
+exists to avoid. So those **backtrack** instead — the candidate carries only its raw span `(start, end)`,
+and a winner's values are recovered afterwards by re-scanning that span (`split_deferred` picks the tail
+schema; `resolve_tail_spans` runs it). Three things make this work:
+
+- *The span is self-contained.* An end tag inside it that matched an ancestor would have ENDED the span,
+  and one discarded by end-tag scope behaves identically standalone — the same re-parse-equivalence the
+  differential already proves for outer-HTML node queries.
+- *The re-scan runs the real engine.* The tail is a compiled sub-schema — `* ::text` / `* ::attr(name)`
+  for a subtree terminal, or the selector's own compounds after the deferred one for a descendant value,
+  with `strict_desc` set so the span's root is excluded (`div:has(a) div::text` means a *proper*
+  descendant). It therefore inherits dropped-end-tag coalescing, end-tag scope and implied close rather
+  than re-deriving them; a hand-rolled collector here would silently re-introduce the split-text bug. An
+  unsupported tail marks the entry dead, so the audit keeps reporting the selector unsupported instead of
+  the column quietly coming back empty. Only a DESCENDANT step into the tail is expressible this way — a
+  child anchor (`div:has(a) > p`) would need "depth exactly 1 in the fragment", the same limit that makes
+  grouped sub-fields reject `./x`.
+- *Winners nest*, so a contained span's values are a subset of its container's. Element spans only nest
+  or are disjoint, so keeping the MAXIMAL spans de-duplicates exactly — and that also bounds the cost:
+  nested winners collapse to one span, so the re-scan is a single bounded extra pass (~2× a plain
+  subtree query, flat in nesting depth) rather than depth-multiplied.
+
+Retention per candidate is therefore two integers, and the streaming path is untouched.
+
+That extra pass is paid **per deferred prefix, not per field**. The prefix — the compounds up to and
+including the one carrying the predicate — is what decides which elements win, so tails whose prefixes are
+equal win on exactly the same elements and compile to ONE sub-schema (`TailPlan`): a single re-scan of a
+winner's span answers every column of the group. That is the label→value shape,
+`//div[contains(.,"Price")]//a/@href` beside `//div[contains(.,"Price")]//span/text()`, at one re-scan
+rather than two. Two rules make the sharing sound. The prefix comparison is a DERIVED structural equality,
+because a hand-written one that forgot a field would hand one column another's values. And an entry the
+member budget has already killed neither joins a group nor is joined — a shared sub-schema fills every
+column of its group from whichever entry is live, while a dead column must stay empty. What remains grows
+with the number of DISTINCT prefixes, which [BENCHMARKS.md](BENCHMARKS.md) measures against the same count
+of plain fields.
+
+For contrast, the other suspected hot spot in this tier was **rejected by measurement**: `sub_hits` with a
+subtree terminal loops `seg_match` over `floor..=top`, which looks like O(depth² × compounds) per text
+node, but a grouped subtree sub-field measures ~1.0× an attached one from nesting depth 2 to 40. Per the
+repo's rule, that stays unoptimised until a workload shows a win.
 
 **`:has()`** rides the same discipline, but resolves at the element's *own* close (its descendants are
 all known then) rather than the parent's. A provisional structural subject match at open starts
@@ -98,7 +199,8 @@ compiles to `E:has(INNER)` and `//INNER/parent::E` to `E:has(> INNER)` — lxml'
 exactly those `:has` matches. (The one *non*-deferred axis, `following-sibling::`, is instead the CSS
 general-sibling relation, so it lowers to a `~` combinator and needs no new machinery at all.)
 
-**Text-content predicates** (`[.="v"]`, `[contains(., "v")]`, `[text()="v"]`, `[contains(text(),"v")]`)
+**Text-content predicates** (`[.="v"]`, `[contains(., "v")]`, `[text()="v"]`, `[contains(text(),"v")]`,
+and CSS `:contains("v")`, which cssselect lowers to `contains(., "v")`)
 are the same deferral: the predicate tests the element's text, known only at close. While the element is
 open its text is buffered — the `.` string-value accumulates every descendant text node (no boundaries),
 while `text()` keeps the *direct* child text nodes as separate pieces (the tokenizer already splits text
@@ -138,12 +240,56 @@ descendant's emission and stays an empty column.
   the parse cost per *schema*, not per *page*. The per-page recompile it removes is negligible against
   a large page's scan, but on small pages it dominates: ~3× fewer µs/page on a 244-byte page with 8
   selectors. `extract`/`extract_grouped` remain as one-shot convenience (a throwaway `Plan`).
-- **Rejected by measurement (do not re-attempt without a workload that shows a win):** a SIMD
-  structural index (the base scan is per-*element* bound, not per-byte; memchr already bulk-skips text)
-  and a subject-tag dispatch index (real selectors are class-led, so it can't bucket them).
+- **One-sided signature filter** (`matcher/sig.rs`, described under *Pipeline*) — the matcher's cost is
+  `selectors × elements`, and the unfiltered form of that pair is string work: a `memcmp` per tag test,
+  and per class test an `attrs` scan plus a fresh split of `class=`. The filter answers "could this
+  compound match at all?" in one AND, which is where a class-led, high-field-count schema saves most:
+  −13% at 4 class-led fields, −24% at 8, −41% at 16, −54% at 32 on the utility-CSS page; −10%/−22% at
+  8/32 on the product listing; −2% to −19% on the tag-led pools, which use it far less. Each KIND of bit
+  is included only above `sig::BITS_MIN` tests of that kind, dropped from both sides together.
+- **Attribute materialization gate** (`matcher::AttrGate`) — the signature filter deliberately summarizes
+  only tag/id/class, because a prefix/substring test is not the token equality a hash can model, so an
+  attribute-predicate schema (`[data-testid=x]`, `a[href^="/p/"]`) got nothing from it. Its cost was
+  `attributes × interesting names` case-insensitive comparisons per element, growing with schema size just
+  where it hurts: a 32-field attribute-led schema names ~30 attributes while a real element carries half a
+  dozen the schema never asked for. One 64-bit set of `(first byte, length)` pairs rejects those in one
+  test, one-sided in the same direction as the signature (a set bit is necessary, never sufficient).
+  Measured −4% at 4 attribute-led fields to −9.5% at 32, neutral elsewhere. Applied only above a
+  name-count floor (`AttrGate::MIN_NAMES`): with one or two interesting names the scan it guards is a
+  single length comparison. The count is a proxy for what actually decides the trade — the fraction of a
+  page's attributes the schema ignores, highest on component-framework markup (`data-*`, `aria-*`).
+- **Where the cost lives: scanning, not matching.** On a real production corpus, running with no
+  selectors at all still accounts for ~43% of median page time — the tokenizer — with the rest spread
+  across value decoding, the ancestor walk and output. Every scanner in `tokenizer.rs` therefore jumps
+  with `memchr` rather than stepping, because a `<script>` holding inline JSON, a long quoted attribute
+  value and a commented-out block are each one long run of bytes no scan predicate can act on.
+  Generated pages carry none of those shapes, so a synthetic table cannot see this class of cost:
+  **profile the real corpus before choosing what to optimize.**
+- **Rejected by measurement (do not re-attempt without a workload that shows a win):**
+  - a SIMD structural index — the base scan is per-*element* bound, not per-byte, and memchr already
+    bulk-skips text;
+  - a subject-tag dispatch index — real selectors are class-led, so it cannot bucket them;
+  - **caching each element's split `class=` tokens** on the open-element stack — worth −27% to −51% on
+    class-led schemas alone, but only ~3% on top of the signature filter while taxing every other
+    workload ~8–11%, for the 40 bytes it added to each stack element;
+  - an **eight-bytes-per-multiply hash** for the signature — no faster than byte-at-a-time FNV-1a,
+    because short tokens pay a variable-length copy per word;
+  - an **ancestor signature** (the OR of an element's and its open ancestors' bits, to reject `div.foo a`
+    before the ancestor walk) — ~5% at 24–32 descendant-led fields on a deep page, but +3% to +11% worse
+    at 4–16 even when gated, since the residue is a wider `Segment` and a branch in the hot walk, and the
+    corpus median of 11 fields/page sits in the losing half;
+  - **member dedup** — the corpus schemas contain zero exact duplicate selectors, and their shared
+    prefixes would be factored by a weaker form of that ancestor signature;
+  - a **UTF-8 fast path for text and raw-source decoding** (`std::str::from_utf8` instead of
+    encoding_rs) — value decoding is ~25% of the work on a schema full of bare-element fields, so it
+    looked like a lever; A/B over the real corpus gave median −0.5% with **0 of 15 cells above their own
+    jitter**. encoding_rs's UTF-8 validation is already as fast as std's. The helper it introduced
+    stayed, because it gives "decode" one definition instead of two that had drifted, but it is not an
+    optimization and `matcher/decode.rs` says so.
 
-Result: ~12–20× Parsel on realistic pages at typical field counts, up to ~40–54× on rich schemas — the
-one-pass advantage grows with field count. Numbers + methodology: [BENCHMARKS.md](BENCHMARKS.md).
+The shape of the result is what the design predicts: the advantage over Parsel grows with field count,
+because the scan is paid once per page rather than once per field, and shrinks with nesting depth (the
+ancestor walk). Figures and methodology live only in [BENCHMARKS.md](BENCHMARKS.md).
 
 ## Page-object layer
 

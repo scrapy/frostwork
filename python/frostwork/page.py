@@ -23,18 +23,20 @@ from __future__ import annotations
 
 import codecs
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field as _dc_field
 from functools import lru_cache
-from typing import Callable, Iterable, Iterator, List, Optional, Tuple, Union
+from typing import Any, Callable, Iterable, Iterator, List, Optional, Tuple, Union
 
 from ._frostwork import Plan as _Plan
 from ._frostwork import audit_schema as _audit_schema
+from ._frostwork import detect_encoding as _detect_encoding
 from ._frostwork import extract as _extract
 from ._frostwork import extract_grouped as _extract_grouped
 from ._frostwork import resolve_label as _resolve_label
 
 __all__ = [
-    "extract", "extract_grouped", "check", "Page", "Item",
+    "extract", "extract_grouped", "check", "detect_encoding", "Page", "Item",
     "SchemaReport", "FieldReport", "GroupReport", "UnsupportedSelector",
 ]
 
@@ -44,19 +46,30 @@ _Card = Tuple[str, Optional[str]]
 Bytesish = Union[bytes, bytearray, memoryview, str]
 
 
-def _as_bytes(html: Bytesish) -> bytes:
-    """Frostwork tokenizes raw bytes. `str` is encoded as UTF-8 (already-decoded text)."""
-    if isinstance(html, str):
-        return html.encode("utf-8")
+def _as_scan_input(html: Bytesish) -> Union[bytes, str]:
+    """What the engine scans. `bytes` and `str` both cross the FFI boundary as-is — the native layer
+    borrows a `str`'s UTF-8 view instead of allocating a second copy of the document (see the `Html`
+    enum in `src/python.rs`), so a caller holding already-decoded text should NOT pre-encode it. Only
+    the remaining bytes-likes need materializing."""
+    if isinstance(html, (bytes, str)):
+        return html
     return bytes(html)
 
 
 def _query_list(queries) -> List[str]:
-    """Reject a bare selector string before ``list()`` explodes it into characters."""
+    """Reject a bare selector string before ``list()`` explodes it into characters, and a
+    ``{name: selector}`` dict before ``list()`` silently keeps its *keys* as the selectors."""
     if isinstance(queries, (str, bytes)):
         raise TypeError(
             f"frostwork: `queries` must be an iterable of selector strings, got a single "
             f"{type(queries).__name__} — wrap it in a list: extract(html, [{queries!r}])"
+        )
+    if isinstance(queries, Mapping):
+        raise TypeError(
+            "frostwork: `queries` must be an iterable of selector strings, got a Mapping — "
+            "iterating it would use its KEYS (the field names) as selectors. `extract` returns "
+            "positional columns, so pass `list(queries.values())`; for a named "
+            "`{name: selector}` schema use `frostwork.Page` (or `frostwork.check` to audit one)."
         )
     return list(queries)
 
@@ -65,23 +78,34 @@ def _check_encoding(html: Bytesish, encoding: Optional[str]) -> Optional[str]:
     """Validate a caller charset label instead of letting the engine silently ignore it.
 
     The engine accepts WHATWG charset labels; Python codec spellings (``latin-1``, ``utf_8``) are
-    normalized through :mod:`codecs`. An unrecognized label raises rather than silently falling
-    through to BOM/``<meta>`` sniffing, and a non-UTF-8 label combined with already-decoded ``str``
-    input raises rather than silently double-transcoding.
+    normalized through :mod:`codecs`. A label that names no encoding at all raises rather than
+    silently falling through to BOM/``<meta>`` sniffing, and a non-UTF-8 label combined with
+    already-decoded ``str`` input raises rather than silently double-transcoding.
+
+    A label that IS a real encoding but not a WHATWG one is a third case, and it must not raise: the
+    documented input here is what Scrapy passes from ``Content-Type``, i.e. whatever
+    ``w3lib.encoding.resolve_encoding`` returned, and that resolves against Python's codec set — which
+    has ``utf-7`` and ``utf-32`` where WHATWG deliberately does not. A crawled page whose HTTP header
+    said ``charset=UTF-7`` (its own ``<meta>`` said UTF-8) therefore made ``extract`` raise on
+    documented usage. WHATWG's rule for such a label is *failure, continue* — ignore it and go on
+    sniffing, which is what browsers do, what the Rust core already did, and what reads this page
+    correctly. Raising on publisher-controlled input is the one thing the no-fallback contract rules
+    out: never an error, never a wrong value.
     """
     if encoding is None:
         return None
     canonical = _resolve_label(encoding)
     if canonical is None:
         try:
-            canonical = _resolve_label(codecs.lookup(encoding).name)
+            python_name = codecs.lookup(encoding).name
         except LookupError:
-            canonical = None
-    if canonical is None:
-        raise ValueError(
-            f"frostwork: unknown encoding label {encoding!r} — pass a WHATWG charset label "
-            "(e.g. 'utf-8', 'windows-1252', 'shift_jis') or None to sniff from BOM/<meta>"
-        )
+            raise ValueError(
+                f"frostwork: unknown encoding label {encoding!r} — pass a WHATWG charset label "
+                "(e.g. 'utf-8', 'windows-1252', 'shift_jis') or None to sniff from BOM/<meta>"
+            ) from None
+        canonical = _resolve_label(python_name)
+        if canonical is None:
+            return None  # real encoding, not a WHATWG one -> failure, continue (sniff)
     if isinstance(html, str) and canonical != "UTF-8":
         raise ValueError(
             f"frostwork: `html` is already-decoded str (tokenized as UTF-8), but "
@@ -129,6 +153,29 @@ def _validate_grouped(
     check(selectors, groups).raise_for_status()
 
 
+def detect_encoding(html: Bytesish, encoding: Optional[str] = None) -> str:
+    """The encoding :func:`extract` would scan ``html`` with, as a WHATWG name (``"windows-1252"``).
+
+    BOM → BOM-less UTF-16 prefix → ``encoding`` label → 4096-byte ``<meta>``/XML-declaration prescan →
+    UTF-8. Exposed on its own because nothing else in a scraper's stack answers this the way a browser
+    does: ``parsel.Selector(body=…)`` never sniffs (it defaults to UTF-8), and w3lib — what Scrapy
+    uses — stops at ``<body>`` and at the first declaration it cannot resolve. See the Encoding section
+    of docs/COMPATIBILITY.md for the enumerated differences.
+
+    Always returns a real encoding. A label naming none is ignored rather than propagated (WHATWG's
+    "failure, continue"), matching what :func:`extract` then does with the document; the stricter
+    validation :func:`extract` applies to a *caller's* label is deliberately not repeated here, since
+    the question this answers is "what will be used", not "is this input acceptable".
+    """
+    label = encoding
+    if label is not None and _resolve_label(label) is None:
+        try:  # a Python codec spelling (`latin-1`, `utf_8`) is normalized the way `extract` does
+            label = codecs.lookup(label).name
+        except LookupError:
+            label = None
+    return _detect_encoding(_as_scan_input(html), label)
+
+
 def extract(
     html: Bytesish,
     queries: Iterable[str],
@@ -148,7 +195,7 @@ def extract(
     encoding = _check_encoding(html, encoding)
     if strict:
         _validate_flat(tuple(query_list))
-    return _extract(_as_bytes(html), query_list, encoding)
+    return _extract(_as_scan_input(html), query_list, encoding)
 
 
 def extract_grouped(
@@ -172,7 +219,7 @@ def extract_grouped(
     if strict:
         group_key = tuple((container, tuple(subfields)) for container, subfields in group_list)
         _validate_grouped(tuple(query_list), group_key)
-    return _extract_grouped(_as_bytes(html), query_list, group_list, encoding)
+    return _extract_grouped(_as_scan_input(html), query_list, group_list, encoding)
 
 
 # --------------------------------------------------------------------------- schema audit / validation
@@ -295,10 +342,19 @@ def check(queries=None, groups=None) -> SchemaReport:
     """Audit a schema without parsing any HTML: report which selectors the engine supports (with an
     advisory reason for those it does not) and the budget usage.
 
-    ``queries`` is an iterable of flat selectors (or ``(name, selector)`` pairs to label them).
-    ``groups`` is a list of ``(name, container_selector, {subname: subselector})`` — or the bare
-    ``(container, [(subname, sel)])`` shape that :func:`extract_grouped` takes. Returns a
+    ``queries`` is a ``{name: selector}`` mapping, an iterable of flat selectors (labelled ``[i]`` by
+    position), or an iterable of ``(name, selector)`` pairs. ``groups`` is a
+    ``{name: (container, subfields)}`` mapping, an iterable of ``(name, container, subfields)``
+    triples, or the bare ``(container, subfields)`` shape that :func:`extract_grouped` takes
+    (auto-named ``group[i]``) — with ``subfields`` given as ``{subname: sel}`` or
+    ``[(subname, sel), ...]`` in any of them. Anything else raises :class:`TypeError` naming these
+    shapes rather than auditing the wrong strings: a mapping is destructured, never iterated, since
+    auditing its *keys* would report a green schema that was never looked at. Returns a
     :class:`SchemaReport`; call :meth:`SchemaReport.raise_for_status` for strict validation.
+
+        >>> import frostwork
+        >>> [(f.name, f.supported) for f in frostwork.check({"blurb": ":contains(x)::text"}).fields]
+        [('blurb', False)]
     """
     fnames, fsels = _split_named(queries or [])
     gnames, gcontainers, gsub_names, gsub_sels, native_groups = _split_groups(groups or [])
@@ -314,32 +370,85 @@ def check(queries=None, groups=None) -> SchemaReport:
     return SchemaReport(fields, group_reports, members, max_members, sib_bits, max_sib_bits)
 
 
+# The shapes `check` accepts, quoted verbatim in the TypeError so a wrong one names its way out. A
+# schema shape that is *misread* rather than rejected is the worst outcome here: auditing the field
+# names of a `{name: selector}` dict reports every field supported (a bare `title` is a valid type
+# selector), so the schema comes back green without ever having been looked at.
+_QUERY_SHAPES = "`queries` must be {name: selector}, [selector, ...], or [(name, selector), ...]"
+_GROUP_SHAPES = (
+    "each group must be {name: (container, subfields)}, (name, container, subfields), or "
+    "(container, subfields), where subfields is {sub: sel} or [(sub, sel), ...]"
+)
+
+
+def _as_tuple(x):
+    """``tuple(x)`` for a shape check — ``None`` if ``x`` is a string, a Mapping, or not iterable at
+    all. Those are all wrong shapes *where this is called*, and each would otherwise "unpack" into
+    something plausible-looking: a string into its characters, a 2-key Mapping into its two keys."""
+    if isinstance(x, (str, bytes, bytearray, Mapping)):
+        return None
+    try:
+        return tuple(x)
+    except TypeError:
+        return None
+
+
+def _pair(item, shapes):
+    """Unpack one ``(name, selector)`` pair, naming the accepted ``shapes`` instead of failing with an
+    opaque index error (or silently splitting a 2-character string into a name and a selector)."""
+    parts = _as_tuple(item)
+    if parts is None or len(parts) != 2 or not isinstance(parts[1], str):
+        raise TypeError(f"frostwork: {shapes}; got {item!r}")
+    return str(parts[0]), parts[1]
+
+
 def _split_named(queries):
-    """Accept `[selector, ...]` or `[(name, selector), ...]`; return (names, selectors)."""
+    """Accept `{name: selector}`, `[selector, ...]`, or `[(name, selector), ...]`; return
+    (names, selectors).
+
+    A Mapping is read as `{name: selector}` — the shape `Page`/`FrostPage` schemas are written in.
+    Iterating it instead would audit the field NAMES as selectors and report the whole schema
+    supported (see `_QUERY_SHAPES`), so a Mapping is destructured explicitly, never iterated."""
+    if isinstance(queries, Mapping):
+        queries = list(queries.items())
+    elif isinstance(queries, (str, bytes, bytearray)):
+        raise TypeError(
+            f"frostwork: {_QUERY_SHAPES}; got a single {type(queries).__name__} "
+            f"{queries!r} — wrap it in a list"
+        )
     names, sels = [], []
     for i, q in enumerate(queries):
         if isinstance(q, str):
             names.append(f"[{i}]")
             sels.append(q)
         else:
-            names.append(str(q[0]))
-            sels.append(q[1])
+            name, sel = _pair(q, _QUERY_SHAPES)
+            names.append(name)
+            sels.append(sel)
     return names, sels
 
 
 def _split_groups(groups):
-    """Accept `(name, container, {sub: sel})` or `(container, [(sub, sel)])`; return the parallel name
-    lists plus the native `(container, [(sub, sel)])` shape `_audit_schema` expects."""
+    """Accept `{name: (container, subfields)}`, `(name, container, subfields)`, or the bare
+    `(container, subfields)` shape `extract_grouped` takes (auto-named `group[i]`), where `subfields`
+    is `{sub: sel}` or `[(sub, sel), ...]`; return the parallel name lists plus the native
+    `(container, [(sub, sel)])` shape `_audit_schema` expects.
+
+    A Mapping is read as `{name: (container, subfields)}` — what `FrostPage.frost_schema()["groups"]`
+    returns — for the same reason `_split_named` reads one as `{name: selector}`: iterating it would
+    audit the group names instead of the schema."""
+    if isinstance(groups, Mapping):
+        groups = [_named_group(name, body) for name, body in groups.items()]
     gnames, gcontainers, gsub_names, gsub_sels, native = [], [], [], [], []
     for i, g in enumerate(groups):
-        if len(g) == 3 and isinstance(g[2], dict):
-            name, container, sub = g[0], g[1], g[2]
-            subn, subs = list(sub.keys()), list(sub.values())
+        parts = _as_tuple(g)
+        if parts is not None and len(parts) == 3:
+            name, container, sub = str(parts[0]), parts[1], parts[2]
+        elif parts is not None and len(parts) == 2:
+            name, container, sub = f"group[{i}]", parts[0], parts[1]
         else:
-            container, sub = g[0], list(g[1])
-            name = f"group[{i}]"
-            subn = [s[0] for s in sub]
-            subs = [s[1] for s in sub]
+            raise TypeError(f"frostwork: {_GROUP_SHAPES}; got {g!r}")
+        subn, subs = _split_subfields(sub)
         gnames.append(name)
         gcontainers.append(container)
         gsub_names.append(subn)
@@ -348,15 +457,37 @@ def _split_groups(groups):
     return gnames, gcontainers, gsub_names, gsub_sels, native
 
 
+def _named_group(name, body) -> tuple:
+    """One `{name: (container, subfields)}` entry as the `(name, container, subfields)` triple."""
+    parts = _as_tuple(body)
+    if parts is None or len(parts) != 2:
+        raise TypeError(f"frostwork: {_GROUP_SHAPES}; got {{{name!r}: {body!r}}}")
+    return (name, parts[0], parts[1])
+
+
+def _split_subfields(sub):
+    """A group's sub-fields — `{sub: sel}` or `[(sub, sel), ...]` — as parallel (names, selectors)."""
+    items = tuple(sub.items()) if isinstance(sub, Mapping) else _as_tuple(sub)
+    if items is None:
+        raise TypeError(f"frostwork: {_GROUP_SHAPES}; got subfields {sub!r}")
+    pairs = [_pair(sf, _GROUP_SHAPES) for sf in items]
+    return [n for n, _s in pairs], [s for _n, s in pairs]
+
+
 _Transforms = Tuple[Callable, ...]
 
 
-def _shape(col: List[str], card: _Card, transforms: _Transforms = ()):
+def _shape(col: List[str], card: _Card, transforms: _Transforms = ()) -> Any:
+    """Shape a raw column by cardinality, then apply transforms. The return type is genuinely `Any`: it is
+    `list[str]`, `str` or `str | None` depending on `card`, and a transform can make it anything at all.
+    Callers that know their cardinality statically get the precise type from `webpoet.field`'s overloads."""
     kind, arg = card
+    value: Any
     if kind == "all":
         value = list(col)
     elif kind == "join":
-        value = arg.join(col)
+        # `card` is built only by `field()`/`Page.field_join`, which always pair "join" with a separator
+        value = (arg or "").join(col)
     else:
         value = col[0] if col else None  # "first"
     for fn in transforms:
@@ -404,9 +535,14 @@ class Page:
         self._queries.append(selector)
         self._cards.append(card)
         self._transforms.append(transforms)
-        self._plan = None  # schema changed -> invalidate the compiled plan
-        self._validated = False
+        self._invalidate()
         return self
+
+    def _invalidate(self) -> None:
+        """The schema changed: drop the compiled plan and the cached strict-validation result, so
+        neither an old plan nor an old green verdict can outlive the selectors they were built from."""
+        self._plan = None
+        self._validated = False
 
     def _ensure_new_name(self, name: str) -> None:
         """Reject ambiguous flat/group collisions before they can overwrite in ``Item.to_dict``."""
@@ -415,13 +551,20 @@ class Page:
 
     def _get_plan(self):
         """The schema compiled to a native ``Plan`` ONCE, cached across pages (rebuilt only if the
-        schema changed). This is what turns per-page recompilation into per-schema compilation."""
+        schema changed). This is what turns per-page recompilation into per-schema compilation.
+
+        Per-column cardinality goes down with it, because that is what makes EARLY EXIT sound: a schema
+        of nothing but single-valued fields is finished as soon as each has a value, and the engine can
+        stop tokenizing rather than run to EOF. One ``field_all``/``field_join`` — or one group, or one
+        deferred selector — leaves it unarmed, since those consumers read the whole column.
+        """
         if self._plan is None:
             garg = [
                 (g["container"], [(sn, sel) for sn, (sel, _c) in g["subfields"].items()])
                 for g in self._groups
             ]
-            self._plan = _Plan(self._queries, garg)
+            first_only = [kind == "first" for kind, _sep in self._cards]
+            self._plan = _Plan(self._queries, garg, first_only)
         return self._plan
 
     def field(self, name: str, selector: str, *, map: Optional[Callable] = None) -> "Page":
@@ -452,21 +595,18 @@ class Page:
 
             .many("offers", ".offer", {"price": ".p::text", "tags": (".tag::text", "all")})
         """
-        self._ensure_new_name(name)
-        subs = {sn: _sub_spec(spec) for sn, spec in subfields.items()}
-        self._groups.append({"name": name, "container": container, "subfields": subs, "one": False})
-        self._plan = None  # schema changed -> invalidate the compiled plan
-        self._validated = False
-        return self
+        return self._add_group(name, container, subfields, one=False)
 
     def one(self, name: str, container: str, subfields: dict) -> "Page":
         """Like :meth:`many`, but :meth:`Item.value` returns the **first** container's ``dict`` row, or
         ``None`` if none match. Same rich sub-specs as :meth:`many`."""
+        return self._add_group(name, container, subfields, one=True)
+
+    def _add_group(self, name: str, container: str, subfields: dict, *, one: bool) -> "Page":
         self._ensure_new_name(name)
         subs = {sn: _sub_spec(spec) for sn, spec in subfields.items()}
-        self._groups.append({"name": name, "container": container, "subfields": subs, "one": True})
-        self._plan = None  # schema changed -> invalidate the compiled plan
-        self._validated = False
+        self._groups.append({"name": name, "container": container, "subfields": subs, "one": one})
+        self._invalidate()
         return self
 
     @property
@@ -497,7 +637,7 @@ class Page:
             self.check().raise_for_status()
             self._validated = True
         encoding = _check_encoding(html, encoding)
-        body = _as_bytes(html)
+        body = _as_scan_input(html)
         plan = self._get_plan()  # compiled once, reused across pages
         if not self._groups:
             cols = plan.extract(body, encoding)
@@ -574,6 +714,28 @@ class Item:
             return self._grouped[name]
         i = self._index(name)
         return None if i is None else _shape(self._cols[i], self._cards[i], self._transforms[i])
+
+    def empty_fields(self) -> List[str]:
+        """Declared fields that matched **nothing** on this page (a `many`/`one` group with no rows
+        counts as empty; a field that matched an empty string does not — it matched).
+
+        This is the runtime half of dead-selector detection. Frostwork has no fallback, so an empty
+        column under ``strict=False`` can mean two very different things — and they are distinguishable,
+        because support is *static*: audit the schema once with :meth:`Page.check` (or
+        ``frostwork-audit``) and any field it reports **supported** that is empty here is a selector that
+        no longer matches the page, not an engine gap. Under the default ``strict=True`` the unsupported
+        case cannot arise at all, so every name returned here is a dead selector::
+
+            report = page.check()                     # once, at startup / in CI
+            item = page.extract(html)
+            for name in item.empty_fields():          # per response
+                log.warning("selector matched nothing: %s", name)
+        """
+        out = [n for n, col in zip(self._names, self._cols) if not col]
+        for name, g in self._grouped.items():
+            if not g:  # [] for an empty `many`, None for a `one` with no container
+                out.append(name)
+        return out
 
     def to_dict(self) -> dict:
         """The whole item as a dict: flat fields shaped by cardinality/``map=``, plus `many`/`one`

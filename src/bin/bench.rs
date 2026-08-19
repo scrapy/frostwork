@@ -45,14 +45,21 @@ fn main() {
         .ok()
         .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or(3000);
+
+    // The schema is compiled ONCE, outside the loop, because that is the only way a scraper runs: a
+    // Scrapy/web-poet page object is a class, its selectors are declared at class-definition time, and
+    // `FrostPage` compiles them into a `Plan` there — once per process, not once per response. Timing
+    // `extract_grouped` in the loop re-parsed every selector string per page, which measures a program
+    // nobody writes and taxes the high-selector-count cells hardest.
+    let plan = frostwork::Plan::compile(flat_queries, &groups);
     let warmup = 200.min(iters.max(1));
     for _ in 0..warmup {
-        let _ = frostwork::extract_grouped(&html, flat_queries, &groups, None);
+        let _ = plan.extract(&html, None);
     }
     let t = Instant::now();
     let mut nvals = 0usize;
     for _ in 0..iters {
-        let (flat, grouped) = frostwork::extract_grouped(&html, flat_queries, &groups, None);
+        let (flat, grouped) = plan.extract(&html, None);
         nvals += count(&flat, &grouped);
     }
     let el = t.elapsed().as_secs_f64();

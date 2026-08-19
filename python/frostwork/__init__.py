@@ -17,6 +17,7 @@ from .page import (
     SchemaReport,
     UnsupportedSelector,
     check,
+    detect_encoding,
     extract,
     extract_grouped,
 )
@@ -32,6 +33,7 @@ __all__ = [
     "extract",
     "extract_grouped",
     "check",
+    "detect_encoding",
     "Page",
     "Item",
     "SchemaReport",

@@ -23,23 +23,50 @@
 //! `ancestor-or-self::`, downward synonyms like `child::`), a range/combined positional predicate
 //! (`[position()<n]`, `[N]`/`[last()]` plus a second predicate), a positional predicate on the sibling
 //! axis (`following-sibling::td[1]`), a text-content predicate in any other shape, other functions
-//! (`count()`, `string()`) — yields no members (the query is then unsupported: empty column, no fallback).
+//! (`count()`, `string()`), a variable reference (`$var`), a comparison against anything but a quoted
+//! string literal (`[@a=2]`, `[@a=b]`) — yields no members (the query is then unsupported: empty
+//! column, no fallback).
 
 use crate::selector::{
-    AttrPred, Comb, Compound, Has, Nth, ReversePos, Selector, Terminal, TextAxis, TextOp, TextPred,
+    AttrOp, AttrPred, Comb, Compound, Has, Nth, ReversePos, Selector, Terminal, TextAxis, TextOp, TextPred,
 };
 
+/// The rules an XPath name literal must satisfy to be answerable here, shared by the tag and attribute
+/// spellings; they differ only in whether non-ASCII is allowed (`NON_ASCII`).
+///
+/// **All-lowercase, in ASCII.** libxml2 LOWERCASES every HTML name in the tree — ASCII only, so a `Ñ`
+/// survives as written — while XPath name-tests compare CASE-SENSITIVELY. An ASCII uppercase letter
+/// (`//DIV`, `//rect/@ID`, `//svg/@viewBox`) therefore matches nothing in lxml, and accepting it would
+/// over-match through the matcher's `eq_ignore_ascii_case`. A non-ASCII uppercase is the opposite case
+/// and must be KEPT: lxml answers `//p/@Ñ`, because neither side folded it. CSS is unaffected —
+/// cssselect lowercases, so uppercase CSS names are meant to match.
+///
+/// **No namespace prefix.** `svg:rect`, `@x:y` need a prefix->URI binding and there is no API to supply
+/// one, so lxml raises "undefined namespace prefix". Accepting `//div/@x:y` would return a value for an
+/// expression the oracle refuses to run.
+///
+/// **A valid XML name start** — not a digit, hyphen or dot (lxml: invalid expression).
+fn valid_name_impl<const NON_ASCII: bool>(s: &str) -> bool {
+    let ok = |b: u8| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.') || (NON_ASCII && b >= 0x80);
+    let starts_ok = matches!(s.as_bytes().first(), Some(&b) if matches!(b, b'a'..=b'z' | b'_') || (NON_ASCII && b >= 0x80));
+    !s.is_empty() && starts_ok && s.bytes().all(ok)
+}
+
+/// A TAG name-test. ASCII-only, and the reason is the SELECTOR side rather than the tokenizer: see the
+/// type-selector arm of `selector::parse_compound`, which refuses the CSS spelling for the same two
+/// reasons (a case rule that would over-match, and a raw-byte tag comparison). Refused, not silently
+/// empty.
 fn valid_name(s: &str) -> bool {
-    // ASCII-only AND all-lowercase. Tag/attr NAMES come from the tokenizer's ASCII name scan, so a
-    // non-ASCII name could never match. Lowercase is the subtler rule: libxml2 LOWERCASES every HTML
-    // name in the tree, while XPath name-tests compare CASE-SENSITIVELY — so an XPath literal carrying
-    // any uppercase letter (`//DIV`, `//rect/@ID`, `//svg/@viewBox`) matches nothing in lxml. Reject it
-    // here so the query is unsupported (empty column, matching the oracle) instead of case-insensitively
-    // over-matching via the matcher's `eq_ignore_ascii_case`. CSS is unaffected (cssselect lowercases,
-    // so uppercase CSS names are meant to match). Non-ASCII attribute *values* are handled downstream.
-    !s.is_empty()
-        && s.bytes()
-            .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b':' | b'.'))
+    valid_name_impl::<false>(s)
+}
+
+/// An ATTRIBUTE name. Non-ASCII is allowed, unlike a tag: the matcher decodes an attribute name before
+/// comparing it (`Matcher::interesting_name`), so `//p[@data-año]` and `//p/@año` answer in any
+/// encoding, exactly as the CSS spellings `[data-año]` / `::attr(año)` do. It is a separate rule from
+/// the tag one deliberately: sharing it would refuse these and leave the two front-ends disagreeing
+/// about the same question.
+fn valid_attr_name(s: &str) -> bool {
+    valid_name_impl::<true>(s)
 }
 
 /// Cap on how many members one query may expand to (union parts × per-step `or` alternatives). Real
@@ -66,6 +93,9 @@ fn compile_members_depth(q: &str, depth: u32) -> Vec<Selector> {
         return Vec::new();
     }
     let q = q.trim();
+    if has_variable_ref(q) {
+        return Vec::new(); // `$var` has no binding here — see `has_variable_ref`
+    }
     // `normalize-space(inner)` is the whole query (XPath errors on unioning a string with a node-set),
     // so handle it before the union split. It wraps the inner path's terminal; the inner must be a
     // single node-set member (no union / `or` expansion). `normalize-space()` / `normalize-space(.)`
@@ -124,10 +154,10 @@ fn split_terminal(q: &str) -> Option<(&str, Terminal)> {
         Some((p, Terminal::Text { subtree: false }))
     } else if let Some(idx) = q.rfind("//@") {
         let name = &q[idx + 3..];
-        valid_name(name).then(|| (&q[..idx], Terminal::Attr { name: name.to_string(), subtree: true }))
+        valid_attr_name(name).then(|| (&q[..idx], Terminal::Attr { name: name.to_string(), subtree: true }))
     } else if let Some(idx) = q.rfind("/@") {
         let name = &q[idx + 2..];
-        valid_name(name).then(|| (&q[..idx], Terminal::Attr { name: name.to_string(), subtree: false }))
+        valid_attr_name(name).then(|| (&q[..idx], Terminal::Attr { name: name.to_string(), subtree: false }))
     } else {
         Some((q, Terminal::OuterHtml))
     }
@@ -457,8 +487,30 @@ fn split_top<'a>(s: &'a str, needle: &str) -> Vec<&'a str> {
     parts
 }
 
-fn strip_quotes(v: &str) -> &str {
-    v.strip_prefix(['"', '\'']).and_then(|x| x.strip_suffix(['"', '\''])).unwrap_or(v)
+/// Does the query carry an XPath **variable reference** (`$pid`) outside a string literal? Parsel binds
+/// variables at call time (`sel.xpath('//*[@id=$pid]', pid=…)`); Frostwork's API takes no bindings, so
+/// there is nothing to substitute. Without this check `[@id=$pid]` parsed as a comparison against the
+/// literal text `"$pid"` — reporting the query SUPPORTED and then matching an element whose id really is
+/// `$pid` (a wrong value), or silently nothing. Reject the whole query instead: unsupported, empty
+/// column, and the audit says so. Any `$` outside a literal is a variable reference or a syntax error in
+/// XPath, so a bare `$` is rejected too; `$` *inside* a literal (`[contains(@id,"$p")]`, prices) is fine.
+pub(crate) fn has_variable_ref(q: &str) -> bool {
+    let b = q.as_bytes();
+    let mut quote = 0u8;
+    for &c in b {
+        if quote != 0 {
+            if c == quote {
+                quote = 0;
+            }
+            continue;
+        }
+        match c {
+            b'"' | b'\'' => quote = c,
+            b'$' => return true,
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Parse a reverse-position predicate to its 1-based FROM-END position: `last()` -> 1, `last()-k` ->
@@ -509,9 +561,11 @@ fn text_axis(s: &str) -> Option<TextAxis> {
     }
 }
 
-/// The right operand must be a SINGLE quoted string literal (`"v"` / `'v'`) — start and end with the
+/// The compared operand must be a SINGLE quoted string literal (`"v"` / `'v'`) — start and end with the
 /// same quote, nothing after. Rejects an `or`-joined or otherwise compound right side (which would not
-/// be a lone literal), so those predicates stay unsupported rather than parsing a bogus needle.
+/// be a lone literal), so those predicates stay unsupported rather than parsing a bogus needle. Used for
+/// both text predicates and attribute tests: an unquoted operand (a number, a bare name, a variable) has
+/// non-byte-compare XPath semantics, so it must not be taken for a literal.
 fn single_literal(s: &str) -> Option<String> {
     let b = s.as_bytes();
     if b.len() >= 2 && (b[0] == b'"' || b[0] == b'\'') && b[b.len() - 1] == b[0] {
@@ -539,44 +593,49 @@ fn parse_predicate_alts(pred: &str) -> Option<Vec<Vec<AttrPred>>> {
 }
 
 /// Parse one attribute test (`@a`, `@a="v"`, `contains(@a,"v")`, `starts-with(@a,"v")`) into an
-/// `AttrPred`. Anything else (positional, `text()`, function) is unsupported.
+/// `AttrPred`. Anything else (positional, `text()`, function) is unsupported. The compared value must be
+/// a QUOTED string literal: XPath gives `[@a=2]` numeric semantics (`number(@a)=2`, so `a="02"` matches)
+/// and `[@a=b]` node-set semantics (compare against child `<b>` elements' string-value), neither of which
+/// a byte compare against the raw text `2`/`b` reproduces (see `single_literal`). Both would be wrong
+/// values, so an unquoted operand is unsupported — an empty column instead.
 fn parse_one_attr(t: &str, out: &mut Vec<AttrPred>) -> Option<()> {
     if let Some(inner) = t.strip_prefix("contains(").and_then(|r| r.strip_suffix(")")) {
         let (name, val) = fn_args(inner)?;
-        out.push(AttrPred::Substr(name, val));
+        out.push(AttrPred::new(name, AttrOp::Substr, val));
     } else if let Some(inner) = t.strip_prefix("starts-with(").and_then(|r| r.strip_suffix(")")) {
         let (name, val) = fn_args(inner)?;
-        out.push(AttrPred::Prefix(name, val));
-    } else if let Some(rest) = t.strip_prefix('@') {
+        out.push(AttrPred::new(name, AttrOp::Prefix, val));
+    } else {
+        // not `@name…` -> positional / text() / function predicate -> unsupported
+        let rest = t.strip_prefix('@')?;
         if let Some(eq) = rest.find('=') {
             let name = rest[..eq].trim();
-            if !valid_name(name) {
+            if !valid_attr_name(name) {
                 return None;
             }
-            let val = strip_quotes(rest[eq + 1..].trim());
-            out.push(AttrPred::Eq(name.to_string(), val.to_string()));
+            let val = single_literal(rest[eq + 1..].trim())?;
+            out.push(AttrPred::new(name, AttrOp::Eq, val));
         } else {
             let name = rest.trim();
-            if !valid_name(name) {
+            if !valid_attr_name(name) {
                 return None;
             }
-            out.push(AttrPred::Exists(name.to_string()));
+            out.push(AttrPred::exists(name));
         }
-    } else {
-        return None; // positional / text() / function predicate -> unsupported
     }
     Some(())
 }
 
-/// Parse `@name , "value"` (a contains/starts-with argument list).
+/// Parse `@name , "value"` (a contains/starts-with argument list). The value must be a quoted literal —
+/// `contains(@a,2)` / `contains(@a,$v)` is a numeric/variable operand, not a byte compare.
 fn fn_args(inner: &str) -> Option<(String, String)> {
     let comma = inner.find(',')?;
     let name = inner[..comma].trim().strip_prefix('@')?.trim();
-    if !valid_name(name) {
+    if !valid_attr_name(name) {
         return None;
     }
-    let val = strip_quotes(inner[comma + 1..].trim());
-    Some((name.to_string(), val.to_string()))
+    let val = single_literal(inner[comma + 1..].trim())?;
+    Some((name.to_string(), val))
 }
 
 #[cfg(test)]
@@ -671,6 +730,29 @@ mod tests {
         assert!(!ok("//ancestor::div")); // axis (has `::`, no node test after `/`)
         assert!(!ok("count(//a)")); // function
         assert_eq!(members("//@href"), 0); // bare descendant attr: no subject element
+    }
+
+    #[test]
+    fn variable_refs_and_unquoted_operands_reject() {
+        // A variable reference has no binding in this API (parsel passes them at call time), and an
+        // unquoted operand is a numeric / node-set comparison in XPath — neither is a byte compare
+        // against the raw text, so both are unsupported (empty column) rather than wrong values.
+        assert_eq!(members("//*[@id=$pid]"), 0); // reported: audited as supported, matched `id="$pid"`
+        assert_eq!(members("//div[@id=$pid]/text()"), 0);
+        assert_eq!(members("//span[contains(@x,$v)]/text()"), 0);
+        assert_eq!(members("//a[starts-with(@href,$p)]/@href"), 0);
+        assert_eq!(members("//div[.=$v]"), 0);
+        assert_eq!(members("//li[$n]"), 0);
+        assert_eq!(members("//a | //b[@id=$pid]"), 0); // one bad union member sinks the query
+        assert_eq!(members("normalize-space(//a[@id=$pid])"), 0);
+        assert_eq!(members("//div[@id=foo]/text()"), 0); // node-set compare (child <foo>), not "foo"
+        assert_eq!(members("//span[@x=2]/text()"), 0); // numeric: `x="02"` matches in lxml
+        assert_eq!(members("//span[contains(@x,2)]"), 0);
+        // `$` inside a string literal is just data (prices, `$`-prefixed ids) — still supported.
+        assert!(ok("//div[contains(@id,\"$p\")]/text()"));
+        assert!(ok("//div[@id=\"$pid\"]"));
+        assert!(ok("//span[.=\"$4.99\"]"));
+        assert!(ok("//div[@id='$x']//a/@href"));
     }
 
     #[test]
@@ -773,6 +855,31 @@ mod tests {
         assert!(ok("//svg//rect"));
         assert!(ok("//a[@data-k=\"V\"]")); // uppercase VALUE is fine (values are case-sensitive in both)
     }
+    /// An ATTRIBUTE name may be non-ASCII, a TAG name may not — the same split the CSS spellings
+    /// `[data-año]` / `::attr(año)` make, since the two front-ends must answer one question one way.
+    /// Every form here is checked against lxml, which answers all of them (`//p/@Ñ` included: libxml2
+    /// lowercases ASCII only, so a non-ASCII uppercase survives in the tree and XPath's case-sensitive
+    /// compare finds it).
+    #[test]
+    fn non_ascii_attribute_names_compile_and_non_ascii_tags_do_not() {
+        assert!(ok("//p[@data-año]")); // predicate, exists
+        assert!(ok("//p[@data-año=\"v\"]")); // predicate, equality
+        assert!(ok("//p[contains(@data-año,\"v\")]"));
+        assert!(ok("//p[starts-with(@data-año,\"v\")]"));
+        assert!(ok("//p/@año")); // terminal
+        assert!(ok("//p//@año")); // descendant terminal
+        assert!(ok("//p[@ñx]")); // a name STARTING non-ASCII
+        assert!(ok("//p[@属性]")); // and one with no ASCII at all
+        assert!(ok("//p/@Ñ")); // non-ASCII uppercase: neither side folds it
+        // the refusals that must survive the widening
+        assert!(!ok("//p[@AÑO]")); // ASCII uppercase still over-matches libxml2's lowercased tree
+        assert!(!ok("//p[@data-AÑO]"));
+        assert!(!ok("//p[@-año]")); // invalid XML name start (lxml raises)
+        assert!(!ok("//p[@1año]"));
+        assert!(!ok("//p[@x:año]")); // namespace prefix: no binding API
+        assert!(!ok("//café")); // TAG names stay ASCII — see `selector::parse_compound`
+        assert!(!ok("//x-é/text()"));
+    }
     #[test]
     fn absolute_single_slash_anchors_to_html_root() {
         // libxml2 always roots the tree at synthesized <html>; a single-slash `/X` selects the root
@@ -803,5 +910,31 @@ mod tests {
         assert!(ok(".//div//text()"));
         assert!(ok(".//a/@href"));
         assert!(ok(".//div/h3/text()")); // only the LEADING anchor is the issue; inner `/` is enforced
+    }
+}
+
+#[cfg(test)]
+mod support_boundary_tests {
+    use super::*;
+
+    /// An expression lxml REJECTS must be unsupported here, not answered. `//div/@x:y` was the worst
+    /// case: lxml raises "undefined namespace prefix" and we returned the attribute's value — a wrong
+    /// value from an expression the oracle refuses to run.
+    #[test]
+    fn expressions_lxml_rejects_are_unsupported() {
+        for q in [
+            "//div/@1",            // attribute name starting with a digit -> lxml: invalid expression
+            "//1div/text()",       // element name starting with a digit
+            "//svg:rect/text()",   // namespace prefix, no bindings -> lxml: undefined prefix
+            "//div/@x:y",          // prefixed attribute -> lxml: undefined prefix
+            "//a:b/@c:d",
+            "//div/@-1",
+        ] {
+            assert!(compile(q).is_none(), "lxml rejects {q:?}, so it must be unsupported here");
+        }
+        // ...and the valid neighbours must keep working
+        for q in ["//div/@data-x", "//div/text()", "//div/@x", "//x-y/text()", "//div/@_x"] {
+            assert!(compile(q).is_some(), "{q:?} is valid and must stay supported");
+        }
     }
 }

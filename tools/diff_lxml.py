@@ -25,15 +25,14 @@ import subprocess
 import sys
 from collections import defaultdict
 
-import cssselect
-import lxml.etree
-import parsel
 from parsel import Selector as PS
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from families import FAMILIES, build_page  # tagged construct generators
 import conformant  # content-model-aware generator (the clean invariant gate)
+import encpages  # legacy-encoding pages x non-ASCII selector literals (the byte/UTF-8 boundary)
 import foreign  # svg/math/template foreign-content generator (also a clean parity gate)
+import oracle  # oracle-toolchain guard: the verdicts only mean anything against libxml2 >= 2.14
 
 # unconstrained grammar generator (adversarial: measures SKIP-set distance, not a gate)
 try:  # optional: unconstrained-grammar generator for the adversarial (SKIP-distance) mode
@@ -56,6 +55,43 @@ def _parse_lines(out):
     return results
 
 
+# Basket selectors the ORACLE answers nowhere in the generated corpus. Such a pair can only ever catch the
+# engine INVENTING values (an over-match); it can never catch one losing them, because there is nothing to
+# lose. That is not automatically a defect — for some of these the emptiness IS the assertion:
+# `dl > dt + dt::text` is empty precisely because libxml2 NESTS a repeated `<dt>` instead of closing it, so
+# a value there would mean the tree rule broke. Others are accidental, and those are what this guards:
+# `h1, h2` and `h1::text, h2::text, h3::text` are empty because the generator emits no headings AT ALL, so
+# two comma-group spellings sit in the basket exercising nothing.
+#
+# So the gate is on the SET, not a count: a selector may leave (the generator grew) but a new one may not
+# arrive unnoticed. That is how the first `:contains()` case here was caught — `div:contains(alpha)::attr(id)`
+# reads like coverage and the generator puts no `id` on a `div`, so it would have graded AGREE against a
+# build with no `:contains()` at all.
+ORACLE_EMPTY_BASKET = frozenset({
+    # ACCIDENTAL — the markup the selector needs is absent from the generator, so the spelling tests
+    # nothing. Emitting an `h1`/`h2`/`h3`, or an `id` on a `colgroup`, would recover four pairs.
+    "h1 ~ p::text", "h1, h2", "h1::text, h2::text, h3::text", "table > colgroup::attr(id)",
+    # INTENDED — empty because the tree rules say so, which makes the emptiness the assertion. A repeated
+    # `<dt>`/`<dd>` NESTS rather than closing, so no sibling pair exists to match; if the engine
+    # auto-closed them instead, these would start returning values.
+    "dl > dt + dt::text", "dl > dd + dd::text", "thead + tbody::text", "caption + thead::text",
+    "optgroup + optgroup::text",
+    # INTENDED — `::text` is the element's OWN text nodes, and these elements have none: a table section,
+    # a row and an optgroup hold their text in descendants, and `<input>` is void so it has no text at all.
+    "table > thead::text", "table > tbody::text", "table > tfoot::text", "table > tr::text",
+    "thead > tr::text", "tbody > tr::text", "select > optgroup::text", 'input[value|="v"]::text',
+})
+
+
+def oracle_empty_basket(basket, oracle_counts):
+    """Basket selectors the oracle answered ZERO times, in basket order.
+
+    Separated out so `tests/test_gates.py` can seed it: this decides a gate, and the property it decides
+    ("could this pair have gone red at all?") is invisible in a run that prints only AGREE totals.
+    """
+    return [sel for sel in basket if not oracle_counts.get(sel, 0)]
+
+
 def _crash_check(cases, results, returncode, err):
     """(crashed_cases, diag): nonzero when `differ` died mid-batch or exited nonzero. Without this a
     panic truncates stdout, `zip` silently drops every later case, and the run can still print PASS —
@@ -71,14 +107,28 @@ def _crash_check(cases, results, returncode, err):
     return crashed, diag
 
 
-def run_engine(cases):
+def run_engine(cases, strict_budget=True, enc=""):
     """cases: list of (html_bytes, [selectors]) -> (results, crashed_cases, diag).
 
-    results[i] holds the value-columns for cases[i] (truncated if the engine crashed mid-batch)."""
-    proc = subprocess.Popen([BIN], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    `enc` is the charset label sent in the protocol's ENC field for every case in the batch; empty
+    (the default) means sniff, which is what every family except the encoding one wants.
+
+    results[i] holds the value-columns for cases[i] (truncated if the engine crashed mid-batch).
+
+    `strict_budget` makes an over-budget schema a loud harness error instead of empty columns — right
+    for PARITY callers (empty columns would read as divergence in every one of them), wrong for
+    `sel_fuzz.py`, whose budget bombs are the thing under test."""
+    env = dict(os.environ)
+    if strict_budget:
+        env["FROSTWORK_DIFFER_BUDGET_STRICT"] = "1"
+    else:
+        env.pop("FROSTWORK_DIFFER_BUDGET_STRICT", None)
+    proc = subprocess.Popen([BIN], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, env=env)
     # protocol: ENC \t HEXHTML \t sels...   (empty ENC = sniff)
     payload = "".join(
-        "\t" + html.hex() + ("\t" if sels else "") + "\t".join(sels) + "\n" for html, sels in cases
+        enc + "\t" + html.hex() + ("\t" if sels else "") + "\t".join(sels) + "\n"
+        for html, sels in cases
     ).encode()
     out, err = proc.communicate(payload)
     results = _parse_lines(out)
@@ -105,9 +155,9 @@ def is_xpath(sel):
     return s.startswith("/") or s.startswith("./") or s.startswith("normalize-space(")
 
 
-def parsel_vals(html, sel):
+def parsel_vals(html, sel, enc="utf-8"):
     try:
-        s = PS(body=html, encoding="utf-8")
+        s = PS(body=html, encoding=enc)
         return (s.xpath(sel) if is_xpath(sel) else s.css(sel)).getall()
     except Exception:
         return None
@@ -116,7 +166,7 @@ def parsel_vals(html, sel):
 def is_node_query(sel):
     """A bare-element / outer-HTML query (no value terminal) returns element markup, not a scalar.
     Value terminals are the CSS pseudos `::text` / `::attr(...)` AND their XPath forms `/text()`,
-    `//text()`, `/@name` — the latter were previously misclassified as node queries, routing XPath
+    `//text()`, `/@name`. Misclassifying the latter as node queries routes XPath
     scalar results through the outer-HTML reparse path where `parsel.Selector(text="1")` guesses JSON
     (numeric text) and raises, spuriously reporting DIVERGE on equal values."""
     s = sel.strip()
@@ -129,6 +179,16 @@ def is_node_query(sel):
     if re.search(r"/@[A-Za-z_][\w:.-]*$", s):  # xpath /@name terminal
         return False
     return True
+
+
+# The engine tracks per-selector membership in fixed-width bitsets (u128), so ONE pass answers at most
+# `MAX_MEMBERS` selectors. Sibling combinators (`+`/`~`) also draw on a separate trigger-bit budget, so
+# batch well under the member cap to leave headroom for a basket that is combinator-heavy.
+MAX_SELECTORS_PER_PASS = 96
+
+
+def _batches(selectors, n=MAX_SELECTORS_PER_PASS):
+    return [list(selectors[i:i + n]) for i in range(0, len(selectors), n)] or [[]]
 
 
 def verdict(mine, theirs, bucket, sel):
@@ -200,7 +260,7 @@ def gen_grouped(rng):
     one pass exercises cross-group routing in text()/emit_attrs, which single-group never touched).
     Returns (html_bytes, groups) where groups = [(container, subs), ...]. Weighted toward the
     divergence-prone cases: nested same-class + empty containers, implied-close (`<li>`), void (`img`),
-    and XPath containers/subs — all previously uncovered."""
+    and XPath containers/subs."""
     cards = "".join(_card(rng) for _ in range(rng.randint(0, 4)))
     close_li = rng.random() < 0.5
     lis = "".join(_li(rng, close_li) for _ in range(rng.randint(0, 4)))
@@ -243,11 +303,17 @@ def main():
     ap.add_argument("--conformant", type=int, default=4000, help="content-model-conformant docs (gate)")
     ap.add_argument("--foreign", type=int, default=1500, help="svg/math/template foreign-content docs (gate)")
     ap.add_argument("--grouped", type=int, default=3000, help="single-pass Many/One grouped cases (gate)")
+    ap.add_argument("--encoding", type=int, default=250,
+                    help="legacy-encoding pages PER LABEL, with non-ASCII selector literals (gate)")
     ap.add_argument("--adversarial", type=int, default=0,
                     help="unconstrained grammar docs (measures SKIP-set distance; not a gate)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--show", type=int, default=6)
+    oracle.add_argument(ap)
     args = ap.parse_args()
+    # Before spending any time: the gate is only meaningful against the pinned oracle's *libxml2*, which
+    # the lxml pin does not fix (see tools/oracle.py). Wrong oracle -> exit 2, not a bogus DIVERGE count.
+    oracle.require(args.allow_old_libxml2)
     rng = random.Random(args.seed)
 
     stat = defaultdict(int)
@@ -278,21 +344,77 @@ def main():
                 examples.append((name, sel, mine[:4], (theirs or [])[:4], body.decode()[:160]))
 
     # ---- CONFORMANT: content-model-valid trees; invariant = byte-identical to lxml (THE GATE) ----
-    conf_cases = [(conformant.generate(rng), conformant.BASKET) for _ in range(args.conformant)]
+    # The basket is BATCHED to stay inside the engine's fixed-width member budget. Over the budget the
+    # surplus columns come back deterministically empty, which a differential reads as divergence in
+    # every one of them — so growing the basket past the limit would look like a catastrophic parity
+    # regression rather than a harness error. `differ` panics on an over-budget batch to make that loud.
+    basket_batches = _batches(conformant.BASKET)  # invariant: slice once, not once per page
+    conf_cases = [
+        (page, batch)
+        for page in (conformant.generate(rng) for _ in range(args.conformant))
+        for batch in basket_batches
+    ]
     engine_out, crashed, diag = run_engine(conf_cases)
     stat["CRASH"] += crashed
     if diag:
         crash_diags.append(("conformant", diag))
+    # Per-selector ORACLE value counts, so the basket's own discriminating power is measured rather than
+    # assumed — see `vacuous_basket`.
+    oracle_vals = defaultdict(int)
     for (body, sels), mine_cols in zip(conf_cases, engine_out):
         for si, sel in enumerate(sels):
             mine = mine_cols[si] if si < len(mine_cols) else []
             theirs = parsel_vals(body, sel)
+            oracle_vals[sel] += len(theirs or [])
             v = verdict(mine, theirs, "CONTROL", sel)
             stat[v] += 1
             stat["pairs"] += 1
             fam_div["(conformant)"][v] += 1
             if v in ("DIVERGE", "CRASH") and len(examples) < args.show:
                 examples.append(("conformant", sel, mine[:5], (theirs or [])[:5], body.decode()[:240]))
+
+    # ---- ENCODING: the same document in a legacy charset, asked with non-ASCII selector literals ----
+    # The one axis this harness did not have. Both selector-construction sites hardcoded utf-8, so no
+    # generated pair had ever crossed the byte/UTF-8 boundary a selector literal sits on — which is
+    # exactly where a silent value loss shipped (`[data-año]` matched a UTF-8 page and returned nothing
+    # for the same document in windows-1252). The label is sent on BOTH sides: the protocol's ENC field
+    # to the engine, `PS(body=…, encoding=…)` to the oracle.
+    #
+    # `expect` is not decoration. A selector the oracle answers nowhere can only catch an over-match, so
+    # a family of always-empty columns would grade AGREE against an engine with the feature removed —
+    # the positives assert lxml returned something, and a violation is a HARNESS error (loud), not a
+    # divergence.
+    enc_oracle_empty = []
+    for label in encpages.LABELS:
+        enc_cases = [encpages.generate(rng, label) for _ in range(args.encoding)]
+        if not enc_cases:
+            break
+        engine_out, crashed, diag = run_engine(
+            [(b, [s for s, _e in sels]) for b, _l, sels in enc_cases], enc=label
+        )
+        stat["CRASH"] += crashed
+        if diag:
+            crash_diags.append((f"encoding:{label}", diag))
+        for (body, _l, sels), mine_cols in zip(enc_cases, engine_out):
+            for si, (sel, expect_nonempty) in enumerate(sels):
+                mine = mine_cols[si] if si < len(mine_cols) else []
+                theirs = parsel_vals(body, sel, enc=label)
+                if expect_nonempty and not theirs:
+                    enc_oracle_empty.append((label, sel))
+                v = verdict(mine, theirs, "CONTROL", sel)
+                stat[v] += 1
+                stat["pairs"] += 1
+                fam_div[f"(encoding:{label})"][v] += 1
+                if v in ("DIVERGE", "CRASH") and len(examples) < args.show:
+                    examples.append((f"encoding:{label}", sel, mine[:5], (theirs or [])[:5],
+                                     body.decode(label)[:240]))
+    if enc_oracle_empty:
+        uniq = sorted(set(enc_oracle_empty))
+        print(f"HARNESS ERROR: {len(uniq)} encoding selectors the ORACLE answered nowhere, which can "
+              f"only catch an over-match:", file=sys.stderr)
+        for label, sel in uniq[:8]:
+            print(f"  {label}  {sel}", file=sys.stderr)
+        sys.exit(2)
 
     # ---- FOREIGN: svg/math/template subtrees; libxml2 treats them as ordinary elements, so this is a
     # clean parity gate over a species conformant.py never emits (self-closing SVG leaves, camelCase
@@ -329,17 +451,17 @@ def main():
                 stat["pairs"] += 1
                 rows = mine_groups[gi] if gi < len(mine_groups) else []
                 containers = sel.xpath(container) if is_xpath(container) else sel.css(container)
-                oracle = [[(c.xpath(s) if is_xpath(s) else c.css(s)).getall() for s in subs]
-                          for c in containers]
-                if len(rows) != len(oracle):
+                theirs_rows = [[(c.xpath(s) if is_xpath(s) else c.css(s)).getall() for s in subs]
+                               for c in containers]
+                if len(rows) != len(theirs_rows):
                     stat["DIVERGE"] += 1
                     fam_div["(grouped)"]["DIVERGE"] += 1
                     if len(examples) < args.show:
                         examples.append(("grouped:rows", container, [f"{len(rows)} rows"],
-                                         [f"{len(oracle)} rows"], body.decode()[:220]))
+                                         [f"{len(theirs_rows)} rows"], body.decode()[:220]))
                     continue
                 cell_bad = None
-                for r_mine, r_theirs in zip(rows, oracle):
+                for r_mine, r_theirs in zip(rows, theirs_rows):
                     for si, sub in enumerate(subs):
                         if verdict(r_mine[si], r_theirs[si], "CONTROL", sub) in ("DIVERGE", "CRASH"):
                             cell_bad = (sub, r_mine[si], r_theirs[si])
@@ -395,10 +517,7 @@ def main():
 
     pairs = stat["pairs"] or 1
     print(f"PATH-2 DIFFERENTIAL vs lxml   seed={args.seed}  pairs={stat['pairs']}")
-    print(
-        f"  oracle: parsel={parsel.__version__} lxml={'.'.join(map(str, lxml.etree.LXML_VERSION))} "
-        f"libxml2={'.'.join(map(str, lxml.etree.LIBXML_VERSION))} cssselect={cssselect.__version__}\n"
-    )
+    print(oracle.banner() + "\n")
     print(f"  AGREE          {stat['AGREE']:>8}  ({100.0*stat['AGREE']/pairs:.2f}%)")
     print(f"  WS-only        {stat['WS']:>8}")
     print(f"  SKIP-EXPECTED  {stat['SKIP-EXPECTED']:>8}   (documented tree-construction, allowed)")
@@ -406,9 +525,13 @@ def main():
     print(f"  CRASH          {stat['CRASH']:>8}   <-- gate: must be 0\n")
 
     print("  by family:   family                 pairs   AGREE   WS  SKIP-EXP  DIVERGE")
-    order = [n for n, _, _ in FAMILIES] + [
+    # Preferred order first, then EVERY remaining family that actually recorded pairs. A hand-written,
+    # closed list lets a family count toward the gate while being INVISIBLE in the report; deriving the
+    # tail means a new generator cannot be silently unlisted.
+    preferred = [n for n, _, _ in FAMILIES] + [
         "(conformant)", "(foreign)", "(grouped)", "(grouped-unsupported)"
     ]
+    order = preferred + sorted(k for k in fam_div if k not in set(preferred))
     for name in order:
         d = fam_div[name]
         p = sum(d.values())
@@ -429,9 +552,18 @@ def main():
         for where, diag in crash_diags:
             print(f"    [{where}] {diag}")
 
+    empty = oracle_empty_basket(conformant.BASKET, oracle_vals)
+    unlisted = [sel for sel in empty if sel not in ORACLE_EMPTY_BASKET]
+    print(f"\n  basket selectors the ORACLE answered nowhere: {len(empty)}/{len(conformant.BASKET)} "
+          f"— over-match coverage only (see ORACLE_EMPTY_BASKET)")
+    if unlisted:
+        print("    UNLISTED — added since the set was recorded, and it cannot catch a LOST value:")
+        for sel in unlisted:
+            print(f"      {sel!r}")
+
     gate = stat["DIVERGE"] + stat["CRASH"]
     print(f"\n  GATE: DIVERGE+CRASH = {gate}  ->  {'PASS' if gate == 0 else 'FAIL'}")
-    sys.exit(1 if gate else 0)
+    sys.exit(1 if gate or unlisted else 0)
 
 
 if __name__ == "__main__":

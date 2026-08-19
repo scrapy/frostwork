@@ -2,58 +2,44 @@
 
 Fast HTML extraction for Python and Rust, without a DOM.
 
-Frostwork runs a set of CSS or XPath selectors in one pass over an HTML response. It does not build
-a document tree, and it does not walk the document again for each field. Typical multi-field
-extraction in the benchmark suite is 10–20× faster than Parsel, rising to 40× or more on larger
-schemas. Zyte's production-selector corpus has a 10.5× median speedup. Working memory stays small
-because Frostwork retains parser state and pending matches, not a tree containing the whole page.
+Frostwork compiles a set of CSS or XPath selectors, scans an HTML response once, and emits only the
+requested values. It does not build a document tree, so working memory tracks parser state and pending
+matches rather than the whole page. Supported results are continuously checked against lxml; the exact
+coverage and known differences — in **both** directions — are listed in the
+[compatibility contract](docs/COMPATIBILITY.md).
 
-Python is a first-class API. The bindings provide a low-level `extract()` function, declarative
-`Page` objects, and a `FrostPage` integration for web-poet and scrapy-poet. Frostwork is designed to
-fit into Parsel/Scrapy projects: it accepts familiar selectors and tests its supported results
-directly against Parsel/lxml. The engine itself is written in Rust and can also be used as a Rust
-library.
+**~14× faster than Parsel (what Scrapy uses) and ~8× faster than lxml at the median on the measured
+production-selector corpus, and ~7× faster than selectolax/lexbor on the workload both can express.
+Often much faster on large, selector-rich product and listing pages, where each of them must traverse a
+DOM per field.**
 
-Frostwork deliberately supports a focused subset of CSS and XPath. Python fails fast on unsupported
-selectors by default, before scanning any HTML. Pass `strict=False` to opt into empty results; neither
-mode falls back to another parser or returns a plausible wrong result. See the
-[selector contract](docs/COMPATIBILITY.md) and
-[benchmark results](docs/BENCHMARKS.md) for the precise boundaries and measurements.
+Because Frostwork never builds that DOM, working memory stays essentially constant as page size grows for
+a fixed-output schema; it scales with parser state and returned values instead of the page tree. Results
+depend on page shape, selector count and output volume; [BENCHMARKS.md](docs/BENCHMARKS.md) has the full
+methodology and performance boundaries.
 
+Frostwork deliberately supports a focused subset of CSS and XPath. Python fails before scanning when a
+selector is unsupported; `strict=False` opts into an empty column instead. Unsupported selectors never
+fall back to another parser or produce guessed results. If an application needs arbitrary DOM access, use
+lxml — Frostwork is for schemas known in advance.
 
+## Install
 
-## Why
-
-DOM parsers are the right tool when callers need to navigate, modify, or query a document in ways
-that are not known up front. A scraper usually has a fixed schema and keeps only a few strings or
-attributes. Building a tree for that job creates work and allocations that the scraper never uses.
-
-Frostwork instead compiles the schema, scans the response bytes once, and emits only the requested
-values. The scan is shared by every field. Its corrected open-element stack reproduces the relevant
-libxml2 2.14 behaviour—such as implied closing tags—without retaining the DOM.
-
-This approach is a particularly good fit for:
-
-- Scrapy page objects with several fields;
-- repeated extraction with the same schema;
-- large responses where DOM allocation is expensive; and
-- services where throughput and predictable working memory matter.
-
-If an application needs arbitrary DOM access, use lxml. If it knows the extraction schema in
-advance, Frostwork can avoid building data it will immediately discard.
-
-## Python quick start
-
-Until packages are published, install the bindings from the repository. Building the extension needs
-a [Rust toolchain](https://rustup.rs) (stable) alongside Python:
+Until packages are published, install from the repository. Building the extension needs a
+[Rust toolchain](https://rustup.rs) (stable) alongside Python ≥ 3.9:
 
 ```bash
 python -m venv .venv
 .venv/bin/pip install maturin
-.venv/bin/maturin develop --release   # compiles the Rust core; needs cargo/rustc on PATH
+.venv/bin/maturin develop --release --extras=webpoet   # compiles the Rust core; needs cargo/rustc on PATH
 ```
 
-The primitive API accepts the response body and all selectors together:
+`--extras=webpoet` installs the supported web-poet release; drop it if you only need `extract`/`Page`.
+That extra requires Python ≥ 3.10, while the core supports Python ≥ 3.9.
+
+## Extracting values
+
+The primitive API takes the response body and all selectors together, and answers them in one scan:
 
 ```python
 from frostwork import extract
@@ -70,85 +56,98 @@ assert price == ["$9"]
 assert link == ["/p/1"]
 ```
 
-All three selectors are evaluated during the same scan. `frostwork.Page` adds names and field
-cardinality for applications that do not use web-poet.
+`extract(..., encoding="windows-1252")` accepts the charset label a Scrapy response supplies; without one,
+Frostwork checks the BOM and `<meta>` declarations before defaulting to UTF-8. `frostwork.Page` adds names
+and per-field cardinality for applications that do not use web-poet.
 
-### Scrapy and web-poet
+The same engine is a Rust library — `frostwork::extract(html, &queries, None)`, with `Page`/`Plan` for named
+fields and compile-once reuse. See the [runnable example](examples/basic.rs).
 
-With web-poet, a page object declares its selectors and Frostwork fills every field in one pass:
+## Scrapy and web-poet
 
+A page object declares its selectors; Frostwork fills every field from one scan of the response:
+
+<!-- doc-test: frost-page -->
 ```python
-from web_poet import handle_urls, Returns
 from frostwork.webpoet import FrostPage, field
 
-@handle_urls("example.com")
-class ProductPage(FrostPage, Returns[Product]):
+class ProductPage(FrostPage):
     name = field("h1::text")
     price = field(".price::text")
     images = field("img::attr(src)", all=True)
+    specs = field(".spec ::text", join=" ")
     brand = field("//meta[@itemprop='brand']/@content")
 ```
 
-In a Scrapy spider, scrapy-poet injects the page object selected by `@handle_urls`. Calling
-`to_item()` fills the whole `Product` in one scan:
+`to_item()` returns a dict here. Add `Returns[YourItem]` for a typed item, as shown in the
+[Python guide](docs/PYTHON.md#3-web-poet-page-objects--frostpage--frostbrowserpage).
+
+Install `scrapy-poet` and enable it in `settings.py` with `ADDONS = {"scrapy_poet.Addon": 300}`
+(Scrapy ≥ 2.10; see [scrapy-poet's setup guide](https://scrapy-poet.readthedocs.io/en/stable/intro/setup.html)
+for older versions). It then builds the page object from the callback's **annotation**:
 
 ```python
 import scrapy
 
 class ProductSpider(scrapy.Spider):
     name = "products"
-    start_urls = ["https://example.com/p/1"]
+    start_urls = ["https://example.com/catalogue/"]
 
-    async def parse(self, response, page: ProductPage):
+    def parse(self, response):
+        for href in response.css("a.product::attr(href)").getall():
+            yield response.follow(href, callback=self.parse_product)
+
+    async def parse_product(self, response, page: ProductPage):
         yield await page.to_item()
 ```
 
-Enable scrapy-poet in `settings.py` with `ADDONS = {"scrapy_poet.Addon": 300}` and it supplies the
-page object according to `@handle_urls`. Outside Scrapy, construct it directly:
-`item = await ProductPage(response=http_response).to_item()`.
+Requests with `callback=None` — including those created from `start_urls` — do not reliably receive
+dependencies in `parse`. Use an explicitly assigned callback for injected page objects. Outside Scrapy,
+construct the page directly: `item = await ProductPage(response=http_response).to_item()`.
 
-`extract(..., encoding="windows-1252")` accepts the charset label supplied by Scrapy's response;
-without one, Frostwork checks the BOM and `<meta>` declarations before defaulting to UTF-8. The
-[Python guide](docs/PYTHON.md) covers `Page`, nested groups, schema auditing, and installation.
+This repository does not pin or test a Scrapy/Twisted matrix; use
+[scrapy-poet's documentation](https://scrapy-poet.readthedocs.io/) for setup details. Frostwork does gate
+the injection boundary: every shipped page base is injectable and can be planned as a callback dependency.
+Field processors, groups, response types and schema auditing are covered in the [Python guide](docs/PYTHON.md).
 
-## Rust quick start
+## How it differs from lxml
 
-The Rust API exposes the same compiled, one-pass engine:
+Frostwork is not a subset of lxml, and not a superset — the set difference runs both ways, and both
+halves are proven by the same gates.
 
-```rust
-let html: &[u8] = b"<h1>Widget</h1><span class=price>$9</span><a href=/p/1>buy</a>";
-let queries = vec![
-    "h1::text".to_string(),
-    ".price::text".to_string(),
-    "a::attr(href)".to_string(),
-];
+**What it does not answer.** Supported CSS is tags, IDs, classes, attribute operators,
+descendant/child/sibling combinators, `:not()`, `:is()`/`:where()`, subject `:has()`, `:contains()`, and
+structural positions such as `:nth-child()`/`:last-of-type`; supported XPath is downward paths, attribute
+and text predicates, unions, positional predicates, `following-sibling::`, `ancestor::`, `parent::` and
+top-level `normalize-space()`; values are text, attributes, descendant attributes, joined text and raw
+outer HTML. Anything that cannot be answered without retaining more tree state stays unsupported, and
+reverse positions and `:has()` have placement restrictions. An unsupported selector never falls back and
+never guesses — `check()` reports the verdict before a scrape, and `frostwork-audit --scan
+myproject/spiders/` classifies selector literals in existing code without importing it.
 
-let columns = frostwork::extract(html, &queries, None);
-assert_eq!(columns[0], vec!["Widget"]);
-assert_eq!(columns[1], vec!["$9"]);
-assert_eq!(columns[2], vec!["/p/1"]);
-```
+**What it answers and lxml does not.** A dozen constructs run here and refuse, truncate or mis-decode
+there:
 
-For named fields, cardinality, nested groups, and compile-once reuse, use `Page` or `Plan`. See the
-[runnable Rust example](examples/basic.rs) and [design notes](docs/DESIGN.md).
+- **Valid CSS cssselect rejects** — `div:has([data-x])`, `div:has(a, img)`, `p:not(.a, .b)`,
+  `[type=submit i]`. Parsel raises `SelectorSyntaxError`; Frostwork matches them with the semantics the
+  spec defines.
+- **Values libxml2 drops** — names longer than its 100-byte buffer, and everything after a `</html>`,
+  which real pages put *before* the content that matters (one crawled page keeps 14 of its 17 KB there).
+- **Encoding, the widest gap — and the one place the browser, not lxml, is the standard.**
+  `parsel.Selector(body=…)` never sniffs `<meta charset>`; `frostwork.detect_encoding` does, at any
+  depth and past the `<body>` and unsupported-label cut-offs where w3lib gives up. It reads a UTF-16
+  body, which lxml's HTML parser cannot parse at all, and decodes with the WHATWG indexes browsers use
+  — where Python's legacy codecs return U+FFFD for 457 euc-jp and 192 big5 sequences of ordinary prose.
+  The rule is **never diverge from the browser**: a price is right when it matches what the site shows
+  a person, so where Frostwork's text differs from Scrapy's on an oddly-encoded page, Frostwork is the
+  one agreeing with the browser. Every such difference is
+  [tabulated with its reason](docs/COMPATIBILITY.md#the-rule-never-diverge-from-the-browser).
+- **A schema verdict before the scrape**, and **one pass for the whole schema** — a page object of
+  single-valued fields stops scanning once every field has a value, which a tree parser cannot do.
 
-## Supported selectors
-
-The common scraping selectors are covered:
-
-- **CSS:** tags, IDs, classes, attribute operators, descendant/child/sibling combinators,
-  `:not()`, `:is()`, `:where()`, subject `:has()`, and forward or reverse structural positions such
-  as `:nth-child()` and `:last-of-type`.
-- **XPath:** downward paths, attribute and text predicates, unions, positional predicates,
-  `following-sibling::`, `ancestor::`, `parent::`, and top-level `normalize-space()`.
-- **Values:** text, attributes, descendant attributes, joined text, and raw outer HTML.
-- **Encoding:** explicit charset labels, BOMs, and HTML `<meta>` declarations.
-
-Some valid CSS and XPath expressions cannot be answered without retaining more tree state and remain
-unsupported. Reverse positions and `:has()` also have placement restrictions. Python validates these
-by default; `check()` provides the same audit as a report for tooling and CI. The
-[compatibility contract](docs/COMPATIBILITY.md) lists every supported, divergent, and unsupported form
-with examples.
+Three of those return *extra* values, the one direction that can surprise a port. The
+[compatibility contract](docs/COMPATIBILITY.md) lists supported, divergent, beyond and unsupported forms
+with examples, the gate behind each, and the migration caveats.
 
 ## Build, test, benchmark
 
@@ -159,26 +158,20 @@ make bench         # benchmark matrix against Parsel
 make soak          # multi-seed differential and fuzz soak
 ```
 
-Run `make help` for the individual targets. The differential gate requires zero supported-result
-divergences and zero crashes against the pinned Parsel/lxml oracle.
+`make help` lists the individual targets. [TESTING.md](docs/TESTING.md) explains what each gate proves and
+what remains outside it.
 
-- Architecture & design decisions: [docs/DESIGN.md](docs/DESIGN.md).
-- Correctness methodology: [docs/TESTING.md](docs/TESTING.md).
-- Exact selector/divergence contract: [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md).
-- Benchmarks: [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
-- Parsel migration guide: [docs/MIGRATION.md](docs/MIGRATION.md).
-- Runnable examples: `cargo run --example basic` and `.venv/bin/python examples/basic.py`.
+## More
 
-## Status
+- [Architecture and design decisions](docs/DESIGN.md)
+- [Python API and recipes](docs/PYTHON.md)
+- [Selector and divergence contract](docs/COMPATIBILITY.md)
+- [Correctness methodology](docs/TESTING.md)
+- [Benchmarks](docs/BENCHMARKS.md)
+- [Parsel migration](docs/MIGRATION.md)
 
-Frostwork is usable from source but is not yet published to PyPI. Build the Python extension with
-`maturin develop --release`.
-
-Correctness is checked against lxml across roughly 569,000 page/selector pairs per differential seed,
-with additional encoding, random-selector, and malformed-HTML fuzzing. The Rust and Python page-object
-layers, nested `Many`/`One` extraction, schema audit, and web-poet integration are included in those
-release gates.
+Frostwork is usable from source but not yet published to PyPI.
 
 ## License
 
-BSD-3-Clause. See [LICENSE](LICENSE).
+Apache-2.0. See [LICENSE](LICENSE).

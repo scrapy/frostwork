@@ -12,6 +12,8 @@ mod encoding;
 mod entities;
 mod implied_close;
 mod matcher;
+/// Rule-table mutation hook: an identity function unless built with `--features mutate`.
+mod mutate;
 mod page;
 #[cfg(feature = "python")]
 mod python;
@@ -31,10 +33,11 @@ pub type GroupRows = Vec<Vec<Vec<String>>>;
 /// Extract each query's values in one streaming pass. Unsupported queries yield an empty column
 /// (there is no fallback — that is the whole point of Frostwork). Values match Parsel's per-text-node,
 /// whitespace-kept, entity-decoded semantics on the supported subset.
-/// Extract each query's values. `encoding` is an optional caller/HTTP charset label (as Scrapy
-/// passes); when `None` the encoding is sniffed (BOM -> `<meta>` -> UTF-8). Structural tokenization
-/// runs on raw bytes for every ASCII-compatible encoding; only the small emitted values are decoded
-/// with the resolved encoding. UTF-16LE/BE are transcoded to UTF-8 up front (rare).
+///
+/// `encoding` is an optional caller/HTTP charset label (as Scrapy passes); when `None` the encoding is
+/// sniffed (BOM -> `<meta>` -> UTF-8). Structural tokenization runs on raw bytes for every
+/// ASCII-compatible encoding; only the small emitted values are decoded with the resolved encoding.
+/// UTF-16LE/BE are transcoded to UTF-8 up front (rare).
 pub fn extract(html: &[u8], queries: &[String], encoding: Option<&str>) -> Vec<Vec<String>> {
     extract_grouped(html, queries, &[], encoding).0
 }
@@ -49,8 +52,9 @@ pub struct GroupQuery {
 }
 
 /// Is `qt` an XPath query (absolute/`.`-rooted path, or a `normalize-space(...)` wrapper) rather than
-/// CSS? The shared routing rule for [`compile_query`] / [`compile_one`].
-fn is_xpath(qt: &str) -> bool {
+/// CSS? The one routing rule, shared by [`compile_query`] / [`compile_one`] and by [`diagnostics`] —
+/// an explainer that classified a query differently from the compiler would name the wrong cause.
+pub(crate) fn is_xpath(qt: &str) -> bool {
     qt.starts_with('/') || qt.starts_with("./") || qt.starts_with("normalize-space(")
 }
 
@@ -67,10 +71,10 @@ fn compile_one(q: &str) -> Option<Selector> {
         }
     } else {
         let mut members = selector::parse_list(q);
-        // Group containers/sub-fields accept exactly ONE selector. Taking `.next()` here used to
-        // execute the first member of `div, span` and silently discard the rest: a partial, wrong
-        // answer that violated the no-fallback contract. Multi-member CSS is therefore unsupported
-        // in this shape, exactly like multi-member XPath unions/or-expansions.
+        // Group containers/sub-fields accept exactly ONE selector. Taking `.next()` instead would run
+        // the first member of `div, span` and silently discard the rest — a partial, wrong answer, which
+        // the no-fallback contract forbids. Multi-member CSS is therefore unsupported in this shape,
+        // exactly like multi-member XPath unions/or-expansions.
         (members.len() == 1).then(|| members.pop()).flatten()
     }
 }
@@ -89,16 +93,45 @@ fn compile_query(q: &str) -> Vec<Selector> {
     }
 }
 
+/// Lower a whole schema's query strings to the matcher's inputs. Every entry point that reasons about
+/// a schema — [`budget_usage`], [`audit_schema`], [`Plan::compile`] — goes through here, so all three
+/// necessarily agree on which selectors compiled: an audit that routed a query differently from the
+/// `Plan` that runs it would promise support for a column that comes back empty.
+fn compile_schema(
+    queries: &[String],
+    groups: &[GroupQuery],
+) -> (Vec<Vec<Selector>>, Vec<matcher::GroupInput>) {
+    let flat = queries.iter().map(|q| compile_query(q)).collect();
+    let grouped = groups
+        .iter()
+        .map(|g| {
+            (compile_one(&g.container), g.subfields.iter().map(|(_, sel)| compile_one(sel)).collect())
+        })
+        .collect();
+    (flat, grouped)
+}
+
+/// The encoding [`extract`] would scan `html` with, as a WHATWG canonical name (`"UTF-8"`,
+/// `"windows-1252"`, `"Shift_JIS"`, …). `label` is the caller/HTTP charset a response supplies, or
+/// `None` to sniff.
+///
+/// The same resolution `extract` runs — BOM → BOM-less UTF-16 prefix → label → browser-bounded
+/// `<meta>`/XML-declaration prescan → UTF-8 — exposed on its own because it is useful without an
+/// extraction, and because nothing else in a scraper's stack answers this question the way a browser
+/// does. Parsel does not sniff at all (`Selector(body=…)` defaults to UTF-8), and w3lib — what Scrapy
+/// uses — differs from browsers in the places tabulated under Encoding in docs/COMPATIBILITY.md. The
+/// answer is always a real encoding: an unresolvable label is ignored rather than propagated, per
+/// WHATWG's "failure, continue".
+pub fn detect_encoding(html: &[u8], label: Option<&str>) -> &'static str {
+    encoding::resolve(html, label).name()
+}
+
 /// The `(member-selector, sibling-bit)` demand of a schema. A caller
 /// that would rather fail loud than get silently-empty columns compares this against
 /// [`MAX_MEMBERS`] / [`MAX_SIB_BITS`]; the Python binding raises `ValueError`.
 pub fn budget_usage(queries: &[String], groups: &[GroupQuery]) -> (usize, usize) {
-    let queries_sel: Vec<Vec<Selector>> = queries.iter().map(|q| compile_query(q)).collect();
-    let compiled_groups: Vec<matcher::GroupInput> = groups
-        .iter()
-        .map(|g| (compile_one(&g.container), g.subfields.iter().map(|(_, sel)| compile_one(sel)).collect()))
-        .collect();
-    matcher::budget_usage(&queries_sel, &compiled_groups)
+    let (flat, grouped) = compile_schema(queries, groups);
+    matcher::budget_usage(&flat, &grouped)
 }
 
 // ---------------------------------------------------------------- schema audit (no-fallback safety)
@@ -108,6 +141,94 @@ pub fn budget_usage(queries: &[String], groups: &[GroupQuery]) -> (usize, usize)
 // yields empty columns in production — turning "unsupported selector" into an explicit, explainable
 // signal. The supported/unsupported DECISION is authoritative (it is the real compiler); the reason is
 // advisory (see [`diagnostics`]).
+
+/// The VALUE TERMINAL each query produces: `"text"`, `"attr"`, `"outer"` (bare element — the value is
+/// the matched element's raw source, i.e. a NODE reference rather than a scalar), `"normalize-space"`,
+/// or `None` for a query that does not compile.
+///
+/// Exposed because a caller sometimes has to treat a node-valued column differently from a scalar one,
+/// and the only authority on which a query is is the compiler that routes it. The web-poet layer needs
+/// exactly this: a field processor's input contract is an lxml/parsel NODE, so when a processor is
+/// attached to an `"outer"` field the raw source has to be re-parsed into one, while `"text"`/`"attr"`
+/// fields are genuinely strings and must be handed over untouched. Deriving that from
+/// [`compile_query`] — the same front-end `extract` and `Plan` use — is the difference between one
+/// definition and a hand-written heuristic that has to keep agreeing with the parser. The heuristic
+/// version of this question gets it wrong (XPath `/text()` and `/@name` read as node
+/// queries), which is why it is answered here instead.
+///
+/// A routed query is uniform on the node-vs-scalar axis: [`compile_query`]'s comma/union rule refuses a
+/// mix of outer-HTML and value terminals (deferred captures cannot interleave with streamed values in
+/// document order), so the first member's terminal settles it for the whole query.
+pub fn selector_terminals(queries: &[String]) -> Vec<Option<&'static str>> {
+    queries
+        .iter()
+        .map(|q| compile_query(q).first().map(|s| terminal_name(&s.terminal)))
+        .collect()
+}
+
+/// The three names libxml2 (and this engine) SYNTHESIZE around content the page never framed.
+const FRAME_NAMES: [&str; 3] = ["html", "head", "body"];
+
+/// Per query, `(pinned, synthesized_frame)` — the matched-node IDENTITY a caller needs before it can
+/// re-parse an outer-HTML value into the node it came from.
+///
+/// `pinned` is the tag name every match must carry (the subject compound's name test, when every
+/// comma/union member agrees on one concrete name); `None` when the query pins none (`*`, `.crumbs`,
+/// `p, div`). `synthesized_frame` says a match could be a document-frame element the page never wrote.
+///
+/// An outer-HTML value is the matched element's own source, so it normally NAMES the element — but a
+/// synthesized frame has no source of its own and its value begins with its CONTENT:
+/// `extract(b"<p>x</p>", ["html", "body", "p"])` returns the same string in all three columns. So
+/// `frostwork.webpoet`'s `.as_node()` handoff has to be told the identity, or refuse the field.
+///
+/// Two rules, both conservative. A synthesized frame carries no attributes (see [`matcher::frame`]), so a
+/// compound with an id/class/attribute cannot match one. And `:not()`, positions and `:has()` only NARROW
+/// what matches, so ignoring them over-reports the frame case — a refusal rather than a wrong node.
+pub fn selector_node_identity(queries: &[String]) -> Vec<(Option<String>, bool)> {
+    queries
+        .iter()
+        .map(|q| {
+            let members = compile_query(q);
+            if members.is_empty() {
+                return (None, true); // does not compile: fail closed on both axes
+            }
+            // `None` until the first member; then the name every member so far agrees on (inner `None` =
+            // they do not, or one of them has no name test at all).
+            let mut pinned: Option<Option<String>> = None;
+            let mut synth = false;
+            for sel in &members {
+                let subject = sel.parts.last().expect("a compiled selector has a subject compound");
+                let name = subject
+                    .tag
+                    .as_deref()
+                    .filter(|t| *t != "*")
+                    .map(|t| t.to_ascii_lowercase());
+                let attribute_bound =
+                    subject.id.is_some() || !subject.classes.is_empty() || !subject.attrs.is_empty();
+                let admits_frame = match &name {
+                    Some(n) => FRAME_NAMES.contains(&n.as_str()),
+                    None => true, // no name test: `<html>`/`<head>`/`<body>` are among what it admits
+                };
+                synth |= admits_frame && !attribute_bound;
+                pinned = Some(match pinned {
+                    None => name,                          // first member sets the candidate
+                    Some(prev) if prev == name => name,    // ...every later one has to repeat it
+                    Some(_) => None,
+                });
+            }
+            (pinned.flatten(), synth)
+        })
+        .collect()
+}
+
+fn terminal_name(t: &selector::Terminal) -> &'static str {
+    match t {
+        selector::Terminal::Text { .. } => "text",
+        selector::Terminal::Attr { .. } => "attr",
+        selector::Terminal::OuterHtml => "outer",
+        selector::Terminal::NormalizeSpace(_) => "normalize-space",
+    }
+}
 
 /// Whether a selector is supported, and if not, a best-effort reason. See [`audit_schema`].
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -233,13 +354,9 @@ pub fn audit_schema(queries: &[String], groups: &[GroupQuery]) -> SchemaAudit {
     // Compile ONCE and derive every support verdict from the exact routes extraction will use. This
     // prevents the audit/strict-mode logic from drifting from matcher eligibility rules (notably the
     // deferred `:has` / text-predicate exclusions in grouped containers and sub-fields).
-    let queries_sel: Vec<Vec<Selector>> = queries.iter().map(|q| compile_query(q)).collect();
-    let compiled_groups: Vec<matcher::GroupInput> = groups
-        .iter()
-        .map(|g| (compile_one(&g.container), g.subfields.iter().map(|(_, sel)| compile_one(sel)).collect()))
-        .collect();
-    let (members, sib_bits) = matcher::budget_usage(&queries_sel, &compiled_groups);
-    let schema = matcher::CompiledSchema::compile(&queries_sel, &compiled_groups);
+    let (flat_sel, grouped_sel) = compile_schema(queries, groups);
+    let (members, sib_bits) = matcher::budget_usage(&flat_sel, &grouped_sel);
+    let schema = matcher::CompiledSchema::compile(&flat_sel, &grouped_sel);
     SchemaAudit {
         flat: queries
             .iter()
@@ -282,34 +399,138 @@ pub fn audit_schema(queries: &[String], groups: &[GroupQuery]) -> SchemaAudit {
     }
 }
 
-/// Resolve the page encoding and yield `(bytes_to_tokenize, value_encoding)`. UTF-16 (the only
-/// non-ASCII-compatible family) is transcoded to a fresh UTF-8 `Vec` once (owned `Cow`); everything
-/// else borrows the input, with a document-leading UTF-8 BOM stripped — libxml2 strips ONLY the
-/// leading BOM (a U+FEFF elsewhere is real content), and per-value decoding must not re-strip it (see
-/// `matcher::finalize`), so it is handled here, once per page.
+/// Resolve the page encoding and yield `(bytes_to_tokenize, value_encoding)`. A non-ASCII-compatible
+/// encoding is transcoded to a fresh UTF-8 `Vec` once (owned `Cow`); everything else borrows the input,
+/// with a document-leading UTF-8 BOM stripped — libxml2 strips ONLY the leading BOM (a U+FEFF elsewhere
+/// is real content), and per-value decoding must not re-strip it (see `matcher::finalize`), so it is
+/// handled here, once per page.
+///
+/// **The transcode set is asked of `encoding_rs`, not listed here**, and that is the whole point: no
+/// hand-written list gets it right. "UTF-16, the only non-ASCII-compatible family" is the obvious one
+/// and it is wrong — ISO-2022-JP is not ASCII-compatible either, since inside `ESC $ B` mode a JIS pair
+/// is two bytes below 0x80 and `社` is literally `<R`. Tokenized as raw bytes, a Japanese page grows a
+/// `<r>` start tag out of the middle of a word and every value downstream of it is wrong. The
+/// predicate covers `replacement` too (the label for HZ-GB-2312 and friends), whose whole purpose is
+/// that browsers refuse to decode such a document at all — one U+FFFD and nothing else.
+///
+/// Whitespace stripping and NUL deletion happen here too, for the whole document (see [`normalize`]).
 fn prepare_bytes<'h>(
     html: &'h [u8],
     encoding: Option<&str>,
 ) -> (Cow<'h, [u8]>, &'static encoding_rs::Encoding) {
     let enc = encoding::resolve(html, encoding);
-    if enc == encoding_rs::UTF_16LE || enc == encoding_rs::UTF_16BE {
-        return (Cow::Owned(enc.decode(html).0.into_owned().into_bytes()), encoding_rs::UTF_8);
+    if !enc.is_ascii_compatible() {
+        // Transcode FIRST: in UTF-16 every ASCII character carries a 0x00 byte, so deleting NUL bytes
+        // from the raw input would shred the document. What must go is the U+0000 CHARACTER, which only
+        // exists once the code units have been decoded. (Parsel deletes NUL from the raw bytes instead,
+        // which is why it cannot read a UTF-16 page at all — a divergence in our favour, already
+        // documented under Encoding in docs/COMPATIBILITY.md.)
+        let utf8 = enc.decode(html).0.into_owned().into_bytes();
+        return (normalize(Cow::Owned(utf8), true), encoding_rs::UTF_8);
     }
-    let bytes = if enc == encoding_rs::UTF_8 && html.starts_with(&[0xEF, 0xBB, 0xBF]) {
-        &html[3..]
-    } else {
-        html
-    };
-    (Cow::Borrowed(bytes), enc)
+    (normalize(Cow::Borrowed(html), enc == encoding_rs::UTF_8), enc)
 }
 
-/// A schema compiled ONCE, reusable across any number of pages — the compile-once/extract-many form of
-/// [`extract_grouped`]. Building a `Plan` parses every selector, lowers it to the matcher's internal
-/// form, and computes the interesting-attribute set a single time; each [`Plan::extract`] then only
-/// resolves the page's encoding and runs the streaming pass. For a `Page`/`FrostPage` run over many
-/// responses this removes the per-page recompile — the natural shape, since a schema is defined once
-/// and applied to every page. Unsupported selectors compile to empty columns exactly as one-shot
-/// [`extract`] does (no fallback); the flat/grouped output is identical.
+/// Parsel's own input normalization, applied ONCE to the whole document before it is tokenized:
+/// `text.strip().replace("\x00", "")` — trim the ends, then delete NUL, **in that order**.
+///
+/// The order is not incidental and must not be "tidied" into recomputing the ends afterwards. Parsel's
+/// two entry points disagree about it — `Selector(text=…)` strips first, `Selector(body=…)` deletes
+/// first — and this engine matches the TEXT one, because that is the path a scraper is on: Scrapy's
+/// `response.selector` and web-poet's `HttpResponse` both build their selector from `response.text`.
+/// The two answers differ only when a NUL sits at a document edge, and there they differ visibly:
+/// `b"<option>x \x00"` keeps its trailing space (so `option::text` is `"x "`, not `"x"`), and in
+/// `b"\x00 \xEF\xBB\xBF<html …>"` the NUL blocks the strip, so the U+FEFF is never promoted to offset 0
+/// and stays a character rather than becoming a BOM. Deleting first would match `body=` and diverge
+/// from every Scrapy scraper.
+fn normalize(bytes: Cow<'_, [u8]>, utf8: bool) -> Cow<'_, [u8]> {
+    let (start, end) = document_bounds(&bytes, utf8);
+    let trimmed = match bytes {
+        Cow::Borrowed(b) => Cow::Borrowed(&b[start..end]),
+        Cow::Owned(mut v) => {
+            v.truncate(end);
+            v.drain(..start);
+            Cow::Owned(v)
+        }
+    };
+    strip_nul(trimmed)
+}
+
+/// The byte range Parsel's `text.strip()` leaves for libxml2: past a leading UTF-8 BOM and the
+/// whitespace written before it, and short of any trailing whitespace.
+///
+/// **Leading.** On a page that INDENTS its doctype — `"    \u{FEFF}<!DOCTYPE HTML>"` — the strip
+/// promotes the U+FEFF to offset 0, where libxml2 then eats it as a BOM. Read the bytes as they arrive
+/// and that U+FEFF is instead a character, and a character before the frame opens the `<body>`: the
+/// page's `<head>`, `<title>` and even the attributes of its own `<html>` tag (redundant once a body is
+/// open) are all lost, so `head title::text` and `html::attr(xmlns)` come back silently EMPTY. libxml2
+/// on the raw bytes and html5lib both agree with the raw reading — this is Parsel normalizing its
+/// input, and matching what a scraper actually sees is the point. Four pages in one 10000-page crawl
+/// sample were shaped this way, between them 71 divergent columns.
+///
+/// **Trailing.** This half can only ever move whitespace-only text, so it never changes a value a
+/// scraper reads — but it does change how many values come back. A page ending `…<option class="c3">\n`
+/// gives the last option a text node here and none under Parsel, so `option::text` returned one extra
+/// row.
+///
+/// Only the BOM is gated on UTF-8 (`utf8`): in windows-1252 those three bytes are `ï»¿`, three real
+/// characters, and Parsel's own decode agrees. The whitespace trim applies whatever the label says,
+/// because Parsel strips the DECODED text and no ASCII-compatible encoding can carry these bytes inside
+/// a multi-byte character — a non-ASCII-compatible one has already been transcoded.
+fn document_bounds(bytes: &[u8], utf8: bool) -> (usize, usize) {
+    const BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
+    let end = bytes.iter().rposition(|&b| !is_strip_ws(b)).map_or(0, |i| i + 1);
+    let mut start = bytes[..end].iter().position(|&b| !is_strip_ws(b)).unwrap_or(end);
+    if utf8 && bytes[start..end].starts_with(BOM) {
+        start += BOM.len();
+    }
+    (start, end)
+}
+
+/// The bytes Python's `strip()` removes from a document's ends — ASCII whitespace **including vertical
+/// tab**, which is the whole reason this is written out rather than deferred to
+/// `u8::is_ascii_whitespace` (that set omits `0x0b`).
+///
+/// It is also deliberately NOT `tokenizer::is_ws`, which is HTML whitespace and correctly *excludes*
+/// `0x0b`: inside a document a vertical tab is ordinary character data. The two sets only look alike.
+/// Missing this cost a page its whole head — `b"\x0b<html a=1><head><title>T</title>…"` strips to
+/// `<html …>` for Parsel, while an un-stripped `0x0b` is a character before the frame and opens the
+/// `<body>`, so `head title::text` and `html::attr(a)` came back empty.
+const fn is_strip_ws(b: u8) -> bool {
+    matches!(b, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
+}
+
+/// Delete every raw NUL byte from the document, as Parsel/w3lib do before handing bytes to lxml
+/// (`body.replace(b"\x00", b"")`).
+///
+/// This has to happen before TOKENIZATION, not at value-emit time. Dropping NUL only from emitted values
+/// leaves the two sides disagreeing about the document's STRUCTURE: `<di\0v>X</di\0v>` is a `div` to
+/// lxml and an element named `di\0v` here, so `div::text` returns nothing — a silently empty column, not
+/// a slightly different string. Attribute names and values, text and tag names are all covered by doing
+/// it once, up front.
+///
+/// The ordinary path (no NUL anywhere, which is every real page) costs one `memchr` over the buffer and
+/// no allocation. Only a document that actually contains a NUL is copied.
+fn strip_nul(bytes: Cow<'_, [u8]>) -> Cow<'_, [u8]> {
+    if memchr::memchr(0, &bytes).is_none() {
+        return bytes;
+    }
+    Cow::Owned(bytes.iter().copied().filter(|&b| b != 0).collect())
+}
+
+/// A schema compiled ONCE and run over any number of pages — **how the engine is actually used, and
+/// what every benchmark measures.** Building a `Plan` parses every selector, lowers it to the matcher's
+/// internal form, and computes the interesting-attribute set a single time; each [`Plan::extract`] then
+/// only resolves the page's encoding and runs the streaming pass.
+///
+/// This is not an optimization a caller opts into. A schema is declared once and applied to every
+/// response — a Scrapy/web-poet page object is a *class*, and `frostwork.Page` / `FrostPage` compile
+/// their selectors here at definition time. [`extract`] and [`extract_grouped`] are the one-shot
+/// convenience form for a caller holding selector strings and one document; they compile a `Plan`
+/// internally and throw it away, which no scraper does per response.
+///
+/// Unsupported selectors compile to empty columns exactly as [`extract`] does (no fallback); the
+/// flat/grouped output is identical either way.
 pub struct Plan {
     schema: matcher::CompiledSchema,
     budget: (usize, usize), // (members, sibling-bits) raw demand, computed once at compile
@@ -318,15 +539,29 @@ pub struct Plan {
 impl Plan {
     /// Compile `queries` + `groups` (the same shapes [`extract_grouped`] accepts) once for reuse.
     pub fn compile(queries: &[String], groups: &[GroupQuery]) -> Plan {
-        let queries_sel: Vec<Vec<Selector>> = queries.iter().map(|q| compile_query(q)).collect();
-        let compiled_groups: Vec<matcher::GroupInput> = groups
-            .iter()
-            .map(|g| {
-                (compile_one(&g.container), g.subfields.iter().map(|(_, sel)| compile_one(sel)).collect())
-            })
-            .collect();
-        let budget = matcher::budget_usage(&queries_sel, &compiled_groups);
-        Plan { schema: matcher::CompiledSchema::compile(&queries_sel, &compiled_groups), budget }
+        Self::compile_first_only(queries, groups, &[])
+    }
+
+    /// [`compile`](Plan::compile), plus the caller's per-column cardinality: `first_only[c]` declares
+    /// that column `c`'s consumer keeps only the FIRST value and discards the rest.
+    ///
+    /// That lets the scan STOP once every column has one — a page whose fields all live in the head is
+    /// answered without tokenizing the body. The columns are unchanged apart from the values that would
+    /// have been discarded anyway, so the `Item` a cardinality layer builds is identical.
+    ///
+    /// Declaring it does not force it: a schema whose answer could still change (groups, deferred
+    /// predicates, reverse positions, outer-HTML, `normalize-space`) is not armed, and one column left
+    /// out of `first_only` disarms the whole schema. See `matcher::CompiledSchema::arm_early_exit`.
+    /// `&[]` — what [`compile`](Plan::compile) passes — arms nothing, which is why plain
+    /// [`extract`]/[`extract_grouped`], whose contract is EVERY value, are unaffected.
+    pub fn compile_first_only(queries: &[String], groups: &[GroupQuery], first_only: &[bool]) -> Plan {
+        let (flat, grouped) = compile_schema(queries, groups);
+        let budget = matcher::budget_usage(&flat, &grouped);
+        let mut schema = matcher::CompiledSchema::compile(&flat, &grouped);
+        if first_only.iter().any(|&f| f) {
+            schema.arm_early_exit(first_only);
+        }
+        Plan { schema, budget }
     }
 
     /// The `(member, sibling-bit)` budget demand of this plan — see [`budget_usage`]. Computed at
@@ -393,6 +628,83 @@ mod tests {
         assert_eq!(ex(cards, "li:has(.new) ~ li::text"), v(&["a1", "B", "a2"])); // all following li (direct text)
         assert_eq!(ex(cards, "li:has(.new) + li::text"), v(&["a1"])); // adjacent: only the immediate next
         assert_eq!(ex(cards, "li:has(.absent) ~ li::text"), v(&[])); // :has fails -> nothing
+    }
+
+    /// The node-vs-scalar answer `frostwork.webpoet` routes a processor on. The XPath rows are the ones
+    /// that matter: the heuristic this replaces read `/text()` and `/@href` as node queries because they
+    /// carry no `::`-pseudo, which is exactly the mistake a query string invites and the compiler cannot
+    /// make.
+    #[test]
+    fn selector_terminals_names_the_value_terminal() {
+        let q: Vec<String> = [
+            "h1::text",                  // text
+            "div ::text",                // subtree text, still text
+            "a::attr(href)",             // attr
+            "div.card",                  // bare element -> outer HTML, i.e. a NODE
+            ".a, .b",                    // all-outer comma list stays outer
+            "//a/text()",                // XPath text terminal, NOT a node
+            "//a/@href",                 // XPath attribute terminal, NOT a node
+            "//div[@id='x']",            // XPath bare element -> outer
+            "normalize-space(//h1)",     // scalar string value
+            "div:has(.a .b)::text",      // does not compile -> None
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(
+            selector_terminals(&q),
+            vec![
+                Some("text"),
+                Some("text"),
+                Some("attr"),
+                Some("outer"),
+                Some("outer"),
+                Some("text"),
+                Some("attr"),
+                Some("outer"),
+                Some("normalize-space"),
+                None,
+            ]
+        );
+    }
+
+    /// The identity `.as_node()` cannot read off a value. `*` is the row that makes the function
+    /// necessary: on `<p>x</p>` it matches three nodes and the engine returns one string for all three.
+    #[test]
+    fn selector_node_identity_pins_a_name_and_reports_the_frame_risk() {
+        let q: Vec<String> = [
+            "div.card",         // a name AND an attribute constraint: never a synthesized frame
+            "div",              // pinned, and `div` is not a frame name
+            ".crumbs",          // no name test, but a class -> a synthesized frame has no attributes
+            "[itemprop=brand]", // ditto, via an attribute
+            "*",                // matches every frame, names nothing -> the ambiguous case
+            "body",             // pinned: every match is a `<body>`, written or synthesized
+            "//html/body",      // ...through XPath as well
+            "p, div",           // members disagree on the name; neither is a frame
+            "p, *",             // one member is the ambiguous case, so the query is
+            "body.page",        // a frame name, but attribute-bound: the source names it
+            "div:has(.a .b)",   // does not compile -> no identity, fail closed
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let want: Vec<(Option<String>, bool)> = [
+            (Some("div"), false),
+            (Some("div"), false),
+            (None, false),
+            (None, false),
+            (None, true),
+            (Some("body"), true),
+            (Some("body"), true),
+            (None, false),
+            (None, true),
+            (Some("body"), false),
+            (None, true),
+        ]
+        .iter()
+        .map(|(n, s)| (n.map(str::to_string), *s))
+        .collect();
+        assert_eq!(selector_node_identity(&q), want);
     }
 
     #[test]
@@ -474,6 +786,99 @@ mod tests {
         }
     }
 
+    /// `:has()` takes a relative selector LIST — `div:has(a, img)`, the shape cssselect#138 names as
+    /// unsupported. `:has(a, b)` is the union of `:has(a)` and `:has(b)` (an element matches if ANY
+    /// member is found), which is what makes the two single-member spellings a usable oracle for it.
+    #[test]
+    fn has_takes_a_selector_list() {
+        let h = "<div id=d1><a>x</a></div><div id=d2><img src=s></div><div id=d3><b>y</b></div>\
+                 <div id=d4><a>z</a><img src=t></div>";
+        // OR across members, in document order, and an element satisfying BOTH appears once
+        assert_eq!(ex(h, "div:has(a, img)::attr(id)"), v(&["d1", "d2", "d4"]));
+        assert_eq!(ex(h, "div:has(img, a)::attr(id)"), v(&["d1", "d2", "d4"]), "member order is irrelevant");
+        // ...and each member alone is the single-compound spelling parsel can evaluate
+        assert_eq!(ex(h, "div:has(a)::attr(id)"), v(&["d1", "d4"]));
+        assert_eq!(ex(h, "div:has(img)::attr(id)"), v(&["d2", "d4"]));
+        // three members, and members of different KINDS (the widened inners) inside one list
+        assert_eq!(ex(h, "div:has(a, img, b)::attr(id)"), v(&["d1", "d2", "d3", "d4"]));
+        assert_eq!(ex(h, "div:has([src], #nope)::attr(id)"), v(&["d2", "d4"]));
+        // child-scoped list: only DIRECT children count, so a nested match does not qualify
+        let nested = "<div id=p><span><a>deep</a></span></div><div id=q><a>direct</a></div>";
+        assert_eq!(ex(nested, "div:has(> a, > img)::attr(id)"), v(&["q"]));
+        assert_eq!(ex(nested, "div:has(a, img)::attr(id)"), v(&["p", "q"]));
+        // a member that matches nothing contributes nothing, and an all-miss list yields an empty column
+        assert_eq!(ex(h, "div:has(a, nosuch)::attr(id)"), v(&["d1", "d4"]));
+        assert_eq!(ex(h, "div:has(nosuch, alsonot)::attr(id)"), Vec::<String>::new());
+        // the list composes with the subtree / descendant value tiers, like a single-compound inner
+        assert_eq!(ex(h, "div:has(a, img) ::text"), v(&["x", "z"]));
+        assert_eq!(ex(h, "div:has(a, img) a::text"), v(&["x", "z"]));
+        // MIXED relative combinators have no faithful `Has` to build, so they are REPORTED, not guessed
+        assert!(!audit_schema(&["div:has(> a, img)::attr(id)".into()], &[]).ok());
+        assert!(audit_schema(&["div:has(a, img)::attr(id)".into()], &[]).ok());
+    }
+
+    /// `:not()` takes a selector list too (Selectors 4). `:not(a, b)` is exactly `:not(a):not(b)` — the
+    /// chained spelling cssselect accepts — so every case here is checked against it.
+    #[test]
+    fn not_takes_a_selector_list() {
+        let h = "<p class=a>A</p><p class=b>B</p><p class=c>C</p><p>D</p>";
+        for (list, chained) in [
+            ("p:not(.a, .b)::text", "p:not(.a):not(.b)::text"),
+            ("p:not(.a, .b, .c)::text", "p:not(.a):not(.b):not(.c)::text"),
+            ("p:not(.a)::text", "p:not(.a)::text"),
+        ] {
+            assert_eq!(ex(h, list), ex(h, chained), "{list}");
+        }
+        assert_eq!(ex(h, "p:not(.a, .b)::text"), v(&["C", "D"]));
+        // a comma inside an attribute VALUE is data, not a member separator
+        let av = "<p title=\"x, y\">A</p><p title=z>B</p>";
+        assert_eq!(ex(av, "p:not([title=\"x, y\"])::text"), v(&["B"]));
+        // an empty member is a syntax error to cssselect, so it is REPORTED rather than ignored
+        assert!(!audit_schema(&["p:not(.a, )::text".into()], &[]).ok());
+        assert!(audit_schema(&["p:not(.a, .b)::text".into()], &[]).ok());
+    }
+
+    /// The Selectors 4 case-sensitivity flag, `[a=v i]`. cssselect rejects it outright, so the oracle is
+    /// the semantics: ASCII folding of the VALUE, on every operator, and nothing else about the compare
+    /// changes (an empty operand still matches nothing; `~=` still splits on ASCII whitespace).
+    #[test]
+    fn attribute_case_insensitive_flag() {
+        let h = "<a id=1 href=\"/Doc.PDF\" rel=\"NoFollow Me\" hreflang=\"EN-us\" type=\"SubMit\">x</a>";
+        for q in [
+            "[type=submit i]",
+            "[type=\"submit\" i]",
+            "[href^=\"/doc\" i]",
+            "[href$=\".pdf\" i]",
+            "[href*=\"OC.p\" i]",
+            "[rel~=nofollow i]",
+            "[hreflang|=en i]",
+        ] {
+            assert_eq!(ex(h, &format!("{q}::attr(id)")), v(&["1"]), "{q}");
+        }
+        // ...and without the flag every one of them is case-SENSITIVE, i.e. matches nothing here
+        for q in ["[type=submit]", "[href^=\"/doc\"]", "[href$=\".pdf\"]", "[href*=\"OC.p\"]",
+                  "[rel~=nofollow]", "[hreflang|=en]"] {
+            assert_eq!(ex(h, &format!("{q}::attr(id)")), Vec::<String>::new(), "{q}");
+        }
+        // `s` is the DEFAULT (case-sensitive), so it parses and changes nothing
+        assert_eq!(ex(h, "[type=\"SubMit\" s]::attr(id)"), v(&["1"]));
+        assert_eq!(ex(h, "[type=\"submit\" s]::attr(id)"), Vec::<String>::new());
+        // the flag folds ASCII ONLY, as CSS defines it — `É`/`é` are one character apart in Unicode and
+        // must not match, or the engine would be doing a Unicode fold no browser does here
+        let acc = "<p id=2 data-x=\"CAFÉ\">t</p>";
+        assert_eq!(ex(acc, "[data-x=\"café\" i]::attr(id)"), Vec::<String>::new());
+        assert_eq!(ex(acc, "[data-x=\"CAFÉ\" i]::attr(id)"), v(&["2"]));
+        // a multi-byte value must not panic a prefix/suffix compare on a non-char-boundary index
+        assert_eq!(ex(acc, "[data-x^=\"ca\" i]::attr(id)"), v(&["2"]));
+        assert_eq!(ex(acc, "[data-x$=\"É\" i]::attr(id)"), v(&["2"]));
+        assert_eq!(ex(acc, "[data-x*=\"AF\" i]::attr(id)"), v(&["2"]));
+        // an empty operand still matches nothing, flag or not (the CSS rule, unchanged)
+        assert_eq!(ex(h, "[href^=\"\" i]::attr(id)"), Vec::<String>::new());
+        // `i` is only a flag after whitespace: `[type=SubMiti]` is a five-character value
+        assert_eq!(ex(h, "[type=SubMiti]::attr(id)"), Vec::<String>::new());
+        assert!(audit_schema(&["[type=submit i]::attr(id)".into()], &[]).ok());
+    }
+
     #[test]
     fn xpath_union_or_and_descendant_attr_values() {
         // union: document-ordered across both members (parsel `//a/text() | //b/text()`)
@@ -507,7 +912,7 @@ mod tests {
         // XPath [N]: tag[N] = of-type; *[N] = nth element child; per-parent
         assert_eq!(ex(h, "//li[2]/text()"), v(&["b"]));
         assert_eq!(ex(h, "//ul/*[3]/text()"), v(&["s"]));
-        // positional INSIDE :not() must turn the counters on too (regression: it once didn't, so the
+        // positional INSIDE :not() must turn the counters on too (miss it and the
         // negation saw index 0 and excluded nothing)
         let li3 = "<ul><li>a</li><li>b</li><li>c</li></ul>";
         assert_eq!(ex(li3, "li:not(:first-child)::text"), v(&["b", "c"]));
@@ -549,12 +954,123 @@ mod tests {
         assert_eq!(ex(five, "//li[last()-1]/text()"), v(&["d"]));
         assert_eq!(ex(five, "//ul/*[last()]/text()"), v(&["e"]));
         assert_eq!(ex(links, "//a[last()]/@href"), v(&["/2"]));
-        // unsupported reverse forms -> empty (never wrong):
-        // subtree terminal (inherits the general subtree-`::text` adjacency divergence — see matcher)
-        assert_eq!(ex("<ul><li><b>p</b>q</li></ul>", "li:last-child ::text"), Vec::<String>::new());
-        assert_eq!(ex("<ul><li>c</li></ul>", "//li[last()]//text()"), Vec::<String>::new());
-        assert_eq!(ex(links, "div:only-child a::attr(href)"), Vec::<String>::new()); // reverse on ANCESTOR
+        // SUBTREE terminals are supported: values are recovered by re-scanning the winner's raw span
+        // (`Matcher::resolve_tail_spans`), so nothing is buffered during the pass.
+        assert_eq!(ex("<ul><li><b>p</b>q</li></ul>", "li:last-child ::text"), v(&["p", "q"]));
+        assert_eq!(ex("<ul><li>c</li></ul>", "//li[last()]//text()"), v(&["c"]));
+        assert_eq!(ex("<ul><li>a<li>L<b>t</b></ul>", "li:last-child ::text"), v(&["L", "t"]));
+        // the re-scan runs the real engine, so tree rules inside the span still apply: a dropped end
+        // tag coalesces, and table scope holds
+        assert_eq!(ex("<ul><li>a<li>HELLO</p>WORLD</ul>", "li:last-child ::text"), v(&["HELLOWORLD"]));
+        assert_eq!(
+            ex("<ul><li>a<li><div><table><tr><td>X</div>Y</table></ul>", "li:last-child ::text"),
+            v(&["XY"])
+        );
+        // NESTED winners de-duplicate (a contained span's values are a subset of its container's)
+        assert_eq!(
+            ex("<ul><li>a<li>L<ul><li>x<li>IN</ul>M</ul>", "li:last-child ::text"),
+            v(&["L", "x", "IN", "M"])
+        );
+        assert_eq!(ex("<div>1<div>A<div>B</div></div></div>", "div:last-child ::text"), v(&["1", "A", "B"]));
+        // subtree `::attr` and the of-type / nth-last variants
+        assert_eq!(
+            ex("<ul><li><a href=\"/1\">x</a><li><a href=\"/2\">y</a><a href=\"/3\">z</a></ul>",
+               "li:last-child ::attr(href)"),
+            v(&["/2", "/3"])
+        );
+        assert_eq!(ex("<ul><li>A<li>B<li>C</ul>", "li:nth-last-child(2) ::text"), v(&["B"]));
+        // reverse on an ANCESTOR compound: the value comes from a DESCENDANT, recovered by re-scanning
+        // the winner's span with the selector tail (`b::text`) — see `split_deferred`.
+        assert_eq!(ex(links, "div:only-child a::attr(href)"), v(&["/1", "/2"]));
+        assert_eq!(
+            ex("<ul><li><b>b1</b><li><b>b2</b></ul>", "li:last-child b::text"),
+            v(&["b2"])
+        );
+        assert_eq!(
+            ex("<ul><li><span><a href=\"/1\">x</a></span><li><span><a href=\"/2\">y</a></span></ul>",
+               "li:last-child span a::attr(href)"),
+            v(&["/2"])
+        );
+        assert_eq!(ex("<ul><li><b>a</b><li><b>b</b></ul>", "//li[last()]//b/text()"), v(&["b"]));
+        // nested winners still de-duplicate through the tail
+        assert_eq!(
+            ex("<ul><li>x<li>L<b>bl</b><ul><li>y<li>IN<b>bi</b></ul></ul>", "li:last-child b::text"),
+            v(&["bl", "bi"])
+        );
+        // still unsupported -> empty (never wrong):
+        // a CHILD step into the tail needs "depth exactly 1 in the span", which the depth-agnostic
+        // matcher can't express (same reason grouped sub-fields reject `./x`)
+        assert_eq!(ex("<ul><li><b>a</b><li><b>b</b></ul>", "li:last-child > b::text"), Vec::<String>::new());
+        assert_eq!(ex("<ul><li><b>a</b><li><b>b</b></ul>", "//li[last()]/b/text()"), Vec::<String>::new());
         assert_eq!(ex(h, "h1::text, li:last-child::text"), Vec::<String>::new()); // reverse in a comma group
+    }
+
+    /// A comma group may MIX a deferred text-predicate member with streamed ones. The two produce their
+    /// values at different times — during the pass, and at the subject's close — so the column is merged
+    /// by document OFFSET and deduped by node. Every expectation here was read off parsel.
+    #[test]
+    fn comma_group_mixing_a_deferred_member_merges_in_document_order() {
+        let h = "<h2>Head</h2><p id=a class=a>alpha</p><p id=b class=b>beta</p>";
+        // disjoint members: DOCUMENT order, not member order — both spellings give the same column
+        assert_eq!(ex(h, "h2::text, p:contains(\"alpha\")::text"), v(&["Head", "alpha"]));
+        assert_eq!(ex(h, "p:contains(\"alpha\")::text, h2::text"), v(&["Head", "alpha"]));
+        // overlapping members: `p::text` and the `:contains` member select the SAME text node, and a
+        // union is node-deduped — three pushes, two values
+        assert_eq!(ex(h, "p::text, p:contains(\"alpha\")::text"), v(&["alpha", "beta"]));
+        assert_eq!(ex(h, "p:contains(\"alpha\")::text, p::text"), v(&["alpha", "beta"]));
+        // one attribute NAME across the group: the attr node is the element's offset, so it dedupes
+        assert_eq!(ex(h, "p::attr(id), p:contains(\"alpha\")::attr(id)"), v(&["a", "b"]));
+        // three members, one deferred
+        assert_eq!(
+            ex("<h2>H</h2><p>alpha</p><span>s</span>", "h2::text, span::text, p:contains(\"alpha\")::text"),
+            v(&["H", "alpha", "s"])
+        );
+        // and two deferred members with no streamed one at all
+        assert_eq!(ex(h, "p:contains(\"alpha\")::text, p:contains(\"zzz\")::text"), v(&["alpha"]));
+
+        // REFUSED, because an offset would not name one node. Two different attributes of one element
+        // are two nodes in lxml's union (it returns both, in source order) sharing the element's offset,
+        // so a `(col, offset)` dedupe would drop one.
+        assert!(!audit_schema(&["p::attr(id), p:contains(\"alpha\")::attr(class)".into()], &[]).ok());
+        assert!(!audit_schema(&["p::text, p:contains(\"alpha\")::attr(id)".into()], &[]).ok());
+        // and a member whose value comes from a SUBTREE re-scan carries no document offset at all
+        assert!(!audit_schema(&["h2::text, div:contains(\"alpha\") ::text".into()], &[]).ok());
+        assert!(!audit_schema(&["h2::text, div:contains(\"alpha\") a::attr(href)".into()], &[]).ok());
+        // the other deferred tiers stay out of a comma group
+        assert!(!audit_schema(&["h2::text, div:has(a) p::text".into()], &[]).ok());
+        assert!(!audit_schema(&["h2::text, li:last-child::text".into()], &[]).ok());
+        // every refusal above is REPORTED, so none of them is a silently empty column
+        assert!(audit_schema(&["h2::text, p:contains(\"alpha\")::text".into()], &[]).ok());
+    }
+
+    /// `:has()` and text-content predicates share the reverse tier's span re-scan, so their values may
+    /// also come from the subject's SUBTREE (`div:has(a) ::text`) or from a value-bearing DESCENDANT
+    /// (`div:has(a) a::attr(href)`) — the common "link inside a card that has an image" shape.
+    #[test]
+    fn deferred_predicate_subtree_and_descendant_values() {
+        let d = "<div class=w><p class=x>px</p><a href='/w'>aw</a>wt</div><div class=n><p>pn</p>nt</div>";
+        // :has with a SUBTREE terminal
+        assert_eq!(ex(d, "div:has(a) ::text"), v(&["px", "aw", "wt"]));
+        assert_eq!(ex(d, "div:has(a) ::attr(href)"), v(&["/w"]));
+        // :has on an ANCESTOR — value from a descendant
+        assert_eq!(ex(d, "div:has(a) p::text"), v(&["px"]));
+        assert_eq!(ex(d, "div:has(a) a::attr(href)"), v(&["/w"]));
+        assert_eq!(ex(d, "div:has(p) a::text"), v(&["aw"]));
+        assert_eq!(ex(d, "div:has(a) p.x::text"), v(&["px"]));
+        // XPath text-content predicate with a non-attached terminal
+        assert_eq!(ex(d, "//div[contains(.,\"aw\")]//text()"), v(&["px", "aw", "wt"]));
+        assert_eq!(ex(d, "//div[contains(.,\"aw\")]//a/@href"), v(&["/w"]));
+        assert_eq!(ex(d, "//div[.=\"pxawwt\"]//a/@href"), v(&["/w"]));
+        // NESTED qualifying subjects de-duplicate (outer span contains the inner one)
+        let n = "<div class=o><a href=/o>o</a><div class=i><a href=/i>i</a></div></div>";
+        assert_eq!(ex(n, "div:has(a) a::attr(href)"), v(&["/o", "/i"]));
+        assert_eq!(ex(n, "div:has(a) ::text"), v(&["o", "i"]));
+        // attached forms unchanged, and a CHILD step into the tail stays out of tier
+        assert_eq!(ex(d, "div:has(a)::attr(class)"), v(&["w"]));
+        assert_eq!(ex(d, "//div[contains(.,\"aw\")]/text()"), v(&["wt"]));
+        assert_eq!(ex(d, "div:has(a) > p::text"), Vec::<String>::new());
+        // two deferred predicates in one selector remain out of tier
+        assert_eq!(ex(d, "div:has(a) p:has(b)::text"), Vec::<String>::new());
     }
 
     #[test]
@@ -575,17 +1091,17 @@ mod tests {
 
     #[test]
     fn dot_child_anchor_is_unsupported_not_wrong() {
-        // Regression for the `./…` child-anchor over-match: the matcher can't enforce a child anchor
-        // on a segment's first compound, so `./step` used to behave like `.//step` (wrong values).
-        // It is now unsupported -> empty column, never a wrong value.
+        // The `./…` child anchor is UNSUPPORTED, not approximated: the matcher cannot enforce a child
+        // anchor on a segment's first compound, and treating `./step` as `.//step` would return values
+        // the oracle does not have. Empty column, never a wrong value.
         //
         // flat: parsel `./h3/text()` on the doc root is [] (h3 is not a child of the document node);
         // rejecting it (empty column) matches that oracle exactly.
         let html = "<html><body><div><h3>A</h3></div><h3>B</h3></body></html>";
         assert_eq!(ex(html, "./h3/text()"), Vec::<String>::new());
         assert_eq!(ex(html, "./body/h3/text()"), Vec::<String>::new());
-        // grouped direct-child `./h3/text()` used to leak the nested `NEST`; now empty (unsupported),
-        // while the `.//h3/text()` descendant control still collects both, in document order.
+        // grouped direct-child `./h3/text()` is empty (unsupported) rather than leaking the nested
+        // `NEST`, while the `.//h3/text()` descendant control collects both, in document order.
         let ghtml = "<html><body><div class=card><h3>A</h3><div><h3>NEST</h3></div></div></body></html>";
         let rows = grp(ghtml, ".card", &["./h3/text()", ".//h3/text()"]);
         assert_eq!(rows, vec![vec![Vec::<String>::new(), v(&["A", "NEST"])]]);
@@ -687,9 +1203,266 @@ mod tests {
             v(&["a", "b"])
         );
     }
+    // libxml2 2.14 NESTS a same-tag dt/dd repeat instead of auto-closing it (unlike `li`/`td`/`option`
+    // above), and never auto-closes ruby annotations at all. A rule table ported from the HTML5 spec
+    // asserts the opposite for both and over-closes, which is why this one is derived from the oracle.
+    #[test]
+    fn dt_dd_same_tag_repeat_nests() {
+        assert_eq!(ex("<dl><dt>a<dt>b</dl>", "dl > dt::text"), v(&["a"]));
+        assert_eq!(ex("<dl><dd>a<dd>b</dl>", "dl > dd::text"), v(&["a"]));
+    }
+    /// `<colgroup>` with an omitted end tag is ordinary table markup and had NO rule, so the sections
+    /// nested inside it and every child-anchored selector past the colgroup lost its cells.
+    #[test]
+    fn colgroup_closed_by_sections_and_rows() {
+        let t = "<table><colgroup><col><col><thead><tr><th>H<tbody><tr><td>D</table>";
+        assert_eq!(ex(t, "table > thead th::text"), v(&["H"]));
+        assert_eq!(ex(t, "table > tbody td::text"), v(&["D"]));
+        assert_eq!(ex(t, "colgroup thead th::text"), v(&[])); // must NOT nest
+        // a colgroup closes an open caption, and an open <p>
+        assert_eq!(ex("<table><caption>C<colgroup><col><thead><tr><th>H</table>", "table > thead th::text"), v(&["H"]));
+        assert_eq!(ex("<div><p>a<colgroup><col></div>", "div > p::text"), v(&["a"]));
+        // ...but a bare <caption> is NOT a scope boundary: the `</div>` is honoured
+        assert_eq!(ex("<div><caption>A</div>B", "caption::text"), v(&["A"]));
+    }
+
+    #[test]
+    fn ruby_annotations_never_auto_close() {
+        assert_eq!(ex("<ruby><rt>a<rt>b</ruby>", "ruby > rt::text"), v(&["a"]));
+        assert_eq!(ex("<ruby><rt>a<rp>b</ruby>", "ruby > rp::text"), v(&[]));
+        // ...and they do NOT close an open <p> either. `div > p::text` was asserted here before and
+        // cannot tell: it is p's DIRECT text, which is `a` whether the <rt> nested or became a sibling.
+        // `div > rt` discriminates — it matches only if the <rt> was lifted out of the <p>.
+        assert_eq!(ex("<div><p>a<rt>b</div>", "div > rt::text"), v(&[]));
+        assert_eq!(ex("<div><p>a<option>b</div>", "div > option::text"), v(&[]));
+    }
+
+    /// libxml2's `htmlStartClose` NAME-pair table (`implied_close::start_closes`).
+    ///
+    /// This is a different rule from the implied-close cross product, at a finer granularity than the
+    /// engine's tag ids: it closes an open `<b>` for an incoming `<td>` but NOT an open `<em>`, and an
+    /// open `<h1>` for an incoming `<table>` but NOT an open `<div>` — pairs a coarser id space lumps
+    /// together.
+    /// Every case here was read off libxml2 2.14 first; `tools/audit_tree_rules.py` re-checks all
+    /// 11,543 (open x incoming) cells, and `tools/mutate_rules.py` checks that flipping one is noticed.
+    #[test]
+    fn start_close_pairs_match_libxml2() {
+        // an incoming <p> closes an open heading or font-style element (very common in legacy markup:
+        // `<h1>Title<p>Body` with the `</h1>` omitted)
+        assert_eq!(ex("<div><h1>T<p>x</div>", "div > p::text"), v(&["x"]));
+        assert_eq!(ex("<div><h1>T<p>x</div>", "div > h1::text"), v(&["T"]));
+        assert_eq!(ex("<div><b>x<p>y</div>", "div > p::text"), v(&["y"]));
+        assert_eq!(ex("<div><u>x<p>y</div>", "div > p::text"), v(&["y"]));
+        assert_eq!(ex("<div><small>x<p>y</div>", "div > p::text"), v(&["y"]));
+        // ...but NOT an open <em>/<strong>, which a coarser id space would lump in with <b>
+        assert_eq!(ex("<div><em>x<p>y</div>", "div > p::text"), v(&[]));
+        // a cell closes an open inline element, an anchor closes an anchor, a form closes a form
+        assert_eq!(ex("<div><span>x<td>y</div>", "div > td::text"), v(&["y"]));
+        assert_eq!(ex("<div><font>x<td>y</div>", "div > td::text"), v(&["y"]));
+        assert_eq!(ex("<div><a>x<a>y</div>", "div > a::text"), v(&["x", "y"]));
+        assert_eq!(ex("<div><form>a<form>b</div>", "div > form::text"), v(&["a", "b"]));
+        // <table> closes an open heading, but not an open <div> (one coarse "block" id would lump them)
+        assert_eq!(ex("<div><h1>T<table><tr><td>c</table></div>", "div > table td::text"), v(&["c"]));
+        // list/definition starts close an open <pre> or <address>
+        assert_eq!(ex("<div><pre>a<li>b</div>", "div > li::text"), v(&["b"]));
+        assert_eq!(ex("<dl><pre>a<dt>b</dl>", "dl > dt::text"), v(&["b"]));
+        assert_eq!(ex("<div><address>a<dd>b</div>", "div > dd::text"), v(&["b"]));
+        assert_eq!(ex("<div><menu>a<ul>b</ul></div>", "div > ul::text"), v(&["b"]));
+        // <fieldset> closes an open <legend>
+        assert_eq!(ex("<div><legend>L<fieldset>x</div>", "div > fieldset::text"), v(&["x"]));
+        // a VOID incoming tag still closes: <col> closes an open <p>. The p-closing audit skips void
+        // elements ("no text of its own"), so this pair had no coverage at all before.
+        assert_eq!(ex("<div><p>x<col>y</div>", "div > p::text"), v(&["x"]));
+    }
     #[test]
     fn p_closed_by_block() {
         assert_eq!(ex("<div><p>x<h2>y</h2><p>z</div>", "div > p::text"), v(&["x", "z"]));
+    }
+
+    // Content after `</html>` is KEPT — a DELIBERATE divergence from libxml2, which stops there and
+    // discards the rest. Trailing injected markup is common in the wild, so dropping real content
+    // silently is the worse failure for a scraper. Locked here because an intentional divergence with no
+    // test is indistinguishable from a bug.
+    //
+    // A 1000-page Common Crawl sample turned this from a marginal call into an obvious one. The tag is
+    // not always a trailing stray: one page's head ends `</head></html><body><header>…`, i.e. the
+    // `</html>` is MISPLACED and 14 of the file's 17 KB follow it. libxml2 keeps 2 elements out of 100+
+    // and a Parsel spider sees an empty page; the engine (and a browser) see the site. Another page in
+    // the same sample hides its JSON-LD `<script>` the same way. So the divergence is not small — and it
+    // runs in the direction that recovers a page rather than losing one.
+    //
+    // Only PARTLY browser-equivalent, and the test pins both halves: a browser ALSO re-parents the
+    // content into `<body>` (HTML Standard "after after body" reprocesses the token in body — verified
+    // against Chrome `--dump-dom`), whereas the engine leaves it where the byte stream put it. So an
+    // unscoped selector finds it (like a browser, unlike lxml) but a `body`-scoped one does not (like
+    // lxml, unlike a browser) — the same root cause as the no-`<body>`-synthesis divergence.
+    #[test]
+    fn content_after_close_html_is_kept() {
+        let h = "<html><body><p>in</p></body></html><div>late</div>";
+        assert_eq!(ex(h, "p::text"), v(&["in"]));
+        assert_eq!(ex(h, "div::text"), v(&["late"])); // lxml/Parsel: empty
+        assert_eq!(ex(h, "div ::text"), v(&["late"]));
+        // ...but NOT re-parented into <body>, so ancestor-scoped selectors agree with lxml, not a browser
+        assert_eq!(ex(h, "body div::text"), Vec::<String>::new());
+        assert_eq!(ex(h, "body > div::text"), Vec::<String>::new());
+        // whitespace-only tails are inert either way
+        assert_eq!(ex("<html><body><p>in</p></body></html>\n\n", "p::text"), v(&["in"]));
+        // the crawled shape: a MISPLACED `</html>` in the head, with the whole real page after it
+        let real = "<html><head></head></html><body><header><a href=/>L</a></header><p>A</p>";
+        assert_eq!(ex(real, "p::text"), v(&["A"])); // lxml/Parsel: empty
+        assert_eq!(ex(real, "a::attr(href)"), v(&["/"])); // lxml/Parsel: empty
+    }
+
+    // END-TAG SCOPE: libxml2 will not unwind a table for an ordinary end tag, so a stray `</div>` inside
+    // a cell is discarded and the cell's text stays whole. Unbalanced `<div>`s around tables are a
+    // common real-world malformation. See `implied_close::blocks_end_tag`.
+    #[test]
+    fn end_tag_does_not_unwind_a_table() {
+        assert_eq!(ex("<div><table><tr><td>A</div>B</td></tr></table>", "td::text"), v(&["AB"]));
+        assert_eq!(ex("<div><td>A</div>B", "td::text"), v(&["AB"])); // no <table> needed
+        assert_eq!(ex("<ul><table><tr><td>A</ul>B", "td::text"), v(&["AB"]));
+        assert_eq!(ex("<span><table><tr><td>A</span>B", "td::text"), v(&["AB"]));
+        // ...but a table-scoped end tag unwinds normally, and </body>/</html> still close the document
+        assert_eq!(ex("<div><table><tr><td>A</table>B</div>", "div::text"), v(&["B"]));
+        assert_eq!(ex("<table><tbody><tr><td>A</tbody>B</table>", "td::text"), v(&["A"]));
+        // `</body>` closes the document whether the page wrote the `<body>` or the engine synthesized
+        // it. Without frame synthesis it is an unmatched end tag on a bare fragment, which coalesces the
+        // runs either side instead.
+        assert_eq!(ex("<body><div><table><tr><td>A</body>B", "td::text"), v(&["A"]));
+        assert_eq!(ex("<div><table><tr><td>A</body>B", "td::text"), v(&["A"]));
+        // a non-table container does NOT block, and a </div> matched inside a cell is honoured
+        assert_eq!(ex("<div><ul><li>A</div>B", "li::text"), v(&["A"]));
+        assert_eq!(ex("<table><tr><td><div>A</div>B</td></tr></table>", "td::text"), v(&["B"]));
+    }
+
+    /// A table-family end tag is scoped too, because the rule is a PRIORITY comparison rather than a
+    /// "the table blocks everything, its row machinery blocks nothing" split: a `<tbody>` open above a
+    /// `<tr>` out-ranks it, so the `</tr>` is discarded and the row keeps what follows.
+    ///
+    /// From a crawled page whose table generator emits `<tr><strong><tbody>` rows: the engine closed each
+    /// row and LOST the cells. The `<strong>` matters — with nothing between them the `<tbody>` start tag
+    /// closes the row itself, and then the end tag has no match either way.
+    #[test]
+    fn end_tag_does_not_unwind_a_higher_priority_element() {
+        let row = "<table><tr><strong><tbody></tr><td>A</td></table>";
+        assert_eq!(ex(row, "tr td::text"), v(&["A"]));
+        // `<thead>` does not close a row either, so it too can sit above one and swallow the next row
+        let two = "<table><tr><td>A</td><thead></tr><tr><td>B</td></tr></table>";
+        assert_eq!(ex(two, "tr tr td::text"), v(&["B"]));
+        // `<body>` out-ranks the whole table machinery, which only matters where one can be open ABOVE
+        // a match: a `<body>` written after `</body>`. A crawled page put one inside a `<td>` and the
+        // `</td>` under it has to be discarded, or the rest of the page leaves the cell.
+        assert_eq!(ex("<body></body><td><body>X</td>Y", "td > body::text"), v(&["XY"]));
+        assert_eq!(ex("<body></body><td><body>X</td>Y", "td::text"), Vec::<String>::new());
+        // ...and the comparison runs the other way too: a LOWER-priority row and cell above the match do
+        // not block, so `</tbody>` unwinds both and the text after it is the table's own.
+        assert_eq!(ex("<table><tbody><tr><td>A</tbody>B</table>", "td::text"), v(&["A"]));
+        assert_eq!(ex("<table><tbody><tr><td>A</tbody>B</table>", "table::text"), v(&["B"]));
+    }
+
+    #[test]
+    fn end_tag_does_not_unwind_a_div_scope_boundary() {
+        // libxml2 ignores the ancestor closer while a <div> is open, then closes both at EOF.
+        assert_eq!(ex("<nav><ul><div>A</nav>B", "div::text"), v(&["AB"]));
+        assert_eq!(ex("<form><div>A</form>B", "div::text"), v(&["AB"]));
+        // Other block elements are not the same boundary.
+        assert_eq!(ex("<nav><blockquote>A</nav>B", "blockquote::text"), v(&["A"]));
+    }
+
+    #[test]
+    fn nested_table_blocks_an_outer_table_family_end_tag() {
+        // A table-family closer may unwind row/cell machinery in its own table, but it cannot cross
+        // a nested <table> to reach an outer row.
+        assert_eq!(ex("<tr><table>A</tr>B", "table::text"), v(&["AB"]));
+        // Same-table section closes still unwind normally.
+        assert_eq!(ex("<table><tbody><tr><td>A</tbody>B</table>", "td::text"), v(&["A"]));
+    }
+
+    /// The names the hand-written start-close table left out. All three were found by widening the
+    /// audit's universe to every element name rather than the ones someone remembered, and each is
+    /// ordinary legacy markup: `<listing>`/`<xmp>` in man-page and README-to-HTML output, and a
+    /// `<title>` after an unclosed `<p>`.
+    #[test]
+    fn start_close_names_missing_from_the_hand_written_port() {
+        // a definition item closes an open <listing> (it behaves exactly like <pre> as an open element)
+        assert_eq!(ex("<div><listing>A<dd>B</dd></div>", "div > dd::text"), v(&["B"]));
+        assert_eq!(ex("<div><listing>A<dd>B</dd></div>", "listing dd::text"), Vec::<String>::new());
+        for t in ["dd", "dl", "dt", "fieldset", "form", "li", "table", "ul"] {
+            let h = format!("<div><listing>A<{t} id=Z>B</div>");
+            assert_eq!(ex(&h, &format!("div > {t}::attr(id)")), v(&["Z"]),
+                       "<{t}> must close an open <listing>");
+        }
+        // ...and <listing>/<xmp>/<title> close an open <p>
+        for t in ["listing", "xmp", "title"] {
+            let h = format!("<div><p>A<{t}>T</{t}>B</div>");
+            assert_eq!(ex(&h, "div > p::text"), v(&["A"]), "<{t}> must close an open <p>");
+            assert_eq!(ex(&h, &format!("div > {t}::text")), v(&["T"]));
+        }
+    }
+
+    /// libxml2 treats the HTML4 `basefont`/`frame`/`isindex` as EMPTY elements. The engine let all three
+    /// hold children, so everything after one of them was nested a level too deep.
+    #[test]
+    fn html4_void_elements_hold_no_children() {
+        for t in ["basefont", "frame", "isindex"] {
+            let h = format!("<div><{t}><span>x</span></div>");
+            assert_eq!(ex(&h, "div > span::text"), v(&["x"]), "<{t}> must be void");
+            assert_eq!(ex(&h, &format!("{t} span::text")), Vec::<String>::new());
+        }
+        // the deliberate other half of the contract: libxml2 keeps these HTML5-era names OPEN
+        for t in ["embed", "source", "track", "wbr"] {
+            let h = format!("<div><{t}><span>x</span></div>");
+            assert_eq!(ex(&h, &format!("{t} span::text")), v(&["x"]), "<{t}> must be NON-void");
+        }
+    }
+
+    // ---- an end tag with nothing to match is DROPPED, and does not split the text node ----
+    // libxml2 discards it and keeps the character data either side as ONE text node. Emitting two
+    // values instead silently TRUNCATES a `One`-cardinality field (`.get()` -> "HELLO", not
+    // "HELLOWORLD") — the one failure mode no-fallback is supposed to rule out. Real pages hit this:
+    // Sphinx emits stray `</p>`. See `Matcher::text`.
+    #[test]
+    fn dropped_end_tag_does_not_split_text() {
+        for tag in ["p", "span", "b", "li", "td", "bogus", "br"] {
+            let html = format!("<div>HELLO</{tag}>WORLD</div>");
+            assert_eq!(ex(&html, "div::text"), v(&["HELLOWORLD"]), "</{tag}>");
+        }
+        // chains across consecutive dropped tags, and applies to the XPath terminals too
+        assert_eq!(ex("<div>A</p>B</p>C</div>", "div::text"), v(&["ABC"]));
+        // ADJACENT drops with no text between must chain too — tracking one dropped tag instead of the
+        // node's whole gap split these, and the Sphinx `</p>\n</p>` case only passed via the `\n` run
+        assert_eq!(ex("<div>A</p></p>B</div>", "div::text"), v(&["AB"]));
+        assert_eq!(ex("<div>A</p></span></b>B</div>", "div::text"), v(&["AB"]));
+        assert_eq!(ex("<div>A</p>B</div>", "//div/text()"), v(&["AB"]));
+        assert_eq!(ex("<div>A</p>B</div>", "//div//text()"), v(&["AB"]));
+        // entity decoding still spans the join
+        assert_eq!(ex("<div>A&amp;</p>&lt;B</div>", "div::text"), v(&["A&<B"]));
+        // ...but each run is decoded on its OWN: the oracle decodes while tokenizing, i.e. before tree
+        // construction, so a construct split across a discarded tag must NOT reassemble. Joining the raw
+        // bytes first manufactured an entity here and a character in the next case.
+        assert_eq!(ex("<div>A&am</p>p;B</div>", "div::text"), v(&["A&amp;B"]));
+        assert_eq!(ex("<div>x&lt</p>;y</div>", "div::text"), v(&["x<;y"]));
+        assert_eq!(
+            extract(b"<div>\xc3</p>\xa9</div>", &["div::text".to_string()], None).pop().unwrap(),
+            v(&["\u{fffd}\u{fffd}"]) // two replacement chars, NOT `é`
+        );
+    }
+    // The join is SOURCE-ADJACENCY only: everything that is a real node in libxml2 still splits the
+    // run, including a comment sitting in the gap left by a dropped tag.
+    #[test]
+    fn real_nodes_still_split_text() {
+        assert_eq!(ex("<div>A<!--c-->B</div>", "div::text"), v(&["A", "B"]));
+        assert_eq!(ex("<div>A<span>s</span>B</div>", "div::text"), v(&["A", "B"]));
+        assert_eq!(ex("<div>A<br>B</div>", "div::text"), v(&["A", "B"]));
+        assert_eq!(ex("<div>A</p><!--c-->B</div>", "div::text"), v(&["A", "B"]));
+    }
+    // A dropped tag must not corrupt the deferred text-content predicates either — they resolve on the
+    // element's own text nodes, so they need the same joined node the value columns get.
+    #[test]
+    fn dropped_end_tag_text_predicates() {
+        assert_eq!(ex("<div>HELLO</p>WORLD</div>", "//div[text()='HELLOWORLD']/text()"), v(&["HELLOWORLD"]));
+        assert_eq!(ex("<div>HELLO</p>WORLD</div>", "//div[contains(text(),'LOWOR')]/text()"), v(&["HELLOWORLD"]));
+        assert_eq!(ex("<div>HELLO</p>WORLD</div>", "normalize-space(//div/text())"), v(&["HELLOWORLD"]));
     }
 
     // ---- the invariant: well-formed input is unchanged (== lxml, == today's engine) ----
@@ -720,6 +1493,31 @@ mod tests {
     #[test]
     fn class_and_id() {
         assert_eq!(ex("<div class=\"c\"><span id=\"x\">s</span></div>", ".c #x::text"), v(&["s"]));
+    }
+    /// A class list splits on ASCII whitespace, not on Unicode whitespace — see `OpenElem::has_class`.
+    /// `[rel~=x]` tokenizes identically, so both are checked here.
+    #[test]
+    fn class_lists_split_on_ascii_whitespace_only() {
+        // separators HTML recognizes: the two classes are distinct
+        for sep in [" ", "\t", "\n", "\r", "\u{0C}"] {
+            let doc = format!("<div class=\"a fadein{sep}clearfix\">x</div>");
+            assert_eq!(ex(&doc, ".fadein::text"), v(&["x"]), "{sep:?}");
+            assert_eq!(ex(&doc, "[class~=clearfix]::text"), v(&["x"]), "{sep:?}");
+        }
+        // ...and the ones it does not: ONE token, so neither name matches. U+3000 is the one that
+        // fired on a real Japanese page; U+000B is ASCII but not ASCII WHITESPACE.
+        for sep in ["\u{3000}", "\u{A0}", "\u{2003}", "\u{0B}"] {
+            let doc = format!("<div class=\"a fadein{sep}clearfix\">x</div>");
+            assert_eq!(ex(&doc, ".fadein::text"), Vec::<String>::new(), "{sep:?}");
+            assert_eq!(ex(&doc, ".clearfix::text"), Vec::<String>::new(), "{sep:?}");
+            assert_eq!(ex(&doc, "[class~=clearfix]::text"), Vec::<String>::new(), "{sep:?}");
+            // the whole run IS a token, so asking for it by its real name still works — except for
+            // U+000B, which cssselect rejects INSIDE a selector (`SelectorSyntaxError`), so an empty
+            // column is the right no-fallback answer there
+            let by_name = ex(&doc, &format!(".fadein{sep}clearfix::text"));
+            let expected = if sep == "\u{0B}" { Vec::new() } else { v(&["x"]) };
+            assert_eq!(by_name, expected, "{sep:?}");
+        }
     }
     #[test]
     fn attr_self() {
@@ -760,8 +1558,8 @@ mod tests {
     #[test]
     fn unicode_identifiers() {
         // CSS idents admit non-ASCII (class/id/tag), and attribute values with non-ASCII must match
-        // through combinators/brackets (regression: `split_structural` used to mangle multi-byte UTF-8
-        // via `c as char`). Oracle: parsel/cssselect accept all of these. (T6)
+        // through combinators/brackets — `split_structural` must not read bytes as chars (`c as char`),
+        // which mangles multi-byte UTF-8. Oracle: parsel/cssselect accept all of these. (T6)
         assert_eq!(ex("<p class=\"café\">x</p><p class=cafe>y</p>", ".café::text"), v(&["x"]));
         assert_eq!(ex("<p id=\"naïve\">x</p>", "#naïve::text"), v(&["x"]));
         assert_eq!(ex("<i data-k=\"日本\">m</i><i data-k=\"x\">n</i>", "[data-k=\"日本\"]::text"), v(&["m"]));
@@ -922,6 +1720,39 @@ mod tests {
         assert!(cols[65].is_empty()); // over-budget selector: deterministic empty, no aliasing
     }
 
+    /// The documented budget is a SHARED 128 across every tier, and the bitsets that address members
+    /// are `u128` — so the number of LIVE members must never exceed it, whichever tiers they come from.
+    ///
+    /// Each deferred tier used its own counter, so 128 normal members plus 128 reverse ones left 256
+    /// live: `budget_usage` reported the schema over budget and Python rejected it while Rust ran every
+    /// one, contradicting COMPATIBILITY.md's "over-budget entries compile dead".
+    #[test]
+    fn live_members_never_exceed_the_shared_budget() {
+        let html = b"<html><body><ul><li class=\"c\">A</li></ul></body></html>";
+        // every selector here WOULD match, so a live column is always non-empty and the count of
+        // non-empty columns is exactly the count of live members
+        for (normal, reverse) in [(100usize, 100usize), (0, 200), (200, 0), (127, 2)] {
+            let mut qs: Vec<String> = vec![".c::text".to_string(); normal];
+            qs.extend(vec!["li:last-child::text".to_string(); reverse]);
+            let (members, _) = budget_usage(&qs, &[]);
+            let cols = extract(html, &qs, None);
+            let live = cols.iter().filter(|c| !c.is_empty()).count();
+            assert!(
+                live <= matcher::MAX_MEMBERS,
+                "{normal} normal + {reverse} reverse: {members} members reported, {live} live \
+                 (limit {})",
+                matcher::MAX_MEMBERS
+            );
+        }
+        // and an IN-budget schema must still answer every column (the clamp must not over-fire)
+        let qs: Vec<String> = vec![".c::text".to_string(); 60]
+            .into_iter()
+            .chain(vec!["li:last-child::text".to_string(); 60])
+            .collect();
+        let cols = extract(html, &qs, None);
+        assert!(cols.iter().all(|c| !c.is_empty()), "in-budget schema lost a column");
+    }
+
     #[test]
     fn budget_members_over_128_is_safe_empty() {
         // 130 flat members: columns 0..127 are live, 128/129 are over the 128-member budget (dead).
@@ -956,10 +1787,22 @@ mod tests {
             ex("<div class=\"x\">a<b>c</b></div>", "div"),
             v(&["<div class=\"x\">a<b>c</b></div>"])
         );
-        // document order across nesting (outer before inner), not close order
+        // Document order across nesting (outer before inner), not close order. `*` also matches the
+        // SYNTHESIZED `<html>`/`<body>` — lxml returns the same four elements — and since outer HTML is
+        // raw source, a synthesized element's is the source it spans, without tags it never had.
         assert_eq!(
             ex("<div><span>s</span></div>", "*"),
-            v(&["<div><span>s</span></div>", "<span>s</span>"])
+            v(&[
+                "<div><span>s</span></div>", // the synthesized <html>, spanning the document
+                "<div><span>s</span></div>", // ...and the <body> inside it
+                "<div><span>s</span></div>",
+                "<span>s</span>",
+            ])
+        );
+        // scoped to what the page actually wrote, the frame is invisible
+        assert_eq!(
+            ex("<div><span>s</span></div>", "body > *"),
+            v(&["<div><span>s</span></div>"])
         );
         // multiple matches in document order
         assert_eq!(ex("<ul><li>a</li><li>b</li></ul>", "li"), v(&["<li>a</li>", "<li>b</li>"]));
@@ -973,6 +1816,27 @@ mod tests {
     fn outer_html_omitted_end_tag_is_raw() {
         // documented divergence: raw source, NOT lxml's reflow (lxml would synthesize </li>)
         assert_eq!(ex("<ul><li>a<li>b</ul>", "ul > li"), v(&["<li>a", "<li>b"]));
+    }
+
+    /// Raw source is raw about MARKUP, not about newlines: `\r\n` and lone `\r` become `\n` in HTML's
+    /// input stream before anything parses, so libxml2 and html5lib both serialize `\n` whatever the
+    /// bytes said. Text and attribute values already normalized and only the outer-HTML path did not —
+    /// a CRLF-authored crawled page put `\r` in all eight of its node columns.
+    #[test]
+    fn outer_html_normalizes_newlines_like_the_input_stream() {
+        assert_eq!(ex("<div>a\r\nb</div>", "div"), v(&["<div>a\nb</div>"]));
+        assert_eq!(ex("<div>a\rb</div>", "div"), v(&["<div>a\nb</div>"]));
+        assert_eq!(
+            ex("<div>\r\n<p>x</p>\r\n</div>", "div"),
+            v(&["<div>\n<p>x</p>\n</div>"])
+        );
+        // inside an attribute value of the captured span, too
+        assert_eq!(
+            ex("<div title=\"a\r\nb\">y</div>", "div"),
+            v(&["<div title=\"a\nb\">y</div>"])
+        );
+        // and it does NOT entity-decode: that is what keeps the span raw
+        assert_eq!(ex("<div>a&amp;b\r\nc</div>", "div"), v(&["<div>a&amp;b\nc</div>"]));
     }
 
     #[test]
@@ -1016,6 +1880,68 @@ mod tests {
             v(&["café"])
         );
     }
+    /// An attribute NAME is raw page bytes while a selector's is UTF-8, so it must be decoded before the
+    /// comparison or it agrees only on a UTF-8 page: `[data-año]` would match there and return NOTHING
+    /// for the same document in windows-1252, where lxml — which decodes before tokenizing — matches.
+    /// Values are unaffected either way (already decoded before comparison), which is what makes the
+    /// name half silent.
+    #[test]
+    fn encoding_non_ascii_attribute_names_are_decoded_before_comparison() {
+        // windows-1252: `data-año` is `data-a\xf1o`, one byte where UTF-8 writes two
+        let w1252 = b"<p data-a\xf1o=\"v\">t</p>";
+        assert_eq!(
+            extract(w1252, &["[data-año]::text".into()], Some("windows-1252"))[0],
+            v(&["t"])
+        );
+        // the predicate's VALUE and the `::attr()` terminal read the same materialized name
+        assert_eq!(
+            extract(w1252, &["[data-año=\"v\"]::attr(data-año)".into()], Some("windows-1252"))[0],
+            v(&["v"])
+        );
+        // shift_jis: a name whose bytes hold no ASCII at all
+        assert_eq!(
+            extract(
+                "<p 属性=\"v\">t</p>".as_bytes(),
+                &["[属性]::text".into()],
+                Some("utf-8"),
+            )[0],
+            v(&["t"])
+        );
+        assert_eq!(
+            extract(
+                &encoding_rs::SHIFT_JIS.encode("<p 属性=\"v\">t</p>").0,
+                &["[属性]::text".into()],
+                Some("shift_jis"),
+            )[0],
+            v(&["t"])
+        );
+        // a name the page spells in a DIFFERENT legacy encoding still must not match
+        assert_eq!(
+            extract(w1252, &["[data-año]::text".into()], Some("shift_jis"))[0],
+            v(&[])
+        );
+    }
+
+    /// ISO-2022-JP is NOT ASCII-compatible, so it has to be transcoded before tokenizing — see
+    /// [`prepare_bytes`]. In `ESC $ B` mode a JIS pair is two bytes below 0x80: `社` is `<R`, which a
+    /// byte tokenizer reads as a start tag, swallowing the character AND opening an `<r>` element that
+    /// is not in the document. That is a FALSE POSITIVE — an element a scraper can match — which is the
+    /// outcome no-fallback exists to prevent.
+    #[test]
+    fn encoding_iso_2022_jp_is_transcoded_not_byte_scanned() {
+        // 株式会社 = ESC $ B 3t <0 2q <R ESC ( B  — note the two `<` bytes inside the word
+        let body = b"<p>\x1b$B3t<02q<R\x1b(B</p><div>after</div>";
+        assert!(body.windows(2).any(|w| w == b"<R"), "vector must contain the ambiguous pair");
+        assert_eq!(
+            extract(body, &["p::text".into()], Some("iso-2022-jp"))[0],
+            v(&["株式会社"])
+        );
+        // and nothing downstream was reshaped by the phantom tag
+        assert_eq!(
+            extract(body, &["div::text".into(), "r::text".into()], Some("iso-2022-jp")),
+            vec![v(&["after"]), v(&[])]
+        );
+    }
     #[test]
     fn encoding_utf16_bom_transcode() {
         let mut body = vec![0xFF, 0xFE]; // UTF-16LE BOM
@@ -1026,9 +1952,53 @@ mod tests {
         assert_eq!(extract(&body, &["p::text".into()], None)[0], v(&["hi"]));
     }
 
+    /// Raw NUL is deleted from the WHOLE document before tokenizing, as Parsel/w3lib do. Dropping it
+    /// only from emitted values (the previous behaviour) meant the two sides disagreed about the
+    /// document's structure, so a NUL inside a tag or attribute NAME emptied the column outright.
+    #[test]
+    fn raw_nul_is_deleted_before_tokenizing_not_just_from_values() {
+        assert_eq!(ex("<di\0v>X</di\0v>", "div::text"), v(&["X"]));
+        assert_eq!(ex("<div cl\0ass=c>X</div>", "div.c::text"), v(&["X"]));
+        assert_eq!(ex("<div id=a\0b>X</div>", "#ab::text"), v(&["X"]));
+        assert_eq!(ex("<a hre\0f='/x'>t</a>", "a::attr(href)"), v(&["/x"]));
+        assert_eq!(ex("<p>a\0b</p>", "p::text"), v(&["ab"]));
+        assert_eq!(ex("<ul><li>a<li\0>b</ul>", "li::text"), v(&["a", "b"]));
+        // a NUL-only text node is nothing at all, in both engines
+        assert_eq!(ex("<div>\0</div>", "div::text"), Vec::<String>::new());
+        // a CHARACTER REFERENCE to NUL is a different thing and still becomes U+FFFD
+        assert_eq!(ex("<div>&#0;x</div>", "div::text"), v(&["\u{FFFD}x"]));
+        // outer HTML is raw SOURCE, so the deletion shows there too — the one documented exception
+        assert_eq!(ex("<di\0v id=x>t</div>", "div"), v(&["<div id=x>t</div>"]));
+    }
+
+    #[test]
+    fn raw_nul_in_utf16_is_deleted_after_transcoding() {
+        // Every ASCII character in UTF-16 carries a 0x00 byte, so the deletion has to happen on the
+        // DECODED text or it would shred the document. What goes is the U+0000 character.
+        //
+        // The NUL goes in a TAG NAME on purpose: a NUL in a value is handled by the value decoder too,
+        // so a test that only put one there passed with the document-level deletion disabled and proved
+        // nothing. Structure is the half that needs it.
+        let mut body = vec![0xFF, 0xFE]; // UTF-16LE BOM
+        for c in "<di\0v id=a\0b>h\0i</di\0v>".chars() {
+            body.push(c as u8);
+            body.push(0);
+        }
+        assert_eq!(extract(&body, &["div::text".into()], None)[0], v(&["hi"]));
+        assert_eq!(extract(&body, &["div#ab::text".into()], None)[0], v(&["hi"]));
+    }
+
     #[test]
     fn void_attr() {
         assert_eq!(ex("<img src=\"a.png\"><img src=\"b.png\">", "img::attr(src)"), v(&["a.png", "b.png"]));
+    }
+    #[test]
+    fn minimized_html4_boolean_attr_uses_its_name_as_value() {
+        assert_eq!(ex("<frame noresize>", "frame::attr(noresize)"), v(&["noresize"]));
+        assert_eq!(ex("<input DISABLED>", "input::attr(disabled)"), v(&["disabled"]));
+        // Explicitly empty and arbitrary valueless attributes remain empty.
+        assert_eq!(ex("<input disabled=\"\">", "input::attr(disabled)"), v(&[""]));
+        assert_eq!(ex("<div hidden>", "div::attr(hidden)"), v(&[""]));
     }
 
     // ---- global-desync guards: rawtext / comments / entities ----
@@ -1037,6 +2007,417 @@ mod tests {
         // '<' inside <script> must NOT desync the parser
         assert_eq!(ex("<script>if (a<b) {x=\"</p>\"}</script><p>t</p>", "p::text"), v(&["t"]));
     }
+    #[test]
+    fn script_double_escaped_content_does_not_desync() {
+        let h = "<script><!--[if IE]><script src=x></script><![endif]--><h4>not markup";
+        assert_eq!(ex(h, "h4::text"), Vec::<String>::new());
+        assert_eq!(
+            ex(h, "script::text"),
+            v(&["<!--[if IE]><script src=x></script><![endif]--><h4>not markup"])
+        );
+    }
+    #[test]
+    fn noframes_content_is_raw_text() {
+        let h = "<html><frameset><frame noresize></frameset><noframes><body>go <a href=x>here</a></body></noframes></html>";
+        assert_eq!(
+            ex(h, "noframes::text"),
+            v(&["<body>go <a href=x>here</a></body>"])
+        );
+        assert_eq!(ex(h, "noframes a::text"), Vec::<String>::new());
+    }
+    /// The rest of libxml2's data modes. Tokenizing any of these elements' CONTENT as markup is worse
+    /// than losing a value: it fabricates elements that are not in the document and then honours the
+    /// wrong end tag, desynchronizing every offset after it.
+    #[test]
+    fn iframe_noembed_xmp_content_is_raw_text() {
+        for t in ["iframe", "noembed", "xmp"] {
+            let h = format!("<{t}><div>fake</div></{t}><p>real</p>");
+            assert_eq!(ex(&h, "div::text"), Vec::<String>::new(), "<{t}> must not hold a real div");
+            assert_eq!(ex(&h, &format!("{t}::text")), v(&["<div>fake</div>"]));
+            assert_eq!(ex(&h, "p::text"), v(&["real"]), "<{t}> must not desync what follows");
+            // entities stay literal in all three (raw text, not RCDATA)
+            let e = format!("<{t}>a&amp;b</{t}>");
+            assert_eq!(ex(&e, &format!("{t}::text")), v(&["a&amp;b"]));
+        }
+    }
+
+    #[test]
+    fn plaintext_swallows_the_rest_of_the_document() {
+        let h = "<div><plaintext>a<div>fake</div><p>after</p>";
+        assert_eq!(ex(h, "plaintext::text"), v(&["a<div>fake</div><p>after</p>"]));
+        assert_eq!(ex(h, "p::text"), Vec::<String>::new());
+        // its own end tag is text too — nothing closes PLAINTEXT except end of document
+        assert_eq!(ex("<plaintext>a</plaintext>b", "plaintext::text"), v(&["a</plaintext>b"]));
+    }
+
+    /// libxml2 accepts `<html>`/`<head>`/`<body>` only as the document frame. Both halves of that had
+    /// observable consequences and neither was implemented.
+    #[test]
+    fn document_frame_tags_close_head_and_are_otherwise_ignored() {
+        // `<body>` closes an open `<head>` — a full document may legally omit `</head>`, and without
+        // this the whole body sat INSIDE the head.
+        let doc = "<html><head><title>T</title><body><p>X</p>";
+        assert_eq!(ex(doc, "html > body p::text"), v(&["X"]));
+        assert_eq!(ex(doc, "head > body p::text"), Vec::<String>::new());
+        assert_eq!(ex(doc, "html > head > title::text"), v(&["T"]));
+        // a REDUNDANT frame tag inserts nothing at all, and does not split the text node around it
+        assert_eq!(ex("<html><body><div>d<html>y</div>", "div::text"), v(&["dy"]));
+        assert_eq!(ex("<html><body><div>d<body>y</div>", "div::text"), v(&["dy"]));
+        assert_eq!(ex("<html><body><div>d<html id=Z>y</div>", "div > html::attr(id)"),
+                   Vec::<String>::new());
+        // ...but its implied closes still run: `<body>` closes an open `<p>`, so `y` is p's SIBLING
+        assert_eq!(ex("<html><body><p>x<body>y", "p::text"), v(&["x"]));
+        // and an end tag matching an ignored start tag pops that phantom, not the document
+        assert_eq!(ex("<html><body><div><body>x</body>tail</div>", "div::text"), v(&["xtail"]));
+        assert_eq!(ex("<html><body><div><body>x</div></body>tail", "div::text"), v(&["x"]));
+        // ...whichever of the three names each of them is. libxml2 keeps a stack SLOT for the tag it
+        // merged away, not a named token, so any frame end tag pops any frame phantom — a stray `<html>`
+        // in the body makes the document's own `</body>` a no-op. Counting phantoms per name matched
+        // only 2 of the 6 combinations.
+        for stray in ["html", "head", "body"] {
+            for closer in ["body", "html"] {
+                let doc = format!("<html><body>x<{stray}>y</{closer}>tail");
+                assert_eq!(ex(&doc, "body::text"), v(&["xytail"]),
+                           "a stray <{stray}> must absorb the following </{closer}>");
+            }
+        }
+    }
+
+    /// ...but written SELF-CLOSING, that same redundant tag closes the element it sits in — see
+    /// `Matcher::self_close_with_no_element_of_its_own`. Reading `<html/>` as "ignored, like `<html>`"
+    /// left a crawled page's stray `<strong>` open around its whole document.
+    #[test]
+    fn a_self_closed_redundant_frame_tag_closes_its_enclosing_element() {
+        for f in ["html", "head", "body"] {
+            // one level, and only one: the `<div>` outside survives
+            let doc = format!("<div><b>x<{f}/>y<i>S</i>");
+            assert_eq!(ex(&doc, "b::text"), v(&["x"]), "<{f}/> must end the <b>");
+            assert_eq!(ex(&doc, "div::text"), v(&["y"]), "<{f}/> must not end the <div>");
+            assert_eq!(ex(&doc, "div > i::text"), v(&["S"]));
+            // it pops what is CURRENT, whatever that is — including a table cell
+            assert_eq!(ex(&format!("<table><tr><td>x<{f}/>y"), "td::text"), v(&["x"]));
+            // after the implied closes this tag runs, not instead of them — which is visible in the
+            // split between the three names: `<head>`/`<body>` close an open `<p>` and `<html>` does
+            // not, so the extra pop lands one level further out for those two.
+            let implied = format!("<div>d<p>x<{f}/>y");
+            let outer = if f == "html" { v(&["d", "y"]) } else { v(&["d"]) };
+            assert_eq!(ex(&implied, "div::text"), outer);
+            // and the phantom it leaves still absorbs a later frame end tag — which is exactly what
+            // separates it from `<html></html>`, where the written end tag pops the phantom instead
+            assert_eq!(ex(&format!("<div><b>x<{f}/>y</body>z"), "div::text"), v(&["yz"]));
+            assert_eq!(ex(&format!("<div><b>x<{f}/>y</body></body>z"), "div::text"), v(&["y"]));
+        }
+        // a non-frame self-closing tag is unaffected: it has an element of its own to close
+        assert_eq!(ex("<div><b>x<zz/>y", "b::text"), v(&["x", "y"]));
+    }
+
+    /// A document that writes no `<html>`/`<head>`/`<body>` still HAS them: libxml2 synthesizes the
+    /// frame, and so does the engine.
+    ///
+    /// This was the largest documented gap. All three have optional start *and* end tags, so
+    /// `<!DOCTYPE html><title>T</title><h1>a</h1><p>b</p>` is a conformant document with no frame in the
+    /// byte stream at all — and every frame-anchored selector (`body h1`), every top-level sibling
+    /// combinator (`h1 + p`, which needs a shared parent), and all root-level text were empty here while
+    /// lxml answered. The rules below it are split into their own tests; this one owns the basic shape.
+    #[test]
+    fn the_document_frame_is_synthesized_when_the_page_omits_it() {
+        // the conformant-but-frameless document from docs/COMPATIBILITY.md
+        let doc = "<!DOCTYPE html><title>T</title><h1>a</h1><p>b</p>";
+        assert_eq!(ex(doc, "head > title::text"), v(&["T"]));
+        assert_eq!(ex(doc, "body h1::text"), v(&["a"]));
+        assert_eq!(ex(doc, "h1 + p::text"), v(&["b"])); // needs a shared parent to be siblings
+        assert_eq!(ex(doc, "html > body > p::text"), v(&["b"]));
+        assert_eq!(ex(doc, "body > :first-child::text"), v(&["a"]));
+
+        // a bare fragment gets a body, and root-level text is body text rather than dropped
+        assert_eq!(ex("<div>a</div>", "body div::text"), v(&["a"]));
+        assert_eq!(ex("abc", "body::text"), v(&["abc"]));
+        assert_eq!(ex("abc<div>d</div>", "body::text"), v(&["abc"]));
+        // ...but whitespace before the frame starts is not content and starts nothing
+        assert_eq!(ex("   \n <div>a</div>", "body > :first-child::text"), v(&["a"]));
+        assert_eq!(ex("   ", "body::text"), Vec::<String>::new());
+
+        // an explicit frame is still used as written — nothing is invented on top of it
+        assert_eq!(ex("<html><head><title>T</title></head><body><p>b</p></body></html>",
+                      "html > head > title::text"), v(&["T"]));
+        assert_eq!(ex("<html><div>d</div></html>", "html > body > div::text"), v(&["d"]));
+        assert_eq!(ex("<html>  <meta id=M>", "html > head > meta::attr(id)"), v(&["M"]));
+    }
+
+    /// WHICH part of a synthesized frame a bare element opens is DERIVED from the oracle over the whole
+    /// element universe (`implied_close::frame_content`), because it is not the relation it looks like:
+    /// only `base`/`link`/`meta`/`script`/`style`/`title` open a `<head>`, while `input`/`noscript`/
+    /// `template`/`basefont`/`bgsound`/`object` stay inside a head that is already open and open none.
+    #[test]
+    fn only_the_head_names_open_a_head() {
+        // the head is opened only by the names that open one, and only before the body starts
+        assert_eq!(ex("<meta id=M><div>d</div>", "head > meta::attr(id)"), v(&["M"]));
+        assert_eq!(ex("<div>d</div><meta id=M>", "body > meta::attr(id)"), v(&["M"]));
+        assert_eq!(ex("<div>d</div><meta id=M>", "head > meta::attr(id)"), Vec::<String>::new());
+        assert_eq!(ex("abc<meta id=M>", "body > meta::attr(id)"), v(&["M"]));
+        // an element that merely SURVIVES in an open head does not open one
+        for body_starter in ["input", "noscript", "template", "basefont", "bgsound", "object"] {
+            let d = format!("<{body_starter} id=Z>");
+            assert_eq!(ex(&d, &format!("body > {body_starter}::attr(id)")), v(&["Z"]),
+                       "<{body_starter}> must open a body, not a head");
+        }
+        // head content NESTED in body content stays where it is
+        assert_eq!(ex("<div><meta id=M></div>", "body div > meta::attr(id)"), v(&["M"]));
+    }
+
+    /// A frameset document has no `<body>` at all — including when the `<frameset>` is written INSIDE the
+    /// head, where it ends the head like any other non-head content but must NOT start a body. A real
+    /// frameset page does exactly that, and wrapping it in an invented body put the whole frameset (and
+    /// the `<body>` written after it) somewhere libxml2 never puts them.
+    #[test]
+    fn a_frameset_document_has_no_body() {
+        assert_eq!(ex("<html><head><frameset id=F><frame src=a></frameset></head><body>y</body>",
+                      "html > frameset::attr(id)"), v(&["F"]));
+        assert_eq!(ex("<html><head><frameset><frame src=a></frameset></head><body>y</body>",
+                      "frameset + body::text"), v(&["y"]));
+        assert_eq!(ex("<html><head><title>t</title><frameset id=F><frame src=a></frameset>",
+                      "html > frameset::attr(id)"), v(&["F"]));
+        // ...while an ordinary tag that ends the head still starts one
+        assert_eq!(ex("<html><head><title>t</title><div>d</div>", "body div::text"), v(&["d"]));
+        assert_eq!(ex("<frameset><frame src=a></frameset>", "html > frameset > frame::attr(src)"),
+                   v(&["a"]));
+        assert_eq!(ex("<frameset><frame src=a></frameset>", "body frame::attr(src)"),
+                   Vec::<String>::new());
+        // Head content inside an open `<frameset>` has no head to go in, so libxml2 opens a BODY for it —
+        // the same one it opens for ordinary content there. Exactly the six `FrameContent::Head` names
+        // change answer inside a frameset; found by `tools/seq_sweep.py`, then derived over the universe.
+        for head_content in ["title", "meta", "style", "link", "base", "script"] {
+            let doc = format!("<frameset><{head_content} id=Z>y");
+            assert_eq!(ex(&doc, "//body//*/@id"), v(&["Z"]),
+                       "<{head_content}> in a frameset belongs to a body");
+            assert_eq!(ex(&doc, "//head//*/@id"), Vec::<String>::new());
+        }
+    }
+
+    /// A written `<body>` is redundant only while one is OPEN — not merely because something else is.
+    /// Two crawled pages needed this: a frameset writing its no-frames fallback, and a `<body>` after a
+    /// `</body>` inside a table cell, where ignoring it left a whole trailing table nested in the earlier
+    /// cell. `<head>` has the OTHER rule — it belongs to the phase before any body content, so anything
+    /// else being open ends it whether or not a head is currently open.
+    #[test]
+    fn a_written_body_is_redundant_only_while_one_is_open() {
+        assert_eq!(ex("<frameset><body><p>gb</p></body></frameset>", "body > p::text"), v(&["gb"]));
+        assert_eq!(ex("<frameset><frameset><body><p>gb</p></frameset></frameset>", "body p::text"),
+                   v(&["gb"]));
+        assert_eq!(ex("<body id=1></body><td><body id=2>x", "//body/@id"), v(&["1", "2"]));
+        assert_eq!(ex("<body id=1></body><div><body id=2>x", "//body/@id"), v(&["1", "2"]));
+        // ...and while one IS open it is ignored, however deep
+        assert_eq!(ex("<body id=1><div><body id=2>x</div>", "//body/@id"), v(&["1"]));
+        assert_eq!(ex("<td><body id=Z>y", "body::attr(id)"), Vec::<String>::new());
+        // the `<head>` rule
+        assert_eq!(ex("<frameset><head id=Z><title>t</title></frameset>", "head::attr(id)"),
+                   Vec::<String>::new());
+        assert_eq!(ex("<head id=1></head><div><head id=2>x", "//head/@id"), v(&["1"]));
+        // Character data ends an open head even when there is no body to move it into: a `<head>`
+        // written after `</body>` keeps nothing but its elements.
+        assert_eq!(ex("<body id=0></body><head>y</head>", "head::text"), Vec::<String>::new());
+        assert_eq!(ex("<body id=0></body><head><title>t</title>y</head>", "head > title::text"),
+                   v(&["t"]));
+    }
+
+    /// A page whose FIRST tag is `<head>` or `<body>` writes no `<html>` — and still gets one. A frame
+    /// tag that builds only its own part leaves the head at the root with no parent and a second `<html>`
+    /// around whatever follows `</head>`, so `html > head`, `html > body` and `head + script` all come
+    /// back empty while the values under them look right.
+    #[test]
+    fn a_page_whose_first_tag_is_a_frame_part_still_gets_an_html() {
+        assert_eq!(ex("<head id=H><title>t</title></head><p>y</p>", "html > head::attr(id)"),
+                   v(&["H"]));
+        assert_eq!(ex("<body id=B><p>y</p></body>", "html > body::attr(id)"), v(&["B"]));
+        assert_eq!(ex("<head id=H></head><body id=B><p>y</p>", "html > head + body::attr(id)"),
+                   v(&["B"]));
+        // libxml2 leaves what follows an explicit `</head>` at `<html>` level (html5lib puts it back in
+        // the head; the oracle here is libxml2), so the script is the head's SIBLING.
+        assert_eq!(ex("<head><meta id=M></head><script>s</script><p>y</p>", "head + script::text"),
+                   v(&["s"]));
+    }
+
+    /// Content after `</html>` gets a SECOND ROOT `<html>`, the same shape libxml2 builds, and no body —
+    /// one was already established. A crawled page's trailing `<script>` was reachable as `//script` but
+    /// not as `//html/script` until the tail had that frame, and text there was dropped outright: with
+    /// the stack empty there is nothing to attach it to.
+    ///
+    /// The second root is verified against a crawled page that self-closes `<html/>` inside a
+    /// downlevel-revealed conditional comment, whose lxml tree has two roots both carrying the
+    /// attributes. Browsers keep one element instead, which is why parsel's own CSS (scoped to the first
+    /// root) and XPath disagree on such a document; the TREE is the oracle here.
+    #[test]
+    fn content_after_the_document_closes_gets_a_second_root() {
+        assert_eq!(ex("<html a=1 /><html a=2><p>x</p>", "//html/@a"), v(&["1", "2"]));
+        assert_eq!(ex("<html a=1></html><html a=2><p>x</p>", "//html/@a"), v(&["1", "2"]));
+        // ...and the tail still gets a parent, so the values under it stay reachable
+        assert_eq!(ex("<html a=1></html><p>x</p>", "html > body > p::text"), v(&["x"]));
+        assert_eq!(ex("<div id=0></html>x", "//html/text()"), v(&["x"]));
+        assert_eq!(ex("<html><body>y</body></html>tail", "//html/text()"), v(&["tail"]));
+        assert_eq!(ex("<html><body>x</body></html><script>s</script>", "//html/script/text()"),
+                   v(&["s"]));
+        assert_eq!(ex("<html><body>x</body></html><p>y</p>", "//html/p/text()"), v(&["y"]));
+        assert_eq!(ex("<html><body>x</body></html><p>y</p>", "//html/body/p/text()"),
+                   Vec::<String>::new());
+    }
+
+    /// `</head>` is an unconditional closer like `</body>`/`</html>`: libxml2 gives it the same end
+    /// priority, so no open element out-ranks it. With `head` left at priority 0 an open `<tr>` blocked
+    /// it and everything after the `</head>` stayed inside the head. Found by `tools/seq_sweep.py`.
+    #[test]
+    fn a_frame_end_tag_is_never_out_ranked() {
+        assert_eq!(ex("<head id=0><tr id=1></head><div id=3>", "//*[@id=\"0\"]//*/@id"), v(&["1"]));
+        assert_eq!(ex("<head id=0><td id=1></head><div id=3>", "//*[@id=\"0\"]//*/@id"), v(&["1"]));
+    }
+
+    /// The first thing that does not belong in `<head>` ends the head AND OPENS THE BODY, and
+    /// everything after it — including the remaining `<meta>`/`<link>`/`<title>`/`<script>` — is a child
+    /// of that body.
+    ///
+    /// The engine already closed the head (the start-close relation has it) but had no body to open, so
+    /// the content landed under `<html>` instead and every frame-anchored or positional selector
+    /// disagreed: `head + body::text` and `html > body::text` came back empty, and `a:first-child`
+    /// picked a different element — in both directions, because the relocation both adds elements to
+    /// the body and removes them from the head.
+    ///
+    /// Checked against BOTH oracles, which is why this is a fix and not a divergence: libxml2 and
+    /// html5lib (the HTML5 spec reference implementation) place the content identically here, on every
+    /// shape below and on the four crawled pages that surfaced it. They part company only *after an
+    /// explicit* `</head>` — `<html><head></head><meta>` leaves the meta at `<html>` level in libxml2
+    /// and back in the head in html5lib — so that path is deliberately untouched, and the body is
+    /// synthesized only where the head ends IMPLICITLY.
+    #[test]
+    fn non_head_content_ends_the_head_and_opens_the_body() {
+        // a start tag that closes the head opens the body, and the head's own elements stay behind
+        let doc = "<html><head><style>s</style><div>D</div><link rel=x></head><body><p>P</p></body>";
+        assert_eq!(ex(doc, "head > style::text"), v(&["s"]));
+        assert_eq!(ex(doc, "body > div::text"), v(&["D"]));
+        assert_eq!(ex(doc, "head > div::text"), Vec::<String>::new());
+        // the <link> AFTER the head ended is a body child, not a head child
+        assert_eq!(ex(doc, "body > link::attr(rel)"), v(&["x"]));
+        assert_eq!(ex(doc, "head > link::attr(rel)"), Vec::<String>::new());
+        // ...and the explicit <body> that follows is redundant, so there is exactly one body
+        assert_eq!(ex(doc, "body > p::text"), v(&["P"]));
+        assert_eq!(ex(doc, "body body p::text"), Vec::<String>::new());
+
+        // NON-WHITESPACE TEXT does it too, and the run SPLITS at the first non-space character:
+        // the leading whitespace is still the head's, the rest starts the body.
+        let t = "<html><head>\n\t  TXT<meta charset=x></head><body><p>P</p>";
+        assert_eq!(ex(t, "body::text"), v(&["TXT"]));
+        assert_eq!(ex(t, "head::text"), v(&["\n\t  "]));
+        assert_eq!(ex(t, "body > meta::attr(charset)"), v(&["x"]));
+        // whitespace ALONE is not "content" and leaves the head open
+        assert_eq!(ex("<html><head>\n <title>T</title></head><body><p>P</p>",
+                      "head > title::text"), v(&["T"]));
+        // nor is text INSIDE a head element — only text whose parent is the head itself
+        assert_eq!(ex("<html><head><title>T</title></head><body><p>P</p>",
+                      "head > title::text"), v(&["T"]));
+
+        // frame-anchored and positional selectors are the ones that were wrong, in both directions
+        let a = "<html><head><style>s</style><a href=x>A</a></head><body><p>P</p>";
+        assert_eq!(ex(a, "a:first-child::text"), v(&["A"])); // a IS body's first element child
+        assert_eq!(ex(a, "head + body a::text"), v(&["A"]));
+        assert_eq!(ex(a, "html > body a::text"), v(&["A"]));
+
+        // head-only elements do NOT end the head, so they must not open a body
+        for keep in ["<meta charset=x>", "<link rel=r>", "<base href=b>", "<script>s</script>"] {
+            let d = format!("<html><head>{keep}<title>T</title></head><body><p>P</p>");
+            assert_eq!(ex(&d, "head > title::text"), v(&["T"]), "{keep} must not end the head");
+        }
+        // a document with no `<head>` at all reaches the body through frame synthesis instead
+        assert_eq!(ex("<div>a</div>", "body div::text"), v(&["a"]));
+        assert_eq!(ex("<div>a</div>", "head div::text"), Vec::<String>::new());
+    }
+
+    /// A TAG NAME runs to whitespace, `>` or `/` — every other byte is part of the name, including `<`.
+    ///
+    /// libxml2's `htmlParseHTMLName` stops only at those three, so `<p<img src=s>` is one element named
+    /// `p<img`, not a `<p>` carrying an odd attribute. The engine ended the name at the first byte
+    /// outside `[A-Za-z0-9_:-]` and so reported a `p` that is not in the document — a FALSE POSITIVE,
+    /// which is the failure mode the no-fallback rule exists to prevent (an unsupported query returns
+    /// nothing; a supported one must not return something that is not there).
+    ///
+    /// Found on a crawled page that writes `<p<mip-img …>` twelve times. The tokenizer already had the
+    /// rule in one place — `find_raw_end` ends a rawtext close tag on exactly whitespace/`>`/`/` — so
+    /// the two name scanners disagreed with each other as well as with the oracle.
+    #[test]
+    fn a_tag_name_ends_only_at_whitespace_slash_or_gt() {
+        // the crawled shape: `p` must NOT match, because the element is not a `p`
+        let doc = "<div><p<img src=s>T</div>";
+        assert_eq!(ex(doc, "p::text"), Vec::<String>::new());
+        assert_eq!(ex(doc, "div > *::text"), v(&["T"])); // it IS an element, just not that one
+        // ...and neither do the other bytes libxml2 keeps in a name
+        for bad in ["<p.x>", "<p#x>", "<p\"x>", "<p=x>", "<p&x>", "<p,x>", "<p(x)>", "<p@x>"] {
+            let d = format!("<div>{bad}T</div>");
+            assert_eq!(ex(&d, "p::text"), Vec::<String>::new(), "{bad} must not be a <p>");
+            assert_eq!(ex(&d, "div > *::text"), v(&["T"]), "{bad} must still be an element");
+        }
+        // an END tag reads the name the same way, so it closes that element and not the short one
+        assert_eq!(ex("<div><p<img>T</p<img>U</div>", "div::text"), v(&["U"]));
+        assert_eq!(ex("<div><p>T</p.x>U</div>", "p::text"), v(&["TU"])); // `</p.x>` closes no `<p>`
+
+        // `/` and whitespace still terminate, so an ordinary tag is untouched
+        assert_eq!(ex("<div><p/x>T</div>", "p::text"), v(&["T"]));
+        assert_eq!(ex("<div><p class=a>T</div>", "p.a::text"), v(&["T"]));
+        assert_eq!(ex("<div><p\tid=i>T</div>", "p#i::text"), v(&["T"]));
+        assert_eq!(ex("<img src=s><p>T", "p::text"), v(&["T"]));
+        // a `<` that does not begin a tag is still text, so ordinary prose is unaffected
+        assert_eq!(ex("<p>a < b and 3<4</p>", "p::text"), v(&["a < b and 3<4"]));
+    }
+
+    /// HTML5's END-TAG-OPEN state: only an ASCII alpha starts an end tag.
+    ///
+    /// The engine collapsed all three branches into "scan a name, skip to `>`", and `is_name_char`
+    /// accepts `%`/`1`/`-`, so `</%>` became an end tag named `%` — dropped as unmatched, JOINING the
+    /// text either side, where libxml2 keeps a bogus-comment node that SPLITS it. A real page's
+    /// `Copyright 1991-2026</%> VECMAR Corporation` came back as one text node instead of two. `</>` was
+    /// the same bug the other way round: no event at all, so the runs were left un-joined where libxml2
+    /// ignores the whole thing and keeps ONE node.
+    #[test]
+    fn end_tag_open_only_starts_a_tag_on_a_letter() {
+        // a BOGUS COMMENT is a node, so it splits the run
+        for bogus in ["</%>", "</1>", "</-x>", "</ >", "</%%%>"] {
+            let doc = format!("<span>a{bogus}b</span>");
+            assert_eq!(ex(&doc, "span::text"), v(&["a", "b"]), "{bogus} must split the text node");
+        }
+        // ...and it runs to the first `>`, quotes and all, so this is a LOCAL difference and not an
+        // offset desync: both engines resume at the same byte
+        assert_eq!(ex("<span>a</% x=\">\">b</span>", "span::text"), v(&["a", "\">b"]));
+        // `</>` is ignored entirely — no node, so the runs are ONE
+        assert_eq!(ex("<span>a</>b</span>", "span::text"), v(&["ab"]));
+        // a real end tag still behaves like one, matched or not
+        assert_eq!(ex("<span>a</p>b</span>", "span::text"), v(&["ab"]));
+        assert_eq!(ex("<span>a</span>b", "span::text"), v(&["a"]));
+        // EOF right after `</`: character data, joined to the run before it
+        assert_eq!(ex("<span>a</", "span::text"), v(&["a</"]));
+    }
+
+    /// A DOCTYPE is invisible to the text node around it; every other declaration form breaks it.
+    ///
+    /// Measured against the oracle rather than assumed: `<!foo>`, `<![CDATA[…]]>`, `<?x?>` and `<!>`
+    /// all end the run in libxml2, and only `<!DOCTYPE …>` does not. Found on a crawled page that opens
+    /// with stray U+FEFF characters and then its doctype, which split what libxml2 keeps as one node.
+    #[test]
+    fn a_doctype_does_not_break_a_text_node() {
+        assert_eq!(ex("<div>a<!doctype html>b</div>", "div::text"), v(&["ab"]));
+        assert_eq!(ex("<div>a<!DOCTYPE HTML>b</div>", "div::text"), v(&["ab"]));
+        assert_eq!(ex("<div>a<!doctype html><!doctype html>b</div>", "div::text"), v(&["ab"]));
+        // ...but everything else in the `<!`/`<?` family DOES break it, in both engines
+        assert_eq!(ex("<div>a<!--c-->b</div>", "div::text"), v(&["a", "b"]));
+        assert_eq!(ex("<div>a<!foo>b</div>", "div::text"), v(&["a", "b"]));
+        assert_eq!(ex("<div>a<![CDATA[x]]>b</div>", "div::text"), v(&["a", "b"]));
+        assert_eq!(ex("<div>a<?x?>b</div>", "div::text"), v(&["a", "b"]));
+        assert_eq!(ex("<div>a<!>b</div>", "div::text"), v(&["a", "b"]));
+        // a doctype followed by a comment still breaks — on the comment
+        assert_eq!(ex("<div>a<!doctype html><!--c-->b</div>", "div::text"), v(&["a", "b"]));
+        // libxml2 matches on the seven-letter PREFIX, case-insensitively, and does not require the name
+        // to be terminated — so these are doctypes and `<!doctyp>` is not
+        assert_eq!(ex("<div>a<!doctypex>b</div>", "div::text"), v(&["ab"]));
+        assert_eq!(ex("<div>a<!DoCtYpE x>b</div>", "div::text"), v(&["ab"]));
+        assert_eq!(ex("<div>a<!doctype>b</div>", "div::text"), v(&["ab"]));
+        assert_eq!(ex("<div>a<!doctyp>b</div>", "div::text"), v(&["a", "b"]));
+    }
+
     #[test]
     fn comment_breaks_text_and_is_skipped() {
         assert_eq!(ex("<p>a<!-- c -->b</p>", "p::text"), v(&["a", "b"]));
@@ -1056,6 +2437,129 @@ mod tests {
         // and in an attribute value
         let attr = "<a title=\"\u{FEFF}hi\">t</a>".as_bytes();
         assert_eq!(extract(attr, &["a::attr(title)".into()], None)[0], v(&["\u{FEFF}hi"]));
+    }
+    /// An INDENTED BOM still counts as the document BOM, because Parsel parses `text.strip()` — see
+    /// [`document_bounds`]. What makes this worth a test rather than a footnote is the size of the
+    /// silence when it is missed: the U+FEFF is a character, a character before the frame opens the
+    /// `<body>`, and from there the page's whole head is outside `head` and its `<html>` tag is a
+    /// redundant duplicate whose attributes are dropped.
+    #[test]
+    fn indented_bom_is_still_the_document_bom() {
+        let q: Vec<String> = ["head title::text", "html::attr(xmlns)", "body::text"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let doc = b"  \t\n\xEF\xBB\xBF<!DOCTYPE HTML><html xmlns=\"x\"><head><title>T</title></head><body>b";
+        assert_eq!(extract(doc, &q, None), vec![v(&["T"]), v(&["x"]), v(&["b"])]);
+        // ...but only whitespace may precede it: after anything else the frame is already open, so the
+        // U+FEFF is content — libxml2 keeps it and so does Parsel, whose strip cannot reach it.
+        let after = b"z\xEF\xBB\xBF<!DOCTYPE HTML><html xmlns=\"x\"><head><title>T</title></head><body>b";
+        assert_eq!(
+            extract(after, &q, None),
+            vec![v(&[]), v(&[]), v(&["z\u{FEFF}", "b"])]
+        );
+        // and a non-UTF-8 page decodes those three bytes as three characters, exactly as Parsel does
+        let cp1252 = b"  \xEF\xBB\xBF<html><head><title>T</title></head><body>b";
+        assert_eq!(
+            extract(cp1252, &q, Some("windows-1252"))[0],
+            v(&[]),
+            "EF BB BF is not a BOM outside UTF-8"
+        );
+    }
+    /// A stray `=` where an attribute name should start is that name's first character, not a
+    /// separator — so the attribute AFTER it is still parsed. Reading it as a separator dropped the
+    /// real attribute (empty name) and swallowed the next one as its value.
+    #[test]
+    fn a_stray_equals_before_an_attribute_name_does_not_eat_the_next_attribute() {
+        assert_eq!(ex("<div = class='x'>y</div>", "div::attr(class)"), v(&["x"]));
+        assert_eq!(ex("<div = class='x'>y</div>", "div[class]::text"), v(&["y"]));
+        // ...including after a real attribute, and with the id still readable
+        let both = "<div id=q = class='x'>y</div>";
+        assert_eq!(ex(both, "div::attr(class)"), v(&["x"]));
+        assert_eq!(ex(both, "div::attr(id)"), v(&["q"]));
+        // the `=` itself is part of the name that follows it, so it consumes no real attribute
+        assert_eq!(ex("<div =foo class=c>y</div>", "div::attr(class)"), v(&["c"]));
+        // and `==x` is one attribute named `=` with value `x` — the next attribute still parses
+        assert_eq!(ex("<div ==x class=c>y</div>", "div::attr(class)"), v(&["c"]));
+    }
+
+    /// A start tag the response ends inside is DROPPED, whole — libxml2 and html5lib agree. Keeping
+    /// whatever was scanned is the false-positive direction: an element, with an attribute value holding
+    /// the rest of the document, that no other parser reports.
+    #[test]
+    fn a_start_tag_cut_off_by_eof_is_dropped() {
+        for tail in ["<a", "<a ", "<a href", "<a href=", "<a href=\"x", "<a href='x", "<a href=x"] {
+            let doc = format!("<p>t</p>{tail}");
+            assert_eq!(ex(&doc, "a::attr(href)"), Vec::<String>::new(), "{tail}");
+            assert_eq!(ex(&doc, "a"), Vec::<String>::new(), "{tail} must not exist at all");
+            // the text before it is untouched, and does not gain the dropped bytes
+            assert_eq!(ex(&doc, "p::text"), v(&["t"]), "{tail}");
+        }
+        // the real shape: an unterminated quoted value swallowing the document tail
+        let real = "<p>t<a href=\"login.?>login</a>]</td></table></body>\n</html>";
+        assert_eq!(ex(real, "a::attr(href)"), Vec::<String>::new());
+        assert_eq!(ex(real, "p::text"), v(&["t"]));
+        // a tag that IS terminated keeps working, closing `>` or `/>`
+        assert_eq!(ex("<p>t</p><a href=\"x\">y", "a::attr(href)"), v(&["x"]));
+        assert_eq!(ex("<p>t</p><img src=\"x\"/>", "img::attr(src)"), v(&["x"]));
+    }
+
+    /// The other half of that same `text.strip()`: trailing whitespace is not a text node, because
+    /// Parsel removed it before libxml2 ever saw it — see [`document_bounds`]. Whitespace-only, so it
+    /// changes no value, but it does change the ROW COUNT of a `::text` column.
+    #[test]
+    fn trailing_whitespace_is_not_a_text_node() {
+        let doc = b"<select><option>a<option class=c>\n\t ";
+        assert_eq!(extract(doc, &["option::text".into()], None)[0], v(&["a"]));
+        // ...and a document that is nothing but whitespace has no content at all
+        assert_eq!(extract(b"  \n ", &["p::text".into()], None)[0], v(&[]));
+        // non-whitespace at the end is untouched, trailing whitespace INSIDE it too
+        let kept = b"<p>a </p>\n";
+        assert_eq!(extract(kept, &["p::text".into()], None)[0], v(&["a "]));
+    }
+
+    /// VERTICAL TAB is in Python's strip set and not in Rust's `is_ascii_whitespace`, and the gap was a
+    /// whole missing head: leading `0x0b` is stripped for Parsel, while an un-stripped one is character
+    /// data before the frame and opens the `<body>`. See [`is_strip_ws`].
+    #[test]
+    fn vertical_tab_is_stripped_like_python_does() {
+        let q: Vec<String> = ["head title::text", "html::attr(a)"].iter().map(|s| s.to_string()).collect();
+        let want = vec![v(&["T"]), v(&["1"])];
+        let page = |lead: &str| format!("{lead}<html a=1><head><title>T</title></head><body><p>p</p>");
+        for lead in ["\u{0b}", " \u{0b}\n", "\u{0c}"] {
+            assert_eq!(extract(page(lead).as_bytes(), &q, None), want, "lead {lead:?}");
+            // ...in a single-byte encoding too: Parsel strips the DECODED text, so the label is
+            // irrelevant to this half — only the BOM below is UTF-8-gated.
+            assert_eq!(extract(page(lead).as_bytes(), &q, Some("windows-1252")), want, "cp1252 {lead:?}");
+        }
+        // stripping a vertical tab can expose the BOM, exactly as stripping a space can
+        assert_eq!(extract(page("\u{0b}\u{feff}").as_bytes(), &q, None), want);
+        // trailing, the other end of the same strip: no text node for the last option
+        let doc = b"<select><option>a<option class=c>\x0b";
+        assert_eq!(extract(doc, &["option::text".into()], None)[0], v(&["a"]));
+        // ...but a vertical tab INSIDE the document is ordinary character data, not whitespace to
+        // strip and not HTML whitespace either — it must survive in the value verbatim.
+        assert_eq!(ex("<p>a\u{0b}b</p>", "p::text"), v(&["a\u{0b}b"]));
+    }
+
+    /// NUL is deleted AFTER the ends are trimmed, matching `Selector(text=…)` — the path Scrapy and
+    /// web-poet are on. Recomputing the bounds afterwards would match `Selector(body=…)` instead and
+    /// diverge from every Scrapy scraper; see [`normalize`].
+    #[test]
+    fn nul_is_deleted_after_the_ends_are_trimmed() {
+        // the NUL is the last byte, so it blocks the strip and the space before it survives
+        assert_eq!(extract(b"<option>x \x00", &["option::text".into()], None)[0], v(&["x "]));
+        // and here it blocks the strip that would otherwise promote the U+FEFF to offset 0, leaving it
+        // a character — which opens the body, so the head is gone
+        let doc = b"\x00 \xEF\xBB\xBF<html a=1><head><title>T</title></head><body><p>p</p>";
+        let q: Vec<String> = ["head title::text", "html::attr(a)", "p::text"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(extract(doc, &q, None), vec![v(&[]), v(&[]), v(&["p"])]);
+        // without the NUL the same page strips down to the BOM and keeps its head
+        let stripped = b" \xEF\xBB\xBF<html a=1><head><title>T</title></head><body><p>p</p>";
+        assert_eq!(extract(stripped, &q, None), vec![v(&["T"]), v(&["1"]), v(&["p"])]);
     }
     #[test]
     fn lt_not_a_tag_is_text() {

@@ -36,13 +36,17 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      # the `python` feature is OFF here (it links libpython only under maturin); lib + differ/bench bins
-      - run: cargo test
-      - run: cargo clippy --all-targets -- -D warnings
+      # `make test` = cargo test + clippy. The `python` feature is OFF here (it links libpython only
+      # under maturin); this builds the lib + differ/bench bins.
+      - run: make test
 
   differential:
     name: differential gate + python
     runs-on: ubuntu-latest
+    # EVERY STEP IS A MAKE TARGET, and that is the point rather than a convenience: this job used to
+    # inline the same commands, and it drifted — `make ci` grew the sequence sweep and the generated-table
+    # drift check, and hosted CI ran neither, so the checks a contributor is told are mandatory were not
+    # the checks a pull request had to pass. Add a gate to the Makefile and it lands here for free.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -52,39 +56,47 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
-      # the differ/bench bins the harness drives (built without the `python` feature)
-      - run: cargo build --release --bin differ --bin bench
       - run: python -m venv .venv
       # pin the oracle exactly: an lxml/parsel upgrade silently moving the reference must be a
       # deliberate bump, not an incidental one that quietly changes what "parity" means.
       - run: .venv/bin/pip install -r requirements-test.txt
-      # correctness gate: 0 non-whitespace DIVERGE + 0 CRASH vs lxml (flat AND grouped One/Many)
-      - run: .venv/bin/python tools/diff_lxml.py
-      - run: .venv/bin/python tools/enc_check.py
-      # differential fuzz: mutate well-formed pages into MALFORMED HTML and diff vs lxml. DIVERGE is
-      # expected here (documented foster-parenting / adoption-agency SKIP set), so only CRASH is gated
-      # (--gate): any panic on any input is a real bug. Catches tokenizer desync (e.g. comment-close)
-      # that the well-formed gate can't reach.
-      - run: .venv/bin/python tools/diff_fuzz.py --iters 6000 --gate
-      # selector fuzz: fuzz the QUERY (valid/exotic/malformed/budget-bomb) against real pages. Enforces
-      # the no-fallback contract — a column is empty OR equals lxml, never non-empty-and-wrong, never a
-      # crash. Gates WRONG (disagree) + OVERMATCH (data on a parsel-invalid selector) + CRASH.
-      - run: .venv/bin/python tools/sel_fuzz.py --iters 6000 --gate
-      # build the extension into the venv, then exercise the Python surface (extract, Page, FrostPage, Many/One)
-      - run: .venv/bin/maturin develop --release
-      - run: .venv/bin/python -m pytest tests/test_python.py -q
-      - run: .venv/bin/python tools/support_snapshot.py --check
+      # The gates hosted CI runs are the gates `make ci` runs, by NAME rather than by a second copy of
+      # the command list. The copy had already drifted: three targets in the Makefile were missing here,
+      # which is the failure the meta-gates exist to catch, one level up.
+      #
+      # `make gate` — 0 non-whitespace DIVERGE + 0 CRASH vs lxml (flat AND grouped One/Many), then
+      # encoding parity. Builds the differ/bench bins the harness drives.
+      - run: make gate
+      # selector fuzz (no-fallback contract: empty OR equal to lxml, never non-empty-and-wrong) plus
+      # malformed-HTML fuzz (CRASH gated absolutely, NOVEL as a rate).
+      - run: make fuzz-smoke
+      # builds the extension, then: the Python surface, tests/test_gates.py (which seeds a regression
+      # into each gate's decision function and asserts it goes red), the support snapshot, the GENERATED
+      # rule tables against the oracle, every tree-construction rule cell against lxml, and mypy over the
+      # shipped package (its annotations are a promise to every user's type checker).
+      - run: make py
+      # value parity over PAGES rather than rules: the fixtures are shaped like the doc-generator and
+      # table markup that broke the engine while the generated gate read 100%.
+      - run: make gate-corpus
+      # TAG SEQUENCES, exhaustively, compared on the whole tree — the surface where the state at token N
+      # depends on tokens 1..N-1, which no (open x incoming) rule sweep can reach.
+      - run: make gate-seq
+      # The layer ABOVE the engine: does a page OBJECT return parsel's item? Five defects lived in that
+      # gap, three of them silent. Includes the derived upstream-surface snapshot.
+      - run: make gate-webpoet
+      # And the inverse: break one load-bearing line in webpoet.py, does any gate notice?
+      - run: make gate-webpoet-mutate
 
   bindings:
     name: bindings (py${{ matrix.python }} / ${{ matrix.os }})
-    # The heavy differential runs once (above) on 3.12/linux. This matrix only builds the extension
-    # and runs the Python suite, cheaply covering the abi3 floor (3.10), the newest CPython, the next
-    # prerelease one, and macOS.
+    # The heavy differential runs once (above) on 3.12/linux. This matrix only builds the extension and
+    # runs the Python suite, cheaply covering the newest CPython, the next prerelease one, and macOS. The
+    # abi3 FLOOR is a separate job below, and since the floor moved to 3.10 it runs this same suite rather
+    # than a stand-in.
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest, python: "3.10" }
           - { os: ubuntu-latest, python: "3.14" }
           - { os: ubuntu-latest, python: "3.15", prerelease: true }
           - { os: macos-latest, python: "3.12" }
@@ -106,4 +118,28 @@ jobs:
         run: .venv/bin/pip install --force-reinstall --no-binary charset-normalizer,time-machine charset-normalizer time-machine
       - run: .venv/bin/maturin develop --release
       - run: .venv/bin/python -m pytest tests/test_python.py -q
+      - run: .venv/bin/python examples/basic.py  # keep the documented example runnable
+
+  abi3-floor:
+    name: abi3 floor (py3.10 / ubuntu-latest)
+    # The wheel is abi3-py310, so 3.10 must keep working. At the old 3.9 floor this job could not run the
+    # suite at all — `parsel`, `web-poet` and `pytest` each require >= 3.10, so it built the extension and
+    # ran tools/abi3_smoke.py (stdlib + frostwork only) as a stand-in. 3.10 is the first version where the
+    # pinned toolchain installs, so the floor now gets the SAME suite as every other interpreter, which is
+    # strictly more coverage than the smoke test it replaces.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.10"
+      - run: python -m venv .venv
+      - run: .venv/bin/pip install -r requirements-test.txt
+      - run: .venv/bin/maturin develop --release
+      - run: .venv/bin/python -m pytest tests/ -q
+      - run: .venv/bin/python tools/abi3_smoke.py   # the wheel must also work with NO dependencies present
       - run: .venv/bin/python examples/basic.py  # keep the documented example runnable

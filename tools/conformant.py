@@ -4,9 +4,9 @@ HTML content model allows, table cells only inside tables, options only inside s
 only phrasing, no head-only elements in the body — with optional end tags omitted **only where HTML
 permits** (`li`/`dt`/`dd`/`option`/`td`/`tr`/`p`).
 
-The point: on such input the engine and lxml apply the *same* rules (Frostwork ported lxml's implied
-close), so they must agree byte-for-byte. That makes the differential a clean gate — any DIVERGE on
-this generator is a true engine bug, not tree-construction leakage (unlike the unconstrained grammar
+The point: on such input the engine and lxml apply the *same* rules (Frostwork reproduces lxml's
+implied close), so they must agree byte-for-byte. That makes the differential a clean gate — any
+DIVERGE on this generator is a true engine bug, not tree-construction leakage (unlike the grammar
 in diff_parity, which emits stray `<td>`/`<title>`/misnested formatting that libxml2 reshapes).
 
 Deterministic given an rng. `generate(rng) -> bytes`; `BASKET` is a supported-selector basket.
@@ -94,10 +94,28 @@ def _dl(rng, depth, ctr):
     omit = rng.random() < 0.5
     parts = []
     for _ in range(rng.randint(1, 3)):
-        n = _next(ctr)
-        parts.append(f"<dt{_attr(rng, n)}>{gen_phrasing(rng, depth - 1, False, ctr)}" + ("" if omit else "</dt>"))
-        parts.append(f"<dd{_attr(rng, n)}>{gen_phrasing(rng, depth - 1, False, ctr)}" + ("" if omit else "</dd>"))
+        # Emit RUNS of the same term/definition tag, not just a strict dt->dd alternation. libxml2
+        # auto-closes only the CROSS pair and nests a same-tag repeat, so `<dt>a<dt>b` is the shape that
+        # actually discriminates the rule — with alternation alone the whole family looks correct.
+        for tag in ("dt", "dd"):
+            for _ in range(rng.randint(1, 2) if omit else 1):
+                n = _next(ctr)
+                body = gen_phrasing(rng, depth - 1, False, ctr)
+                parts.append(f"<{tag}{_attr(rng, n)}>{body}" + ("" if omit else f"</{tag}>"))
     return "<dl>" + "".join(parts) + "</dl>"
+
+
+def _ruby(rng, depth, ctr):
+    """`ruby`/`rt`/`rp` — libxml2 never auto-closes annotations (they nest), unlike every other
+    optional-end-tag family. Previously ungenerated, so the rule had zero differential coverage."""
+    omit = rng.random() < 0.5
+    parts = []
+    for _ in range(rng.randint(1, 3)):
+        n = _next(ctr)
+        parts.append(_text(rng))
+        for tag in rng.choice([("rt",), ("rp",), ("rt", "rp"), ("rt", "rt"), ("rp", "rt")]):
+            parts.append(f"<{tag}{_attr(rng, n)}>{_text(rng)}" + ("" if omit else f"</{tag}>"))
+    return "<ruby>" + "".join(parts) + "</ruby>"
 
 
 def _table(rng, depth, ctr):
@@ -115,6 +133,23 @@ def _table(rng, depth, ctr):
     inner = "".join(rows)
     if use_tbody:
         inner = "<tbody>" + inner + ("" if omit else "</tbody>")
+    # Section/caption RUNS with omitted end tags. `<thead>…<tbody>` after an unclosed row or cell is
+    # everyday generated markup, and the three sections are NOT interchangeable in libxml2 (`<tbody>`/
+    # `<tfoot>` close an open row/cell, `<thead>` nests). None of this was generated before.
+    if rng.random() < 0.4:
+        head_cells = "".join(f"<th>{_text(rng)}" + ("" if omit else "</th>")
+                             for _ in range(rng.randint(1, 2)))
+        head = "<thead><tr>" + head_cells + ("" if omit else "</tr></thead>")
+        inner = head + inner
+    if rng.random() < 0.3:
+        inner += "<tfoot><tr><td>" + _text(rng) + ("" if omit else "</td></tr></tfoot>")
+    if rng.random() < 0.3:
+        inner = f"<caption>{_text(rng)}" + ("" if omit else "</caption>") + inner
+    # `<colgroup><col>…` with an omitted `</colgroup>` is ordinary table markup and had NO rule: the
+    # sections ended up nested inside the colgroup, so a child-anchored selector lost the cells.
+    if rng.random() < 0.35:
+        cols = "".join(f"<col{_attr(rng, _next(ctr))}>" for _ in range(rng.randint(1, 3)))
+        inner = f"<colgroup>{cols}" + ("" if omit else "</colgroup>") + inner
     return "<table>" + inner + "</table>"
 
 
@@ -123,7 +158,16 @@ def _select(rng, depth, ctr):
     opts = []
     for _ in range(rng.randint(1, 4)):
         n = _next(ctr)
+        # `<optgroup>` RUNS with an omitted end tag are ordinary markup on real pages, and libxml2
+        # NESTS them (it does not auto-close a same-tag repeat).
+        # Keep the "did I open one?" answer in a local: sniffing the output for `"optgroup"` also matches
+        # `"</optgroup>"`, which appended stray closers into a CONFORMANT page.
+        opened = rng.random() < 0.35
+        if opened:
+            opts.append(f'<optgroup label="g{n}"{_attr(rng, n)}>')
         opts.append(f"<option{_attr(rng, n)}>{_text(rng)}" + ("" if omit else "</option>"))
+        if opened and not omit:
+            opts.append("</optgroup>")
     return "<select>" + "".join(opts) + "</select>"
 
 
@@ -154,8 +198,10 @@ def gen_flow(rng, depth, ctr):
             out.append(_table(rng, depth, ctr))
         elif r < 0.85:
             out.append(_dl(rng, depth, ctr))
-        elif r < 0.92:
+        elif r < 0.91:
             out.append(_select(rng, depth, ctr))
+        elif r < 0.95:
+            out.append(_ruby(rng, depth, ctr))
         else:
             out.append(_rawtext(rng, ctr))
     return "".join(out)
@@ -175,6 +221,17 @@ BASKET = [
     "div ::text", "p::text", "p ::text", "span::text", "li::text", "td::text", "th::text",
     "a::text", "a ::text", "label::text", "option::text", "dd::text", "dt::text",
     "ul > li::text", "ol > li::text", "div > p::text", "dl > dt::text", "dl > dd::text",
+    # ruby: `> rt` / `> rp` are what catch an over-eager annotation auto-close (they nest in libxml2)
+    "ruby > rt::text", "ruby > rp::text", "ruby ::text", "rt::text", "rp::text", "rt ::text",
+    "dl > dt + dt::text", "dl > dd + dd::text", "dt dt::text", "dl dd ::text",
+    # table sections + optgroup: arms that had NO differential coverage until these were added
+    "table > thead::text", "table > tbody::text", "table > tfoot::text", "table > caption::text",
+    "thead > tr::text", "tbody > tr::text", "thead th::text", "tbody td::text",
+    # child-anchored past a colgroup: these are what a nested-colgroup bug drops
+    "table > colgroup::attr(id)", "table > thead th::text", "table > tbody td::text",
+    "table > tfoot td::text", "colgroup + thead th::text", "table > colgroup > col::attr(class)",
+    "select > optgroup::text", "optgroup > option::text", "optgroup + optgroup::text",
+    "thead + tbody::text", "caption + thead::text",
     "table tr > td::text", "select > option::text", "table > tr::text", "tr > th::text",
     "a::attr(href)", "img::attr(src)", "input::attr(value)", "[data-k]::attr(data-k)",
     "[title]::attr(title)",  # exercises CR/CRLF-in-attribute normalization (T4)
@@ -199,6 +256,45 @@ BASKET = [
     # forward/reverse positions (subject-attached terminals)
     "li:first-child::text", "li:nth-child(2)::text", "li:nth-of-type(2)::text",
     "li:last-child::text", "li:last-of-type::text", "li:nth-last-of-type(2)::text",
+    # reverse with a SUBTREE terminal — values recovered by re-scanning the winner's span, so these
+    # exercise the re-scan path (incl. nested winners, which must de-duplicate)
+    "li:last-child ::text", "li:nth-last-child(2) ::text", "li:only-child ::text",
+    "div:last-child ::text", "p:last-of-type ::text", "td:last-child ::text",
+    "li:last-child ::attr(href)", "div:last-child ::attr(id)",
+    "//li[last()]//text()", "//li[last()-1]//text()", "//div[last()]//text()",
+    # deferred predicate on an ANCESTOR compound — value from a descendant, recovered by re-scanning the
+    # winner's span with the selector tail (reverse, `:has()` and text-predicate all share that path)
+    "li:last-child a::attr(href)", "li:last-child span::text", "div:last-child p::text",
+    "li:only-child a::text", "//li[last()]//a/@href", "//div[last()]//span/text()",
+    "div:has(a) ::text", "div:has(a) ::attr(href)", "div:has(span) ::text",
+    "div:has(a) p::text", "div:has(a) a::attr(href)", "div:has(p) span::text",
+    "li:has(a) span::text", "//div[contains(.,'alpha')]//text()",
+    "//div[contains(.,'alpha')]//a/@href", "//li[contains(.,'beta')]//span/text()",
+    # CSS `:contains()` — cssselect lowers it to `contains(., "v")`, so it shares every value location the
+    # XPath text predicate above has, and each one is listed rather than assumed: own, subtree, descendant,
+    # and the following-sibling (label->value) shape. Both argument tokens cssselect accepts are here too.
+    'p:contains("alpha")::text', 'div:contains("alpha") ::text',
+    'div:contains("alpha") a::attr(href)', 'li:contains("beta") span::text',
+    'dt:contains("alpha") + dd::text', 'dt:contains("alpha") ~ dd::text',
+    'div:contains(alpha)::attr(class)', "span:contains('beta')::text",
+    'div.shared:contains("alpha")::attr(class)', 'td:contains("beta")::text',
+    # a value terminal with no subject compound after an EXPLICIT combinator — the implicit universal.
+    # parsel answers these identically to the `*` spelling, and the corpus writes the label->value pattern
+    # this way (`:contains('Price')+::text`), so both spellings are gated side by side.
+    "dt + ::text", "dt ~ ::text", "dl > ::text", "li + ::text", "td + ::attr(id)",
+    "dt + *::text", "dt ~ *::text", "dl > *::text",
+    ':contains("alpha") + ::text', 'dt:contains("alpha") + ::text',
+    # A comma group MIXING a deferred member with streamed ones. These two kinds produce their values at
+    # different times — during the pass, and at the subject's close — so the column has to be merged by
+    # document offset and deduped by node, not appended. Both member ORDERS are here because appending
+    # gives the right answer for one of them by luck; the overlapping pair (`p::text` and
+    # `p:contains(...)::text` select the same text node) is what a missing dedupe shows up in; and the
+    # attribute row uses ONE attribute name because two names on one element are distinct nodes at the
+    # same offset, which is the shape this deliberately refuses.
+    'p::text, p:contains("alpha")::text', 'p:contains("alpha")::text, p::text',
+    'span::text, p:contains("alpha")::text', 'p:contains("alpha")::text, span::text',
+    'div::attr(class), div:contains("alpha")::attr(class)',
+    'dt::text, dd:contains("alpha")::text, span::text',
     # deferred :has() and matches-any pseudos in cssselect-oracle-compatible shapes
     "div:has(span)::attr(id)", "div:has(> p)::attr(class)",
     "*:is(p, span)::text", "*:where(dt, dd)::text",

@@ -1,11 +1,16 @@
 """
-Peak-memory + parse-time benchmark for the Frostwork engine: `frostwork.extract` (one streaming
-pass, no DOM) vs Parsel (parse once into an lxml tree, then one query per field).
+Peak-memory + parse-time benchmark for the Frostwork engine: one streaming pass, no DOM, schema
+compiled once (what `Page`/`FrostPage` do) vs Parsel (parse once into an lxml tree, then one query
+per field). Both sides are measured in their real reuse pattern.
 
 Why this exists: the throughput matrix (bench_matrix.py) proves Frostwork is *fast*, but its
 defining property — **no DOM** — is invisible without measuring memory. On a large page from which
 you pull a few fields, Parsel must build the entire lxml tree (memory scales with page size) while
 Frostwork streams past the filler and stays bounded. This bench makes that concrete.
+
+`--engines` runs the same measurement over every adapter in `bench_engines.py`, because "no DOM" is
+a claim against the whole field and not just against Parsel: lexbor's tree is markedly leaner than
+libxml2's, which is exactly the kind of thing a throughput-only comparison hides.
 
 Measurement is process-level **peak RSS** (resource.getrusage.ru_maxrss), not tracemalloc: Frostwork
 allocates in Rust and Parsel in C (libxml2), both invisible to tracemalloc. RSS is a process-wide
@@ -22,6 +27,7 @@ Usage:
   .venv/bin/python tools/bench_mem.py                        # synthetic size sweep 1,4,16,64 MB
   .venv/bin/python tools/bench_mem.py 1,4,16,64,256          # custom sizes (MB)
   .venv/bin/python tools/bench_mem.py --real <corpus_dir> [n_docs=8]   # N largest REAL pages
+  .venv/bin/python tools/bench_mem.py --engines <corpus_dir> [n=12]    # EVERY competitor (bench_engines)
 """
 from __future__ import annotations
 
@@ -88,9 +94,18 @@ def _child(engine, doc_path, mode, sel_json):
 
     if engine == "frostwork":
         import frostwork
+        from frostwork._frostwork import Plan
+
+        # Compiled ONCE, outside `work`, for the same reason the throughput benches do it: a page
+        # object's selectors are compiled at class-definition time, not per response. It also keeps the
+        # measurement honest in the direction that matters here — the plan is a fixed per-SCHEMA cost, so
+        # counting it inside the per-page peak would attribute schema memory to page size, which is the
+        # exact claim this file exists to test.
+        frostwork.check(list(queries)).raise_for_status()
+        plan = Plan(list(queries), [])
 
         def work():
-            return frostwork.extract(body, queries, "utf-8")
+            return plan.extract(body, "utf-8")
     elif engine == "parsel":
         import parsel
 
@@ -106,7 +121,20 @@ def _child(engine, doc_path, mode, sel_json):
                     cols.append([])
             return cols
     else:
-        raise SystemExit(f"unknown engine {engine!r}")
+        # Competitive mode: any adapter from the bench_engines registry. The registry import and the
+        # engine's own lazy library import both happen HERE, before the mode branch, so they land in
+        # the baseline run too and cancel out of the delta — otherwise selectolax's module would be
+        # charged to lexbor's DOM.
+        import bench_engines
+
+        by_key = {e.key: e for e in bench_engines.ENGINES}
+        if engine not in by_key:
+            raise SystemExit(f"unknown engine {engine!r}")
+        eng = by_key[engine]
+        eng.run(b"<html><p>x</p></html>", [])
+
+        def work():
+            return eng.run(body, queries)
 
     secs = 0.0
     keep = None
@@ -199,11 +227,74 @@ def run_real(corpus_dir, n_docs):
     return {"mode": "real", "corpus": corpus_dir, "rows": rows, "platform": sys.platform}
 
 
+def run_engines(corpus_dir, n_docs):
+    """Peak RSS for EVERY engine in the competitive registry, over the N largest real pages.
+
+    A throughput chart cannot show Frostwork's defining property, and it is the property the fast
+    competitor does not share: lexbor's DOM is compact, but it is still a DOM and still O(page).
+    Every engine is measured on the SAME selectors — the ones all of them can express — so the column
+    that differs is the tree, not the workload.
+    """
+    import tempfile
+
+    import bench_engines
+
+    corpus_dir = os.path.abspath(os.path.expanduser(corpus_dir))
+    all_pages = glob.glob(os.path.join(corpus_dir, "*", "pages", "*.html"))
+    if not all_pages:
+        raise SystemExit(f"no <dir>/*/pages/*.html under {corpus_dir}")
+    for label, reason in bench_engines.unavailable_report(bench_engines.ENGINES):
+        print(f"SKIPPED ENGINE: {label} — {reason}")
+    engines = [e for e in bench_engines.ENGINES if not e.unavailable()]
+    paths = sorted(all_pages, key=os.path.getsize, reverse=True)[:n_docs]
+
+    print(f"\n{len(paths)} largest real pages from {corpus_dir}")
+    print("peak RSS attributable to parse+extract (work − baseline), best-of-3 time\n")
+    print(f"{'page':>8} {'nsel':>4} | " + " ".join(f"{e.label[:13]:>13}" for e in engines))
+    print("-" * (16 + 14 * len(engines)))
+    rows = []
+    with tempfile.TemporaryDirectory() as td:
+        for p in paths:
+            sel_json = os.path.join(os.path.dirname(os.path.dirname(p)), "selectors.json")
+            queries = [q for q in _selectors_for(p, sel_json) if isinstance(q, str) and q.strip()]
+            shared = [q for q in queries if all(e.expressible(q) for e in engines)]
+            if not shared:
+                continue
+            shared_json = os.path.join(td, "shared.json")
+            with open(shared_json, "w") as f:
+                json.dump({str(i): q for i, q in enumerate(shared)}, f)
+            row = {"page": os.path.relpath(p, corpus_dir), "mb": os.path.getsize(p) / 1048576,
+                   "nsel": len(shared), "engines": {}}
+            for e in engines:
+                rss, secs = measure(e.key, p, shared_json)
+                row["engines"][e.key] = {"rss_mb": rss / 1048576, "ms": secs * 1000}
+            rows.append(row)
+            print(f"{row['mb']:>6.1f}MB {len(shared):>4} | "
+                  + " ".join(f"{row['engines'][e.key]['rss_mb']:>11.1f}MB" for e in engines))
+    if rows:
+        print("-" * (16 + 14 * len(engines)))
+        print(f"{'median':>8} {'':>4} | " + " ".join(
+            f"{_median([r['engines'][e.key]['rss_mb'] for r in rows]):>11.1f}MB" for e in engines))
+        print(f"{'ms':>8} {'':>4} | " + " ".join(
+            f"{_median([r['engines'][e.key]['ms'] for r in rows]):>11.1f}ms" for e in engines))
+    return {"mode": "engines", "corpus": corpus_dir, "rows": rows,
+            "engines": [e.key for e in engines], "platform": sys.platform}
+
+
 def main():
     argv = sys.argv[1:]
     if argv and argv[0] == "--child":
         _, engine, doc_path, mode, sel_json = (argv + [""])[:5]
         return _child(engine, doc_path, mode, sel_json)
+
+    if argv and argv[0] == "--engines":
+        result = run_engines(argv[1], int(argv[2]) if len(argv) > 2 else 12)
+        fname = "membench_engines.json"
+        os.makedirs(RESULTS, exist_ok=True)
+        with open(os.path.join(RESULTS, fname), "w") as f:
+            json.dump(result, f, indent=2)
+        print(f"\nwrote {os.path.join('tools/results', fname)}")
+        return
 
     if argv and argv[0] == "--real":
         corpus_dir = argv[1]

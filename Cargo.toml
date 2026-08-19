@@ -3,8 +3,8 @@ name = "frostwork"
 version = "0.0.0"
 edition = "2021"
 description = "Treeless, one-pass HTML extraction — CSS/XPath selectors matched on a streaming scan, no DOM."
-license = "BSD-3-Clause"
-repository = "https://github.com/zytedata/frostwork"
+license = "Apache-2.0"
+repository = "https://github.com/shaneaevans/frostwork"
 keywords = ["html", "scraping", "css-selectors", "xpath", "streaming"]
 categories = ["parsing", "web-programming"]
 readme = "README.md"
@@ -24,6 +24,10 @@ pyo3 = { version = "0.29", features = ["extension-module", "abi3-py310"], option
 
 [features]
 python = ["dep:pyo3"]
+# Rule-table mutation testing (tools/mutate_rules.py): lets ONE build flip any single tree-construction
+# rule cell at runtime via FROSTWORK_MUTATE, so the "would a gate notice?" sweep costs one compile
+# instead of ~400. NEVER enable for a release: it makes the tables environment-dependent.
+mutate = []
 
 [[bin]]
 name = "differ"

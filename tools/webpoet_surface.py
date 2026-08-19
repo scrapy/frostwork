@@ -1,0 +1,257 @@
+"""Audit and snapshot the web-poet / zyte-common-items integration surface.
+
+The exported page bases, ``web_poet.field`` keywords and public processor names are read from the
+installed packages. Every upstream name must be supported or declined with a reason. Processor input
+types are an explicit contract, checked against the node handoff below.
+
+Run:   .venv/bin/python tools/webpoet_surface.py            # print the snapshot
+Gate:  .venv/bin/python tools/webpoet_surface.py --check    # fail if it drifted from the checked-in copy
+"""
+
+from __future__ import annotations
+
+import argparse
+import inspect
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import web_poet
+import webpoet_cases
+from parsel import Selector, SelectorList
+from web_poet import field as wp_field
+
+from frostwork.webpoet import _WP_FIELD_KWARGS, FrostBrowserPage, FrostFields, FrostPage
+
+ROOT = Path(__file__).resolve().parents[1]
+TARGET = ROOT / "docs" / "WEBPOET_SURFACE.md"
+
+
+# ------------------------------------------------------------------ 1. page / extractor base classes
+# name -> (Frostwork counterpart, or None with a reason for declining)
+BASES = {
+    "ItemPage": ("FrostFields", None),
+    "Extractor": (
+        None,
+        "non-injectable field bundle; use `FrostFields` for an injectable `ItemPage`",
+    ),
+    "WebPage": ("FrostPage", None),
+    "BrowserPage": ("FrostBrowserPage", None),
+    "SelectorExtractor": (
+        None,
+        "input is an existing parsel.Selector; serializing and rescanning it adds work and can change source",
+    ),
+    "Injectable": (None, "marker base for dependency injection, not an extraction surface"),
+    "Returns": (None, "generic item-class mixin, composed with any base"),
+}
+
+FROST_BASES = {"FrostFields": FrostFields, "FrostPage": FrostPage, "FrostBrowserPage": FrostBrowserPage}
+
+
+def upstream_bases() -> list:
+    """Every class web-poet exports that participates in the page-object hierarchy."""
+    from web_poet.pages import Extractor, Injectable, Returns
+
+    out = []
+    for name in dir(web_poet):
+        if name.startswith("_"):
+            continue
+        obj = getattr(web_poet, name)
+        if not inspect.isclass(obj):
+            continue
+        if issubclass(obj, (Injectable, Extractor, Returns)):
+            out.append(name)
+    return sorted(out)
+
+
+# ------------------------------------------------------------------ 2. field() keyword surface
+FIELD_KWARGS = {name: None for name in _WP_FIELD_KWARGS}  # name -> decline reason (None = forwarded)
+
+
+def upstream_field_kwargs() -> list:
+    return sorted(
+        n for n, p in inspect.signature(wp_field).parameters.items() if p.kind == p.KEYWORD_ONLY
+    )
+
+
+# ------------------------------------------------------------------ 3. zyte processors
+# The registry in `tools/webpoet_cases.py` is the single source: which processors are covered, how a page object
+# reaches each, and which gate proves it — read by this tool and by `tools/diff_webpoet.py`, so they cannot
+# drift into declining a processor one of them still exercises.
+PROCESSORS = {
+    **{c.processor: None for c in webpoet_cases.CASES},
+    **webpoet_cases.DECLINED,
+}
+
+
+def upstream_processors() -> list:
+    return webpoet_cases.upstream_processors()
+
+
+# ------------------------------------------------------------------ 4. processor input value types
+# The isinstance gates a processor branches on, and whether Frostwork can produce that type for a field. A
+# node-taking processor returns anything else UNCHANGED, which is why the field has to declare which it wants.
+VALUE_TYPES = [
+    ("str", "yes", "a `::text` / `::attr()` terminal, or a bare element declared with `.as_value()`"),
+    ("list[str]", "yes", "`all=True` on a scalar terminal — what images_processor consumes"),
+    ("parsel.Selector", "yes", "a bare-element field declared with `.as_node()`"),
+    ("parsel.SelectorList", "yes", "the same with `all=True`"),
+    ("lxml.html.HtmlElement", "via Selector", "processors accept `.root`; handed over as a Selector"),
+    ("dict", "no", "rating_processor's dict form composes sub-values; write it as a @web_poet.field"),
+]
+
+
+def _dist_version(dist: str) -> str:
+    """Installed version of a distribution. Neither library exposes `__version__`, and hand-parsing the
+    requirements file would report the PIN rather than what is actually imported here."""
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        return version(dist)
+    except PackageNotFoundError:  # pragma: no cover - both are pinned test deps
+        return "(not installed)"
+
+
+def _gate(kind: str, upstream: list, known: dict) -> list:
+    """Every upstream name must be in `known` (covered or declined). Returns the rows to render."""
+    missing = [n for n in upstream if n not in known]
+    if missing:
+        raise SystemExit(
+            f"webpoet-surface: {kind} appeared upstream and is in neither the covered nor the declined "
+            f"list: {missing}\n"
+            f"  This is the gate working. Add it to tools/webpoet_surface.py — either wire it up in "
+            f"frostwork.webpoet (and exercise it in tools/diff_webpoet.py) or decline it with a REASON.\n"
+            f"  Do not delete the name from the check to make this pass."
+        )
+    stale = [n for n in known if n not in upstream]
+    if stale:
+        raise SystemExit(
+            f"webpoet-surface: {kind} is listed here but no longer exists upstream: {stale}\n"
+            f"  Upstream removed or renamed it; drop the entry (and any code that targets it)."
+        )
+    return [(n, known[n]) for n in upstream]
+
+
+def render() -> str:
+    # The registry audit runs HERE, not only from a test: `make gate-webpoet` calls this tool and nothing else,
+    # so a processor (or a `ProductPage.Processors` mapping) that upstream adds would otherwise be invisible to
+    # the standalone gate.
+    gaps = webpoet_cases.coverage_gaps()
+    if gaps:
+        raise SystemExit(
+            "webpoet-surface: the processor registry (tools/webpoet_cases.py) and the installed libraries "
+            "disagree:\n  - " + "\n  - ".join(gaps)
+        )
+
+    base_rows = _gate("a page base class", upstream_bases(), BASES)
+    kwarg_rows = _gate("a field() keyword", upstream_field_kwargs(), FIELD_KWARGS)
+    proc_rows = _gate("a zyte processor", upstream_processors(), PROCESSORS)
+
+    # the Frostwork bases named in the table must actually exist and be usable
+    for _name, (counterpart, _reason) in BASES.items():
+        if counterpart is not None and counterpart not in FROST_BASES:
+            raise SystemExit(f"webpoet-surface: BASES names {counterpart!r}, which frostwork.webpoet lacks")
+
+    # ...and "usable" includes INJECTABLE, which is the half that was missing. scrapy-poet builds a
+    # callback argument only if `web_poet.pages.is_injectable` accepts its class; for anything it rejects,
+    # andi leaves the argument out of the plan and the page object never arrives — no exception, no log.
+    # Asked here rather than in a test because it is a property of an UPSTREAM predicate: if web-poet
+    # changes what counts as injectable, this is the gate that should go red.
+    from web_poet.pages import is_injectable
+
+    for name, base in FROST_BASES.items():
+        if not is_injectable(base):
+            raise SystemExit(
+                f"webpoet-surface: {name} is not is_injectable(), so scrapy-poet would silently omit a "
+                f"callback argument annotated with it. Every shipped base must be an ItemPage."
+            )
+
+    # and the node types claimed producible must really be what the handoff produces
+    from frostwork.webpoet import _as_node, _as_nodes
+
+    if not isinstance(_as_node("<p>x</p>"), Selector):
+        raise SystemExit("webpoet-surface: the node handoff no longer produces a parsel.Selector")
+    if not isinstance(_as_nodes(["<p>x</p>"], ("all", None)), SelectorList):
+        raise SystemExit("webpoet-surface: the all= node handoff no longer produces a SelectorList")
+
+    lines = [
+        "# web-poet integration surface",
+        "",
+        "Generated and verified by `tools/webpoet_surface.py`. The page bases, field keywords and processor",
+        "names come from the installed libraries; an unclassified upstream addition fails the gate.",
+        "",
+        f"Read from: web-poet {_dist_version('web-poet')}, "
+        f"zyte-common-items {_dist_version('zyte-common-items')} "
+        "(both pinned in `requirements-test.txt`, so this snapshot moves only when a pin does).",
+        "",
+        "## Page / extractor base classes",
+        "",
+        "| web-poet class | Frostwork counterpart | if declined, why |",
+        "|---|---|---|",
+    ]
+    for name, (counterpart, reason) in base_rows:
+        lines.append(f"| `{name}` | {f'`{counterpart}`' if counterpart else '—'} | {reason or ''} |")
+
+    lines += [
+        "",
+        "## `web_poet.field` keyword surface",
+        "",
+        "Forwarded verbatim by `frostwork.webpoet.field`, so a declaration built by Frostwork is not a",
+        "second-class `web_poet.field`.",
+        "",
+        "| keyword | forwarded | if declined, why |",
+        "|---|---|---|",
+    ]
+    for name, reason in kwarg_rows:
+        lines.append(f"| `{name}` | {'no' if reason else 'yes'} | {reason or ''} |")
+
+    lines += [
+        "",
+        "## zyte-common-items field processors",
+        "",
+        "Each supported processor has a generated case in `make gate-webpoet`, compared with Parsel.",
+        "",
+        "| processor | covered | if declined, why |",
+        "|---|---|---|",
+    ]
+    for name, reason in proc_rows:
+        lines.append(f"| `{name}` | {'no' if reason else 'yes'} | {reason or ''} |")
+
+    lines += [
+        "",
+        "## Value types a processor can be handed",
+        "",
+        "A bare-element field with a processor must choose `.as_node()` or `.as_value()`; Frostwork does",
+        "not infer the representation from the processor.",
+        "",
+        "| type | Frostwork can produce | from |",
+        "|---|---|---|",
+    ]
+    for name, can, how in VALUE_TYPES:
+        lines.append(f"| `{name}` | {can} | {how} |")
+
+    return "\n".join(lines) + "\n"
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--check", action="store_true", help="fail if the checked-in snapshot differs")
+    args = ap.parse_args()
+    content = render()
+    if args.check:
+        if not TARGET.exists():
+            raise SystemExit(f"{TARGET.relative_to(ROOT)} is missing; generate it with tools/webpoet_surface.py")
+        if TARGET.read_text() != content:
+            raise SystemExit(
+                f"{TARGET.relative_to(ROOT)} is stale; regenerate with "
+                f"`python tools/webpoet_surface.py > {TARGET.relative_to(ROOT)}`"
+            )
+        print(f"webpoet-surface: {TARGET.relative_to(ROOT)} matches the installed libraries -> PASS")
+    else:
+        print(content, end="")
+
+
+if __name__ == "__main__":
+    main()
