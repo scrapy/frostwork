@@ -969,7 +969,9 @@ impl TextVal<'_> {
 }
 
 struct PendingText<'a> {
-    bytes: std::borrow::Cow<'a, [u8]>,
+    /// The FIRST run's bytes, borrowed from the document. A joined node's later runs live in `joined`
+    /// instead, decoded — nothing ever owns bytes here.
+    bytes: &'a [u8],
     /// Decoded text of runs 1..n once a join has happened; empty while the node is a single run.
     joined: String,
     allows_entities: bool,
@@ -2866,7 +2868,7 @@ impl<'a> Matcher<'a> {
             if p.gap_end == start && p.allows_entities == allows_entities {
                 // decode this run on its own and append the STRING — see `PendingText`
                 if p.joined.is_empty() {
-                    p.joined = finalize(&p.bytes, allows_entities, self.input.encoding());
+                    p.joined = finalize(p.bytes, allows_entities, self.input.encoding());
                 }
                 p.joined.push_str(&finalize(text, allows_entities, self.input.encoding()));
                 p.gap_end = start + text.len();
@@ -2875,7 +2877,7 @@ impl<'a> Matcher<'a> {
         }
         self.flush_text();
         self.pending_text = Some(PendingText {
-            bytes: std::borrow::Cow::Borrowed(text),
+            bytes: text,
             joined: String::new(),
             allows_entities,
             start,
@@ -2905,7 +2907,7 @@ impl<'a> Matcher<'a> {
             return;
         };
         let val = if p.joined.is_empty() {
-            TextVal::Raw { bytes: &p.bytes, entities: p.allows_entities }
+            TextVal::Raw { bytes: p.bytes, entities: p.allows_entities }
         } else {
             TextVal::Decoded(&p.joined)
         };
