@@ -21,7 +21,7 @@ python -m venv .venv
 .venv/bin/pip install web-poet
 ```
 
-Wheels are **abi3** (`abi3-py39`): one wheel runs on CPython ≥ 3.9 (tested on 3.14).
+Wheels are **abi3** (`abi3-py310`): one wheel runs on CPython ≥ 3.10 (tested up to the 3.15 prerelease).
 
 ## 1. The primitive
 

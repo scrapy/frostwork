@@ -73,6 +73,21 @@ pre-release check. Individual targets (`gate`, `fuzz-smoke`, `bench`) run their 
 - **Byte/offset core, not `&str` or a DOM.** The tokenizer works on `&[u8]`; values are decoded lazily
   only when emitted (no whole-document UTF-8 validation). Keep it that way — it's a big perf lever.
 
+## Releasing
+
+Write the changelog entry for the new version under a `## X.Y.Z (unreleased)` heading, then:
+
+```bash
+bump-my-version bump minor    # major/minor/patch — rewrites Cargo.toml, Cargo.lock, pyproject.toml,
+                              # dates the changelog heading, commits and tags v<new version>
+git push --follow-tags
+```
+
+Pushing the tag runs `.github/workflows/publish.yml`: abi3 wheels for every supported platform + an
+sdist, each smoke-tested by installing the built artifact and running the Python suite, then uploaded
+to PyPI via Trusted Publishing (OIDC, `pypi` environment — no token). `workflow_dispatch` builds and
+smoke-tests everything without publishing.
+
 ## Conventions
 
 - **Do not add a `Co-Authored-By` trailer to commits.**

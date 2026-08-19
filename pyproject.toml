@@ -5,24 +5,24 @@ build-backend = "maturin"
 
 [project]
 name = "frostwork"
-version = "0.1.0"
+version = "0.0.0"
 description = "Treeless, one-pass HTML extraction — CSS/XPath selectors matched on a streaming scan, no DOM."
 readme = "README.md"
 license = "BSD-3-Clause"
 license-files = ["LICENSE"]
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 authors = [{ name = "Zyte" }]
 keywords = ["html", "scraping", "css-selectors", "xpath", "streaming", "web-poet", "scrapy"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Programming Language :: Rust",
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
     "Topic :: Text Processing :: Markup :: HTML",
     "Topic :: Internet :: WWW/HTTP :: Indexing/Search",
 ]
@@ -48,3 +48,26 @@ Issues = "https://github.com/zytedata/frostwork/issues"
 features = ["python"]
 module-name = "frostwork._frostwork"
 python-source = "python"
+
+# Release: `bump-my-version bump minor` rewrites the version everywhere it is duplicated, dates the
+# changelog heading, commits and tags; pushing the tag is what triggers .github/workflows/publish.yml.
+[tool.bumpversion]
+current_version = "0.0.0"
+commit = true
+tag = true
+tag_name = "v{new_version}"
+
+[[tool.bumpversion.files]]
+filename = "Cargo.toml"
+
+[[tool.bumpversion.files]]
+filename = "Cargo.lock"
+search = '''
+name = "frostwork"
+version = "{current_version}"'''
+
+[[tool.bumpversion.files]]
+filename = "CHANGELOG.md"
+search = "\\(unreleased\\)$"
+replace = "({now:%Y-%m-%d})"
+regex = true
