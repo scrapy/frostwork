@@ -1,14 +1,15 @@
-//! Encoding resolution: BOM -> explicit override (HTTP/caller) -> `<meta>` charset prescan ->
-//! UTF-8 default. Ported from `parsel-stream-core/src/encoding.rs` (proven to match Parsel).
+//! Encoding resolution: BOM -> explicit override (HTTP/caller) -> `<meta>` charset prescan -> UTF-8
+//! default.
 //!
-//! We never transcode the whole document for ASCII-compatible encodings — the tokenizer runs on raw
-//! bytes, and the matcher decodes only emitted *values* with the resolved encoding. That works because
-//! in an ASCII-compatible encoding a byte below 0x80 always IS that ASCII character, so every HTML
-//! structural delimiter is unambiguous. Where it does not hold, the caller transcodes to UTF-8 up
-//! front (see `lib.rs`) — and which encodings those are is `Encoding::is_ascii_compatible`'s answer,
-//! not a list written here. Naming the family was the bug: "the UTF-16 family" omitted ISO-2022-JP,
-//! whose `ESC $ B` mode packs `社` into the two bytes `<R`, so a crawled page grew a start tag out of
-//! the middle of a Japanese word.
+//! An ASCII-compatible encoding is never transcoded. The tokenizer runs on raw bytes and the matcher
+//! decodes only emitted *values* with the resolved encoding, which works because in an ASCII-compatible
+//! encoding a byte below 0x80 always IS that ASCII character, so every HTML structural delimiter is
+//! unambiguous. Where that does not hold, the caller transcodes to UTF-8 up front (see `lib.rs`).
+//!
+//! Which encodings those are is `Encoding::is_ascii_compatible`'s answer, never a list written here.
+//! "The UTF-16 family" is the wrong answer: ISO-2022-JP is not ASCII-compatible either, because in its
+//! `ESC $ B` mode `社` is the two bytes `<R`, and a byte tokenizer would grow a start tag out of the
+//! middle of a Japanese word.
 
 use encoding_rs::Encoding;
 
@@ -19,11 +20,11 @@ use encoding_rs::Encoding;
 /// like `http-equiv`, a `charset=` inside any attribute value looked like a declaration, and the first
 /// raw `>` "ended" the tag even inside a quoted value.
 ///
-/// `from_utf8_lossy` is lossless *for this purpose* even though the document's encoding is still unknown
-/// here — that is what the prescan is deciding. What it reads is an encoding LABEL, and every label is
-/// ASCII, matched ASCII-case-insensitively. A non-ASCII byte becomes U+FFFD, which matches no label and
-/// no attribute name this cares about, so a mangled byte can only turn "not a declaration" into "still
-/// not a declaration" — the answer a browser reaches too.
+/// `from_utf8_lossy` is lossless *for this purpose*, even though the document's encoding is still
+/// undecided here (that is what the prescan decides). What it reads is an encoding LABEL, and every label
+/// is ASCII, matched ASCII-case-insensitively. A non-ASCII byte becomes U+FFFD, which matches no label
+/// and no attribute name this cares about, so a mangled byte can only turn "not a declaration" into
+/// "still not a declaration", the answer a browser reaches too.
 fn meta_attrs(head: &[u8], from: usize) -> (Vec<(String, String)>, usize) {
     const WS: [u8; 5] = [b' ', b'\t', b'\n', b'\r', 0x0c];
     let n = head.len();
@@ -198,10 +199,9 @@ fn start_tag_name(head: &[u8], lt: usize) -> Option<&[u8]> {
 /// attribute context, so a `<!-- saved from url … charset=windows-1252 -->` banner or `charset=big5`
 /// in early visible text must NOT switch the decode.
 ///
-/// Comment boundaries come from the TOKENIZER's own `scan_comment`, not a second copy here. A local
-/// `-->`-only search missed the abrupt closes libxml2 honours (`<!-->`, `<!--->`, and `--!>`), so a
-/// perfectly live `<meta charset>` after one of them looked like it was still commented out and the
-/// declaration was ignored. One implementation, differential-proven, used by both.
+/// Comment boundaries come from the TOKENIZER's own `scan_comment`, not a second copy here. libxml2
+/// honours abrupt closes (`<!-->`, `<!--->`, `--!>`), so a local `-->`-only search would read a live
+/// `<meta charset>` after one of them as still commented out and ignore the declaration.
 ///
 /// ONE left-to-right pass, allocation-free, skipping comments on the way past them.
 ///
@@ -224,10 +224,9 @@ fn start_tag_name(head: &[u8], lt: usize) -> Option<&[u8]> {
 ///   once real content is parsed the browser will not re-decode, so past the floor the head is the
 ///   boundary.
 ///
-/// A flat 4096-byte window (w3lib's number, and what this used to be) is wrong in both directions:
-/// it drops the head declarations real pages carry behind a producer comment or a block of `og:`
-/// metas, and it honours body declarations no browser does. It also cost a measured ~35µs on every
-/// label-less page — one whole extra pass over the document — which the head bound gives back.
+/// A flat byte window is wrong in both directions: it would drop late head declarations and honour late
+/// body declarations no browser does. It also costs ~35µs on every label-less page, a whole extra pass
+/// over the document, which stopping at the real head boundary does not.
 fn meta_prescan(head: &[u8]) -> Option<&'static Encoding> {
     if let Some(enc) = xml_decl_encoding(head) {
         return enc.into();
@@ -341,9 +340,8 @@ pub fn resolve(html: &[u8], override_label: Option<&str>) -> &'static Encoding {
     // whole document and has nothing to stall on either.
     //
     // A window is therefore a divergence from the browser, and this subsystem has no budget for one (see
-    // the encoding rule in AGENTS.md). The old 4096 was w3lib's number, which cost real pages: a legacy
-    // site that opens with a producer comment or a block of `og:` metas puts its `Content-Type` past it
-    // and the page decoded as UTF-8 with a U+FFFD in every value.
+    // the encoding rule in AGENTS.md). A fixed window would miss declarations on pages that open with a
+    // producer comment or a block of metadata, decoding their values with the wrong encoding.
     //
     // Deliberately NOT stopped at `<body>` (w3lib's regex does), because a real page can carry a late
     // `<meta charset>` inside the body and browsers still honour it.
@@ -385,10 +383,10 @@ mod tests {
     }
 }
 
-/// Prescan vectors oracled against **w3lib.encoding.html_to_unicode** — what Scrapy actually uses to
-/// pick a response encoding. The earlier fix used Parsel as the oracle, whose UTF-8 default agreed by
-/// accident on several of these, so the gate reported parity while the prescan was both over- and
-/// under-triggering. Each expectation below was read off w3lib directly.
+/// Prescan regression vectors. Cases where browsers and w3lib agree are oracled against
+/// **w3lib.encoding.html_to_unicode**, which is what Scrapy uses to pick a response encoding. Named
+/// divergences follow browser measurements and are also gated in `tools/enc_check.py`; Parsel is not an
+/// oracle for the prescan because its UTF-8 default can agree by accident.
 #[cfg(test)]
 mod w3lib_oracle_tests {
     use super::*;
@@ -510,9 +508,9 @@ mod w3lib_oracle_tests {
     /// This is the WHATWG label table, it is what browsers do, and it is also what Scrapy does:
     /// `w3lib.encoding.resolve_encoding("iso-8859-1")` is `cp1252`. Only a *raw* Parsel
     /// `Selector(body=…, encoding="iso-8859-1")` — which bypasses w3lib — applies Python's literal
-    /// latin-1 codec and leaves the C1 range as controls. A real page in the crawl sample
-    /// (`charset=iso-8859-1` in its HTTP header, an en dash written as the single byte 0x96) is
-    /// readable text here and in Scrapy, and 7 mojibake values under raw Parsel.
+    /// latin-1 codec and leaves the C1 range as controls. A page whose HTTP header says
+    /// `charset=iso-8859-1` and writes an en dash as the single byte 0x96 is readable text here and in
+    /// Scrapy, and mojibake under raw Parsel.
     #[test]
     fn the_iso_8859_1_label_is_windows_1252() {
         assert_eq!(resolve(b"<p>x</p>", Some("iso-8859-1")), encoding_rs::WINDOWS_1252);
@@ -527,10 +525,8 @@ mod w3lib_oracle_tests {
     /// How far a declaration is still a declaration — both halves measured in Chrome, because the
     /// browser is the standard for encoding and it does not match WHATWG's suggested budget.
     ///
-    /// In the HEAD: honoured at any depth. Found on real pages, three in one 1000-page Common Crawl
-    /// sample — a legacy site opens with a producer comment or a block of `og:`/`keywords` metas and
-    /// the `Content-Type` lands at byte 1080/1532/1611. The engine read 1024, missed it, and decoded a
-    /// whole windows-1252 page as UTF-8, which is what 57 of that sample's divergences were.
+    /// In the HEAD: honoured at any depth. A page can open with a producer comment or a block of metadata,
+    /// so a bounded read would miss the declaration and decode the page with the wrong encoding.
     ///
     /// In the BODY: honoured only within the first 1024 bytes. Past that the browser has committed to
     /// content it will not re-decode, and neither do we.
@@ -550,7 +546,7 @@ mod w3lib_oracle_tests {
         assert!(late.iter().position(|&b| b == b'C').unwrap() > 1024);
         assert_eq!(resolve(&late, None), encoding_rs::WINDOWS_1252);
 
-        // ...and past every depth a bounded window would have cut off. Each was measured in Chrome.
+        // ...and past every depth a bounded window would cut off. These depths were measured in Chrome.
         for depth in [3900usize, 4200, 16 * 1024, 64 * 1024, 256 * 1024, 1024 * 1024] {
             let mut deep = pad(depth);
             deep.extend_from_slice(decl);
@@ -645,8 +641,8 @@ mod w3lib_oracle_tests {
             encoding_rs::BIG5
         );
         // Many comments, each holding a decoy: none declares anything, and the real one after them is
-        // still reached because all of it is still the HEAD. This is the shape that was O(document)
-        // per hit before the rewrite — 500 backwards `rfind`s over a growing buffer.
+        // still reached because all of it is still the HEAD. A backwards search makes this quadratic by
+        // rescanning a growing prefix for each comment.
         let mut many = b"<html><head>".to_vec();
         for _ in 0..500 {
             many.extend_from_slice(b"<!-- <meta charset=shift_jis> --><link rel=x>");

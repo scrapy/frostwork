@@ -489,7 +489,8 @@ mod seg_match_tests {
         assert!(!seg_match_anchored(&seg("c>b c", false), &stack, 3, 0, None));
     }
 
-    /// Deep nesting with a leftmost compound that never matches: the shape that was exponential.
+    /// Deep nesting with a leftmost compound that never matches: a naive backtracking walk is
+    /// exponential on this shape.
     #[test]
     fn deep_nest_is_not_exponential() {
         let stack = stack_of(&"b".repeat(400));
@@ -498,7 +499,7 @@ mod seg_match_tests {
         for subject in (0..stack.len()).step_by(7) {
             assert!(!seg_match_anchored(&sg, &stack, subject, 0, None));
         }
-        // the old walk needed ~28 s for ONE subject at depth 40; this whole sweep is milliseconds
+        // a backtracking walk needs ~28 s for ONE subject at depth 40; this whole sweep is milliseconds
         assert!(t.elapsed().as_secs() < 2, "took {:?}", t.elapsed());
     }
 }

@@ -456,27 +456,28 @@ fn normalize(bytes: Cow<'_, [u8]>, utf8: bool) -> Cow<'_, [u8]> {
     strip_nul(trimmed)
 }
 
-/// The byte range Parsel's `text.strip()` leaves for libxml2: past a leading UTF-8 BOM and the
-/// whitespace written before it, and short of any trailing whitespace.
+/// The byte range Parsel's `text.strip()` leaves for libxml2: past a leading UTF-8 BOM and any
+/// whitespace written before it, and short of any trailing whitespace. Parsel parses the STRIPPED text,
+/// so stripping the same bytes is what makes the two agree.
 ///
-/// **Leading.** On a page that INDENTS its doctype — `"    \u{FEFF}<!DOCTYPE HTML>"` — the strip
-/// promotes the U+FEFF to offset 0, where libxml2 then eats it as a BOM. Read the bytes as they arrive
-/// and that U+FEFF is instead a character, and a character before the frame opens the `<body>`: the
-/// page's `<head>`, `<title>` and even the attributes of its own `<html>` tag (redundant once a body is
-/// open) are all lost, so `head title::text` and `html::attr(xmlns)` come back silently EMPTY. libxml2
-/// on the raw bytes and html5lib both agree with the raw reading — this is Parsel normalizing its
-/// input, and matching what a scraper actually sees is the point. Four pages in one 10000-page crawl
-/// sample were shaped this way, between them 71 divergent columns.
+/// **Leading.** The strip can promote a U+FEFF to offset 0, where libxml2 eats it as a BOM, so
+/// `"    \u{FEFF}<!DOCTYPE HTML>"` starts with a doctype. Left unstripped, that U+FEFF would be character
+/// data before the frame and would open the `<body>`, losing the page's `<head>`, its `<title>` and the
+/// attributes of its own `<html>` tag (redundant once a body is open). `head title::text` and
+/// `html::attr(xmlns)` would then come back empty.
 ///
-/// **Trailing.** This half can only ever move whitespace-only text, so it never changes a value a
-/// scraper reads — but it does change how many values come back. A page ending `…<option class="c3">\n`
-/// gives the last option a text node here and none under Parsel, so `option::text` returned one extra
-/// row.
+/// The strip is Parsel's, not libxml2's: given the raw bytes, libxml2 and html5lib both read that
+/// U+FEFF as a character. Frostwork follows Parsel because `response.text` is the input a Scrapy
+/// scraper actually selects over.
 ///
-/// Only the BOM is gated on UTF-8 (`utf8`): in windows-1252 those three bytes are `ï»¿`, three real
-/// characters, and Parsel's own decode agrees. The whitespace trim applies whatever the label says,
-/// because Parsel strips the DECODED text and no ASCII-compatible encoding can carry these bytes inside
-/// a multi-byte character — a non-ASCII-compatible one has already been transcoded.
+/// **Trailing.** This half moves only whitespace-only text, so it changes no value a scraper reads. It
+/// does change how MANY values come back: unstripped, a page ending `…<option class="c3">\n` would give
+/// the last option a text node that Parsel has no node for.
+///
+/// Only the BOM is gated on UTF-8 (`utf8`). In windows-1252 those three bytes are `ï»¿`, three real
+/// characters, and Parsel's own decode agrees. The whitespace trim applies under every label because
+/// none of the ASCII strip bytes can occur inside a multi-byte character in an ASCII-compatible
+/// encoding; a non-ASCII-compatible encoding is transcoded before it reaches here.
 fn document_bounds(bytes: &[u8], utf8: bool) -> (usize, usize) {
     const BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
     let end = bytes.iter().rposition(|&b| !is_strip_ws(b)).map_or(0, |i| i + 1);
@@ -487,15 +488,15 @@ fn document_bounds(bytes: &[u8], utf8: bool) -> (usize, usize) {
     (start, end)
 }
 
-/// The bytes Python's `strip()` removes from a document's ends — ASCII whitespace **including vertical
-/// tab**, which is the whole reason this is written out rather than deferred to
-/// `u8::is_ascii_whitespace` (that set omits `0x0b`).
+/// The bytes Python's `strip()` removes from a document's ends: ASCII whitespace **including vertical
+/// tab**, which is why the set is written out instead of deferred to `u8::is_ascii_whitespace` (that
+/// one omits `0x0b`).
 ///
-/// It is also deliberately NOT `tokenizer::is_ws`, which is HTML whitespace and correctly *excludes*
-/// `0x0b`: inside a document a vertical tab is ordinary character data. The two sets only look alike.
-/// Missing this cost a page its whole head — `b"\x0b<html a=1><head><title>T</title>…"` strips to
-/// `<html …>` for Parsel, while an un-stripped `0x0b` is a character before the frame and opens the
-/// `<body>`, so `head title::text` and `html::attr(a)` came back empty.
+/// It is deliberately not `tokenizer::is_ws` either. That set is HTML whitespace, which correctly
+/// excludes `0x0b`, because inside a document a vertical tab is ordinary character data. The two only
+/// look alike. Dropping `0x0b` from this set would leave it as the leading character in
+/// `b"\x0b<html a=1><head><title>T</title>…"`, opening the `<body>` before a head can start and emptying
+/// `head title::text` and `html::attr(a)`.
 const fn is_strip_ws(b: u8) -> bool {
     matches!(b, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
 }
@@ -1231,9 +1232,9 @@ mod tests {
     fn ruby_annotations_never_auto_close() {
         assert_eq!(ex("<ruby><rt>a<rt>b</ruby>", "ruby > rt::text"), v(&["a"]));
         assert_eq!(ex("<ruby><rt>a<rp>b</ruby>", "ruby > rp::text"), v(&[]));
-        // ...and they do NOT close an open <p> either. `div > p::text` was asserted here before and
-        // cannot tell: it is p's DIRECT text, which is `a` whether the <rt> nested or became a sibling.
-        // `div > rt` discriminates — it matches only if the <rt> was lifted out of the <p>.
+        // ...and they do NOT close an open <p> either. `div > p::text` cannot tell: it is p's DIRECT
+        // text, which is `a` whether the <rt> nests or becomes a sibling. `div > rt` discriminates,
+        // matching only if the <rt> was lifted out of the <p>.
         assert_eq!(ex("<div><p>a<rt>b</div>", "div > rt::text"), v(&[]));
         assert_eq!(ex("<div><p>a<option>b</div>", "div > option::text"), v(&[]));
     }
@@ -1244,8 +1245,8 @@ mod tests {
     /// engine's tag ids: it closes an open `<b>` for an incoming `<td>` but NOT an open `<em>`, and an
     /// open `<h1>` for an incoming `<table>` but NOT an open `<div>` — pairs a coarser id space lumps
     /// together.
-    /// Every case here was read off libxml2 2.14 first; `tools/audit_tree_rules.py` re-checks all
-    /// 11,543 (open x incoming) cells, and `tools/mutate_rules.py` checks that flipping one is noticed.
+    /// These cases were taken from libxml2 2.14. `tools/audit_tree_rules.py` re-checks the complete
+    /// (open x incoming) table, and `tools/mutate_rules.py` checks that flipping a cell is noticed.
     #[test]
     fn start_close_pairs_match_libxml2() {
         // an incoming <p> closes an open heading or font-style element (very common in legacy markup:
@@ -1285,12 +1286,11 @@ mod tests {
     // silently is the worse failure for a scraper. Locked here because an intentional divergence with no
     // test is indistinguishable from a bug.
     //
-    // A 1000-page Common Crawl sample turned this from a marginal call into an obvious one. The tag is
-    // not always a trailing stray: one page's head ends `</head></html><body><header>…`, i.e. the
-    // `</html>` is MISPLACED and 14 of the file's 17 KB follow it. libxml2 keeps 2 elements out of 100+
-    // and a Parsel spider sees an empty page; the engine (and a browser) see the site. Another page in
-    // the same sample hides its JSON-LD `<script>` the same way. So the divergence is not small — and it
-    // runs in the direction that recovers a page rather than losing one.
+    // The tag is not always a trailing stray. A page whose head ends `</head></html><body><header>…` has
+    // a MISPLACED `</html>` with 14 of its 17 KB after it, where libxml2 keeps 2 elements out of 100+: a
+    // Parsel spider sees an almost empty page and the engine, like a browser, sees the site. JSON-LD
+    // `<script>` elements are hidden the same way. The divergence runs in the direction that recovers a
+    // page rather than losing one.
     //
     // Only PARTLY browser-equivalent, and the test pins both halves: a browser ALSO re-parents the
     // content into `<body>` (HTML Standard "after after body" reprocesses the token in body — verified
@@ -1379,10 +1379,10 @@ mod tests {
         assert_eq!(ex("<table><tbody><tr><td>A</tbody>B</table>", "td::text"), v(&["A"]));
     }
 
-    /// The names the hand-written start-close table left out. All three were found by widening the
-    /// audit's universe to every element name rather than the ones someone remembered, and each is
-    /// ordinary legacy markup: `<listing>`/`<xmp>` in man-page and README-to-HTML output, and a
-    /// `<title>` after an unclosed `<p>`.
+    /// These legacy names were omitted by a hand-written start-close table, which is why the audit's
+    /// universe contains every element name rather than the ones someone remembers:
+    /// `<listing>`/`<xmp>` in man-page and README-to-HTML output, and a `<title>` after an unclosed
+    /// `<p>`.
     #[test]
     fn start_close_names_missing_from_the_hand_written_port() {
         // a definition item closes an open <listing> (it behaves exactly like <pre> as an open element)
@@ -1401,8 +1401,8 @@ mod tests {
         }
     }
 
-    /// libxml2 treats the HTML4 `basefont`/`frame`/`isindex` as EMPTY elements. The engine let all three
-    /// hold children, so everything after one of them was nested a level too deep.
+    /// libxml2 treats the HTML4 `basefont`/`frame`/`isindex` as EMPTY elements. Treating them as
+    /// containers would nest everything after one a level too deep.
     #[test]
     fn html4_void_elements_hold_no_children() {
         for t in ["basefont", "frame", "isindex"] {
@@ -1601,8 +1601,8 @@ mod tests {
     #[test]
     fn empty_selector_is_unsupported_not_universal() {
         // An empty / whitespace-only NODE query is not a selector (parsel raises SelectorSyntaxError).
-        // Per the no-fallback contract it must be an empty column — NOT an implicit `*` that dumps the
-        // whole document into the field (the pre-fix behavior). Found by the selector fuzzer.
+        // Per the no-fallback contract it must be an empty column, NOT an implicit `*` that dumps the
+        // whole document into the field.
         let h = "<body><p>A</p><div>B</div></body>";
         assert_eq!(ex(h, ""), v(&[]));
         assert_eq!(ex(h, "   "), v(&[]));
@@ -2051,8 +2051,8 @@ mod tests {
         assert_eq!(ex("<plaintext>a</plaintext>b", "plaintext::text"), v(&["a</plaintext>b"]));
     }
 
-    /// libxml2 accepts `<html>`/`<head>`/`<body>` only as the document frame. Both halves of that had
-    /// observable consequences and neither was implemented.
+    /// libxml2 accepts `<html>`/`<head>`/`<body>` only as the document frame. Both halves of that rule
+    /// have observable consequences, so both are pinned here.
     #[test]
     fn document_frame_tags_close_head_and_are_otherwise_ignored() {
         // `<body>` closes an open `<head>` — a full document may legally omit `</head>`, and without
@@ -2115,11 +2115,12 @@ mod tests {
     /// A document that writes no `<html>`/`<head>`/`<body>` still HAS them: libxml2 synthesizes the
     /// frame, and so does the engine.
     ///
-    /// This was the largest documented gap. All three have optional start *and* end tags, so
+    /// All three have optional start *and* end tags, so
     /// `<!DOCTYPE html><title>T</title><h1>a</h1><p>b</p>` is a conformant document with no frame in the
-    /// byte stream at all — and every frame-anchored selector (`body h1`), every top-level sibling
-    /// combinator (`h1 + p`, which needs a shared parent), and all root-level text were empty here while
-    /// lxml answered. The rules below it are split into their own tests; this one owns the basic shape.
+    /// byte stream at all. Without synthesis, every frame-anchored selector (`body h1`), every top-level
+    /// sibling combinator (`h1 + p`, which needs a shared parent) and all root-level text would come back
+    /// empty while lxml answers. The rules below are split into their own tests; this one owns the basic
+    /// shape.
     #[test]
     fn the_document_frame_is_synthesized_when_the_page_omits_it() {
         // the conformant-but-frameless document from docs/COMPATIBILITY.md
@@ -2238,15 +2239,15 @@ mod tests {
                    v(&["s"]));
     }
 
-    /// Content after `</html>` gets a SECOND ROOT `<html>`, the same shape libxml2 builds, and no body —
-    /// one was already established. A crawled page's trailing `<script>` was reachable as `//script` but
-    /// not as `//html/script` until the tail had that frame, and text there was dropped outright: with
-    /// the stack empty there is nothing to attach it to.
+    /// Content after `</html>` gets a SECOND ROOT `<html>`, the same shape libxml2 builds, and no body,
+    /// since one is already established. Without that frame a trailing `<script>` would be reachable as
+    /// `//script` but not as `//html/script`, and text there would be dropped outright because the empty
+    /// stack provides nothing to attach it to.
     ///
-    /// The second root is verified against a crawled page that self-closes `<html/>` inside a
-    /// downlevel-revealed conditional comment, whose lxml tree has two roots both carrying the
-    /// attributes. Browsers keep one element instead, which is why parsel's own CSS (scoped to the first
-    /// root) and XPath disagree on such a document; the TREE is the oracle here.
+    /// The second root is verified against a page that self-closes `<html/>` inside a downlevel-revealed
+    /// conditional comment, whose lxml tree has two roots both carrying the attributes. Browsers keep
+    /// one element instead, which is why parsel's own CSS (scoped to the first root) and XPath disagree
+    /// on such a document; the TREE is the oracle here.
     #[test]
     fn content_after_the_document_closes_gets_a_second_root() {
         assert_eq!(ex("<html a=1 /><html a=2><p>x</p>", "//html/@a"), v(&["1", "2"]));
@@ -2314,7 +2315,7 @@ mod tests {
         assert_eq!(ex("<html><head><title>T</title></head><body><p>P</p>",
                       "head > title::text"), v(&["T"]));
 
-        // frame-anchored and positional selectors are the ones that were wrong, in both directions
+        // frame-anchored and positional selectors are the ones this reshapes, in both directions
         let a = "<html><head><style>s</style><a href=x>A</a></head><body><p>P</p>";
         assert_eq!(ex(a, "a:first-child::text"), v(&["A"])); // a IS body's first element child
         assert_eq!(ex(a, "head + body a::text"), v(&["A"]));
@@ -2368,12 +2369,12 @@ mod tests {
 
     /// HTML5's END-TAG-OPEN state: only an ASCII alpha starts an end tag.
     ///
-    /// The engine collapsed all three branches into "scan a name, skip to `>`", and `is_name_char`
-    /// accepts `%`/`1`/`-`, so `</%>` became an end tag named `%` — dropped as unmatched, JOINING the
-    /// text either side, where libxml2 keeps a bogus-comment node that SPLITS it. A real page's
-    /// `Copyright 1991-2026</%> VECMAR Corporation` came back as one text node instead of two. `</>` was
-    /// the same bug the other way round: no event at all, so the runs were left un-joined where libxml2
-    /// ignores the whole thing and keeps ONE node.
+    /// Collapsing the END-TAG-OPEN branches into "scan a name, skip to `>`" would break the distinction,
+    /// because `is_name_char` accepts `%`/`1`/`-`. Then `</%>` would become an unmatched end tag, JOINING
+    /// the text either side where libxml2 keeps a bogus-comment node that SPLITS it:
+    /// `Copyright 1991-2026</%> VECMAR Corporation` would be one text node instead of two. `</>` would
+    /// fail the other way round, producing no event and leaving the runs un-joined where libxml2 ignores
+    /// the whole thing and keeps ONE node.
     #[test]
     fn end_tag_open_only_starts_a_tag_on_a_letter() {
         // a BOGUS COMMENT is a node, so it splits the run
@@ -2484,7 +2485,7 @@ mod tests {
         assert_eq!(ex("<div ==x class=c>y</div>", "div::attr(class)"), v(&["c"]));
     }
 
-    /// A start tag the response ends inside is DROPPED, whole — libxml2 and html5lib agree. Keeping
+    /// A start tag the response ends inside is DROPPED, whole; libxml2 and html5lib agree. Keeping
     /// whatever was scanned is the false-positive direction: an element, with an attribute value holding
     /// the rest of the document, that no other parser reports.
     #[test]
@@ -2519,9 +2520,9 @@ mod tests {
         assert_eq!(extract(kept, &["p::text".into()], None)[0], v(&["a "]));
     }
 
-    /// VERTICAL TAB is in Python's strip set and not in Rust's `is_ascii_whitespace`, and the gap was a
-    /// whole missing head: leading `0x0b` is stripped for Parsel, while an un-stripped one is character
-    /// data before the frame and opens the `<body>`. See [`is_strip_ws`].
+    /// VERTICAL TAB is in Python's strip set and not in Rust's `is_ascii_whitespace`. Omitting it here
+    /// would leave character data before the frame and open the `<body>`, losing the head. See
+    /// [`is_strip_ws`].
     #[test]
     fn vertical_tab_is_stripped_like_python_does() {
         let q: Vec<String> = ["head title::text", "html::attr(a)"].iter().map(|s| s.to_string()).collect();

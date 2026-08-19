@@ -1,8 +1,8 @@
 //! The document frame — `<html>`/`<head>`/`<body>` state and the questions the rules ask about it.
 //!
-//! **Why this is a module.** Spread across six call sites as a different combination of two bare bools,
-//! a counter and an inline stack scan, each rule ends up asking a PROXY question instead of the real one
-//! — four distinct bugs in one 10000-page crawl sample, all of that shape:
+//! **Why this is a module.** If frame state were spread across call sites as ad-hoc combinations of bare
+//! booleans, counters and inline stack scans, rules could ask PROXY questions instead of the real ones.
+//! These are the distinctions that must remain explicit:
 //!
 //! | rule | asked | needed |
 //! |---|---|---|
@@ -14,8 +14,8 @@
 //! Every question is named here, once, so a rule that reaches for the wrong one is visible in the diff
 //! rather than buried in a `stack.iter().any(...)` at the call site.
 //!
-//! **Why not an insertion-mode enum**, which is the obvious idea and the first one tried: two of the five
-//! questions are not phases, and a linear phase collapses exactly the pairs the engine has to tell apart.
+//! **Why not an insertion-mode enum**, which is the obvious shape: several questions are not phases, and
+//! a linear phase collapses exactly the distinctions the engine has to preserve.
 //! [`head_is_current`] ("the head is the CURRENT top, so this text is the head's own") is not
 //! [`head_is_open`] ("a head is open somewhere") and neither is [`DocumentFrame::head_seen`] ("a head has
 //! existed, so a later head-only tag is not put back in one") — `<head><title>` is all three of open,
@@ -92,9 +92,9 @@ pub(super) fn only_html_open(stack: &[OpenElem<'_>]) -> bool {
 /// Is a `<html>`/`<head>`/`<body>` start tag REDUNDANT here — i.e. is the frame already established, so
 /// libxml2 would ignore the tag rather than insert an element?
 ///
-/// The three names do NOT share one rule. Treating them as one ("accepted while nothing but an `<html>`
-/// is open") was right for `<head>` and wrong for the other two; each arm says which oracle cell it
-/// stands on, and `frame-in-element` in `tools/audit_tree_rules.py` sweeps all three over the whole
+/// The three names do NOT share one rule. "Accepted while nothing but an `<html>` is open" holds for
+/// `<head>` only, not for the other two; each arm says which oracle cell it stands on, and
+/// `frame-in-element` in `tools/audit_tree_rules.py` sweeps all three over the whole
 /// element universe crossed with "is a body open". A frame the page OMITS is a different question,
 /// answered by `Matcher::ensure_frame`.
 pub(super) fn tag_is_redundant(name: &[u8], stack: &[OpenElem<'_>]) -> bool {

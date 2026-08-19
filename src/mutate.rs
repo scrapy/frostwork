@@ -6,9 +6,9 @@
 //! lxml. This answers the other half — **"if a cell were wrong, would anything go red?"** — by flipping
 //! one cell at a time and running the gates against the mutant.
 //!
-//! That is the only check in the repo that finds blind spots without someone first guessing where they
-//! are. Every other "did we test this?" question here was answered by a human noticing an absence: the
-//! `dd`/`dt` arm, the missing `colgroup` rule, escapes in selectors. This one enumerates.
+//! This finds blind spots without first guessing a missing example: it enumerates the modeled cells and
+//! asks whether each change is observable. Rules the engine does not model as cells still need a wider
+//! derivation before this sweep can reach them.
 //!
 //! Cost is why it is a runtime hook rather than a source rewrite: reading the mutation from the
 //! environment means ONE build serves every mutant, instead of a rebuild-and-relink per cell.

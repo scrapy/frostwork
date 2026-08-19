@@ -209,8 +209,8 @@ pub fn frame_content(name: &str) -> FrameContent {
 /// Derived by `tools/gen_tree_rules.py` over the whole element universe, which is why it
 /// is libxml2 2.14's set and not HTML5's: `listing` and `noscript` look like they belong
 /// here and do not (libxml2 parses their content as markup, having scripting disabled),
-/// while the obsolete `xmp`/`plaintext` do belong. It was a hand-written list of nine
-/// names before it was derived.
+/// while the obsolete `xmp`/`plaintext` do belong. Deriving the set is what keeps a
+/// non-obvious name from being left out of it.
 pub fn data_mode(name: &str) -> DataMode {
     crate::mutate::data_mode(
         name,

@@ -224,11 +224,11 @@ pub(crate) fn split_top_commas(q: &str) -> Vec<&str> {
 /// Index of the `)` that closes a functional pseudo whose `(` sits just before `from`, or `None` if the
 /// selector never closes it (a syntax error — fail closed).
 ///
-/// A bare depth counter is not enough here, and the difference is not academic: `)` is ordinary DATA
-/// inside a quoted attribute value, so `div:is(#outer, [data-x=")"])` was cut off at the quoted `)`, the
-/// leftover `"])` failed to parse, and a selector Parsel answers returned an EMPTY column. Both quotes
-/// and CSS escapes are honoured — `\)` is an escaped paren, `\"` inside a string does not end it, and an
-/// unbalanced `(` inside a value (`[title='a(b']`) no longer swallows the rest of the query.
+/// A bare depth counter is not enough, because `)` is ordinary DATA inside a quoted attribute value: it
+/// would cut `div:is(#outer, [data-x=")"])` off at the quoted `)`, leave `"])` to fail parsing, and return
+/// an EMPTY column for a selector Parsel answers. Quotes and CSS escapes are both honoured here, so `\)`
+/// is an escaped paren, `\"` inside a string does not end it, and an unbalanced `(` inside a value
+/// (`[title='a(b']`) does not swallow the rest of the query.
 ///
 /// The returned index always lands on an ASCII `)`, so it is a `str` char boundary: the escape skip can
 /// step into a multi-byte character, but its continuation bytes are all `>= 0x80` and match no
@@ -450,9 +450,9 @@ pub fn parse(query: &str) -> Result<Selector, ()> {
 /// of whitespace and explicit combinator chars (`>`/`+`/`~`) at bracket depth 0 is one combinator,
 /// named by its explicit char (pure whitespace = descendant). Combinators inside `[...]` are literal.
 ///
-/// Bracket depth alone is not enough: a `)` inside a QUOTED value closed the bracket run early, and the
-/// next space then read as a descendant combinator — so `div:is([data-x=")"], #x)` split into two
-/// compounds and the selector was reported unsupported. Quotes and CSS escapes are tracked here for the
+/// Bracket depth alone is not enough: a `)` inside a QUOTED value would close the bracket run early, and
+/// the next space would read as a descendant combinator, splitting `div:is([data-x=")"], #x)` into two
+/// compounds and reporting the selector unsupported. Quotes and CSS escapes are tracked here for the
 /// same reason as in [`find_functional_close`].
 fn split_structural(head: &str) -> Result<(Vec<String>, Vec<Comb>), ()> {
     let b = head.as_bytes();
@@ -674,8 +674,8 @@ fn parse_compound_depth(s: &str, depth: u32) -> Result<Compound, ()> {
             // and in shift_jis 949 character pairs differ only in the ASCII case of a trail byte — `П`
             // is 0x8450 and `а` is 0x8470, so a selector for one would match the other.
             //
-            // Measured before refusing: over 30000 crawled pages lxml built a non-ASCII element on 5,
-            // every one of them mojibake or a tag whose separator was an NBSP. Nothing to widen for.
+            // The refusal is measured, not assumed: crawled pages produced non-ASCII elements only from
+            // mojibake or malformed separators, so there was no useful selector surface to widen.
             if !name.is_ascii() {
                 return Err(());
             }
@@ -767,7 +767,7 @@ fn parse_compound_depth(s: &str, depth: u32) -> Result<Compound, ()> {
                     // An UNQUOTED attribute value must be a CSS identifier. cssselect rejects anything
                     // else outright (`[a=2]`, `[a=$v]`, `[href^=/p]`, `[a=--v]` are all
                     // SelectorSyntaxError), so answering them would be a non-empty column on a selector
-                    // Parsel refuses — the "OVERMATCH" the selector fuzzer gates. Reject here instead;
+                    // Parsel refuses: the OVERMATCH direction the selector fuzzer gates. Reject here;
                     // quoting the value (`[a="2"]`) is the supported form. (Same root cause as the XPath
                     // non-literal operand rejected in `xpath::parse_one_attr`.)
                     if !is_css_ident(v) {
@@ -1435,11 +1435,11 @@ mod support_boundary_tests {
         assert!(parse(r#"[data-x="a\"]::text"#).is_err() || v(r#"[data-x="a\"]"#).is_some());
     }
 
-    /// The `::attr()` ARGUMENT takes escapes too, and this one was worse than a coverage gap: the
-    /// validator only inspected the first character, so `::attr(data-\6b)` passed as a valid identifier
-    /// and was then matched as the literal name `data-\6b`, which no element carries. The compiler
-    /// PROMISED support and returned an empty column — the one outcome the no-fallback contract forbids
-    /// (parsel answers `['v1']`). Found by the selector fuzzer's new escape family, not by hand.
+    /// The `::attr()` ARGUMENT takes escapes too, and getting it wrong is worse than a coverage gap. A
+    /// validator that inspected only the first character would pass `::attr(data-\6b)` as an identifier,
+    /// then match the literal name `data-\6b`, which no element carries: the compiler would PROMISE
+    /// support and return an empty column, the one outcome the no-fallback contract forbids (parsel
+    /// answers `['v1']`).
     #[test]
     fn css_escapes_in_the_attr_argument_are_decoded() {
         let arg = |q: &str| match parse(q).map(|s| s.terminal) {

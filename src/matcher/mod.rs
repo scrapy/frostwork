@@ -995,10 +995,9 @@ struct NsState {
     value: Option<String>,            // finalized normalized string of the first matched node
 }
 
-// NOTE: a subject-tag dispatch index was prototyped here and MEASURED NEUTRAL (bench_matrix.py):
-// real scraping selectors are heavily class-led (no subject tag), so they can't be tag-bucketed, and
-// the per-element HashMap lookup cancels the savings on tag-led selectors over common tags. Removed —
-// don't re-add without a class-aware index and a workload that shows a win.
+// A subject-tag dispatch index measures NEUTRAL here (`bench_matrix.py`). Class-led selectors cannot be
+// tag-bucketed, and the per-element lookup offsets the savings for common tag-led selectors. Do not add
+// one without a class-aware index and a workload that demonstrates a win.
 
 impl CompiledSchema {
     /// Compile a schema ONCE for reuse across pages. `queries[i]` is the member selectors of query `i`
@@ -1599,8 +1598,8 @@ impl<'a> Matcher<'a> {
     /// elements, so they share one sub-schema and this pass reads all of their tails from one re-scan.
     ///
     /// Two details matter. The re-scan runs the REAL engine (`schema.tail_schemas[slot]`), so it inherits
-    /// dropped-end-tag coalescing, table scope and implied close rather than re-deriving them — a
-    /// hand-rolled collector here would silently re-introduce the split-text bug. And winners NEST (a
+    /// dropped-end-tag coalescing, table scope and implied close rather than re-deriving them; a
+    /// hand-rolled collector here would silently split the text nodes libxml2 coalesces. And winners NEST (a
     /// last-child inside a last-child, a `:has` div inside a `:has` div), so a contained span's values are
     /// a subset of its container's and would double-count: element spans only nest or are disjoint, so
     /// keeping the MAXIMAL ones de-duplicates exactly — which also bounds the work to one extra pass.
@@ -2015,12 +2014,13 @@ impl<'a> Matcher<'a> {
     /// the value is clean valid UTF-8 — the common case, so usually zero allocation).
     ///
     /// `DECODE_NAMES` is [`Matcher::decode_names`] lifted to a const, the same shape as
-    /// `compound_matches_impl`'s filter flag. The flag is per PAGE while the check it guards would run
-    /// per ATTRIBUTE, and the schemas that would pay it are the ones that cannot use it — nothing names
-    /// a non-ASCII attribute — so monomorphizing keeps the ordinary path compiled exactly as it was.
-    /// That is a structural argument, not a measured one: as a per-attribute branch the A/B read 3/13
-    /// cells above jitter at 3 reps and 0/12 at 7 (median +0.8%), i.e. a null result either way. The
-    /// const removes the question rather than answering it.
+    /// `compound_matches_impl`'s filter flag. The decision is per PAGE while the guarded check would run
+    /// per ATTRIBUTE, so monomorphizing removes the branch from schemas that cannot use it because they
+    /// name no non-ASCII attribute.
+    ///
+    /// That is a structural argument, not a measured one: as a per-attribute branch the A/B reads 3/13
+    /// cells above jitter at 3 reps and 0/12 at 7 (median +0.8%), a null result either way. The const
+    /// removes the question rather than answering it.
     fn materialize_attrs<const DECODE_NAMES: bool>(
         &self,
         raw_attrs: &[(&'a [u8], Option<&'a [u8]>)],
@@ -2420,10 +2420,9 @@ impl<'a> Matcher<'a> {
     /// is still absorbed by it — which is what separates this from `<html></html>`, where the written
     /// end tag pops the phantom and the enclosing element survives.
     ///
-    /// Found on a crawled page that opens a stray `<strong>` before its doctype and then writes
-    /// `<html xmlns=… />`. libxml2 ends the `<strong>` there; leaving it open parented the page's
-    /// entire body inside it, so every `body > *` a scraper asks for was empty while `body *` was
-    /// intact — the frame wrong, not the values.
+    /// For a stray `<strong>` before the doctype followed by `<html xmlns=… />`, libxml2 ends the
+    /// `<strong>` at the self-close. Leaving it open would parent the whole body inside it, making every
+    /// `body > *` empty while leaving `body *` intact. The frame would be wrong, not the values.
     fn self_close_with_no_element_of_its_own(&mut self, span_start: usize) {
         self.flush_text();
         if let Some(e) = self.stack.pop() {
@@ -2509,9 +2508,9 @@ impl<'a> TokenSink<'a> for Matcher<'a> {
         // A real `<body>`/`<html>`/`<head>` is excluded because it opens the frame itself — and `<body>`
         // in particular reaches here having just popped the head through the same relation. So is a tag
         // that opens NEITHER part: a frameset document has no `<body>` at all, and `<frameset>` ends the
-        // head like any other non-head content. Wrapping it in an invented body put a real page's whole
-        // frameset inside one, where libxml2 makes it a child of `<html>` — which `frame_content` already
-        // knew and only `ensure_frame` was asking.
+        // head like any other non-head content. Wrapping that in an invented body would put the whole
+        // frameset inside one, where libxml2 makes it a child of `<html>`. `frame_content` is the question
+        // to ask here, not "is this a frame tag".
         if popped_head
             && frame.is_none()
             && !self.frame.body_established()
@@ -2796,8 +2795,9 @@ impl<'a> Matcher<'a> {
     ///
     /// The same rule as above minus its second half: character data always ends an open head, but once a
     /// body exists there is no body to move it into, so libxml2 pops the head and leaves the text at
-    /// `<html>` level. Only a `<head>` written after `</body>` gets here — which is why it was missed:
-    /// the two halves were one function gated on `body_established()`, so the head simply kept the text.
+    /// `<html>` level. Only a `<head>` written after `</body>` reaches here, which is why this is its own
+    /// function: if folded into the half above and gated on `body_established()`, the head would keep the
+    /// text.
     fn late_head_text_split(&self, text: &[u8]) -> Option<usize> {
         if !self.frame.body_established() || !head_is_current(&self.stack) {
             return None;
@@ -2812,7 +2812,7 @@ impl<'a> Matcher<'a> {
     /// there is nothing to anchor `body h1` on, no shared parent to make `h1 + p` siblings, and nowhere
     /// to put root-level text.
     ///
-    /// Which part a given start tag opens is [`frame_content`], derived from the oracle over the whole
+    /// Which part a given start tag opens is [`frame_content_of`], derived from the oracle over the whole
     /// element universe. The frame tags themselves open no PART — but they still need the element they
     /// belong in: a page whose first tag is `<head>` or `<body>` writes no `<html>`, and libxml2 (and
     /// html5lib, and every browser) still wraps it in one. Leaving that out puts the `<head>` at the root
@@ -2821,10 +2821,10 @@ impl<'a> Matcher<'a> {
     /// underneath them look right. Real pages do this — a crawled page can open with a bare `<head>`.
     fn ensure_frame(&mut self, name: &[u8], frame: Option<usize>, at: usize) {
         // The `<html>` comes FIRST, before the body check: content after `</html>` still needs an element
-        // to sit in, and libxml2 gives it one — a SECOND ROOT `<html>`, which is the same shape it builds
-        // for a second `<html>` start tag. Ordering this after the `body_established` return left the
-        // tail parentless, so `//html/script` found a real page's trailing script in lxml and not here
-        // (the values were all still there; only the frame around them was missing).
+        // to sit in, and libxml2 gives it one, a SECOND ROOT `<html>`, the same shape it builds for a
+        // second `<html>` start tag. If ordered after the `body_established` return instead, the tail
+        // would be parentless and `//html/script` would miss a trailing script lxml finds. The values
+        // would still be there; only the frame around them would be missing.
         if nothing_open(&self.stack) && !name.eq_ignore_ascii_case(b"html") {
             self.start_tag(b"html", &[], false, at, at);
         }

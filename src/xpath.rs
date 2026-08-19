@@ -917,9 +917,9 @@ mod tests {
 mod support_boundary_tests {
     use super::*;
 
-    /// An expression lxml REJECTS must be unsupported here, not answered. `//div/@x:y` was the worst
-    /// case: lxml raises "undefined namespace prefix" and we returned the attribute's value — a wrong
-    /// value from an expression the oracle refuses to run.
+    /// An expression lxml REJECTS must be unsupported here, not answered. For `//div/@x:y`, lxml raises
+    /// "undefined namespace prefix", so answering it at all would return a wrong value from an expression
+    /// the oracle refuses to run.
     #[test]
     fn expressions_lxml_rejects_are_unsupported() {
         for q in [

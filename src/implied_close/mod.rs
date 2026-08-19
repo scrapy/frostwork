@@ -29,10 +29,11 @@ pub use generated::*;
 /// derivation cannot observe them: nothing is ever open above the document frame, and content after
 /// `</html>` is discarded by libxml2 (a documented divergence), so no probe can read those cells.
 ///
-/// `head` was missing from this list, and the sequence sweep found it: in `<head><tr></head><div>` the
-/// open `<tr>` out-ranks a priority-0 `</head>`, so the end tag was discarded and everything after it
-/// stayed inside the head. libxml2 gives `head` the same end priority as `body` (above `table`), so no
-/// open element blocks it either.
+/// `head` belongs here with them. In `<head><tr></head><div>` an open `<tr>` out-ranks a priority-0
+/// `</head>`, so without the exemption the end tag would be discarded and everything after it would stay
+/// inside the head. libxml2 unwinds the `<tr>` and honours the `</head>`, and this exemption is what
+/// reproduces that: the caller ANDs it with [`blocks_end_tag`], so returning false here short-circuits the
+/// scope comparison and no open element can block these three.
 pub fn end_tag_discardable(name: &[u8]) -> bool {
     !(name.eq_ignore_ascii_case(b"body")
         || name.eq_ignore_ascii_case(b"html")
@@ -43,10 +44,9 @@ pub fn end_tag_discardable(name: &[u8]) -> bool {
 ///
 /// libxml2's rule is a COMPARISON, not a set of boundary elements: every name carries an
 /// [`end_priority`] and a misplaced end tag may only unwind elements that do not out-rank it. Reading it
-/// as a set (a table-scoped set blocking ordinary end tags, plus `div`) kept the two coarsest cells and
-/// lost the ORDER inside the table machinery — `</tr>` cannot unwind an open `<tbody>`. A crawled page
-/// whose table generator emits `<tr><strong><tbody><td>…</strong><tbody></tr>` rows then closed each row
-/// here while libxml2 kept it open, and the cells after the first `</tr>` were lost.
+/// as a set (a table-scoped set blocking ordinary end tags, plus `div`) would keep the coarsest cells but
+/// lose the ORDER inside the table machinery, where `</tr>` cannot unwind an open `<tbody>`. On generated
+/// table rows, that mistake would close the row early and lose the cells after the first `</tr>`.
 pub fn blocks_end_tag(open_name: &[u8], closing: &[u8]) -> bool {
     end_priority_of(open_name) > end_priority_of(closing)
 }
@@ -86,8 +86,8 @@ pub fn end_priority_of(name: &[u8]) -> u8 {
 /// Case-insensitive [`data_mode`] for a raw tag name — an unrecognized name holds ordinary markup.
 ///
 /// The tokenizer asks this per start tag. It lives here, next to the other generated-table lookups,
-/// because the name list is derived from the same oracle sweep over the same universe: the tokenizer's
-/// own hand-written copy of it was nine `eq_ignore_ascii_case` arms that no gate could have shown wrong.
+/// because the name list is derived from the same oracle sweep over the same universe. A separate
+/// hand-written copy could omit a name without the derivation or mutation sweep reaching it.
 pub fn data_mode_of(name: &[u8]) -> crate::tokenizer::DataMode {
     lookup(name, crate::tokenizer::DataMode::Normal, data_mode)
 }
@@ -128,9 +128,9 @@ mod tests {
         assert!(!implies("caption", "caption"));
     }
 
-    /// The `<p>`-closing set and the table-section arms, cell by cell against libxml2 2.14.6. These
-    /// arms had NO differential coverage (the generators never emitted `optgroup`/`thead`/`tfoot`/
-    /// `caption`, and never put `<option>`/`<rt>` after an unclosed `<p>`), and 19 of them were wrong.
+    /// The `<p>`-closing set and the table-section arms, cell by cell against libxml2 2.14.6. Generated
+    /// differential pages do not exercise these shapes, so this test provides direct Rust regression
+    /// coverage; `tools/audit_tree_rules.py` independently checks the rule table against libxml2.
     #[test]
     fn arms_without_generator_coverage() {
         // <p> is closed by blocks and list/table ITEMS ...
@@ -138,7 +138,7 @@ mod tests {
                   "tfoot", "caption", "p"] {
             assert!(implies(t, "p"), "<{t}> must close an open <p>");
         }
-        // ... but NOT by these, which nest inside it (the old blanket rule closed on all five)
+        // ... but NOT by these, which nest inside it (a blanket rule would close on all five)
         for t in ["option", "optgroup", "thead", "rt", "rp", "span", "a", "section"] {
             assert!(!implies(t, "p"), "<{t}> must NOT close an open <p>");
         }

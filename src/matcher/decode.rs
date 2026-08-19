@@ -1,7 +1,7 @@
 //! Value decoding: turn the raw byte span of a matched value (text node or attribute) into the final
 //! `String`/`Cow` the engine emits. Pure `bytes + encoding -> value` with no dependency on any matcher
-//! type — it runs only for values that actually match (a small fraction of the document), so the
-//! whole-document decode/validation the old `&str` path paid up front is gone.
+//! type. It runs only for values that actually match, a small fraction of the document, so no
+//! whole-document decode or UTF-8 validation happens up front.
 //!
 //! [`EncodedInput`] carries that `bytes + encoding` pair as one value, keeping document-range
 //! operations tied to the encoding chosen for the prepared buffer.
@@ -69,15 +69,14 @@ impl<'a> EncodedInput<'a> {
 
 /// Bytes -> `str` under the resolved encoding, with UTF-8 short-circuited. For UTF-8
 /// `decode_without_bom_handling` is *defined* to equal `from_utf8_lossy`, so `from_utf8` answers valid
-/// input — the overwhelming case — without decoder setup.
+/// input, the overwhelming case, without decoder setup.
 ///
-/// **This exists for consistency, not for speed, and the measurement is why it says so.** Only
-/// `decode_attr` had the fast path; `finalize` and `raw_source` went through the general decoder, and
-/// value decoding is ~25% of the work on a schema full of bare-element (outer-HTML) fields, so it
-/// looked like a lever. A/B over the real corpus: median −0.5%, **0 of 15 cells above their own
-/// jitter**, signs mixed — a null result. encoding_rs's UTF-8 validation is already as fast as std's.
-/// What the change is worth is that "decode" now has ONE definition rather than two that had already
-/// drifted apart. Do not re-attempt it as an optimization without a workload that shows a win.
+/// **The short-circuit is for consistency, not a claimed speedup.** Value decoding is ~25% of the work
+/// on a schema full of bare-element (outer-HTML) fields, which makes it look like a lever. A/B over the
+/// real corpus says otherwise: median −0.5%, **0 of 15 cells above their own jitter**, signs mixed, a
+/// null result, because encoding_rs's UTF-8 validation is already as fast as std's. Its value is one
+/// definition of "decode" instead of two. Do not treat it as an optimization without a workload that
+/// demonstrates one.
 pub(super) fn decode_bytes<'a>(bytes: &'a [u8], enc: &'static Encoding) -> Cow<'a, str> {
     if enc == encoding_rs::UTF_8 {
         return match std::str::from_utf8(bytes) {
@@ -100,12 +99,12 @@ fn normalize_crlf(s: Cow<str>) -> Cow<str> {
 }
 
 /// Finalize an emitted value from raw bytes: decode with the resolved encoding, CRLF-normalize,
-/// entity-decode. Called ONLY for values that actually match (a small fraction of the
-/// document), so the whole-document decode/validation the old `&str` path paid up front is gone.
+/// entity-decode. Called ONLY for values that actually match, a small fraction of the document, so no
+/// whole-document decode or UTF-8 validation happens up front.
 ///
-/// The NUL filtering below is now a backstop, not the mechanism: raw NUL is deleted from the whole
-/// document before tokenizing (`crate::strip_nul`), because dropping it only from emitted values made
-/// the engine and lxml disagree about the document's STRUCTURE. It stays because it costs one
+/// The NUL filtering below is a backstop, not the mechanism. Raw NUL is deleted from the whole document
+/// before tokenizing (`crate::strip_nul`), because dropping it only from emitted values would make the
+/// engine and lxml disagree about the document's STRUCTURE. It stays because it costs one
 /// `contains(&0)` on a path that already scans the value, and because a decoded U+0000 arriving from
 /// somewhere else must not reach a column.
 pub(super) fn finalize(bytes: &[u8], allows_entities: bool, enc: &'static Encoding) -> String {

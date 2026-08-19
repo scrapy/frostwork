@@ -196,11 +196,10 @@ fn skip_to_gt(b: &[u8], from: usize) -> usize {
 /// Scan RAWTEXT/RCDATA content for the matching `</name` end tag (case-insensitive). Returns
 /// (text_end, after_end_tag).
 ///
-/// The appropriate end tag gets a start tag's ATTRIBUTE states here too — see `scan_attrs`. Ending it
-/// at the first `>` instead was the same bug in a second place, and it is the malformed-HTML fuzzer's
-/// the fuzzer's `end_tag_attr` mutation covers: `<title>x</title\nsrc='y:>` has no
-/// later `'`, so libxml2 reads the whole rest of the document as that attribute's value and keeps
-/// nothing, while the engine closed the title and kept the page.
+/// The end tag has a start tag's ATTRIBUTE states here too (see `scan_attrs`), so a quoted value can
+/// carry the `>`. Ending the tag at the first `>` instead would keep markup libxml2 discards: in
+/// `<title>x</title\nsrc='y:>` there is no later `'`, so libxml2 reads the rest of the document as that
+/// attribute's value and keeps nothing after it.
 fn find_raw_end<'a>(
     b: &'a [u8],
     from: usize,
@@ -277,11 +276,10 @@ fn find_script_end<'a>(
     let mut state = State::Data;
     let mut i = from;
     while i < n {
-        // Only two bytes can begin anything this scanner acts on: `<` (every state) and `-` (the `-->`
-        // that leaves an escaped state). Skip to the next one instead of stepping — a `<script>` holding
-        // inline JSON is one long run of neither, and this was the ONE scanner in the file still walking
-        // it a byte at a time (`find_raw_end`, `skip_to_gt` and `tokenize` all already jump). On a real
-        // 1.6 MB product page it was ~90% of the whole no-selector scan.
+        // Only two bytes begin anything this scanner acts on: `<` (every state) and `-` (the `-->` that
+        // leaves an escaped state), so it skips to the next one instead of stepping. Script bodies can
+        // contain long JSON runs of neither: walking them byte by byte costs ~90% of a no-selector scan
+        // on a 1.6 MB product page. `find_raw_end`, `skip_to_gt` and `tokenize` jump the same way.
         let hit = match state {
             State::Data => memchr::memchr(b'<', &b[i..]),
             State::Escaped | State::DoubleEscaped => memchr::memchr2(b'-', b'<', &b[i..]),
@@ -359,12 +357,12 @@ pub fn tokenize<'a, S: TokenSink<'a>>(b: &'a [u8], sink: &mut S) {
                         // be at EOF. `finish` then closes what is open and returns; the tail of the
                         // document simply never happens.
                         //
-                        // This runs per markup token on EVERY page, including the schemas that can never
+                        // This runs per markup token on EVERY page, including schemas that can never
                         // stop, so it is held to the same rule as the matcher's pre-filters: cheaper than
-                        // what it guards, for the callers that cannot use it. Measured with `ab_bench.py`
-                        // against a build with the branch compiled out — median -0.1% over 26 cells, one
-                        // cell above its own jitter and that one FASTER. The unarmed cost is a `u128`
-                        // compare against a mask that is 0 (`Matcher::done`).
+                        // what it guards, for the callers that cannot use it. Against a build with the
+                        // branch compiled out, `ab_bench.py` reports median -0.1% over 26 cells, one cell
+                        // above its own jitter and that one FASTER. Unarmed it is a `u128` comparison
+                        // against a zero mask (`Matcher::done`).
                         if sink.done() {
                             return;
                         }
@@ -452,14 +450,13 @@ fn handle_markup<'a, S: TokenSink<'a>>(
 /// attributes into `attr_buf`. Returns `(offset, terminated, self_closing)`; `terminated` is false
 /// when the input ran out before the `>`.
 ///
-/// END tags come through here too, and must: HTML5 gives them the same attribute states as start
-/// tags, and only DISCARDS what they collect. The difference that matters is quoting — a `"` after
-/// `=` opens a value that runs to the next `"`, so a `>` inside it does not end the tag. Reading an
-/// end tag as "scan a name, skip to `>`" instead ended it early, and a Blogger template that emits
-/// `</img\nsrc="http:>` (unterminated, so the value runs on to the next quote 300 bytes later) then
-/// kept an `</a>`, two `</div>`s and a whole `<div id='HTML3'>` start tag that libxml2 and html5lib
-/// both swallow — reporting an element that is not in the document, the FALSE-POSITIVE direction.
-/// Two 10000-page crawl samples found it, 29 and 32 divergent columns, one page each.
+/// END tags come through here too, and must: HTML5 gives them the same attribute states as start tags
+/// and only DISCARDS what they collect. The difference that matters is quoting. A `"` after `=` opens a
+/// value that runs to the next `"`, so a `>` inside it does not end the tag. Reading an end tag as
+/// "scan a name, skip to `>`" would end it early and keep markup libxml2 and html5lib both swallow.
+/// After `</img\nsrc="http:>`, whose value is unterminated and so runs on to the next quote 300 bytes
+/// later, that reading keeps an `</a>`, two `</div>`s and a whole `<div id='HTML3'>` start tag.
+/// Reporting an element the document does not contain is the FALSE-POSITIVE direction.
 fn scan_attrs<'a>(
     b: &'a [u8],
     mut i: usize,
@@ -494,11 +491,11 @@ fn scan_attrs<'a>(
         let as_ = i;
         // An `=` where an attribute NAME should start is the first character of that name, not a
         // separator (HTML5 calls this `unexpected-equals-sign-before-attribute-name`; libxml2 and
-        // html5lib agree, the latter naming the attribute `U0003D`). Reading it as a separator gave the
-        // attribute an EMPTY name, which is dropped — and swallowed the real attribute after it as its
-        // value: a crawled page's `<div = class='background-bg-internas'>` lost its class entirely, so
-        // `div::attr(class)` came back one row short. Only reachable here, since whitespace, `>` and `/`
-        // were all consumed above.
+        // html5lib agree, the latter naming the attribute `U0003D`). Read as a separator it would give
+        // the attribute an EMPTY name, which would be dropped, and then swallow the real attribute after
+        // it as that value: `<div = class='background-bg-internas'>` would lose its class, leaving
+        // `div::attr(class)` one row short. Only reachable here, since whitespace, `>` and `/` are all
+        // consumed above.
         if b[i] == b'=' {
             i += 1;
         }
@@ -566,12 +563,11 @@ fn handle_start<'a, S: TokenSink<'a>>(
 
     if !terminated {
         // EOF before the closing `>`: the tag is DROPPED, whole. Not emitted, and not turned back into
-        // text either — libxml2 and html5lib agree on that for every shape (`<a`, `<a href`, `<a href=`,
+        // text either. libxml2 and html5lib agree on that for every shape (`<a`, `<a href`, `<a href=`,
         // `<a href="x`), and the text before it is untouched. Emitting whatever was scanned is the
-        // FALSE-POSITIVE direction: a page cut off inside `<a href="login.…` would report an `<a>`
-        // element, with an `href` holding the rest of the document, that no other parser sees at all.
-        // Truncated responses are not a rare shape in a crawl — one such page is worth 6 divergent
-        // columns, and it is a major group in the malformed-HTML fuzzer.
+        // FALSE-POSITIVE direction: a page cut off inside `<a href="login.…` would report an `<a>` with
+        // an `href` holding the rest of the document, which no other parser sees. Truncated responses
+        // are not a rare shape in a crawl.
         return n;
     }
 
@@ -702,9 +698,7 @@ src="http:></a><div id='HTML3'><i>" >y"#),
         assert_eq!(toks(b"a</p"), ["T:a", "E:p"]);
     }
 
-    /// ...and the RAWTEXT/RCDATA and SCRIPT closers get those states too — three call sites, one rule.
-    /// The fuzzer's `end_tag_attr` mutation reaches these two, which the plain end tag
-    /// above was already fixed.
+    /// ...and the RAWTEXT/RCDATA and SCRIPT closers use the same attribute states.
     #[test]
     fn rawtext_end_tag_attributes_are_scanned_too() {
         // RCDATA: the `>` inside the quoted value does not close the title
@@ -717,8 +711,8 @@ src="http:></a><div id='HTML3'><i>" >y"#),
             toks(br#"<script><!--s</script x=">">after"#),
             ["S:script[]", "T!:<!--s", "E:script", "T:after"]
         );
-        // an UNTERMINATED value eats the rest of the document — no later quote to close it, which is
-        // exactly the shape the fuzzer produced (`</title\nsrc='y:>`), and libxml2 keeps nothing after it
+        // an UNTERMINATED value eats the rest of the document: no later quote closes it, and libxml2
+        // keeps nothing after it
         assert_eq!(toks(b"<title>t</title\nsrc='y:><p>gone"), ["S:title[]", "T:t", "E:title"]);
     }
 
