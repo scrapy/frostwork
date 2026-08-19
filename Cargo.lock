@@ -18,8 +18,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "frostwork"
-version = "0.0.0"
+0.1.0
 dependencies = [
  "encoding_rs",
  "html-escape",
