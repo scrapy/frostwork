@@ -1632,7 +1632,7 @@ impl<'a> Matcher<'a> {
     /// grouped outer-HTML captures, and pop any group instances it opened into their group's rows
     /// (an empty container still yields a row). Called at every close site (implied-close / end tag /
     /// self-close / EOF), so instance lifetime tracks element lifetime with no depth scan.
-    fn close_elem(&mut self, e: OpenElem, end: usize) {
+    fn close_elem(&mut self, mut e: OpenElem, end: usize) {
         let mut cols = e.cap_cols;
         if cols != 0 && self.schema.stop_mask != 0 {
             // This element is no longer open, so its capture is final. EARLY EXIT reads both facts:
@@ -1660,13 +1660,15 @@ impl<'a> Matcher<'a> {
             let stride = 1 + self.schema.positional_tags.len();
             let base = self.pos.len() - stride;
             let total_children = self.pos[base];
-            for pend in &e.cold().rev_pending {
+            // Consumed by value: `e` is being dropped, so a winner's values MOVE into `pending`
+            // rather than being copied out of a buffer that is about to die.
+            for pend in std::mem::take(&mut e.cold_mut().rev_pending) {
                 let re = &self.schema.reverse_entries[pend.entry as usize];
                 let total = match re.of_type_tag {
                     Some(j) => self.pos[base + 1 + j],
                     None => total_children,
                 };
-                for cand in &pend.cands {
+                for cand in pend.cands {
                     if !reverse_matches(&re.rev, cand.idx, total) {
                         continue;
                     }
@@ -1678,8 +1680,8 @@ impl<'a> Matcher<'a> {
                         // share carries this column too
                         Tail::Merged => {}
                         Tail::Streamed => {
-                            for (off, v) in &cand.vals {
-                                self.pending.push((re.col, *off, v.clone()));
+                            for (off, v) in cand.vals {
+                                self.pending.push((re.col, off, v));
                             }
                         }
                     }
@@ -1704,13 +1706,18 @@ impl<'a> Matcher<'a> {
                 let re = &self.schema.reverse_entries[r as usize];
                 let (of_type, single_slot) = (re.rev.of_type, re.single_slot);
                 let idx = if of_type { e.of_type_index } else { e.child_index };
-                let vals: Vec<(usize, String)> = e
-                    .cold()
-                    .rev_buf
-                    .iter()
-                    .filter(|(er, _, _)| *er == r)
-                    .map(|(_, o, v)| (*o, v.clone()))
-                    .collect();
+                // Each `rev_buf` entry belongs to exactly one `r` and this loop visits each `r` once,
+                // so taking the value moves it out for good. `cold` may be absent: a reverse subject
+                // that captured nothing never allocated one, and must not allocate one here.
+                let vals: Vec<(usize, String)> = match e.cold.as_deref_mut() {
+                    Some(cold) => cold
+                        .rev_buf
+                        .iter_mut()
+                        .filter(|(er, _, _)| *er == r)
+                        .map(|(_, o, v)| (*o, std::mem::take(v)))
+                        .collect(),
+                    None => Vec::new(),
+                };
                 let cand = RevCand { idx, vals, span: (e.start, end) };
                 let target = match self.stack.last_mut() {
                     Some(parent) => &mut parent.cold_mut().rev_pending,
