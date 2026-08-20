@@ -3,6 +3,17 @@
 All notable user-facing changes will be recorded here. Frostwork will follow semantic versioning after its
 first public release.
 
+## 0.1.1 (unreleased)
+
+### Performance
+
+- Reverse-position selectors (`:last-child`, `:only-*`, `:nth-last-*`, XPath `[last()]`) no longer copy a
+  candidate's values on the way to the output. Each sibling's captured values are moved to the parent and
+  then into the column, rather than copied at both steps, which is work proportional to sibling count and
+  not to matches. Measured 13-17% faster on a reverse-position workload; no other selector shape is
+  affected. `docs/BENCHMARKS.md` now publishes that workload as its own row, so a regression on it shows
+  up in the canonical table.
+
 ## 0.1.0 (2026-08-19)
 
 First public preview.

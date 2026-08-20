@@ -340,6 +340,11 @@ def emit_markdown():
 
 def run_table(name, html_bytes, counts=COUNTS, pool=None, strict=True):
     pool = pool or POOL
+    # A cell labelled N selectors must run N. `pool[:c]` silently caps, so a count past the end of the
+    # pool publishes two identical rows under different labels -- the same class of dishonest number
+    # `assert_cell_extracts` refuses. Give a shorter pool its own counts instead.
+    over = [c for c in counts if c > len(pool)]
+    assert not over, f"{name}: counts {over} exceed the {len(pool)}-selector pool"
     kb = len(html_bytes) / 1024
     print(f"\n### {name}  ({kb:.0f} KB)")
     print(f"  {'sels':>4} | {'engine µs':>10} {'MB/s':>7} {'vals':>6} | {'parsel µs':>10} | {'speedup':>7}")
@@ -398,6 +403,11 @@ def main():
             ("attr-led / attribute-heavy", attr_heavy(med), ATTR_POOL),
         ):
             run_table(name, html, kind_counts, pool)
+        # Reverse positions (`:last-child` and friends) are the one supported shape whose values cannot
+        # be emitted as they stream: each candidate is held on its subject, promoted to the parent, and
+        # committed only if it wins at the parent's close. No pool above reaches that path, so a change
+        # to it had no published number. Its pool is 8 selectors, hence its own counts.
+        run_table("reverse-position values", reverse_values(med), [0, 1, 4, 8], REVERSE_VALUE_POOL)
 
     if args.markdown:
         emit_markdown()
