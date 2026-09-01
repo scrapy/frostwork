@@ -12,7 +12,9 @@ import release_check  # noqa: E402
 
 
 def test_current_source_is_release_ready():
-    assert release_check.source_errors() == []
+    # A reusable workflow retains the caller's tag ref. Mirror the CLI's automatic tag detection so
+    # this test applies the dated-release rule on a tag and the unreleased rule on a branch.
+    assert release_check.source_errors(tag=release_check._automatic_tag()) == []
 
 
 def test_description_gate_rejects_the_pypi_relative_link_regression():

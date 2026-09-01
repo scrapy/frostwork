@@ -3,6 +3,14 @@
 All notable user-facing changes will be recorded here. Frostwork will follow semantic versioning after its
 first public release.
 
+## 0.1.2 (unreleased)
+
+### Packaging and documentation
+
+- Includes all 0.1.1 changes below. Version 0.1.1 was never uploaded to PyPI: its immutable tag exposed
+  a tag-context bug in the release-check test before artifact building began. The test now applies the
+  dated-changelog rule on release tags and the unreleased rule on branches, matching the checker CLI.
+
 ## 0.1.1 (2026-09-01)
 
 ### Packaging and documentation
