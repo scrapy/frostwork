@@ -6,7 +6,7 @@ Frostwork compiles a set of CSS or XPath selectors, scans an HTML response once,
 requested values. It does not build a document tree, so working memory tracks parser state and pending
 matches rather than the whole page. Supported results are continuously checked against lxml; the exact
 coverage and known differences — in **both** directions — are listed in the
-[compatibility contract](docs/COMPATIBILITY.md).
+[compatibility contract](https://github.com/scrapy/frostwork/blob/main/docs/COMPATIBILITY.md).
 
 **~14× faster than Parsel (what Scrapy uses) and ~8× faster than lxml at the median on the measured
 production-selector corpus, and ~7× faster than selectolax/lexbor on the workload both can express.
@@ -15,7 +15,8 @@ DOM per field.**
 
 Because Frostwork never builds that DOM, working memory stays essentially constant as page size grows for
 a fixed-output schema; it scales with parser state and returned values instead of the page tree. Results
-depend on page shape, selector count and output volume; [BENCHMARKS.md](docs/BENCHMARKS.md) has the full
+depend on page shape, selector count and output volume;
+[BENCHMARKS.md](https://github.com/scrapy/frostwork/blob/main/docs/BENCHMARKS.md) has the full
 methodology and performance boundaries.
 
 Frostwork deliberately supports a focused subset of CSS and XPath. Python fails before scanning when a
@@ -25,17 +26,16 @@ lxml — Frostwork is for schemas known in advance.
 
 ## Install
 
-Until packages are published, install from the repository. Building the extension needs a
-[Rust toolchain](https://rustup.rs) (stable) alongside Python ≥ 3.9:
+Frostwork requires Python ≥ 3.10. Install the core package, or include the web-poet integration:
 
 ```bash
-python -m venv .venv
-.venv/bin/pip install maturin
-.venv/bin/maturin develop --release --extras=webpoet   # compiles the Rust core; needs cargo/rustc on PATH
+pip install frostwork
+pip install "frostwork[webpoet]"
 ```
 
-`--extras=webpoet` installs the supported web-poet release; drop it if you only need `extract`/`Page`.
-That extra requires Python ≥ 3.10, while the core supports Python ≥ 3.9.
+Published wheels contain the Rust extension, so installing from PyPI does not need a Rust toolchain.
+Building an editable checkout does; see the
+[Python development guide](https://github.com/scrapy/frostwork/blob/main/docs/PYTHON.md#development-build).
 
 ## Extracting values
 
@@ -61,7 +61,8 @@ Frostwork checks the BOM and `<meta>` declarations before defaulting to UTF-8. `
 and per-field cardinality for applications that do not use web-poet.
 
 The same engine is a Rust library — `frostwork::extract(html, &queries, None)`, with `Page`/`Plan` for named
-fields and compile-once reuse. See the [runnable example](examples/basic.rs).
+fields and compile-once reuse. See the
+[runnable example](https://github.com/scrapy/frostwork/blob/main/examples/basic.rs).
 
 ## Scrapy and web-poet
 
@@ -80,7 +81,7 @@ class ProductPage(FrostPage):
 ```
 
 `to_item()` returns a dict here. Add `Returns[YourItem]` for a typed item, as shown in the
-[Python guide](docs/PYTHON.md#3-web-poet-page-objects--frostpage--frostbrowserpage).
+[Python guide](https://github.com/scrapy/frostwork/blob/main/docs/PYTHON.md#3-web-poet-page-objects--frostpage--frostbrowserpage).
 
 Install `scrapy-poet` and enable it in `settings.py` with `ADDONS = {"scrapy_poet.Addon": 300}`
 (Scrapy ≥ 2.10; see [scrapy-poet's setup guide](https://scrapy-poet.readthedocs.io/en/stable/intro/setup.html)
@@ -108,7 +109,8 @@ construct the page directly: `item = await ProductPage(response=http_response).t
 This repository does not pin or test a Scrapy/Twisted matrix; use
 [scrapy-poet's documentation](https://scrapy-poet.readthedocs.io/) for setup details. Frostwork does gate
 the injection boundary: every shipped page base is injectable and can be planned as a callback dependency.
-Field processors, groups, response types and schema auditing are covered in the [Python guide](docs/PYTHON.md).
+Field processors, groups, response types and schema auditing are covered in the
+[Python guide](https://github.com/scrapy/frostwork/blob/main/docs/PYTHON.md).
 
 ## How it differs from lxml
 
@@ -141,12 +143,12 @@ there:
   The rule is **never diverge from the browser**: a price is right when it matches what the site shows
   a person, so where Frostwork's text differs from Scrapy's on an oddly-encoded page, Frostwork is the
   one agreeing with the browser. Every such difference is
-  [tabulated with its reason](docs/COMPATIBILITY.md#the-rule-never-diverge-from-the-browser).
+  [tabulated with its reason](https://github.com/scrapy/frostwork/blob/main/docs/COMPATIBILITY.md#the-rule-never-diverge-from-the-browser).
 - **A schema verdict before the scrape**, and **one pass for the whole schema** — a page object of
   single-valued fields stops scanning once every field has a value, which a tree parser cannot do.
 
 Three of those return *extra* values, the one direction that can surprise a port. The
-[compatibility contract](docs/COMPATIBILITY.md) lists supported, divergent, beyond and unsupported forms
+[compatibility contract](https://github.com/scrapy/frostwork/blob/main/docs/COMPATIBILITY.md) lists supported, divergent, beyond and unsupported forms
 with examples, the gate behind each, and the migration caveats.
 
 ## Build, test, benchmark
@@ -158,20 +160,20 @@ make bench         # benchmark matrix against Parsel
 make soak          # multi-seed differential and fuzz soak
 ```
 
-`make help` lists the individual targets. [TESTING.md](docs/TESTING.md) explains what each gate proves and
+`make help` lists the individual targets.
+[TESTING.md](https://github.com/scrapy/frostwork/blob/main/docs/TESTING.md) explains what each gate proves and
 what remains outside it.
 
 ## More
 
-- [Architecture and design decisions](docs/DESIGN.md)
-- [Python API and recipes](docs/PYTHON.md)
-- [Selector and divergence contract](docs/COMPATIBILITY.md)
-- [Correctness methodology](docs/TESTING.md)
-- [Benchmarks](docs/BENCHMARKS.md)
-- [Parsel migration](docs/MIGRATION.md)
-
-Frostwork is usable from source but not yet published to PyPI.
+- [Architecture and design decisions](https://github.com/scrapy/frostwork/blob/main/docs/DESIGN.md)
+- [Python API and recipes](https://github.com/scrapy/frostwork/blob/main/docs/PYTHON.md)
+- [Selector and divergence contract](https://github.com/scrapy/frostwork/blob/main/docs/COMPATIBILITY.md)
+- [Correctness methodology](https://github.com/scrapy/frostwork/blob/main/docs/TESTING.md)
+- [Benchmarks](https://github.com/scrapy/frostwork/blob/main/docs/BENCHMARKS.md)
+- [Parsel migration](https://github.com/scrapy/frostwork/blob/main/docs/MIGRATION.md)
+- [Release history](https://github.com/scrapy/frostwork/blob/main/CHANGELOG.md)
 
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE).
+Apache-2.0. See [LICENSE](https://github.com/scrapy/frostwork/blob/main/LICENSE).

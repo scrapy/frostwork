@@ -1,0 +1,3 @@
+# Packaging-only validation. Kept out of requirements-test.txt so the bindings/interpreter matrix does
+# not install Twine and its rendering/upload stack in jobs that never inspect a distribution.
+twine==7.0.0

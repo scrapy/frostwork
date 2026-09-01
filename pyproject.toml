@@ -55,8 +55,10 @@ frostwork-audit = "frostwork.audit:main"
 [project.urls]
 Homepage = "https://github.com/scrapy/frostwork"
 Repository = "https://github.com/scrapy/frostwork"
-Documentation = "https://github.com/scrapy/frostwork#readme"
+Documentation = "https://github.com/scrapy/frostwork/blob/main/docs/PYTHON.md"
 Issues = "https://github.com/scrapy/frostwork/issues"
+Changelog = "https://github.com/scrapy/frostwork/blob/main/CHANGELOG.md"
+Security = "https://github.com/scrapy/frostwork/security/policy"
 
 # The package ships `py.typed`, so its annotations are a promise to every user's type checker.
 # `make py` and CI run `mypy python/frostwork tests/typing_fixture.py`; `tests/test_typing.py` additionally

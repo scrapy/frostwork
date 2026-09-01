@@ -11,7 +11,18 @@ Three layers, smallest to largest:
 3. `frostwork.webpoet.FrostPage` / `FrostBrowserPage` — a web-poet page object whose selector fields
    share a single scan.
 
-## Install / build
+## Install
+
+Frostwork requires Python ≥ 3.10. Install the core package, or include the web-poet integration:
+
+```bash
+pip install frostwork
+pip install "frostwork[webpoet]"
+```
+
+Published wheels contain the Rust extension and do not require a Rust toolchain.
+
+### Development build
 
 ```bash
 python -m venv .venv

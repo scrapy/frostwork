@@ -17,6 +17,7 @@
 #   make soak        multi-million differential/fuzz soak across independent seeds
 #   make py          rebuild the extension (maturin --release), Python suite + tree-rule audit +
 #                    the generated start-close table vs the oracle (tools/gen_tree_rules.py --check)
+#   make release-check  build the sdist and validate the exact metadata/README PyPI will render
 #   make gate-webpoet  web-poet integration differential vs parsel, compared on the WHOLE item,
 #                    plus the upstream surface snapshot (docs/WEBPOET_SURFACE.md) vs the real libraries
 #   make gate-webpoet-mutate  break one webpoet.py line at a time; does any gate notice?
@@ -27,7 +28,8 @@
 #   make bench-engines CORPUS=<dir>  vs the other fast scraping parsers (selectolax, lxml, bs4),
 #                    values checked against parsel/lxml before anything is timed
 #   make bench-engines-mem CORPUS=<dir>  peak RSS for the same engines on the largest real pages
-#   make ci          test + gate + gate-corpus + gate-seq + fuzz-smoke + py + gate-webpoet(+mutate)
+#   make ci          test + gate + gate-corpus + gate-seq + fuzz-smoke + py + gate-webpoet(+mutate) +
+#                    release-check
 #                    — the minimum pre-release check, and the same target list hosted CI runs
 #                    (.github/workflows/ci.yml names these targets rather than copying the commands)
 #
@@ -41,14 +43,17 @@ FUZZ_ITERS ?= 6000
 .DEFAULT_GOAL := help
 .PHONY: help bootstrap bootstrap-bench test build ext gate gate-corpus gate-seq corpus-real gate-mutate \
 	gate-mutate-full fuzz-smoke soak py gate-webpoet gate-webpoet-mutate bench bench-smoke bench-webpoet \
-	bench-engines bench-engines-mem ci
+	bench-engines bench-engines-mem release-check ci
+
+VERSION := $(shell sed -nE 's/^version = "([^"]+)"/\1/p' pyproject.toml | head -1)
+RELEASE_SDIST := target/release-check/frostwork-$(VERSION).tar.gz
 
 help:
 	@grep -E '^#   make ' Makefile | sed 's/^#   /  /'
 
 bootstrap:
 	python3 -m venv .venv
-	.venv/bin/pip install -r requirements-test.txt
+	.venv/bin/pip install -r requirements-test.txt -r requirements-release.txt
 
 # The competitor parsers `bench-engines` measures against. Separate from `bootstrap` because they are
 # not oracles — nothing gated depends on them, and `make ci` runs without them installed.
@@ -134,6 +139,16 @@ py: ext
 	$(PY) tools/audit_tree_rules.py --gate
 	$(PY) -m mypy python/frostwork tests/typing_fixture.py
 
+# The README is valid on GitHub even when every relative link is broken on PyPI. Check both the source
+# policy and the Core Metadata from the artifact, then ask Twine's renderer to validate the long
+# description. The artifact path names the current version exactly so a stale local build cannot be
+# mistaken for the candidate.
+release-check:
+	$(PY) tools/release_check.py
+	$(MATURIN) sdist --out target/release-check
+	$(PY) -m twine check --strict $(RELEASE_SDIST)
+	$(PY) tools/release_check.py --distribution $(RELEASE_SDIST)
+
 # The layer ABOVE the engine. `gate` proves a selector returns lxml's column; nothing proved that a page
 # OBJECT returns parsel's item, and five defects lived in that gap — three of them silent (a processor
 # handed a str, a field dropped from the plan, an item that came back `{}`). Compared on the whole item,
@@ -179,5 +194,5 @@ bench-engines: ext
 bench-engines-mem: ext
 	$(PY) tools/bench_mem.py --engines $(CORPUS) $(MEM_DOCS)
 
-ci: test gate gate-corpus gate-seq fuzz-smoke py gate-webpoet gate-webpoet-mutate
+ci: test gate gate-corpus gate-seq fuzz-smoke py gate-webpoet gate-webpoet-mutate release-check
 	@echo "frostwork: all local gates passed"

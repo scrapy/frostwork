@@ -5,6 +5,14 @@ first public release.
 
 ## 0.1.1 (unreleased)
 
+### Packaging and documentation
+
+- The PyPI description now leads with the published install commands, states the Python 3.10 floor, and
+  uses absolute repository links so its documentation, examples, changelog and license do not resolve
+  under `pypi.org/project/frostwork/` and return 404.
+- Releases now validate the built metadata and rendered README, rerun the complete correctness workflow,
+  verify the package from the public index, and create a GitHub Release only after PyPI verification.
+
 ### Performance
 
 - Reverse-position selectors (`:last-child`, `:only-*`, `:nth-last-*`, XPath `[last()]`) no longer copy a

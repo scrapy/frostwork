@@ -335,13 +335,15 @@ Write the changelog entry for the new version under a `## X.Y.Z (unreleased)` he
 ```bash
 bump-my-version bump minor    # major/minor/patch — rewrites Cargo.toml, Cargo.lock, pyproject.toml,
                               # dates the changelog heading, commits and tags <new version>
-git push --follow-tags
+git push --atomic origin main X.Y.Z
 ```
 
-Pushing the tag runs `.github/workflows/publish.yml`: abi3 wheels for every supported platform + an
-sdist, each smoke-tested by installing the built artifact and running the Python suite, then uploaded
-to PyPI via Trusted Publishing (OIDC, `pypi` environment — no token). `workflow_dispatch` builds and
-smoke-tests everything without publishing.
+Pushing the annotated tag runs `.github/workflows/publish.yml`: the complete correctness workflow, abi3
+wheels for every supported platform + an sdist, artifact metadata/rendering checks, smoke installation,
+PyPI Trusted Publishing (OIDC, `pypi` environment — no token), public-index verification, then a GitHub
+Release. `workflow_dispatch` runs through the artifact checks without publishing. Tags are immutable:
+never delete, recreate or force-move one; fix a failed release with a new version. The complete process
+and one-time environment/tag protections are in [docs/RELEASING.md](docs/RELEASING.md).
 
 ## Conventions
 

@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_call:
 
 permissions:
   contents: read
@@ -24,6 +25,10 @@ jobs:
           py_v=$(grep -m1 '^version' pyproject.toml | sed -E 's/.*"(.*)".*/\1/')
           echo "Cargo.toml=$cargo_v  pyproject.toml=$py_v"
           test "$cargo_v" = "$py_v" || { echo "::error::version mismatch: $cargo_v != $py_v"; exit 1; }
+      # Also checks the public README/install copy, absolute PyPI-safe links, project URLs and changelog
+      # state. On a reusable tag run it automatically requires the package version and dated changelog
+      # heading to match GITHUB_REF_NAME.
+      - run: python tools/release_check.py
 
   rust:
     name: cargo test + clippy
@@ -59,7 +64,10 @@ jobs:
       - run: python -m venv .venv
       # pin the oracle exactly: an lxml/parsel upgrade silently moving the reference must be a
       # deliberate bump, not an incidental one that quietly changes what "parity" means.
-      - run: .venv/bin/pip install -r requirements-test.txt
+      - run: .venv/bin/pip install -r requirements-test.txt -r requirements-release.txt
+      # Build the sdist and check the metadata users will actually see. Source-only link checks missed
+      # the first release because GitHub and PyPI resolve the same Markdown differently.
+      - run: make release-check
       # The gates hosted CI runs are the gates `make ci` runs, by NAME rather than by a second copy of
       # the command list. The copy had already drifted: three targets in the Makefile were missing here,
       # which is the failure the meta-gates exist to catch, one level up.
