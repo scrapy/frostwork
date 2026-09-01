@@ -16,7 +16,10 @@ from pathlib import Path, PurePosixPath
 import re
 import subprocess
 import tarfile
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10, the package's supported floor
+    import tomli as tomllib
 from urllib.parse import unquote, urlsplit
 import zipfile
 

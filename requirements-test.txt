@@ -15,6 +15,9 @@ andi==0.8.0
 # `tests/test_typing.py` is what checks that promise: `field()` used to annotate as the internal marker
 # class, so correct code (`x: str = page.name`) was an error in the user's CI and nothing here noticed.
 mypy==2.3.0
+# `tools/release_check.py` is imported by the full test suite, including the Python 3.10 ABI floor;
+# `tomllib` only joined the standard library in Python 3.11.
+tomli==2.2.1; python_version < "3.11"
 
 # The web-poet integration's oracle (tools/diff_webpoet.py). `zyte-common-items` is the primary
 # consumer of `frostwork.webpoet`, and its absence here is why the strings-only processor bug could
