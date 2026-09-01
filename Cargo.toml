@@ -1,6 +1,6 @@
 [package]
 name = "frostwork"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "Treeless, one-pass HTML extraction — CSS/XPath selectors matched on a streaming scan, no DOM."
 license = "Apache-2.0"
