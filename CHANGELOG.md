@@ -3,6 +3,15 @@
 All notable user-facing changes will be recorded here. Frostwork will follow semantic versioning after its
 first public release.
 
+## 0.1.3 (unreleased)
+
+### Packaging and documentation
+
+- Includes all 0.1.2 and 0.1.1 changes below. Neither version was uploaded to PyPI: the 0.1.2
+  pre-upload smoke test exposed locale-dependent file decoding in the release checker on Windows. The
+  checker now reads repository text explicitly as UTF-8 and can report Unicode diagnostics safely on a
+  cp1252 console.
+
 ## 0.1.2 (2026-09-01)
 
 ### Packaging and documentation

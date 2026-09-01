@@ -15,6 +15,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import subprocess
+import sys
 import tarfile
 try:
     import tomllib
@@ -45,6 +46,17 @@ STALE_DESCRIPTION_TEXT = (
 )
 MARKDOWN_LINK = re.compile(r"!?(?:\[[^]]*\])\(\s*([^)\s]+)")
 RELEASE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
+
+
+def _read_utf8(path: Path) -> str:
+    """Read repository text independently of the host's locale."""
+    return path.read_text(encoding="utf-8")
+
+
+def _terminal_text(text: str, *, encoding: str | None = None) -> str:
+    """Make diagnostics printable even when a Windows console uses cp1252."""
+    output_encoding = encoding or sys.stdout.encoding or "utf-8"
+    return text.encode(output_encoding, errors="backslashreplace").decode(output_encoding)
 
 
 def _toml(path: Path) -> dict:
@@ -138,9 +150,9 @@ def source_errors(*, tag: str | None = None) -> list[str]:
         if not target.startswith("https://"):
             errors.append(f"project URL {name!r} is not HTTPS: {target!r}")
 
-    errors.extend(description_errors((ROOT / "README.md").read_text(), source="README.md"))
+    errors.extend(description_errors(_read_utf8(ROOT / "README.md"), source="README.md"))
 
-    changelog = (ROOT / "CHANGELOG.md").read_text()
+    changelog = _read_utf8(ROOT / "CHANGELOG.md")
     top = _top_changelog_heading(changelog)
     if top is None:
         errors.append("CHANGELOG.md has no version heading")
@@ -257,7 +269,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.notes_for:
-        print(changelog_notes((ROOT / "CHANGELOG.md").read_text(), args.notes_for))
+        print(_terminal_text(changelog_notes(_read_utf8(ROOT / "CHANGELOG.md"), args.notes_for)))
         return 0
 
     tag = args.tag or _automatic_tag()
@@ -276,7 +288,7 @@ def main(argv: list[str] | None = None) -> int:
     if errors:
         print("release check: FAIL")
         for error in errors:
-            print(f"- {error}")
+            print(f"- {_terminal_text(error)}")
         return 1
     checked = "source metadata" if not args.distribution else "source and built metadata"
     print(f"release check: OK ({checked})")

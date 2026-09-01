@@ -17,8 +17,31 @@ def test_current_source_is_release_ready():
     assert release_check.source_errors(tag=release_check._automatic_tag()) == []
 
 
+def test_source_metadata_is_read_as_utf8_on_every_host(monkeypatch):
+    original = Path.read_text
+    expected = {ROOT / "README.md", ROOT / "CHANGELOG.md"}
+    seen = set()
+
+    def guarded_read_text(path, *args, **kwargs):
+        if path in expected:
+            assert kwargs.get("encoding") == "utf-8"
+            seen.add(path)
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", guarded_read_text)
+    assert release_check.source_errors(tag=release_check._automatic_tag()) == []
+    assert seen == expected
+
+
+def test_release_diagnostics_are_printable_on_windows_cp1252():
+    assert (
+        release_check._terminal_text("Python ≥ 3.10", encoding="cp1252")
+        == r"Python \u2265 3.10"
+    )
+
+
 def test_description_gate_rejects_the_pypi_relative_link_regression():
-    readme = (ROOT / "README.md").read_text()
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
     broken = readme.replace(
         "https://github.com/scrapy/frostwork/blob/main/docs/COMPATIBILITY.md",
         "docs/COMPATIBILITY.md",
@@ -29,7 +52,10 @@ def test_description_gate_rejects_the_pypi_relative_link_regression():
 
 
 def test_description_gate_rejects_stale_prepublication_copy():
-    readme = (ROOT / "README.md").read_text() + "\nFrostwork is not yet published to PyPI.\n"
+    readme = (
+        (ROOT / "README.md").read_text(encoding="utf-8")
+        + "\nFrostwork is not yet published to PyPI.\n"
+    )
     errors = release_check.description_errors(readme)
     assert any("stale pre-publication" in error for error in errors), errors
 
@@ -45,7 +71,7 @@ def test_built_metadata_is_checked_not_just_the_source(tmp_path):
     ]
     for name, target in project["urls"].items():
         headers.append(f"Project-URL: {name}, {target}")
-    description = (ROOT / "README.md").read_text().replace(
+    description = (ROOT / "README.md").read_text(encoding="utf-8").replace(
         "https://github.com/scrapy/frostwork/blob/main/docs/COMPATIBILITY.md",
         "docs/COMPATIBILITY.md",
         1,
@@ -72,9 +98,9 @@ def test_release_notes_come_from_the_versioned_changelog_section():
 
 def test_release_gate_is_wired_into_local_ci_and_tag_publishing():
     """A correct checker that no workflow calls is not a release gate."""
-    makefile = (ROOT / "Makefile").read_text()
-    ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
-    publish = (ROOT / ".github" / "workflows" / "publish.yml").read_text()
+    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+    ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    publish = (ROOT / ".github" / "workflows" / "publish.yml").read_text(encoding="utf-8")
 
     assert "ci: test gate gate-corpus gate-seq fuzz-smoke py gate-webpoet " \
         "gate-webpoet-mutate release-check" in makefile
