@@ -7,9 +7,10 @@ are a promise, and only a type checker can hold them: annotating `field()` as th
 makes correct code an error in the user's CI while every runtime test here passes.
 """
 
-from typing import Any, Dict, List, Optional, assert_type
+from typing import Any, Dict, List, Optional
 
 import attrs
+from typing_extensions import assert_type
 
 from frostwork.webpoet import FrostBrowserPage, FrostFields, FrostPage, Many, One, field
 
