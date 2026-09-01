@@ -1,3 +1,6 @@
 # Packaging-only validation. Kept out of requirements-test.txt so the bindings/interpreter matrix does
 # not install Twine and its rendering/upload stack in jobs that never inspect a distribution.
 twine==7.0.0
+# The documented release command creates the version commit and annotated tag; pin it so a clean release
+# environment contains the same CLI rather than relying on an operator's global install.
+bump-my-version==1.5.1
