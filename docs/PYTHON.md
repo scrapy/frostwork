@@ -102,6 +102,11 @@ Pass `map=fn` to transform a field's shaped value in Python (never in the scan) 
 `.field_all("prices", ".price::text", map=lambda xs: [float(x) for x in xs])`. `Item.value` /
 `to_dict` reflect the transform; `get` / `get_all` return the raw matches.
 
+`get_all(name)` follows the field declaration: `field` returns zero or one raw match,
+`field_all` returns every match, and `field_join` returns every match before joining. A matched empty
+string is a value (`[""]`), distinct from no match (`[]`). To read every match, declare `field_all`;
+adding another field or disabling early exit never changes what `get_all` returns for an existing field.
+
 ## 3. web-poet page objects — `FrostPage` / `FrostBrowserPage`
 
 `FrostPage` is a `web_poet.WebPage`. Each `field(...)` becomes a real `web_poet.field`, so attribute

@@ -3,6 +3,18 @@
 All notable user-facing changes will be recorded here. Frostwork will follow semantic versioning after its
 first public release.
 
+## 0.1.4 (unreleased)
+
+### Correctness
+
+- Python and Rust `Item.get_all()` now consistently respect the field declaration: a single-valued
+  `field` returns zero or one raw match, while `field_all` and `field_join` return every raw match.
+  Previously, adding an unrelated field could expose additional matches by disabling early exit.
+  Declare `field_all` when every match is needed; single-valued schemas retain their early-exit behavior.
+- The corpus gate now uses the main differential's verdict without discarding empty or whitespace-only
+  values. Regressions that drop an empty attribute or change value count can no longer pass as
+  whitespace-only differences. Command-level regression tests cover the verdict, report and exit status.
+
 ## 0.1.3 (2026-09-02)
 
 ### Packaging and documentation

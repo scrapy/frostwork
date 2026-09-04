@@ -117,6 +117,11 @@ necessary because `encoding_rs` follows WHATWG indexes while Parsel ultimately u
 `make gate-corpus` runs the same value verdict over `tests/corpus`, a small vendored set of self-authored
 fixtures shaped like the real markup that breaks parsers.
 
+The corpus gate uses the differential's verdict without additional normalization. Empty attributes and
+whitespace-only text nodes still count as values: removing one can change a first-valued field.
+`tests/test_gates.py` injects such regressions through the complete corpus command and checks its exit
+status and report, alongside ordering, duplicate-count and text-node-splitting regressions.
+
 For a real corpus, use:
 
 ```bash

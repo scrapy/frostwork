@@ -5,12 +5,14 @@ itself untested code, and it has been wrong three times: `enc_check` printed MIS
 fuzzer filed real divergences into a bulk "expected" bucket; the corpus gate treated a supported selector
 losing values as a coverage gap and passed. Each time the gate was green while the engine was broken.
 
-So these tests seed a KNOWN regression into each gate's decision function and assert it goes red. They
-are cheap (no page generation, no engine) and they fail loudly the moment a gate is loosened.
+So these tests seed a KNOWN regression into each gate's decision function and assert it goes red.
+Command-level tests also exercise the wiring around those decisions: an earlier normalization must
+not hide a regression before the decision function sees it.
 
 Run: .venv/bin/python -m pytest tests/test_gates.py
 """
 
+import json
 import os
 import sys
 
@@ -41,14 +43,69 @@ def test_corpus_gate_fails_on_a_lost_value():
     assert is_value_bug(divergence_kind(["HELLO", "WORLD"], ["HELLOWORLD"], "p::text"))
 
 
-def test_corpus_gate_still_tolerates_whitespace_only_differences():
-    """The bar is NON-whitespace parity; a whitespace-only difference must not fail the gate, or the gate
-    becomes unusable on real pages and gets switched off."""
-    from bench_corpus import nonws_equal
+@pytest.mark.parametrize("html, query, injected, expected_verdict", [
+    pytest.param('<a href=""></a><a href="/product"></a>', "a::attr(href)",
+                 ["/product"], "DIVERGE", id="lost-empty-attribute"),
+    pytest.param('<a href="/product"></a>', "a::attr(href)",
+                 ["", "/product"], "DIVERGE", id="extra-empty-attribute"),
+    pytest.param('<a href=" "></a><a href="/product"></a>', "a::attr(href)",
+                 ["/product"], "DIVERGE", id="lost-whitespace-attribute"),
+    pytest.param('<p> </p><p>value</p>', "p::text",
+                 ["value"], "DIVERGE", id="lost-whitespace-text-node"),
+    pytest.param('<p>a</p><p>b</p>', "p::text",
+                 ["b", "a"], "DIVERGE", id="reordered-values"),
+    pytest.param('<p>a</p><p>a</p>', "p::text",
+                 ["a"], "DIVERGE", id="lost-duplicate"),
+    pytest.param('<p>a</p>', "p::text",
+                 ["a", "a"], "DIVERGE", id="extra-duplicate"),
+    pytest.param('<p>a</p>', "p::text",
+                 [], "DIVERGE", id="empty-column"),
+    pytest.param('<p>HELLOWORLD</p>', "p::text",
+                 ["HELLO", "WORLD"], "DIVERGE", id="split-text-node"),
+    pytest.param('<p>a</p>', "p::text",
+                 ["\n a \n"], "WS", id="surrounding-whitespace"),
+    pytest.param('<a href=""></a><a href="/product"></a>', "a::attr(href)",
+                 ["", "/product"], "AGREE", id="unchanged-empty-attribute"),
+])
+def test_corpus_gate_command_uses_the_differential_verdict(
+    tmp_path, monkeypatch, capsys, html, query, injected, expected_verdict,
+):
+    """Inject engine output through the whole command, including its report and exit status.
 
-    assert nonws_equal(["a", " "], ["a"])
-    assert nonws_equal(["\n a \n"], ["a"])
-    assert not nonws_equal(["a"], ["a", "b"])
+    A second comparator used to discard empty/whitespace values and turn a DIVERGE into WS before
+    is_value_bug() ran. Dropping the first empty href then changed a first-valued field while the
+    corpus gate passed. Keep real Parsel output and the shared verdict as the oracle here.
+    """
+    import bench_corpus as corpus
+    from diff_lxml import verdict
+
+    expected = corpus.parsel_extract(html.encode(), [query])[0]
+    assert verdict(injected, expected, "CONTROL", query) == expected_verdict
+    case = tmp_path / "corpus" / "example"
+    (case / "pages").mkdir(parents=True)
+    (case / "selectors.json").write_text(json.dumps({"value": query}), encoding="utf-8")
+    (case / "pages" / "test.html").write_text(html, encoding="utf-8")
+
+    class InjectedPlan:
+        def extract(self, body, encoding):
+            return [list(injected)]
+
+    monkeypatch.setattr(corpus, "_plan_for", lambda queries: InjectedPlan())
+    monkeypatch.setattr(corpus, "RESULTS", str(tmp_path / "results"))
+    monkeypatch.setattr(sys, "argv", ["bench_corpus.py", str(case.parent), "--gate"])
+    if expected_verdict == "DIVERGE":
+        with pytest.raises(SystemExit) as exc:
+            corpus.main()
+        assert exc.value.code == 1
+    else:
+        corpus.main()
+
+    report = json.loads((tmp_path / "results" / "corpusbench.json").read_text(encoding="utf-8"))
+    assert report["columns"] == 1
+    assert report["diverge"] == int(expected_verdict == "DIVERGE")
+    assert report["parity_agree"] == int(expected_verdict == "AGREE")
+    assert report["parity_ws"] == int(expected_verdict == "WS")
+    assert ("->  FAIL" if expected_verdict == "DIVERGE" else "->  PASS") in capsys.readouterr().out
 
 
 # ------------------------------------------------------------------- fuzz attribution (diff_fuzz.py)

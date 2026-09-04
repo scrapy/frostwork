@@ -100,6 +100,7 @@ impl Page {
     }
 
     /// Add a **single-valued** field: [`Item::get`] returns its first match, or `None`.
+    /// [`Item::get_all`] returns at most that first match; use [`Page::field_all`] for every match.
     pub fn field(self, name: impl Into<String>, selector: impl Into<String>) -> Self {
         self.push(name, selector, Card::First)
     }
@@ -232,10 +233,19 @@ impl Item {
             .and_then(|i| self.cols[i].first().map(String::as_str))
     }
 
-    /// Every matched value for `name`, cardinality-independent: an empty slice if the field is absent
+    /// Raw values requested by `name`'s declaration, before joining: zero or one match for
+    /// [`Page::field`], every match in document order for [`Page::field_all`] and [`Page::field_join`].
+    /// This does not depend on whether the scan exits early. An empty slice if the field is absent
     /// or matched nothing.
     pub fn get_all(&self, name: &str) -> &[String] {
-        self.index(name).map_or(&[], |i| self.cols[i].as_slice())
+        self.index(name).map_or(&[], |i| {
+            let col = self.cols[i].as_slice();
+            if matches!(self.cards[i], Card::First) {
+                &col[..col.len().min(1)]
+            } else {
+                col
+            }
+        })
     }
 
     /// A cardinality-aware view of `name` (respecting `First`/`All`/`Join`), or `None` if absent.
@@ -425,13 +435,52 @@ mod tests {
 
     #[test]
     fn get_is_cardinality_independent() {
-        // get()/get_all() work regardless of how the field was declared
+        // get() reads the first raw value regardless of how the field was declared
         let page = Page::new()
             .field_all("images", "img::attr(src)")
             .field_join("desc", ".desc ::text", " ");
         let item = page.extract(product());
         assert_eq!(item.get("images"), Some("/a.png")); // first of the list
         assert_eq!(item.get("desc"), Some("Warm ")); // first text node, raw
+    }
+
+    #[test]
+    fn get_all_follows_cardinality_across_schemas() {
+        let cases: &[(&[u8], &str, &[&str])] = &[
+            (b"<p>a</p><p>b</p>", "p::text", &["a", "b"]),
+            (b"<a href=''></a><a href='/product'></a>", "a::attr(href)", &["", "/product"]),
+            (b"<p> </p><p>b</p>", "p::text", &[" ", "b"]),
+            (b"<div><div>inner</div>outer</div>", "div",
+             &["<div><div>inner</div>outer</div>", "<div>inner</div>"]),
+            (b"<div><p>a</p></div><div><p>b</p></div>", "p:last-child::text", &["a", "b"]),
+        ];
+        for &(body, selector, raw) in cases {
+            let body = [body, b"<aside>later</aside><aside>last</aside>"].concat();
+            for card in [Card::First, Card::All, Card::Join("|".into())] {
+                let first = matches!(card, Card::First);
+                for companion in 0..4 {
+                    let page = Page::new().push("value", selector, card.clone());
+                    let page = match companion {
+                        0 => page,
+                        1 => page.field("other", "aside::text"),
+                        2 => page.field("missing", "nosuchtag::text"),
+                        _ => page.field_all("other", "aside::text"),
+                    };
+                    // Both extraction entry points, including reuse of their compiled plans.
+                    let compiled = page.compile();
+                    for _ in 0..2 {
+                        for item in [page.extract(&body), compiled.extract(&body)] {
+                            let expected = if first { &raw[..1] } else { raw };
+                            assert_eq!(item.get_all("value"), expected,
+                                       "{selector}, {card:?}, companion={companion}");
+                            assert_eq!(item.get("value"), Some(raw[0]));
+                            assert!(item.get_all("absent").is_empty());
+                            assert!(item.get_all("missing").is_empty());
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

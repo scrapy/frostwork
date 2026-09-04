@@ -344,6 +344,54 @@ def test_item_missing_field():
     assert item.value("absent") is None
 
 
+@pytest.mark.parametrize("body, selector, raw", [
+    (b"<p>a</p><p>b</p>", "p::text", ["a", "b"]),
+    (b'<a href=""></a><a href="/product"></a>', "a::attr(href)", ["", "/product"]),
+    (b"<p> </p><p>b</p>", "p::text", [" ", "b"]),
+    (b"<div><div>inner</div>outer</div>", "div",
+     ["<div><div>inner</div>outer</div>", "<div>inner</div>"]),
+    (b"<div><p>a</p></div><div><p>b</p></div>", "p:last-child::text", ["a", "b"]),
+])
+@pytest.mark.parametrize("card", ["first", "all", "join"])
+@pytest.mark.parametrize("companion", ["none", "late-first", "missing-first", "all", "join", "group"])
+def test_item_raw_values_follow_cardinality_across_schemas(body, selector, raw, card, companion):
+    """Unrelated fields must not change get_all(), including when they prevent early exit.
+
+    Empty values are real matches; nested captures are ordered by element start, not close. Raw
+    access stays untransformed, and all/join declarations retain every match.
+    """
+    body += b"<aside>later</aside><aside>last</aside>"
+    page = Page()
+    shaped = raw[0] if card == "first" else raw if card == "all" else "|".join(raw)
+    if card == "first":
+        page.field("value", selector, map=lambda value: ("mapped", value))
+    elif card == "all":
+        page.field_all("value", selector, map=lambda value: ("mapped", value))
+    else:
+        page.field_join("value", selector, "|", map=lambda value: ("mapped", value))
+    if companion == "late-first":
+        page.field("other", "aside::text")
+    elif companion == "missing-first":
+        page.field("other", "nosuchtag::text")
+    elif companion == "all":
+        page.field_all("other", "aside::text")
+    elif companion == "join":
+        page.field_join("other", "aside::text", "|")
+    elif companion == "group":
+        page.many("other", "aside", {"text": "::text"})
+    for _ in range(2):  # the cached plan must have the same contract
+        item = page.extract(body)
+        expected = raw[:1] if card == "first" else raw
+        assert item.get_all("value") == expected
+        assert item.get("value") == raw[0]
+        assert item.value("value") == ("mapped", shaped)
+        assert item.to_dict()["value"] == ("mapped", shaped)
+        assert "value" not in item.empty_fields()
+        # A caller owns the returned list; changing it must not change subsequent reads.
+        item.get_all("value").clear()
+        assert item.get_all("value") == expected
+
+
 def test_item_to_json_shapes_and_unicode():
     item = (
         Page()

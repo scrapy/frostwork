@@ -569,7 +569,8 @@ class Page:
 
     def field(self, name: str, selector: str, *, map: Optional[Callable] = None) -> "Page":
         """Single-valued field: :meth:`Item.value` returns its first match (or ``None``). ``map``
-        is an optional transform applied to that shaped value."""
+        is an optional transform applied to that shaped value. :meth:`Item.get_all` returns at most
+        that first raw match; use :meth:`field_all` to request every match."""
         return self._add(name, selector, ("first", None), (map,) if map else ())
 
     def field_all(self, name: str, selector: str, *, map: Optional[Callable] = None) -> "Page":
@@ -696,20 +697,29 @@ class Item:
         return col[0] if col else None
 
     def get_all(self, name: str) -> list:
-        """Every value for ``name``. For a flat field: all matched strings. For a `many`/`one` group:
-        the row ``dict``s (a `one` group yields a 0- or 1-element list). ``[]`` if absent."""
+        """Raw values requested by ``name``'s declaration, before joining or ``map=`` transforms.
+
+        A ``field`` returns zero or one match; ``field_all`` and ``field_join`` return every match
+        in document order. This does not depend on whether the scan exits early. For a ``many``/``one``
+        group, return the row dicts (``one`` yields zero or one row). ``[]`` if absent.
+        """
         if name in self._grouped:
             g = self._grouped[name]
             if isinstance(g, list):  # many -> all rows
                 return list(g)
             return [g] if g is not None else []  # one -> single-row list (or empty)
         i = self._index(name)
-        return list(self._cols[i]) if i is not None else []
+        if i is None:
+            return []
+        if self._cards[i][0] == "first":
+            return self._cols[i][:1]
+        return list(self._cols[i])
 
     def value(self, name: str):
         """Cardinality-aware value for ``name`` (respects first/all/join and any ``map=`` transform),
         a `many`/`one` group's rows, or ``None`` if absent. For flat fields, ``get``/``get_all`` return
-        raw untransformed matches; for groups they return the first/all rows."""
+        untransformed matches within the declared cardinality; for groups they return the first/all
+        rows (``one`` retains at most one row)."""
         if name in self._grouped:
             return self._grouped[name]
         i = self._index(name)

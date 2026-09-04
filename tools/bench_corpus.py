@@ -94,9 +94,9 @@ def gap_reason(sel):
 
 
 def divergence_kind(fc, pc, query):
-    """The ACTUAL severity of a divergence, per the no-fallback contract ('never a wrong value'):
-      EMPTY   — frostwork returns nothing (safe: an unsupported query yields an empty column)
-      SUBSET  — frostwork's non-ws content is a strict subset of Parsel's (missing values, not wrong)
+    """Describe a column the shared verdict has ALREADY marked divergent; every kind fails the gate.
+      EMPTY   — frostwork returns no non-whitespace content
+      SUBSET  — frostwork's non-ws values occur in Parsel's column, but count/order may differ
       SEGMENT — same total text, different text-node BOUNDARIES. Benign ONLY under join cardinality:
                 a `One` field takes col[0], so an extra split silently TRUNCATES it ('HELLO', not
                 'HELLOWORLD'). Treated as a bug by --gate; do not wave it through as cosmetic.
@@ -123,15 +123,15 @@ def divergence_kind(fc, pc, query):
     return "WRONG"
 
 
-# Every selector this tool measures is one the engine claims to SUPPORT — `frostwork.extract` runs with
-# strict validation, so an unsupported one raises rather than reaching the comparison. That makes EMPTY
+# Every selector this tool measures is one the engine claims to SUPPORT — `_plan_for` runs strict
+# validation, so an unsupported one raises rather than reaching the comparison. That makes EMPTY
 # and SUBSET regressions, not coverage gaps: a supported column going from ["a","b"] to ["a"] is exactly
 # the failure a rule change causes, and grading it as a gap let `make gate-corpus` stay green through it.
 VALUE_BUG_KINDS = ("EMPTY", "SUBSET", "SEGMENT", "WRONG")
 
 
 def is_value_bug(kind: str) -> bool:
-    """Does this divergence kind fail the gate? Every non-whitespace divergence does."""
+    """Does this divergence kind fail the gate? Every kind reported by divergence_kind does."""
     return kind in VALUE_BUG_KINDS
 
 
@@ -146,12 +146,6 @@ def _plan_for(queries):
     """
     frostwork.check(list(queries)).raise_for_status()
     return Plan(list(queries), [])
-
-
-def nonws_equal(a, b):
-    """True if two value columns carry the same non-whitespace content (drop empty/ws-only items).
-    This is the project's actual bar; the gate's WS check is length-sensitive to empty text nodes."""
-    return [v.strip() for v in a if v.strip()] == [v.strip() for v in b if v.strip()]
 
 
 def parsel_extract(body, queries):
@@ -199,9 +193,9 @@ def main():
     total_bytes = 0
     n_cols = 0
     agree = 0             # value-identical (node queries: re-parse-equivalent) — gate's AGREE
-    ws_only = 0           # differ only in whitespace / empty text-node count (content identical)
+    ws_only = 0           # surrounding whitespace only, as defined by the shared verdict
     node_cols = 0         # bare-element (outer-HTML) columns, compared as raw source
-    diverge = []          # (page, sel_index, query) true content divergences (non-ws differs)
+    diverge = []          # (page, sel_index, query, kind) shared-verdict divergences
     parsel_uncompilable = 0
     frost_us, parsel_us, sizes, speedups, frost_mbps = [], [], [], [], []
 
@@ -255,8 +249,9 @@ def main():
             v = verdict(fc, pc, "CONTROL", queries[j])
             if v == "AGREE":
                 agree += 1
-            elif v == "WS" or (not is_node_query(queries[j]) and nonws_equal(fc, pc)):
-                # only whitespace differs, incl. extra empty text-nodes on universal ::text collectors
+            elif v == "WS":
+                # Only the shared verdict can grant this allowance. Dropping empty/whitespace
+                # values here changes cardinality and can change the first value of a field.
                 ws_only += 1
             else:  # real content divergence
                 kind = divergence_kind(fc, pc, queries[j])
@@ -296,9 +291,8 @@ def main():
     print(f"  content-identical: {content_ok}/{n_cols}  ({pct(content_ok, n_cols):.2f}%)"
           f"   [{agree} exact + {ws_only} whitespace-only]")
     print(f"  DIVERGE          : {len(diverge)}  ({pct(len(diverge), n_cols):.2f}%)   "
-          f"(non-whitespace content differs)")
-    # SEVERITY (the real signal, per the no-fallback contract): only WRONG is a 'wrong value' bug.
-    # EMPTY/SUBSET are coverage gaps (frostwork returns nothing / a subset — never a wrong value).
+          f"(value content, order or count differs)")
+    # Severity describes the failure; every divergence on these audited selectors fails the gate.
     import collections
     by_kind = collections.Counter(k for _p, _j, _q, k in diverge)
     print(f"    by severity: "
@@ -308,7 +302,7 @@ def main():
     for reason, cnt in by_reason.most_common():
         flag = "  <-- REAL MISMATCH" if reason.startswith("unexplained") else ""
         print(f"      {cnt:>4}  {reason}{flag}")
-    # EVERY non-whitespace divergence fails: these are all supported selectors (strict validation), so
+    # EVERY divergence fails: these are all supported selectors (strict validation), so
     # EMPTY/SUBSET are lost values, not coverage gaps. Grading them as gaps meant a regression from
     # ["a","b"] to ["a"] left this gate green — the single most likely way a rule change breaks a scrape.
     wrong = [(p, j, q, k) for p, j, q, k in diverge if is_value_bug(k)]
@@ -341,7 +335,7 @@ def main():
     print(f"\nwrote tools/results/corpusbench.json")
 
     if gate:
-        print(f"\nCORPUS GATE: value bugs (any non-whitespace divergence) = {len(wrong)}  ->  "
+        print(f"\nCORPUS GATE: value bugs (any differential divergence) = {len(wrong)}  ->  "
               f"{'PASS' if not wrong else 'FAIL'}")
         if wrong:
             raise SystemExit(1)
