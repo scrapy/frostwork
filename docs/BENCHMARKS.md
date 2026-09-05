@@ -23,12 +23,45 @@ outside its timed loop, and `bench_engines.py` / `bench_corpus.py` / `bench_mem.
 page object.
 
 **Provenance, because the sections are not all the same vintage.** The page-shape matrix, size sweep,
-grouped and deferred-tail figures below are from one `tools/bench_matrix.py` run on the current build.
+grouped and deferred-tail figures below are from an earlier `tools/bench_matrix.py` run on Apple arm64.
 The **production-corpus** and **competitive-field** tables in the next two sections are older: their
 corpus is not distributed and is not present on the machine this build was measured on, so they were
-not re-run. They predate the shared-tail-prefix change, which can only reduce Frostwork's time on a
-schema with several deferred fields on one compound — so treat those ratios as a floor, and re-run
-`make bench-engines CORPUS=<dir>` where the corpus exists before quoting one as current.
+not re-run. They predate subsequent engine changes and are historical measurements, not a guaranteed performance
+floor. Re-run `make bench-engines CORPUS=<dir>` where the corpus exists before quoting one as current.
+
+For a small public workload with original-byte hashes, named complete schemas and machine-readable
+provenance, run `make bench-migration`. Its fixtures and measurement limits are described in
+[MIGRATION.md](MIGRATION.md); it verifies exact whole-item parity before timing. The manual migration
+benchmark workflow provides the same command on Linux, without treating shared-runner timing as a gate.
+
+## First-value retention in a mixed schema
+
+Measured on Apple arm64 on 2026-09-05, with the same generated 196 KiB product listing before and after
+bounded first-value retention. The schema has five scalar text/attribute fields and one all-links field,
+so both builds scan the entire document. Values are verified against Parsel by the composition tests;
+the A/B harness also requires identical retained value counts.
+
+| workload | before, µs/page | after, µs/page | change | within-run spread |
+| --- | ---: | ---: | ---: | ---: |
+| first-value fields plus all links | 1239.9 | 987.5 | −20.4% | 2.7% |
+
+This is an engine-only measurement, using seven interleaved repetitions of 300 extractions and the
+minimum per side. The all-value class/tag controls changed by −1.3% to +2.0%, within their own spread;
+pure-scan changed by −0.8%, also within spread. Those controls establish no measurable improvement or
+regression in this run. This workload is self-authored and is not evidence of a corpus-wide speedup.
+
+The scalar columns stop retaining matches after the first text/attribute value. All-value fields and
+group rows still collect every requested value. Deferred predicates, normalization and raw-HTML captures
+retain their previous handling; this is not an optimization for `One` group capture or node processors.
+No peak-RSS claim is made from the reduction in retained values.
+
+`src/bin/bench.rs` accepts `F <selector>` to declare a first-value field, so both comparison builds must
+include that harness support. Reproduce the interleaved comparison with:
+
+```bash
+.venv/bin/python tools/ab_bench.py --a /path/to/before/bench --b /path/to/after/bench \
+  --tables first-mixed,tag-led,class-led,scan --reps 7 --iters 300
+```
 
 ## Real production pages
 

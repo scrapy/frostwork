@@ -23,6 +23,8 @@
 #   make gate-webpoet-mutate  break one webpoet.py line at a time; does any gate notice?
 #   make bench       full throughput matrix vs Parsel (minutes; for release notes)
 #   make bench-smoke quick article/deep-nesting performance check
+#   make verify-migration  whole Page items vs Parsel on hashed, saved response fixtures
+#   make bench-migration   the same check, then reproducible whole-item timings (JSON report)
 #   make bench-webpoet  FrostPage.to_item() vs a Parsel WebPage, swept over field count
 #                    BENCH_ARGS="--boundaries" for the boundary questions (four sweeps)
 #   make bench-engines CORPUS=<dir>  vs the other fast scraping parsers (selectolax, lxml, bs4),
@@ -43,7 +45,7 @@ FUZZ_ITERS ?= 6000
 .DEFAULT_GOAL := help
 .PHONY: help bootstrap bootstrap-bench test build ext gate gate-corpus gate-seq corpus-real gate-mutate \
 	gate-mutate-full fuzz-smoke soak py gate-webpoet gate-webpoet-mutate bench bench-smoke bench-webpoet \
-	bench-engines bench-engines-mem release-check ci
+	bench-engines bench-engines-mem verify-migration bench-migration release-check ci
 
 VERSION := $(shell sed -nE 's/^version = "([^"]+)"/\1/p' pyproject.toml | head -1)
 RELEASE_SDIST := target/release-check/frostwork-$(VERSION).tar.gz
@@ -138,6 +140,12 @@ py: ext
 	$(PY) tools/gen_tree_rules.py --check
 	$(PY) tools/audit_tree_rules.py --gate
 	$(PY) -m mypy python/frostwork tests/typing_fixture.py
+
+verify-migration: ext
+	$(PY) tools/verify_migration.py tests/migration/pages.py:REGISTRY tests/migration/manifest.json --json target/migration-report.json
+
+bench-migration: ext
+	$(PY) tools/verify_migration.py tests/migration/pages.py:REGISTRY tests/migration/manifest.json --json target/migration-report.json --benchmark $(BENCH_ARGS)
 
 # The README is valid on GitHub even when every relative link is broken on PyPI. Check both the source
 # policy and the Core Metadata from the artifact, then ask Twine's renderer to validate the long

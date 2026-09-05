@@ -2,6 +2,7 @@
 //! line, blank lines ignored) so shell quoting can't corrupt `>`/`[]`/`()`.
 //! Usage: `bench HTML_FILE < selectors.txt` (empty stdin = 0 selectors = pure scan).
 //!   Flat mode:    each line is a flat selector.
+//!                 `F <selector>` declares a first-value field; other columns retain every value.
 //!   Grouped mode: a line `G <container>` makes ALL remaining lines sub-fields of one `Many` group
 //!                 (the single-pass per-instance × per-sub cost the grouped table measures).
 //! Prints one line to stderr: `<bytes> <nsel> <us/page> <pages/s> <MB/s> <vals/page>` (tab-separated).
@@ -17,11 +18,14 @@ fn main() {
     // Split into flat selectors and (optionally) one grouped `(container, subs)`.
     let mut container: Option<String> = None;
     let mut sels: Vec<String> = Vec::new();
+    let mut first_only: Vec<bool> = Vec::new();
     for l in sel_text.lines().map(|l| l.trim()).filter(|l| !l.is_empty()) {
         if let Some(c) = l.strip_prefix("G ") {
             container = Some(c.trim().to_string());
         } else {
-            sels.push(l.to_string());
+            let first = l.strip_prefix("F ");
+            first_only.push(first.is_some());
+            sels.push(first.unwrap_or(l).to_string());
         }
     }
     let groups: Vec<frostwork::GroupQuery> = match &container {
@@ -33,7 +37,14 @@ fn main() {
     };
     // count all emitted values: flat columns + every grouped sub-cell
     let count = |flat: &[Vec<String>], grouped: &[frostwork::GroupRows]| -> usize {
-        flat.iter().map(|c| c.len()).sum::<usize>()
+        flat.iter().enumerate()
+            .map(|(i, c)| {
+                if first_only[i] {
+                    c.len().min(1)
+                } else {
+                    c.len()
+                }
+            }).sum::<usize>()
             + grouped
                 .iter()
                 .flat_map(|rows| rows.iter().flat_map(|row| row.iter().map(|col| col.len())))
@@ -51,7 +62,7 @@ fn main() {
     // `FrostPage` compiles them into a `Plan` there — once per process, not once per response. Timing
     // `extract_grouped` in the loop re-parsed every selector string per page, which measures a program
     // nobody writes and taxes the high-selector-count cells hardest.
-    let plan = frostwork::Plan::compile(flat_queries, &groups);
+    let plan = frostwork::Plan::compile_first_only(flat_queries, &groups, &first_only);
     let warmup = 200.min(iters.max(1));
     for _ in 0..warmup {
         let _ = plan.extract(&html, None);

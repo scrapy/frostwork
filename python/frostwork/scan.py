@@ -12,8 +12,9 @@ so it is safe on spiders with heavy import-time setup) and classify every select
 with `file:line` for each site. Dynamic selectors (f-strings, concatenation, variables) cannot be
 decided statically and are reported as SKIPPED rather than quietly dropped.
 
-Not a replacement for the schema audit: it sees a call site, not a schema, so it cannot check the
-member/sibling budget or the container/sub-field relationship. Use it to size a migration and to keep
+Not a replacement for the schema audit: it sees a call site, not a complete schema, so it cannot check
+the combined member/sibling budget. Literal group builders retain their container/sub-field context.
+Use it to size a migration and to keep
 un-ported selectors visible in CI; use the schema audit for ported page objects.
 """
 
@@ -54,6 +55,7 @@ KEYWORD_ARGS = {
 FIELD_CALLS = {"field", "field_all", "field_join"}
 GROUP_CALLS = {"many", "one"}
 WEBPOET_GROUP_CALLS = {"Many", "One"}
+FIELD_MODIFIERS = {"map", "re_first", "as_node", "as_value", "typed_as"}
 
 
 # Pseudo call name for a file this interpreter could not parse — a scan FAILURE (nothing was audited in
@@ -70,6 +72,7 @@ class Site(NamedTuple):
     kind: str  # "css" | "xpath" | "auto" (decide by syntax)
     selector: Optional[str]  # None when the argument is not a literal (see `dynamic`)
     dynamic: bool = False
+    context: str = "flat"  # flat | group-container | group-subfield | group-schema
 
     @property
     def where(self) -> str:
@@ -114,22 +117,40 @@ def _call_name(call: ast.Call) -> str:
     return ""
 
 
+def _field_marker(node) -> Optional[ast.Call]:
+    """Follow a field's fluent receiver, never its callbacks or an arbitrary factory's arguments.
+
+    Finding a `field()` somewhere inside an expression does not prove the expression returns it.
+    An unrecognized wrapper stays unresolved instead of making a partial scan look complete.
+    """
+    while isinstance(node, ast.Call):
+        if _call_name(node) in FIELD_CALLS:
+            return node
+        if not isinstance(node.func, ast.Attribute) or node.func.attr not in FIELD_MODIFIERS:
+            break
+        node = node.func.value
+    return None
+
+
 def scan_source(source: str, path: str) -> List[Site]:
     """Every selector call site in `source` (a parsed Python module), in file order."""
     tree = ast.parse(source, filename=path)
     sites: List[Site] = []
+    contexts: dict[int, str] = {}
 
-    def add(node, call: str, kind: str) -> None:
+    def add(node, call: str, kind: str, context: str = "flat") -> None:
         if node is None:
             return  # the call does not pass this argument at all
         got = _literal_strings(node)
         if got is None:
             # An f-string / concatenation / variable: honest SKIPPED, never silently dropped.
-            sites.append(Site(path, node.lineno, call, kind, None, dynamic=True))
+            sites.append(Site(path, node.lineno, call, kind, None, dynamic=True, context=context))
             return
         for s in got:
-            sites.append(Site(path, node.lineno, call, kind, s))
+            sites.append(Site(path, node.lineno, call, kind, s, context=context))
 
+    # ast.walk visits parents before their descendants. A group records its actual field markers
+    # here before those calls are visited, so context detection needs no separate tree traversal.
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
@@ -147,23 +168,33 @@ def scan_source(source: str, path: str) -> List[Site]:
             # entirely (a silently "clean" migration report) and, for `field("title", selector=...)`,
             # audited the FIELD NAME as a selector — noise that then failed the audit.
             sel = _pick(node, 1, "selector")
-            if sel is None and not node.args and not _kw(node, "name"):
-                sel = None  # nothing to go on
             if sel is None and len(node.args) == 1 and not _kw(node, "selector"):
                 sel = node.args[0]  # web-poet: field(selector)
-            add(sel, name, "auto")
+            add(sel, name, "auto", contexts.get(id(node), "flat"))
         elif name in GROUP_CALLS:
-            add(_pick(node, 1, "container"), name, "auto")  # Page: many(name, container, subfields)
+            add(_pick(node, 1, "container"), name, "auto", "group-container")
             subs = _pick(node, 2, "subfields")
             if isinstance(subs, ast.Dict):
                 for value in subs.values:
                     # a sub-field may be a cardinality TUPLE — `(".tag::text", "join", " ")`. Only its
                     # first element is a selector; scanning the whole tuple reported "join" and " " as
                     # selector sites, and the separator then failed the audit.
-                    add(value.elts[0] if isinstance(value, ast.Tuple) and value.elts else value,
-                        name, "auto")
+                    add(value.elts[0] if isinstance(value, (ast.Tuple, ast.List)) and value.elts else value,
+                        name, "auto", "group-subfield")
+            elif subs is not None:
+                add(subs, name, "auto", "group-schema")
         elif name in WEBPOET_GROUP_CALLS:
-            add(_pick(node, 0, "container"), name, "auto")  # web-poet: Many(container, sub=field(...))
+            add(_pick(node, 0, "container"), name, "auto", "group-container")
+            for kw in node.keywords:
+                if kw.arg is None:
+                    add(kw.value, name, "auto", "group-schema")
+                elif kw.arg not in ("item", "container"):
+                    marker = _field_marker(kw.value)
+                    if marker is not None:
+                        contexts[id(marker)] = "group-subfield"
+                    else:
+                        sites.append(Site(path, kw.value.lineno, name, "auto", None,
+                                          dynamic=True, context="group-schema"))
         for kw in node.keywords:
             if kw.arg in KEYWORD_ARGS:
                 add(kw.value, name, KEYWORD_ARGS[kw.arg])
@@ -225,12 +256,18 @@ def judge(sites: Iterable[Site]) -> List[Verdict]:
                 Verdict(
                     site,
                     False,
-                    "relative XPath step — a per-container loop's selector. Port the loop to a "
-                    "Many/One group (container + `.//`-anchored sub-fields); see docs/MIGRATION.md",
+                    "relative XPath step — a per-container loop's selector. Audit the intended "
+                    "Many/One context before porting; `.//x` includes nested descendants and is not "
+                    "equivalent to the child path `./x`; see docs/MIGRATION.md",
                 )
             )
             continue
-        field = check([sel]).fields[0]
+        if site.context == "group-container":
+            field = check([], [(sel, [])]).groups[0].container
+        elif site.context == "group-subfield":
+            field = check([], [("*", [("value", sel)])]).groups[0].subfields[0]
+        else:
+            field = check([sel]).fields[0]
         out.append(Verdict(site, field.supported, field.reason))
     return out
 
@@ -246,5 +283,6 @@ def summarize(verdicts: List[Verdict]) -> dict:
         "unsupported": len(literal) - len(supported),
         "skipped": len(verdicts) - len(literal) - len(errors),
         "errors": len(errors),  # unparseable files: the scan is INCOMPLETE, not clean
-        "coverage": (len(supported) / len(literal)) if literal else 1.0,
+        "coverage": (len(supported) / len(literal)) if literal else None,
+        "complete": bool(literal) and len(literal) == len(verdicts) and not errors,
     }

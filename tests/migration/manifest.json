@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "responses": [
+    {
+      "schema": "product",
+      "file": "product.html",
+      "encoding": "utf-8",
+      "url": "https://example.invalid/product",
+      "sha256": "79b4bdfdd18a355add55e02896c49bfca38662ff040358549f3924c68158b65d",
+      "source": "Self-authored; repository license"
+    },
+    {
+      "schema": "listing",
+      "file": "listing.html",
+      "encoding": "utf-8",
+      "url": "https://example.invalid/listing",
+      "sha256": "dc48b5c4eecb1a01b785fd142e326eb01a84e0f7a2a7168515718e557db7666b",
+      "source": "Self-authored; repository license"
+    },
+    {
+      "schema": "article",
+      "file": "article.html",
+      "encoding": "windows-1252",
+      "url": "https://example.invalid/article",
+      "sha256": "6662433a9eb854f84dc9d0b2bddf84ac027d96d6d3a005562a9977fb88be150e",
+      "source": "Self-authored; repository license"
+    }
+  ]
+}

@@ -223,22 +223,20 @@ def verdict(mine, theirs, bucket, sel):
 # `.meta > span::text`) and relative XPath subs now get coverage, alongside value + outer-HTML.
 _SUBS_CSS = ["h3::text", "a::attr(href)", ".price::text", "span::text", "a::text", "b", ".price",
              "img::attr(src)", "h3 a::text", ".meta > span::text", ".tag::text", "a::attr(class)"]
-# NOTE: relative XPath subs must be DESCENDANT (`.//`) forms. A single-slash CHILD anchor (`./h3`,
-# `./@class`) is unsupported — the depth-agnostic matcher can't enforce the child anchor on a segment's
-# first compound, so xpath.rs rejects it (empty column) rather than over-matching like `.//h3`. Such
-# forms compile empty and are deliberately kept OUT of this pool (empty vs Parsel's value = DIVERGE).
-_SUBS_XPATH = [".//a/@href", ".//h3//text()", ".//span/text()", ".//a/text()", ".//b/text()"]
+# Child/context anchors must be exercised alongside nested descendants: `.//x` is not `./x`.
+_SUBS_XPATH = [".//a/@href", ".//h3//text()", ".//span/text()", ".//a/text()", ".//b/text()",
+               "./h3/a/text()", "./span/text()", "./@class", "./text()", ".//text()"]
 _SUBS_IMG = ["img::attr(src)", "img::attr(alt)", "img"]
 
 
 def _card(rng):
-    p = []
+    p = [f"card {rng.randint(1, 99)} "]
     if rng.random() < 0.85:
         p.append(f"<h3><a href='/a{rng.randint(1, 99)}' class='lnk'>It {rng.randint(1, 99)}</a></h3>")
     if rng.random() < 0.70:
         p.append(f'<span class="price">${rng.randint(1, 999)}.{rng.randint(0, 99):02d}</span>')
     if rng.random() < 0.50:
-        p.append(f'<div class="meta"><span>m{rng.randint(0, 9)}</span></div>')
+        p.append(f'<div class="meta"><span>m{rng.randint(0, 9)}</span><h3><a>nested</a></h3></div>')
     if rng.random() < 0.40:
         p.append(f'<b class="tag">t{rng.randint(0, 9)}</b>')
     if rng.random() < 0.35:

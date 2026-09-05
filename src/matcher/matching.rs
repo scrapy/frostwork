@@ -216,6 +216,9 @@ pub(super) fn seg_match_anchored(
     };
     // The leftmost compound carries the position-specific constraints, so they join that block's test.
     let head_ok = |top: usize| {
+        if seg.context_depth.is_some_and(|depth| top - floor != depth) {
+            return false;
+        }
         // A `strict` (relative `.//`) segment excludes the context node itself: the leftmost compound
         // must bind strictly BELOW the floor, so reject a bind AT `floor`.
         if seg.strict && top == floor {
@@ -408,7 +411,7 @@ mod seg_match_tests {
             combs.push(if c == '>' { Comb::Child } else { Comb::Descendant });
             parts.push(compound(&chars.next().unwrap().to_string()));
         }
-        Segment { parts, combs, strict }
+        Segment { parts, combs, strict, context_depth: None }
     }
 
     /// Every pattern up to 4 compounds over a 3-letter alphabet, against every stack up to depth 6,

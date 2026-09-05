@@ -158,10 +158,69 @@ pub struct Selector {
     /// `<html>` and grouped `.//tag` omits the container. Absolute paths (`//x`, `/html/…`) and all CSS
     /// selectors are descendant-or-**self** (false): the leftmost compound may bind at the floor.
     pub strict_desc: bool,
+    /// Group context depth for the first compound: self (0), child (1), or unrestricted.
+    pub context_depth: Option<usize>,
 }
 
 fn is_ws(c: u8) -> bool {
     matches!(c, b' ' | b'\t' | b'\n' | b'\r' | 0x0c)
+}
+
+/// Consume one CSS escape, including its optional hex terminator. Structural scans share this.
+fn escape_end(b: &[u8], start: usize) -> usize {
+    let mut end = start + 1;
+    if end >= b.len() {
+        return end;
+    }
+    if b[end].is_ascii_hexdigit() {
+        while end < b.len() && end < start + 7 && b[end].is_ascii_hexdigit() {
+            end += 1;
+        }
+        if end < b.len() && is_ws(b[end]) {
+            let cr = b[end] == b'\r';
+            end += 1;
+            if cr && b.get(end) == Some(&b'\n') {
+                end += 1;
+            }
+        }
+    } else {
+        end += 1;
+        while end < b.len() && b[end] & 0xc0 == 0x80 {
+            end += 1;
+        }
+    }
+    end
+}
+
+fn escaped_at(s: &str, index: usize) -> bool {
+    s.as_bytes()[..index]
+        .iter()
+        .rev()
+        .take_while(|&&b| b == b'\\')
+        .count()
+        % 2
+        == 1
+}
+
+fn trim_css(s: &str) -> &str {
+    let s = s.trim_start();
+    if !s.contains('\\') {
+        return s.trim_end();
+    }
+    let b = s.as_bytes();
+    let (mut i, mut end) = (0, 0);
+    while i < b.len() {
+        if b[i] == b'\\' {
+            i = escape_end(b, i);
+            end = i;
+        } else {
+            if !is_ws(b[i]) {
+                end = i + 1;
+            }
+            i += 1;
+        }
+    }
+    &s[..end]
 }
 
 /// Is `v` a CSS **identifier** — the only unquoted form an attribute value may take? Measured against
@@ -195,7 +254,7 @@ pub(crate) fn split_top_commas(q: &str) -> Vec<&str> {
         // A CSS escape makes the next byte DATA, never a delimiter: `.a\,b` is one class name, and
         // inside a string `\"` does not end the string.
         if c == b'\\' {
-            i += 2;
+            i = escape_end(b, i);
             continue;
         }
         if quote != 0 {
@@ -241,7 +300,7 @@ fn find_functional_close(b: &[u8], from: usize) -> Option<usize> {
     while i < n {
         let c = b[i];
         if c == b'\\' {
-            i += 2;
+            i = escape_end(b, i);
             continue;
         }
         if quote != 0 {
@@ -277,7 +336,7 @@ fn has_unquoted(s: &str, stop: &[u8]) -> bool {
     while i < b.len() {
         let c = b[i];
         if c == b'\\' {
-            i += 2;
+            i = escape_end(b, i);
             continue;
         }
         if quote != 0 {
@@ -325,7 +384,7 @@ pub fn parse_list(q: &str) -> Vec<Selector> {
 // no fallback), so a unit error is the whole error domain.
 #[allow(clippy::result_unit_err)]
 pub fn parse(query: &str) -> Result<Selector, ()> {
-    let q = query.trim();
+    let q = trim_css(query);
     // ---- split off the value terminal (or none -> bare element / outer HTML) ----
     enum Tk {
         Text,
@@ -363,12 +422,12 @@ pub fn parse(query: &str) -> Result<Selector, ()> {
     // subject compound is scoped like the ATTACHED `*` it stands for, whatever the whitespace said.
     let mut subtree;
     if matches!(tk, Tk::Outer) {
-        head = structural.trim().to_string();
+        head = trim_css(structural).to_string();
         subtree = false;
     } else {
-        let had_space = structural.ends_with(|c: char| c.is_whitespace());
-        head = structural.trim().to_string();
-        if let Some(before_star) = head.strip_suffix('*') {
+        let had_space = trim_css(structural).len() < structural.trim_start().len();
+        head = trim_css(structural).to_string();
+        if let Some(before_star) = head.strip_suffix('*').filter(|_| !escaped_at(&head, head.len() - 1)) {
             // A trailing universal `*` — how it binds decides scope. Mirror cssselect's `_subject`,
             // whose `descendant-or-self::*/*` + `::text` collapse to `descendant-or-self::text()`
             // applies ONLY when the terminal is ATTACHED to a descendant-combinator `*` — never to
@@ -414,7 +473,7 @@ pub fn parse(query: &str) -> Result<Selector, ()> {
             return Err(());
         }
         head = "*".to_string();
-    } else if head.ends_with(['>', '+', '~']) && !matches!(tk, Tk::Outer) {
+    } else if head.ends_with(['>', '+', '~']) && !escaped_at(&head, head.len() - 1) && !matches!(tk, Tk::Outer) {
         // A value terminal with NO subject compound after an explicit combinator — `dt + ::text`,
         // `div > ::attr(id)`, `:contains("Price") + ::text`. parsel strips the pseudo-element itself and
         // hands cssselect the rest, so the terminal reads as attached to an implicit universal: parsel
@@ -443,7 +502,7 @@ pub fn parse(query: &str) -> Result<Selector, ()> {
         Tk::Text => Terminal::Text { subtree },
         Tk::Outer => Terminal::OuterHtml,
     };
-    Ok(Selector { parts, combs, terminal, strict_desc: false })
+    Ok(Selector { parts, combs, terminal, strict_desc: false, context_depth: None })
 }
 
 /// Split a structural selector into compound strings and the combinators between them. A maximal run
@@ -473,7 +532,7 @@ fn split_structural(head: &str) -> Result<(Vec<String>, Vec<Comb>), ()> {
         // set BEFORE the skip, so the two-byte step can never leave it pointing inside a character.
         if c == b'\\' {
             start.get_or_insert(i);
-            i += 2;
+            i = escape_end(b, i);
             continue;
         }
         if quote != 0 {
@@ -536,7 +595,7 @@ fn split_structural(head: &str) -> Result<(Vec<String>, Vec<Comb>), ()> {
                 }
                 match start.take() {
                     Some(s) => {
-                        parts.push(head[s..end].trim().to_string());
+                        parts.push(trim_css(&head[s..end]).to_string());
                         combs.push(kind);
                     }
                     // leading whitespace is fine; a leading explicit combinator is malformed
@@ -551,7 +610,7 @@ fn split_structural(head: &str) -> Result<(Vec<String>, Vec<Comb>), ()> {
         }
     }
     if let Some(s) = start {
-        parts.push(head[s..].trim().to_string());
+        parts.push(trim_css(&head[s..]).to_string());
     } else if !combs.is_empty() {
         return Err(()); // trailing combinator with no subject compound
     }
@@ -563,8 +622,13 @@ fn split_structural(head: &str) -> Result<(Vec<String>, Vec<Comb>), ()> {
 /// `abc`). Returns `None` for input CSS does not define - a trailing lone backslash - so the caller can
 /// reject the selector rather than guess at it.
 fn unescape_css(raw: &str) -> Option<String> {
+    // lxml cannot execute XPath strings containing XML-forbidden code points, even if the CSS lexer
+    // accepts them. Apply this to literals as well as escape output.
+    let executable = |s: &str| s.chars().all(|c| {
+        matches!(c, '\t' | '\n' | '\r') || (c >= ' ' && c != '\u{fffe}' && c != '\u{ffff}')
+    });
     if !raw.contains('\\') {
-        return Some(raw.to_string()); // overwhelmingly the common case: no allocation beyond the copy
+        return executable(raw).then(|| raw.to_string());
     }
     let mut out = String::with_capacity(raw.len());
     let mut chars = raw.chars().peekable();
@@ -586,13 +650,24 @@ fn unescape_css(raw: &str) -> Option<String> {
             }
         }
         // one optional whitespace terminator is consumed, not emitted
-        if matches!(chars.peek(), Some(' ' | '\t' | '\n' | '\r' | '\u{c}')) {
+        if matches!(chars.peek(), Some(' ' | '\t' | '\n' | '\r' | '\u{c}'))
+            && chars.next() == Some('\r')
+            && chars.peek() == Some(&'\n')
+        {
             chars.next();
         }
         let cp = u32::from_str_radix(&hex, 16).ok()?;
+        // cssselect can construct surrogate/NUL strings, but lxml refuses to execute them. Do not
+        // turn a surrogate into U+FFFD and match an unrelated replacement character in the page.
+        if cp == 0 || (0xd800..=0xdfff).contains(&cp) {
+            return None;
+        }
         out.push(char::from_u32(cp).unwrap_or('\u{fffd}'));
     }
-    Some(out)
+    // cssselect applies a second escape pass after hexadecimal replacement. A decoded backslash
+    // can therefore introduce another escape (`a\5c b`), or a control character (`a\\b`). Refuse
+    // these spellings throughout the compiler instead of interpreting them differently in each caller.
+    (executable(&out) && !out.contains('\\')).then_some(out)
 }
 
 /// Is `name` a valid CSS identifier for a class / id / attribute name / `::attr()` argument?
@@ -600,7 +675,7 @@ fn unescape_css(raw: &str) -> Option<String> {
 /// A non-empty check is not enough: cssselect raises `SelectorSyntaxError` for `.1`, `.-2`, `[1]` and
 /// `ExpressionError` for `::attr(1)`, so accepting them made `check()` promise support for selectors the
 /// oracle refuses to run. The rule is CSS 2.1's: an optional leading `-`, then a non-digit start, then
-/// name characters. Escapes are valid CSS here too but stay unsupported (rejected, not silently wrong).
+/// name characters. Class/ID escapes are validated and decoded by `read_css_name`.
 fn is_ident_name(name: &str) -> bool {
     let rest = name.strip_prefix('-').unwrap_or(name);
     let mut chars = rest.chars();
@@ -628,6 +703,33 @@ fn read_name(b: &[u8], i: &mut usize) -> String {
         }
     }
     String::from_utf8_lossy(&b[start..*i]).to_string()
+}
+
+fn read_css_name(b: &[u8], i: &mut usize, ident: bool) -> Result<String, ()> {
+    let start = *i;
+    while *i < b.len() {
+        match b[*i] {
+            b'\\' => {
+                if *i + 1 == b.len() || matches!(b[*i + 1], b'\n' | b'\r' | 0x0c) {
+                    return Err(());
+                }
+                *i = escape_end(b, *i);
+            }
+            c if c.is_ascii_alphanumeric() || c == b'-' || c == b'_' || c >= 0x80 => *i += 1,
+            _ => break,
+        }
+    }
+    let raw = std::str::from_utf8(&b[start..*i]).map_err(|_| ())?;
+    if raw.is_empty() || (ident && !is_ident_name(raw)) {
+        return Err(());
+    }
+    let decoded = unescape_css(raw).ok_or(())?;
+    // cssselect/lxml cannot execute a selector containing NUL. A class containing ASCII whitespace
+    // cannot name one HTML class token; keep these outside the accepted identifier surface.
+    if ident && decoded.bytes().any(is_ws) {
+        return Err(());
+    }
+    Ok(decoded)
 }
 
 /// Nesting cap for the mutually-recursive compound parser (`parse_compound` ↔ `parse_is_arg` /
@@ -686,15 +788,12 @@ fn parse_compound_depth(s: &str, depth: u32) -> Result<Compound, ()> {
         match b[i] {
             b'.' => {
                 i += 1;
-                let name = read_name(b, &mut i);
-                if !is_ident_name(&name) {
-                    return Err(()); // cssselect: `.1`, `.-2`, `.--x` are SelectorSyntaxError
-                }
+                let name = read_css_name(b, &mut i, true)?;
                 c.classes.push(name);
             }
             b'#' => {
                 i += 1;
-                let name = read_name(b, &mut i);
+                let name = read_css_name(b, &mut i, false)?;
                 // An ID is a CSS *hash token*, whose payload is a NAME rather than an identifier, so
                 // cssselect accepts `#1id` where it rejects `.1`. Mirror the oracle: rejecting it here
                 // would make a working selector unsupported, losing coverage for no safety gain.

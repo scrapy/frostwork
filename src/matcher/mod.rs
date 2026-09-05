@@ -472,6 +472,7 @@ struct Segment {
     pub(super) parts: Vec<Compound>,
     pub(super) combs: Vec<Comb>, // Descendant | Child only
     pub(super) strict: bool, // leftmost compound must bind strictly below `floor` (relative `.//` descendant)
+    pub(super) context_depth: Option<usize>,
 }
 
 struct CSel {
@@ -727,6 +728,7 @@ fn split_deferred(
         parts: full.parts[..=k].to_vec(),
         combs: full.combs[..k].to_vec(),
         strict: full.strict,
+        context_depth: full.context_depth,
     };
     let members = match compile::tail_selector(sel, k) {
         Some(t) => Some(vec![t]),
@@ -753,7 +755,7 @@ fn to_segments(sel: &Selector) -> (Vec<Segment>, Vec<bool>) {
     for (k, comb) in sel.combs.iter().enumerate() {
         match comb {
             Comb::Adjacent | Comb::General => {
-                segs.push(Segment { parts: std::mem::take(&mut parts), combs: std::mem::take(&mut combs), strict: false });
+                segs.push(Segment { parts: std::mem::take(&mut parts), combs: std::mem::take(&mut combs), strict: false, context_depth: None });
                 adj.push(*comb == Comb::Adjacent);
                 parts.push(sel.parts[k + 1].clone());
             }
@@ -763,7 +765,8 @@ fn to_segments(sel: &Selector) -> (Vec<Segment>, Vec<bool>) {
             }
         }
     }
-    segs.push(Segment { parts, combs, strict: false });
+    segs.push(Segment { parts, combs, strict: false, context_depth: None });
+    segs[0].context_depth = sel.context_depth;
     // `strict_desc` constrains the selector's LEFTMOST compound (the head of the first segment), which
     // is the only place the context-node anchor applies. Relative XPath (`.//`) never has sibling
     // combinators, so there is exactly one segment — but scope the flag to segment 0 regardless.
@@ -871,6 +874,8 @@ pub struct CompiledSchema {
     // may stop; 0 disarms it, which is the default and every path that has not opted in. See
     // `arm_early_exit` for what makes a schema eligible and `Matcher::done` for the per-token test.
     stop_mask: u128,
+    // Immediate flat first-value columns: bounded retention even when groups/all fields need EOF.
+    first_mask: u128,
     // What the compiled compounds require of an element signature (see `sig::Wants`) — derived by the
     // same walk that fills the `req`s, so the two cannot disagree. That is the whole safety argument
     // for letting the scan build LESS than a full signature: a kind of bit no `req` asks for can be
@@ -897,9 +902,9 @@ pub struct Matcher<'a> {
     // by member; lxml orders a union by document position. Flushed sorted and deduped on `(col, offset)`,
     // which is a node identity only because `uniform_node_terminal` gates the column.
     mixed: Vec<(usize, usize, String)>,
-    // EARLY EXIT: which of `schema.stop_mask`'s columns already hold a value. `done()` is
-    // `satisfied == stop_mask`, and `stop_mask == 0` (the default) makes that permanently false, so an
-    // unarmed schema pays one `u128` compare per markup token and nothing else.
+    // Satisfied first-value columns, plus finalized outer-HTML columns when early exit is armed.
+    // Ordinary all-value schemas leave this zero. Outer-HTML scatters directly at finish, so the
+    // streaming emitters can skip every bit here without masking an all-value or deferred column.
     satisfied: u128,
     // How many elements with a pending outer-HTML capture are OPEN. Stopping while one is would make
     // `finish_grouped` close it at end-of-input and hand its column a span the element does not have;
@@ -1447,11 +1452,12 @@ impl CompiledSchema {
             tail_schemas,
             trig_immediate_mask,
             stop_mask: 0,
+            first_mask: 0,
             wants,
         }
     }
 
-    /// Arm EARLY EXIT for a schema whose caller wants at most the FIRST value of every column.
+    /// Bound immediate flat first-value columns, and arm early exit when every column permits it.
     ///
     /// `first_only[c]` says column `c`'s consumer discards everything after the first value — the
     /// `One`/`Card::First` cardinality the `Page` layer applies. When that holds for every live column
@@ -1464,7 +1470,9 @@ impl CompiledSchema {
     /// stopping would truncate its output. Cardinality lives one layer up, which is why this is opt-in
     /// from there rather than derived here.
     ///
-    /// Eligibility is deliberately narrow, and each clause is a way the answer could still change after
+    /// Retention skips later text/attribute values even if groups or all-value columns require EOF.
+    /// It does not truncate raw-HTML captures, and any deferred/normalized/mixed column disarms it.
+    /// Early-exit eligibility is narrower; each clause is a way the answer could still change after
     /// the mask fills:
     /// - **no groups** — a `Many` row set is unbounded by construction;
     /// - **no deferred entries** (`:has()`, reverse positions, text predicates) — those are decided at a
@@ -1489,13 +1497,25 @@ impl CompiledSchema {
     /// requiring one would disarm the mechanism instead of just never firing.
     pub fn arm_early_exit(&mut self, first_only: &[bool]) {
         self.stop_mask = 0;
-        let eligible = self.groups.is_empty()
-            && self.reverse_entries.is_empty()
+        self.first_mask = 0;
+        let immediate = self.reverse_entries.is_empty()
             && self.has_entries.is_empty()
             && self.text_entries.is_empty()
             && !self.has_ns
             && self.mix_cols == 0;
-        if !eligible {
+        if !immediate {
+            return;
+        }
+        // Text and attributes arrive in document order, so later values can be discarded immediately.
+        // Outer HTML does not: a nested match closes before its ancestor. Leave captures untouched.
+        for cs in &self.entries {
+            if cs.emit && !cs.dead && cs.col < 128
+                && first_only.get(cs.col).copied() == Some(true)
+                && matches!(cs.terminal, Terminal::Text { .. } | Terminal::Attr { .. }) {
+                self.first_mask |= 1u128 << cs.col;
+            }
+        }
+        if !self.groups.is_empty() {
             return;
         }
         let mut mask: u128 = 0;
@@ -1958,15 +1978,16 @@ impl<'a> Matcher<'a> {
     /// order because the streaming pass emits in it.
     #[inline]
     fn emit_flat(&mut self, col: usize, off: usize, v: String) {
+        let bit = 1u128 << col;
+        if self.satisfied & bit != 0 {
+            return;
+        }
         if self.schema.mix_cols >> col & 1 != 0 {
             self.mixed.push((col, off, v));
         } else {
             self.results[col].push(v);
-            // EARLY EXIT bookkeeping. `stop_mask` is 0 unless the schema was armed, and a schema is only
-            // armed when every live column funnels its values through here (no outer-HTML capture, no
-            // deferred resolution, no mixed buffer), so this is the one place satisfaction can be seen.
-            if self.schema.stop_mask != 0 && col < 128 {
-                self.satisfied |= 1u128 << col;
+            if self.schema.first_mask != 0 {
+                self.satisfied |= self.schema.first_mask & bit;
             }
         }
     }
@@ -2100,7 +2121,9 @@ impl<'a> Matcher<'a> {
                         _ => continue,
                     };
                     // a group container never emits a flat value; a >=128 column can't be tracked
-                    if !cs.emit || cs.col >= 128 || !aname.eq_ignore_ascii_case(name.as_bytes()) {
+                    if !cs.emit || cs.col >= 128
+                        || self.satisfied & (1u128 << cs.col) != 0
+                        || !aname.eq_ignore_ascii_case(name.as_bytes()) {
                         continue;
                     }
                     let hit = if subtree {
@@ -2934,7 +2957,7 @@ impl<'a> Matcher<'a> {
         // Which output columns want this text node (deduped across comma-group members). Decided
         // FIRST, so `finalize` (validate+decode) runs only when the text is actually captured —
         // skipping the whole cost for text in unselected regions (most of the document).
-        let colmask = self.stack[top].text_cols;
+        let colmask = self.stack[top].text_cols & !self.satisfied;
         // grouped ::text sub-fields: (instance index, sub index) targets for this text node
         let mut gtargets: Vec<(usize, usize)> = Vec::new();
         for ii in 0..self.open_instances.len() {

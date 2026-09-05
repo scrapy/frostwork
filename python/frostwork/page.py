@@ -26,7 +26,9 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field as _dc_field
 from functools import lru_cache
-from typing import Any, Callable, Iterable, Iterator, List, Optional, Tuple, Union
+from typing import Any, Callable, Iterable, Iterator, List, Optional, Protocol, Tuple, Union
+
+from .validation import FieldProcessingError, ValidationReport, validate_item
 
 from ._frostwork import Plan as _Plan
 from ._frostwork import audit_schema as _audit_schema
@@ -42,8 +44,19 @@ __all__ = [
 
 # A field's cardinality: ("first", None) | ("all", None) | ("join", separator).
 _Card = Tuple[str, Optional[str]]
+_Subfields = Union[Mapping[str, str], Iterable[Tuple[str, str]]]
 
 Bytesish = Union[bytes, bytearray, memoryview, str]
+
+
+class Response(Protocol):
+    """The byte-response surface used by :meth:`Page.extract_response`; no Scrapy dependency."""
+
+    @property
+    def body(self) -> bytes: ...
+
+    @property
+    def encoding(self) -> Optional[str]: ...
 
 
 def _as_scan_input(html: Bytesish) -> Union[bytes, str]:
@@ -120,23 +133,8 @@ def _group_list(groups) -> list:
     message on the wrong shape instead of an opaque unhashable/unpack error downstream."""
     norm = []
     for g in groups:
-        try:
-            container, subfields = g
-        except (TypeError, ValueError):
-            raise TypeError(
-                "frostwork: each group must be (container_selector, [(name, selector), ...]); "
-                f"got {g!r}"
-            ) from None
-        subs = []
-        for sf in subfields:
-            sub = tuple(sf)
-            if len(sub) != 2:
-                raise TypeError(
-                    "frostwork: each group sub-field must be a (name, selector) pair; "
-                    f"got {sf!r}"
-                )
-            subs.append(sub)
-        norm.append((container, subs))
+        container, subfields = _group_body(g, _EXTRACT_GROUP_SHAPES)
+        norm.append((container, _subfields(subfields, _EXTRACT_GROUP_SHAPES)))
     return norm
 
 
@@ -201,13 +199,14 @@ def extract(
 def extract_grouped(
     html: Bytesish,
     queries: Iterable[str],
-    groups: Iterable[Tuple[str, Iterable[Tuple[str, str]]]],
+    groups: Iterable[Tuple[str, _Subfields]],
     encoding: Optional[str] = None,
     *,
     strict: bool = True,
 ) -> Tuple[List[List[str]], list]:
     """One streaming pass returning ``(flat_columns, grouped)``. ``groups`` is a list of
-    ``(container_selector, [(subfield_name, subfield_selector), ...])``; for every element matching
+    ``(container_selector, [(subfield_name, subfield_selector), ...])`` (a subfield mapping is also
+    accepted); for every element matching
     ``container_selector`` (document order) each sub-field is extracted **scoped to it**
     (descendant-or-self). ``grouped[g]`` is that group's rows, each a list of sub-field value-columns
     (``[group][row][subfield][value]``). Unsupported selectors raise by default; pass
@@ -331,10 +330,10 @@ class SchemaReport:
         return head + "\n" + "\n".join(rows) if rows else head
 
 
-def _field_reports(names, selectors, tuples) -> List[FieldReport]:
+def _field_reports(fields, tuples) -> List[FieldReport]:
     return [
         FieldReport(n, sel, sup, reason)
-        for n, sel, (sup, reason) in zip(names, selectors, tuples)
+        for (n, sel), (sup, reason) in zip(fields, tuples)
     ]
 
 
@@ -356,16 +355,16 @@ def check(queries=None, groups=None) -> SchemaReport:
         >>> [(f.name, f.supported) for f in frostwork.check({"blurb": ":contains(x)::text"}).fields]
         [('blurb', False)]
     """
-    fnames, fsels = _split_named(queries or [])
-    gnames, gcontainers, gsub_names, gsub_sels, native_groups = _split_groups(groups or [])
-    flat_t, groups_t, (members, max_members, sib_bits, max_sib_bits) = _audit_schema(fsels, native_groups)
-    fields = _field_reports(fnames, fsels, flat_t)
+    named_fields = _named_fields(queries or [])
+    named_groups = _named_groups(groups or [])
+    flat_t, groups_t, (members, max_members, sib_bits, max_sib_bits) = _audit_schema(
+        [sel for _name, sel in named_fields], [(c, subs) for _name, c, subs in named_groups]
+    )
+    fields = _field_reports(named_fields, flat_t)
     group_reports = []
-    for gn, gc, subn, subs, (ctuple, subtuples) in zip(
-        gnames, gcontainers, gsub_names, gsub_sels, groups_t
-    ):
+    for (gn, gc, subs), (ctuple, subtuples) in zip(named_groups, groups_t):
         container = FieldReport(f"{gn}<container>", gc, ctuple[0], ctuple[1])
-        subfields = _field_reports(subn, subs, subtuples)
+        subfields = _field_reports(subs, subtuples)
         group_reports.append(GroupReport(gn, container, subfields))
     return SchemaReport(fields, group_reports, members, max_members, sib_bits, max_sib_bits)
 
@@ -378,6 +377,9 @@ _QUERY_SHAPES = "`queries` must be {name: selector}, [selector, ...], or [(name,
 _GROUP_SHAPES = (
     "each group must be {name: (container, subfields)}, (name, container, subfields), or "
     "(container, subfields), where subfields is {sub: sel} or [(sub, sel), ...]"
+)
+_EXTRACT_GROUP_SHAPES = (
+    "each group must be (container, subfields), where subfields is {sub: sel} or [(sub, sel), ...]"
 )
 
 
@@ -402,9 +404,9 @@ def _pair(item, shapes):
     return str(parts[0]), parts[1]
 
 
-def _split_named(queries):
-    """Accept `{name: selector}`, `[selector, ...]`, or `[(name, selector), ...]`; return
-    (names, selectors).
+def _named_fields(queries):
+    """Accept `{name: selector}`, `[selector, ...]`, or `[(name, selector), ...]`; keep each
+    name paired with its selector through normalization and report construction.
 
     A Mapping is read as `{name: selector}` — the shape `Page`/`FrostPage` schemas are written in.
     Iterating it instead would audit the field NAMES as selectors and report the whole schema
@@ -416,65 +418,70 @@ def _split_named(queries):
             f"frostwork: {_QUERY_SHAPES}; got a single {type(queries).__name__} "
             f"{queries!r} — wrap it in a list"
         )
-    names, sels = [], []
-    for i, q in enumerate(queries):
-        if isinstance(q, str):
-            names.append(f"[{i}]")
-            sels.append(q)
-        else:
-            name, sel = _pair(q, _QUERY_SHAPES)
-            names.append(name)
-            sels.append(sel)
-    return names, sels
+    return [(f"[{i}]", q) if isinstance(q, str) else _pair(q, _QUERY_SHAPES)
+            for i, q in enumerate(queries)]
 
 
-def _split_groups(groups):
+def _named_groups(groups):
     """Accept `{name: (container, subfields)}`, `(name, container, subfields)`, or the bare
     `(container, subfields)` shape `extract_grouped` takes (auto-named `group[i]`), where `subfields`
-    is `{sub: sel}` or `[(sub, sel), ...]`; return the parallel name lists plus the native
-    `(container, [(sub, sel)])` shape `_audit_schema` expects.
+    is `{sub: sel}` or `[(sub, sel), ...]`; return `(name, container, [(sub, sel)])` records.
 
     A Mapping is read as `{name: (container, subfields)}` — what `FrostPage.frost_schema()["groups"]`
-    returns — for the same reason `_split_named` reads one as `{name: selector}`: iterating it would
+    returns — for the same reason `_named_fields` reads one as `{name: selector}`: iterating it would
     audit the group names instead of the schema."""
     if isinstance(groups, Mapping):
-        groups = [_named_group(name, body) for name, body in groups.items()]
-    gnames, gcontainers, gsub_names, gsub_sels, native = [], [], [], [], []
+        groups = [(str(name), *_group_body(body)) for name, body in groups.items()]
+    named = []
     for i, g in enumerate(groups):
         parts = _as_tuple(g)
         if parts is not None and len(parts) == 3:
-            name, container, sub = str(parts[0]), parts[1], parts[2]
-        elif parts is not None and len(parts) == 2:
-            name, container, sub = f"group[{i}]", parts[0], parts[1]
+            name, body = str(parts[0]), parts[1:]
         else:
-            raise TypeError(f"frostwork: {_GROUP_SHAPES}; got {g!r}")
-        subn, subs = _split_subfields(sub)
-        gnames.append(name)
-        gcontainers.append(container)
-        gsub_names.append(subn)
-        gsub_sels.append(subs)
-        native.append((container, list(zip(subn, subs))))
-    return gnames, gcontainers, gsub_names, gsub_sels, native
+            name, body = f"group[{i}]", parts
+        container, sub = _group_body(body)
+        named.append((name, container, _subfields(sub)))
+    return named
 
 
-def _named_group(name, body) -> tuple:
-    """One `{name: (container, subfields)}` entry as the `(name, container, subfields)` triple."""
+def _group_body(body, shapes=_GROUP_SHAPES) -> tuple:
+    """The `(container, subfields)` shape shared by auditing and extraction."""
     parts = _as_tuple(body)
-    if parts is None or len(parts) != 2:
-        raise TypeError(f"frostwork: {_GROUP_SHAPES}; got {{{name!r}: {body!r}}}")
-    return (name, parts[0], parts[1])
+    if parts is None or len(parts) != 2 or not isinstance(parts[0], str):
+        raise TypeError(f"frostwork: {shapes}; got {body!r}")
+    return parts
 
 
-def _split_subfields(sub):
-    """A group's sub-fields — `{sub: sel}` or `[(sub, sel), ...]` — as parallel (names, selectors)."""
+def _subfields(sub, shapes=_GROUP_SHAPES):
+    """A group's sub-fields — `{sub: sel}` or `[(sub, sel), ...]` — as `(name, selector)` pairs."""
     items = tuple(sub.items()) if isinstance(sub, Mapping) else _as_tuple(sub)
     if items is None:
-        raise TypeError(f"frostwork: {_GROUP_SHAPES}; got subfields {sub!r}")
-    pairs = [_pair(sf, _GROUP_SHAPES) for sf in items]
-    return [n for n, _s in pairs], [s for _n, s in pairs]
+        raise TypeError(f"frostwork: {shapes}; got subfields {sub!r}")
+    return [_pair(sf, shapes) for sf in items]
 
 
 _Transforms = Tuple[Callable, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _Field:
+    selector: str
+    card: _Card
+    transforms: _Transforms = ()
+    index: int = 0  # position in the native result columns, assigned when the schema is built
+
+    def value(self, name: str, col: List[str]):
+        try:
+            return _shape(col, self.card, self.transforms)
+        except Exception as exc:
+            raise FieldProcessingError(name, self.selector, exc) from exc
+
+
+@dataclass(frozen=True, slots=True)
+class _Group:
+    container: str
+    subfields: dict[str, _Field]
+    one: bool
 
 
 def _shape(col: List[str], card: _Card, transforms: _Transforms = ()) -> Any:
@@ -515,26 +522,20 @@ class Page:
     """An ordered ``{name -> (selector, cardinality)}`` schema. Build it once with the ``field*``
     methods (chainable), then call :meth:`extract` per page; reuse one ``Page`` across responses."""
 
-    __slots__ = (
-        "_names", "_queries", "_cards", "_transforms", "_groups", "_plan", "_strict", "_validated"
-    )
+    __slots__ = ("_fields", "_groups", "_plan", "_strict", "_validated")
 
     def __init__(self, *, strict: bool = True) -> None:
-        self._names: List[str] = []
-        self._queries: List[str] = []
-        self._cards: List[_Card] = []
-        self._transforms: List[_Transforms] = []
-        self._groups: List[dict] = []  # {name, container, subfields: {subname: selector}, one}
+        self._fields: dict[str, _Field] = {}
+        self._groups: dict[str, _Group] = {}
         self._plan = None  # native compiled Plan, built lazily on first extract, reused after
         self._strict = strict
         self._validated = False
 
     def _add(self, name: str, selector: str, card: _Card, transforms: _Transforms) -> "Page":
         self._ensure_new_name(name)
-        self._names.append(name)
-        self._queries.append(selector)
-        self._cards.append(card)
-        self._transforms.append(transforms)
+        # Replace rather than mutate: extracted Items can share this schema without per-response
+        # metadata copies, and keep their original declarations if the Page is extended later.
+        self._fields = {**self._fields, name: _Field(selector, card, transforms, len(self._fields))}
         self._invalidate()
         return self
 
@@ -546,7 +547,7 @@ class Page:
 
     def _ensure_new_name(self, name: str) -> None:
         """Reject ambiguous flat/group collisions before they can overwrite in ``Item.to_dict``."""
-        if name in self._names or any(g["name"] == name for g in self._groups):
+        if name in self._fields or name in self._groups:
             raise ValueError(f"duplicate Page field/group name: {name!r}")
 
     def _get_plan(self):
@@ -556,15 +557,17 @@ class Page:
         Per-column cardinality goes down with it, because that is what makes EARLY EXIT sound: a schema
         of nothing but single-valued fields is finished as soon as each has a value, and the engine can
         stop tokenizing rather than run to EOF. One ``field_all``/``field_join`` — or one group, or one
-        deferred selector — leaves it unarmed, since those consumers read the whole column.
+        deferred selector — leaves early exit unarmed, since those consumers read the whole column.
+        Immediate first-value text/attribute fields can still stop retaining later matches in a mixed
+        schema; deferred/normalized/mixed deferred columns disable that optimization.
         """
         if self._plan is None:
             garg = [
-                (g["container"], [(sn, sel) for sn, (sel, _c) in g["subfields"].items()])
-                for g in self._groups
+                (g.container, [(sn, sub.selector) for sn, sub in g.subfields.items()])
+                for g in self._groups.values()
             ]
-            first_only = [kind == "first" for kind, _sep in self._cards]
-            self._plan = _Plan(self._queries, garg, first_only)
+            first_only = [f.card[0] == "first" for f in self._fields.values()]
+            self._plan = _Plan([f.selector for f in self._fields.values()], garg, first_only)
         return self._plan
 
     def field(self, name: str, selector: str, *, map: Optional[Callable] = None) -> "Page":
@@ -605,25 +608,37 @@ class Page:
 
     def _add_group(self, name: str, container: str, subfields: dict, *, one: bool) -> "Page":
         self._ensure_new_name(name)
-        subs = {sn: _sub_spec(spec) for sn, spec in subfields.items()}
-        self._groups.append({"name": name, "container": container, "subfields": subs, "one": one})
+        subs = {sn: _Field(*_sub_spec(spec), index=i) for i, (sn, spec) in enumerate(subfields.items())}
+        self._groups = {**self._groups, name: _Group(container, subs, one)}
         self._invalidate()
         return self
 
     @property
     def field_names(self) -> List[str]:
-        return list(self._names) + [g["name"] for g in self._groups]
+        return [*self._fields, *self._groups]
 
     def check(self) -> SchemaReport:
         """Audit this page's whole schema (flat fields + ``many``/``one`` groups) without touching any
         HTML: which selectors are supported, advisory reasons for those that are not, and budget usage.
         See :class:`SchemaReport`."""
-        named_queries = list(zip(self._names, self._queries))
-        named_groups = [
-            (g["name"], g["container"], {sn: sel for sn, (sel, _c) in g["subfields"].items()})
-            for g in self._groups
-        ]
-        return check(named_queries, named_groups)
+        schema = self.frost_schema()
+        return check(schema["fields"], schema["groups"])
+
+    def frost_schema(self) -> dict:
+        """Named selectors in the same audit format as ``FrostFields.frost_schema()``."""
+        return {
+            "fields": {name: f.selector for name, f in self._fields.items()},
+            "groups": {name: (g.container, {sn: sub.selector for sn, sub in g.subfields.items()})
+                       for name, g in self._groups.items()},
+        }
+
+    def extract_response(self, response: Response, *, strict: Optional[bool] = None) -> "Item":
+        """Extract original response bytes with its encoding (Scrapy or web-poet, without imports).
+
+        Never accesses ``response.text`` or its selector. To use Frostwork's own sniffing instead,
+        call ``page.extract(response.body)`` explicitly.
+        """
+        return self.extract(response.body, encoding=response.encoding, strict=strict)
 
     def extract(
         self, html: Bytesish, encoding: Optional[str] = None, *, strict: Optional[bool] = None
@@ -641,21 +656,21 @@ class Page:
         body = _as_scan_input(html)
         plan = self._get_plan()  # compiled once, reused across pages
         if not self._groups:
-            cols = plan.extract(body, encoding)
-            return Item(list(self._names), list(self._cards), cols, list(self._transforms))
+            return Item._from_columns(self._fields, plan.extract(body, encoding))
         flat_cols, grouped = plan.extract_grouped(body, encoding)
         gout: dict = {}
-        for g, rows in zip(self._groups, grouped):
-            subitems = list(g["subfields"].items())  # [(subname, (selector, card))]
-            shaped = [{sn: _shape(col, card) for (sn, (_s, card)), col in zip(subitems, row)} for row in rows]
-            gout[g["name"]] = (shaped[0] if shaped else None) if g["one"] else shaped
-        return Item(list(self._names), list(self._cards), flat_cols, list(self._transforms), gout)
+        for (name, g), rows in zip(self._groups.items(), grouped):
+            shaped = [{sn: _shape(col, sub.card) for (sn, sub), col in zip(g.subfields.items(), row)}
+                      for row in (rows[:1] if g.one else rows)]
+            gout[name] = (shaped[0] if shaped else None) if g.one else shaped
+        return Item._from_columns(self._fields, flat_cols, gout,
+                                  {name: (g.one, tuple(g.subfields)) for name, g in self._groups.items()})
 
     def __len__(self) -> int:
-        return len(self._names) + len(self._groups)
+        return len(self._fields) + len(self._groups)
 
     def __repr__(self) -> str:
-        fields = ", ".join(f"{n}={q!r}" for n, q in zip(self._names, self._queries))
+        fields = ", ".join(f"{n}={f.selector!r}" for n, f in self._fields.items())
         return f"Page({fields})"
 
 
@@ -663,24 +678,40 @@ class Item:
     """Values extracted for one page — one column per declared field. Look fields up by name with
     :meth:`get` / :meth:`get_all`, or take the whole item with :meth:`to_dict` / :meth:`to_json`."""
 
-    __slots__ = ("_names", "_cards", "_cols", "_transforms", "_grouped")
+    __slots__ = ("_fields", "_cols", "_grouped", "_group_specs")
 
     def __init__(
         self, names: List[str], cards: List[_Card], cols: List[List[str]],
         transforms: Optional[List[_Transforms]] = None,
         grouped: Optional[dict] = None,
+        *, selectors: Optional[List[str]] = None,
+        group_specs: Optional[dict] = None,
     ) -> None:
-        self._names = names
-        self._cards = cards
-        self._cols = cols
-        self._transforms = transforms if transforms is not None else [()] * len(names)
-        self._grouped = grouped or {}  # name -> list[dict] (many) | dict|None (one)
+        selectors = selectors or [""] * len(names)
+        transforms = transforms if transforms is not None else [()] * len(names)
+        if not (len(names) == len(cards) == len(selectors) == len(transforms)):
+            raise ValueError("Item needs one selector, cardinality and transform sequence per field")
+        fields = {n: _Field(sel, card, funcs, i) for i, (n, sel, card, funcs) in enumerate(zip(
+            names, selectors, cards, transforms
+        ))}
+        if len(fields) != len(names):
+            raise ValueError("Item field names must be unique")
+        self._set_columns(fields, cols, grouped, group_specs)
 
-    def _index(self, name: str) -> Optional[int]:
-        try:
-            return self._names.index(name)
-        except ValueError:
-            return None
+    def _set_columns(self, fields: dict[str, _Field], cols, grouped, group_specs) -> None:
+        if len(cols) != len(fields):
+            raise ValueError("Item needs exactly one value column per field")
+        self._fields = fields
+        self._cols = cols
+        self._grouped = grouped or {}  # name -> list[dict] (many) | dict|None (one)
+        self._group_specs = group_specs or {}
+
+    @classmethod
+    def _from_columns(cls, fields: dict[str, _Field], cols, grouped=None, group_specs=None) -> "Item":
+        """Attach columns to the Page's stable schema without rebuilding its field definitions."""
+        item = cls.__new__(cls)
+        item._set_columns(fields, cols, grouped, group_specs)
+        return item
 
     def get(self, name: str):
         """First value for ``name``. For a flat field: its first matched string (or ``None``). For a
@@ -690,10 +721,8 @@ class Item:
             if isinstance(g, list):  # many -> first row
                 return g[0] if g else None
             return g  # one -> the row dict (or None)
-        i = self._index(name)
-        if i is None:
-            return None
-        col = self._cols[i]
+        field = self._fields.get(name)
+        col = self._cols[field.index] if field is not None else []
         return col[0] if col else None
 
     def get_all(self, name: str) -> list:
@@ -708,12 +737,11 @@ class Item:
             if isinstance(g, list):  # many -> all rows
                 return list(g)
             return [g] if g is not None else []  # one -> single-row list (or empty)
-        i = self._index(name)
-        if i is None:
+        field = self._fields.get(name)
+        if field is None:
             return []
-        if self._cards[i][0] == "first":
-            return self._cols[i][:1]
-        return list(self._cols[i])
+        col = self._cols[field.index]
+        return col[:1] if field.card[0] == "first" else list(col)
 
     def value(self, name: str):
         """Cardinality-aware value for ``name`` (respects first/all/join and any ``map=`` transform),
@@ -722,36 +750,47 @@ class Item:
         rows (``one`` retains at most one row)."""
         if name in self._grouped:
             return self._grouped[name]
-        i = self._index(name)
-        return None if i is None else _shape(self._cols[i], self._cards[i], self._transforms[i])
+        field = self._fields.get(name)
+        return field.value(name, self._cols[field.index]) if field is not None else None
+
+    def validate(
+        self, *, required: Iterable[str] = (),
+        counts: Optional[Mapping[str, Tuple[int, Optional[int]]]] = None,
+        group_required: Optional[Mapping[str, Iterable[str]]] = None,
+    ) -> ValidationReport:
+        """Check processed values, raw match counts and required group subfields.
+
+        Returns a report with the processed ``item``, per-field ``states`` and structured ``issues``.
+        ``counts={"images": (1, 8)}`` requires ``field_all``/``field_join`` or ``many``: a first-only
+        declaration cannot prove an upper bound. ``group_required={"offers": ["price"]}`` checks
+        each matched row; also put ``offers`` in ``required`` to require a container.
+        """
+        return validate_item(self, required=required, counts=counts, group_required=group_required)
 
     def empty_fields(self) -> List[str]:
         """Declared fields that matched **nothing** on this page (a `many`/`one` group with no rows
         counts as empty; a field that matched an empty string does not — it matched).
 
-        This is the runtime half of dead-selector detection. Frostwork has no fallback, so an empty
-        column under ``strict=False`` can mean two very different things — and they are distinguishable,
-        because support is *static*: audit the schema once with :meth:`Page.check` (or
-        ``frostwork-audit``) and any field it reports **supported** that is empty here is a selector that
-        no longer matches the page, not an engine gap. Under the default ``strict=True`` the unsupported
-        case cannot arise at all, so every name returned here is a dead selector::
+        Audit support once with :meth:`Page.check` (or ``frostwork-audit``), then monitor missing
+        matches. An empty result can be legitimate optional content, changed markup, or a parsing
+        difference; it does not by itself prove the layout changed. Under ``strict=False`` an
+        unsupported selector is another possibility. This method does not apply transforms::
 
             report = page.check()                     # once, at startup / in CI
             item = page.extract(html)
             for name in item.empty_fields():          # per response
                 log.warning("selector matched nothing: %s", name)
         """
-        out = [n for n, col in zip(self._names, self._cols) if not col]
+        out = [n for n, col in zip(self._fields, self._cols) if not col]
         for name, g in self._grouped.items():
-            if not g:  # [] for an empty `many`, None for a `one` with no container
+            if g is None or isinstance(g, list) and not g:
                 out.append(name)
         return out
 
     def to_dict(self) -> dict:
         """The whole item as a dict: flat fields shaped by cardinality/``map=``, plus `many`/`one`
         groups as row lists / a row / ``None``."""
-        d = {n: _shape(c, card, tf)
-             for n, card, c, tf in zip(self._names, self._cards, self._cols, self._transforms)}
+        d = {n: field.value(n, col) for (n, field), col in zip(self._fields.items(), self._cols)}
         d.update(self._grouped)
         return d
 
@@ -764,7 +803,7 @@ class Item:
         return iter(self.to_dict().items())
 
     def __len__(self) -> int:
-        return len(self._names) + len(self._grouped)
+        return len(self._fields) + len(self._grouped)
 
     def __repr__(self) -> str:
         return f"Item({self.to_dict()!r})"

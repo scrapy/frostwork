@@ -13,7 +13,7 @@ from web_poet import HttpResponse  # noqa: E402
 ROOT = Path(__file__).resolve().parents[1]
 DOCS = [ROOT / "README.md", ROOT / "docs" / "PYTHON.md"]
 
-EXPECTED_EXAMPLES = {"frost-page", "product-page", "zyte-product-page"}
+EXPECTED_EXAMPLES = {"frost-page", "product-page", "zyte-product-page", "runtime-validation"}
 
 PRODUCT_HTML = (
     b"<html><head><meta itemprop='brand' content='Acme'></head><body>"
@@ -80,6 +80,10 @@ def test_every_marked_documentation_block_builds_and_produces_an_item():
 
     for _example_id, source, block in blocks:
         namespace = _run(block, source)
+        if _example_id == "runtime-validation":
+            assert namespace["report"].ok
+            assert namespace["report"].item["offers"] == [{"price": "9"}]
+            continue
         pages = _page_objects(namespace)
         assert pages, f"{source}: a marked block defines no page object"
         for page_cls in pages:

@@ -218,6 +218,8 @@ def generate(rng, depth=5):
 
 # Supported-subset selector basket, spanning compounds x {descendant, child} x {text, attr}.
 BASKET = [
+    r".\73 hared::text",  # CSS identifier escapes; matches the generator's own vocabulary
+    r"#\69 1::attr(id)",
     "div ::text", "p::text", "p ::text", "span::text", "li::text", "td::text", "th::text",
     "a::text", "a ::text", "label::text", "option::text", "dd::text", "dt::text",
     "ul > li::text", "ol > li::text", "div > p::text", "dl > dt::text", "dl > dd::text",

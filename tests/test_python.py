@@ -2044,7 +2044,7 @@ def test_input_edges_match_parsel(label, body, encoding):
 def test_check_reports_supported_and_unsupported():
     r = frostwork.check(
         ["h1::text", "div:has(.a .b)::text", "//a[position()<2]/@href"],
-        [("offers", ".offer", {"price": ".//span/text()", "sib": "a + b::text", "kid": "./h3/text()"})],
+        [("offers", ".offer", {"price": ".//span/text()", "sib": "a + b::text", "kid": "./h3[last()]/text()"})],
     )
     assert not r.ok
     assert not r.over_budget
@@ -2053,7 +2053,7 @@ def test_check_reports_supported_and_unsupported():
     assert ":has()" in unsup["[1]"]
     assert "positional" in unsup["[2]"]
     assert "sibling combinator" in unsup["sib"]
-    assert "descendant" in unsup["kid"]  # ./ child anchor -> use .//
+    assert "deferred-close" in unsup["kid"]
     assert r.groups[0].container.supported  # .offer is fine
 
 
@@ -2081,7 +2081,7 @@ def test_check_reads_a_dict_as_name_to_selector():
 
 
 def test_check_reads_a_dict_of_groups_and_of_subfields():
-    subs = {"price": ".//span/text()", "kid": "./h3/text()"}  # `./x` child anchor -> unsupported
+    subs = {"price": ".//span/text()", "kid": "./h3[last()]/text()"}  # deferred predicates remain unsupported in groups
     for groups in (
         {"offers": (".offer", subs)},                    # {name: (container, subfields)}
         {"offers": (".offer", list(subs.items()))},      # ... with sub-fields as pairs

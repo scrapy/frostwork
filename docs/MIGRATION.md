@@ -1,49 +1,131 @@
-# Migrating a Parsel page object
+# Migrating a Scrapy extraction schema
 
-Frostwork is best introduced as an audited hot path, not as an ad-hoc replacement for every
-`.css()`/`.xpath()` call.
+Start with [frostwork-demo](https://github.com/shaneaevans/frostwork-demo) for a runnable crawl. Use the
+[Python guide](PYTHON.md) for the APIs and [compatibility contract](COMPATIBILITY.md) for selector limits.
+For an existing spider, work through one complete callback or page schema at a time.
 
-1. Collect the selectors used to build one item — `frostwork-audit --scan myproject/spiders/` mines them
-   straight out of the source (inline `.css()`/`.xpath()`, `ItemLoader.add_*`,
-   `LinkExtractor(restrict_*)`) without importing anything, and prints a supported/unsupported verdict
-   per `file:line`. That is the coverage number for the migration, before any rewrite.
-2. Run `frostwork.check(selectors)` or declare them on `Page` and call `page.check()`.
-3. Keep supported selectors together so Frostwork answers them in one pass.
-4. Rewrite simple unsupported forms using the audit suggestion where possible; keep genuinely
-   tree-dependent queries on Parsel.
-5. Cross-check representative pages before switching the production path.
+1. Run `frostwork-audit --scan myproject/spiders/` to find literal selector gaps without importing the
+   spider. Dynamic selectors are unknown; aliases and custom wrappers can be invisible to the scanner. Add `--require-complete` in CI if a partial scan must fail.
+2. Declare a reusable `Page`, or use `FrostPage` with scrapy-poet. Use `field_all` whenever the callback
+   consumes all matches. Audit the complete schema with `frostwork-audit myproject/pages.py` to check
+   group context and shared selector budgets.
+3. Save representative response **bytes**, the resolved encoding and URL. Include missing optional
+   content, multiple repeated rows, nested markup and the encodings your spider actually receives.
+4. Compare every field and the whole item on those saved responses. Only then measure extraction time,
+   and finally run the callback through a real Scrapy crawl to measure downloader and pipeline costs.
 
-```python
-from parsel import Selector
-from frostwork import Page
+## Verify saved responses
 
-page = (
-    Page()
-    .field("title", "h1::text")
-    .field_all("images", "img::attr(src)")
-)
-page.check().raise_for_status()
+The repository includes a comparison tool and self-authored fixtures under `tests/migration/`, covered
+by the repository license. The fixtures are small, inspectable examples, not a sample of the real web.
+From a checkout with the test dependencies installed:
 
-frost = page.extract(body).to_dict()
-parsel = Selector(body=body, encoding="utf-8")
-assert frost["title"] == parsel.css("h1::text").get()
-assert frost["images"] == parsel.css("img::attr(src)").getall()
+```bash
+make verify-migration
+make bench-migration
 ```
 
-Common rewrites:
+These commands write `target/migration-report.json`. The benchmark compiles Frostwork's plans before
+timing, alternates the order of Frostwork and Parsel runs, and reports samples, medians and spread for
+complete extraction plus cardinality shaping and transforms. It excludes file I/O, downloading,
+ItemLoaders and pipelines. It does not measure memory; use the separate memory harness described in
+[BENCHMARKS.md](BENCHMARKS.md). A manual **migration benchmark** GitHub Actions workflow runs the same
+fixtures on Linux and uploads the report; its shared runner timings are indicative.
 
-| Parsel shape | Frostwork approach |
-|---|---|
-| repeated `selector.css(field)` inside cards | `Page.many(container, subfields)` |
-| `./child` or a bare `td/text()` in a grouped XPath | use `.//descendant` when descendant scope is acceptable (this is the single most common un-portable shape) |
+To check your own `Page` schemas:
+
+```bash
+.venv/bin/python tools/verify_migration.py myproject/pages.py:REGISTRY responses/manifest.json \
+  --json migration-report.json
+```
+
+`REGISTRY` is a dictionary of schema names to `Page` instances, or point at a single `Page` instead.
+The command imports that module and executes its transforms. Use an import-safe schema module, and
+transforms that are deterministic and have no side effects. Values must be JSON-compatible.
+The tool is repository tooling; it is not installed as a separate package command.
+
+The response manifest names the schema for each page. Paths are relative to the manifest. `encoding`
+is the response's resolved encoding; omit it only to test Frostwork sniffing against Parsel's default
+UTF-8. A hash mismatch is an input error, so changed fixtures cannot silently reuse old provenance:
+
+```json
+{
+  "version": 1,
+  "responses": [
+    {
+      "schema": "product",
+      "file": "product.html",
+      "encoding": "windows-1252",
+      "url": "https://example.invalid/product",
+      "sha256": "SHA256_OF_THE_ORIGINAL_BODY_BYTES"
+    }
+  ]
+}
+```
+
+Use `hashlib.sha256(response.body).hexdigest()` when saving the body. Keep capture provenance and
+licensing information alongside it. Do not decode and re-encode a saved response to make a check pass.
+
+A schema counts as verified only when it is supported, has at least one saved response and agrees on
+**every whole item** and every retained raw flat column tested for it. A transform cannot hide a raw
+value loss. Group subfields are compared after their declared cardinality shaping. Missing keys, extra values, order, empty strings and whitespace are
+significant. Raw HTML serialization differences fail this migration check even when the engine's
+existing differential verdict accepts them under its documented raw-source contract; the report
+includes that verdict for flat columns as context. An oracle error is unverified, never agreement.
+An empty field is reported, so a green comparison where a selector never matches is visible.
+
+Add `--benchmark --rounds 7 --iterations 100` after parity succeeds. If any complete schema fails,
+nothing is timed. A response with no matches is excluded from extraction timing. The report records
+body and manifest hashes, the schema module hash, native extension hash, Git revision and dirty state,
+Python/package/libxml2 versions, and machine details. Imported helper modules are not individually
+hashed: retain the complete project revision and environment when sharing a measurement.
+
+This tool compares a `Page` to Parsel with the same selectors and transforms. It does not port callback
+logic or verify ItemLoaders, web-poet output processors, URL joining, requests or pipelines. The
+[demo](https://github.com/shaneaevans/frostwork-demo) covers the crawl path; Frostwork's web-poet differential
+checks the integration against its own oracle.
+
+## Relative selectors inside repeated rows
+
+Use `./` when the relation really is an immediate child. Replacing it with `.//` changes the meaning
+and can pick up a nested recommendation or an inner card:
+
+```python
+from frostwork import Page
+
+products = Page().many("products", "article", {
+    "id": "@id",                         # the article's attribute
+    "name": "./h2/text()",                # its immediate heading
+    "tags": ("./ul/li/text()", "all"),
+    "text": (".//text()", "join", ""),    # its string value, including nested text
+})
+```
+
+`text()` reads the container's own text nodes; `.//text()` reads its full subtree. `.` returns its raw
+source HTML. These context forms work in grouped subfields; a flat `./child` remains unsupported.
+Use scalar text and attribute fields when a processor needs values. `.as_node()` intentionally reparses
+matched HTML for node-oriented web-poet processors and has a different performance boundary.
+
+Other common translations:
+
+| Parsel use | Frostwork declaration |
+| --- | --- |
+| `.get()` | `Page.field` |
+| `.getall()` | `Page.field_all` |
 | `normalize-space(path)` | supported as a flat scalar field |
-| `sel.xpath('//*[@id=$pid]', pid=…)` (XPath variables) | inline the value as a quoted literal — Frostwork takes no variable bindings, so `$pid` is unsupported |
-| arbitrary reverse/parent traversal | keep on Parsel unless listed in `COMPATIBILITY.md` |
+| `.xpath(query, variable=value)` | variable bindings remain unsupported; validate a concrete selector before using it |
+| arbitrary parent or reverse traversal | check the exact shape against the compatibility contract |
 
-Run `frostwork-audit myproject.pages --json` in CI so future selector edits cannot silently move a
-field outside the supported subset, and `frostwork-audit --scan` over the spiders so un-ported selectors
-stay visible.
+Keep tree-dependent queries in the existing implementation until the entire schema can be expressed
+faithfully. There is no automatic parser fallback. Re-run the schema audit in CI when selectors change.
 
-Once a page object is live, `Item.empty_fields()` gives the other half of the picture: with the schema
-already audited as supported, a field that comes back empty means the *page* changed, not that Frostwork
-lacks the selector (see [PYTHON.md](PYTHON.md#dead-selector-or-coverage-gap--itemempty_fields)).
+## Monitoring a running spider
+
+`Page.extract_response(response)` passes `response.body` and `response.encoding` through directly.
+After extraction, `item.validate(required=..., counts=..., group_required=...)` checks your data contract.
+Use `report.record_stats(self.crawler.stats)` for Scrapy counters, then inspect `report.ok` or call
+`report.raise_for_status()`. Yield `report.item` after validation to reuse the already processed values.
+
+A missing optional field is not necessarily a broken selector. Keep requirements specific to the item
+contract, and use saved responses to investigate changes. Group requirements check existing rows;
+include the group itself in `required` when at least one row must exist.

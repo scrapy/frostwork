@@ -6,6 +6,9 @@ contract remains in `COMPATIBILITY.md`; this table is a drift tripwire for headl
 | feature | context | selector | supported |
 |---|---|---|---|
 | CSS compound | flat | `div.card[data-x]::text` | yes |
+| CSS escaped class | flat | `.sm\:text-lg::text` | yes |
+| CSS hex escaped id | flat | `#i\31::attr(id)` | yes |
+| CSS escaped tag | flat | `\70::text` | no |
 | CSS sibling | flat | `dt + dd::text` | yes |
 | CSS reverse position | flat | `li:last-child::text` | yes |
 | CSS reverse subtree | flat | `li:last-child ::text` | yes |
@@ -45,5 +48,12 @@ contract remains in `COMPATIBILITY.md`; this table is a drift tripwire for headl
 | Grouped comma container | container | `div, span` | no |
 | Grouped deferred container | container | `div:has(a)` | no |
 | Grouped descendant sub-field | sub-field | `.//a/@href` | yes |
+| Grouped child sub-field | sub-field | `./a/@href` | yes |
+| Flat child anchor | flat | `./a/@href` | no |
+| Grouped own attribute | sub-field | `@id` | yes |
+| Grouped own text | sub-field | `text()` | yes |
+| Grouped subtree text | sub-field | `.//text()` | yes |
+| Grouped own node | sub-field | `.` | yes |
+| Grouped normalize-space | sub-field | `normalize-space(//a)` | no |
 | Grouped comma sub-field | sub-field | `p::text, a::text` | no |
 | Grouped deferred sub-field | sub-field | `p:has(a)::text` | no |

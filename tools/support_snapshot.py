@@ -11,6 +11,9 @@ TARGET = ROOT / "docs" / "SUPPORT_SNAPSHOT.md"
 
 ROWS = [
     ("CSS compound", "flat", "div.card[data-x]::text", True),
+    ("CSS escaped class", "flat", r".sm\:text-lg::text", True),
+    ("CSS hex escaped id", "flat", r"#i\31::attr(id)", True),
+    ("CSS escaped tag", "flat", r"\70::text", False),
     ("CSS sibling", "flat", "dt + dd::text", True),
     ("CSS reverse position", "flat", "li:last-child::text", True),
     ("CSS reverse subtree", "flat", "li:last-child ::text", True),
@@ -53,6 +56,13 @@ ROWS = [
     ("Grouped comma container", "container", "div, span", False),
     ("Grouped deferred container", "container", "div:has(a)", False),
     ("Grouped descendant sub-field", "sub-field", ".//a/@href", True),
+    ("Grouped child sub-field", "sub-field", "./a/@href", True),
+    ("Flat child anchor", "flat", "./a/@href", False),
+    ("Grouped own attribute", "sub-field", "@id", True),
+    ("Grouped own text", "sub-field", "text()", True),
+    ("Grouped subtree text", "sub-field", ".//text()", True),
+    ("Grouped own node", "sub-field", ".", True),
+    ("Grouped normalize-space", "sub-field", "normalize-space(//a)", False),
     ("Grouped comma sub-field", "sub-field", "p::text, a::text", False),
     ("Grouped deferred sub-field", "sub-field", "p:has(a)::text", False),
 ]

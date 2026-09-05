@@ -68,6 +68,7 @@ Security = "https://github.com/scrapy/frostwork/security/policy"
 # was a hand-written universe, and three mutations survived a sweep only because tests written in the same
 # commit were not in it.
 [tool.pytest.ini_options]
+testpaths = ["tests"]
 markers = ["webpoet_contract: asserts a frostwork.webpoet contract (the mutation sweep's unit detector)"]
 
 [tool.mypy]

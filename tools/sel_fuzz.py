@@ -385,9 +385,8 @@ def g_escaped(rng):
     review read the parser. The generated forms decode onto names the pages really carry, so parsel has
     values and a literal-matching engine grades WRONG rather than harmlessly-empty-on-both-sides.
 
-    Escapes in a class / id / attribute *name* are an UNSUPPORTED gap rather than decoded, which the
-    contract allows (empty, never wrong); generating them pins the gap so it cannot drift into a wrong
-    answer. The trailing-lone-backslash forms are ones cssselect REJECTS, where any non-empty column is
+    Class and ID escapes are decoded, while attribute-name escapes remain unsupported. These
+    probes exercise both the supported surface and the refusal boundary. The trailing-lone-backslash forms are ones cssselect REJECTS, where any non-empty column is
     an OVERMATCH.
 
     The escaped values deliberately use SUBSTRING/PREFIX operators over `class`/`data-k`/`href`, which
@@ -410,7 +409,7 @@ def g_escaped(rng):
         r'[data-k]::attr(data-\6b)',        # ::attr() argument -> data-k
         # decodes fine but matches nothing on these pages (title is `t` / `a<n>`): a decode-path probe
         r'[title*="caf\e9"]::text',         # -> [title*="café"], non-ASCII via escape
-        # UNSUPPORTED GAP: must stay empty rather than drift into a literal match
+        # Identifier escapes: class/ID supported; attribute names still refused
         r".\63 1::text",                    # class name
         r"#\69 1::text",                    # id
         r'[data-\6b ="v1"]::text',          # attribute name

@@ -85,11 +85,11 @@ fn xpath_reason(qt: &str) -> String {
          `[text()=\"v\"]`, or `[contains(text(),\"v\")]` on the SUBJECT step is supported (not combined \
          with another predicate, `!=`/`<`/`>`, `normalize-space(...)`, or on a non-subject step)"
     } else if has_unsupported_function(qt) {
-        "XPath function (`normalize-space()`, `count()`, `string()`, …) is unsupported; only \
-         `contains()`/`starts-with()` over an attribute are supported"
+        "this XPath function or placement is unsupported; top-level `normalize-space(path)` is \
+         supported for flat fields, as are the documented attribute/text predicates"
     } else if is_relative_child_anchor(qt) {
-        "relative child anchor (`./x`) can't be enforced by the streaming matcher; use the descendant \
-         form `.//x` instead"
+        "relative child anchor (`./x`) is unsupported in this context; `.//x` selects all descendants \
+         and is not an equivalent rewrite"
     } else if is_bare_absolute_nonroot(qt) {
         "a single-slash `/x` selects only the document root element; use `//x` (any depth) or \
          `/html/…`"

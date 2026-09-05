@@ -190,7 +190,7 @@ def _report_dict(label: str, report: SchemaReport) -> dict:
     }
 
 
-def _scan_report(targets: List[str], verbose: bool, as_json: bool) -> int:
+def _scan_report(targets: List[str], verbose: bool, as_json: bool, require_complete: bool = False) -> int:
     """``--scan`` mode: audit selector literals mined from source, reported per ``file:line``."""
     from .scan import judge, scan_path, summarize
 
@@ -208,6 +208,8 @@ def _scan_report(targets: List[str], verbose: bool, as_json: bool) -> int:
     summary = summarize(verdicts)
 
     clean = summary["unsupported"] == 0 and summary["errors"] == 0
+    if require_complete and not summary["complete"]:
+        clean = False
     if as_json:
         print(
             json.dumps(
@@ -220,6 +222,7 @@ def _scan_report(targets: List[str], verbose: bool, as_json: bool) -> int:
                             "line": v.site.line,
                             "call": v.site.call,
                             "kind": v.site.kind,
+                            "context": v.site.context,
                             "selector": v.site.selector,
                             "supported": None if v.site.dynamic else v.supported,
                             "reason": v.reason,
@@ -243,13 +246,16 @@ def _scan_report(targets: List[str], verbose: bool, as_json: bool) -> int:
 
     if not verdicts:
         print("no selector call sites found")
-        return 0
+        return 0 if clean else 1
     tail = f", {summary['errors']} file(s) UNPARSEABLE" if summary["errors"] else ""
+    percentage = f"{100.0 * summary['coverage']:.0f}%" if summary["coverage"] is not None else "coverage unknown"
     print(
         f"\n{summary['supported']}/{summary['literal']} literal selector(s) supported "
-        f"({100.0 * summary['coverage']:.0f}%), {summary['unsupported']} unsupported, "
+        f"({percentage}), {summary['unsupported']} unsupported, "
         f"{summary['skipped']} skipped (not literals){tail}"
     )
+    if not summary["complete"]:
+        print("Audit incomplete: resolve dynamic selectors and parse errors before claiming full coverage.")
     return 0 if clean else 1
 
 
@@ -277,6 +283,8 @@ def main(argv: List[str] | None = None) -> int:
         "objects — covers inline .css()/.xpath(), ItemLoaders and LinkExtractors",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {_version()}")
+    parser.add_argument("--require-complete", action="store_true",
+                        help="with --scan, fail if selectors are dynamic, files cannot be parsed, or no literals are found")
     args = parser.parse_args(argv)
 
     # Keep the report printable on narrow terminal encodings (e.g. Windows cp1252 when piped).
@@ -290,7 +298,9 @@ def main(argv: List[str] | None = None) -> int:
         return 2
 
     if args.scan:
-        return _scan_report(args.target, args.verbose, args.json)
+        return _scan_report(args.target, args.verbose, args.json, args.require_complete)
+    if args.require_complete:
+        return _usage_error("--require-complete applies to --scan")
     if len(args.target) > 1:
         return _usage_error(
             "the schema audit takes ONE module target (several paths are only for --scan)"

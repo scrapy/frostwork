@@ -144,6 +144,7 @@ pub(super) fn tail_selector(sel: &Selector, k: usize) -> Option<Selector> {
         combs: sel.combs[k + 1..].to_vec(),
         terminal: sel.terminal.clone(),
         strict_desc: true,
+        context_depth: None,
     })
 }
 

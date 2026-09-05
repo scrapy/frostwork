@@ -112,11 +112,17 @@ def tables(which):
     # A pure scan with no selectors must stay flat: per-element cost shows here with nothing to
     # amortize it.
     t["scan"] = ("pure scan (0 selectors -- must stay flat)", bm.class_heavy(med), [0], [])
+    # First-value declarations mixed with an all-value column: the scan must reach EOF, but scalar
+    # text/attribute columns need not keep allocating values their consumer discards. `F ` is bench's
+    # cardinality prefix; the final all-value selector stays present in every measured cell.
+    first_pool = ["F .price::text", "F .title::text", "F img::attr(src)",
+                  "F a::attr(href)", "F .desc::text", "a::attr(href)"]
+    t["first-mixed"] = ("first-value fields plus all links", bm.product_listing(med), [6], first_pool)
     return [t[k] for k in which]
 
 
 ALL = ["class-led", "tag-led", "desc-led", "desc-deep", "attr-led", "attr-page", "listing",
-       "listing-class", "article", "deep", "table", "tail", "reverse-values", "scan"]
+       "listing-class", "article", "deep", "table", "tail", "reverse-values", "scan", "first-mixed"]
 
 
 def corpus_cells(corpus_dir, limit):

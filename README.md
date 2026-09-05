@@ -66,6 +66,13 @@ fields and compile-once reuse. See the
 
 ## Scrapy and web-poet
 
+For a runnable Scrapy project, start with
+[frostwork-demo](https://github.com/shaneaevans/frostwork-demo). Its local storefront examples cover
+ordinary callbacks, ItemLoader, web-poet, nested products and browser rendering, with tests that run
+real crawls and compare exported items against Parsel. For existing spiders, follow the
+[migration workflow](https://github.com/scrapy/frostwork/blob/main/docs/MIGRATION.md) to audit complete
+schemas, verify saved responses and monitor extracted items.
+
 A page object declares its selectors; Frostwork fills every field from one scan of the response:
 
 <!-- doc-test: frost-page -->

@@ -7,12 +7,16 @@ are a promise, and only a type checker can hold them: annotating `field()` as th
 makes correct code an error in the user's CI while every runtime test here passes.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import attrs
 from typing_extensions import assert_type
 
+from frostwork import extract_grouped
 from frostwork.webpoet import FrostBrowserPage, FrostFields, FrostPage, Many, One, field
+
+
+assert_type(extract_grouped(b'', [], [('article', {'title': './h2/text()'})]), Tuple[List[List[str]], list])
 
 
 @attrs.define
@@ -147,3 +151,18 @@ class CustomPage(BytesPage):
 
 def check_custom_types(p: CustomPage) -> None:
     assert_type(p.title, Optional[str])
+
+
+def check_runtime_validation_types() -> None:
+    from frostwork import Page, Item, ValidationReport
+    from frostwork.page import Response
+    class ByteResponse:
+        body: bytes = b"<h1>x</h1>"
+        encoding: Optional[str] = "utf-8"
+    response: Response = ByteResponse()
+    item = Page().field("title", "h1::text").extract_response(response)
+    assert_type(item, Item)
+    report = item.validate(required=["title"], counts={}, group_required={})
+    assert_type(report, ValidationReport)
+    assert_type(report.ok, bool)
+    assert_type(report.item, dict[str, Any])

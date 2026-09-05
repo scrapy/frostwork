@@ -4,6 +4,9 @@ Python bindings over the Rust core, built with [PyO3](https://pyo3.rs) and
 [maturin](https://maturin.rs). Matching stays in Rust; the `Page`/`Item` layer and web-poet integration
 provide the Python-facing API.
 
+For an existing Scrapy spider, start with the [migration workflow](MIGRATION.md); for a runnable
+project, use [frostwork-demo](https://github.com/shaneaevans/frostwork-demo).
+
 Three layers, smallest to largest:
 
 1. `frostwork.extract` — the one-pass primitive.
@@ -368,7 +371,7 @@ accepts a `{name: (container, subfields)}` mapping, `(name, container, subfields
 `(container, subfields)` form used by `extract_grouped`. Subfields may be a mapping or name-selector
 pairs. Invalid shapes raise `TypeError`.
 
-`FrostPage.frost_schema()` returns the mapping form, ready to audit:
+`Page.frost_schema()` and `FrostPage.frost_schema()` return the mapping form, ready to audit:
 
 ```python
 schema = ProductPage.frost_schema()
@@ -417,8 +420,12 @@ frostwork-audit --scan myproject/spiders/
 ```
 
 Dynamic selectors are reported as skipped. Parse failures are reported as errors and make the scan fail.
-The scan helps size a migration, but cannot validate schema budgets or group relationships; run the schema
-audit after conversion.
+Literal `Page.many/one` and web-poet `Many/One` selectors are checked in their group context, so a
+flat-supported selector that cannot run inside a group is reported correctly. The scan cannot prove
+whole-schema budgets or resolve dynamic construction; run the import-based schema audit after conversion.
+The scanner recognizes documented call shapes; aliases and custom wrappers may be invisible.
+A scan with no literal selectors reports **unknown** coverage. Add `--require-complete` to fail CI on
+dynamic selectors, parse errors or a scan with no auditable literals.
 
 ### Dead selector or coverage gap? — `Item.empty_fields`
 
@@ -434,8 +441,46 @@ for name in item.empty_fields():
 An empty string counts as a match. An empty `many`/`one` group counts as empty. With the default
 `strict=True`, every returned name is a supported selector that matched nothing.
 
+## 5. Response adapters and item validation
+
+`Page.extract_response(response)` reads `response.body` with `response.encoding`. It works with Scrapy
+and web-poet byte responses without importing either framework. It never accesses `response.text`.
+
+Validate the data contract separately from selector support:
+
+<!-- doc-test: runtime-validation -->
+```python
+from frostwork import Page
+
+page = (Page().field("title", "h1::text", map=str.strip)
+        .field_all("images", "img::attr(src)")
+        .many("offers", "article", {"price": "./b/text()"}))
+item = page.extract(b'<h1> Mug </h1><img src="/mug.jpg"><article><b>9</b></article>')
+report = item.validate(required=["title", "offers"], counts={"images": (1, 8)},
+                       group_required={"offers": ["price"]})
+report.raise_for_status()
+assert report.item == {"title": "Mug", "images": ["/mug.jpg"], "offers": [{"price": "9"}]}
+```
+
+`report.issues` carries the field path, code and explanation. `report.states` distinguishes `no_match`,
+`matched_empty`, `processed_empty`, `processing_failed` and `filled`. Required checks use the final value;
+zero and `False` are values, and a transform may supply a missing default. Whitespace stays significant
+unless your transform strips it. Count bounds apply to raw matches and require `field_all`, `field_join`
+or `many`; first-value declarations cannot prove a maximum count. Group requirements check each existing
+row, so require the group itself when at least one row must exist.
+
+In a spider, use `report.record_stats(self.crawler.stats)` for bounded counters and yield `report.item`
+after checking `report.ok`. This reuses processed values instead of running transforms again through
+`item.to_dict()`. A `map=` exception accessed through `Item.value()` or `to_dict()` raises
+`FieldProcessingError` with field and selector context, preserving the original exception as its cause.
+Validation records it as an issue and omits that failed field from `report.item`.
+
+An absent optional value does not establish a layout change or rule out a parsing difference. Use saved
+responses to investigate, following the [migration workflow](MIGRATION.md).
+
 ## Further reading
 
+- [Migration workflow](MIGRATION.md) — saved responses, whole-item parity and reproducible timings.
 - [Compatibility](COMPATIBILITY.md) — supported selectors and known differences.
 - [Testing](TESTING.md) — correctness gates and release checks.
 - [Benchmarks](BENCHMARKS.md) — measured performance and boundaries.

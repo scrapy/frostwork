@@ -21,6 +21,7 @@ from .page import (
     extract,
     extract_grouped,
 )
+from .validation import FieldProcessingError, ItemValidationError, ValidationIssue, ValidationReport
 
 try:
     from importlib.metadata import version as _version
@@ -40,5 +41,9 @@ __all__ = [
     "FieldReport",
     "GroupReport",
     "UnsupportedSelector",
+    "FieldProcessingError",
+    "ItemValidationError",
+    "ValidationIssue",
+    "ValidationReport",
     "__version__",
 ]

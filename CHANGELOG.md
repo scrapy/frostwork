@@ -14,6 +14,46 @@ first public release.
 - The corpus gate now uses the main differential's verdict without discarding empty or whitespace-only
   values. Regressions that drop an empty attribute or change value count can no longer pass as
   whitespace-only differences. Command-level regression tests cover the verdict, report and exit status.
+- CSS class and ID selectors now decode literal and hexadecimal escapes, including utility classes
+  such as `.sm\:text-lg`. Escape terminators stay part of the identifier instead of becoming descendant
+  combinators. Non-executable character escapes and ambiguous decoded-backslash escapes are refused throughout
+  the compiler, including quoted attribute values.
+- Grouped subfields support immediate-child XPath (`./h2/text()`), own attributes (`@id`), own text
+  (`text()`), subtree text/attributes (`.//text()`, `.//@id`) and context HTML (`.`). Child paths are
+  anchored to the actual container; nested descendants cannot satisfy the first child step.
+- Grouped extraction and schema audits share input normalization: malformed subfield pairs are
+  rejected instead of unpacking a string or mapping key into unrelated selectors. Extraction also
+  accepts subfield mappings directly.
+
+### Developer experience
+
+- Source audits use the grouped compiler for literal `Page.many/one` and web-poet `Many/One` fields,
+  with context-specific diagnostics. Dynamic-only scans report unknown coverage; `--require-complete`
+  can fail CI on unresolved sites or empty scans. Full schema audits still check shared budgets.
+  Group detection follows field modifier chains; callbacks and unknown factories cannot make an
+  unresolved group look complete.
+- `Page.extract_response()` uses response bytes and encoding without a Scrapy dependency.
+  `Page.frost_schema()` exposes the same named selector format as the web-poet integration.
+- `Item.validate()` checks required processed values, retained match counts and required group
+  subfields. Reports distinguish absent matches, empty matches, empty processed values and transform
+  failures, and can record Scrapy stats. `FieldProcessingError` adds field/selector context while
+  preserving the original exception. An empty row still counts as a matched group container.
+- The migration workflow now includes complete-item verification on hashed saved responses, an
+  inspectable fixture manifest, parity-gated timing reports and a manual Linux benchmark workflow.
+  Historical benchmark ratios are no longer described as a guaranteed performance floor.
+- Default pytest discovery is scoped to `tests/`, so Cargo package snapshots under `target/` cannot
+  be collected as duplicate test modules.
+
+### Performance
+
+- Immediate first-value text and attribute fields stop retaining later matches even when an all-value
+  field or group requires a complete scan. Deferred predicates, normalization and raw-HTML captures keep
+  their existing ordering and retention rules. The A/B harness now includes a mixed-cardinality workload;
+  measurement details and limitations are in `docs/BENCHMARKS.md`.
+- `Page` and `Item` share stable field definitions instead of copying parallel metadata lists on each
+  response. Named item access uses direct lookups, and required-field validation uses set membership.
+  Extending a page preserves earlier items' schemas. `Page.one()` shapes only the first matched row;
+  the engine still scans and collects grouped matches as before.
 
 ## 0.1.3 (2026-09-02)
 

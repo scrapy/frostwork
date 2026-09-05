@@ -246,7 +246,7 @@ fn compile_part(q: &str) -> Option<Vec<Selector>> {
     Some(
         lists
             .into_iter()
-            .map(|parts| Selector { parts, combs: combs.clone(), terminal: terminal.clone(), strict_desc: relative })
+            .map(|parts| Selector { parts, combs: combs.clone(), terminal: terminal.clone(), strict_desc: relative, context_depth: None })
             .collect(),
     )
 }
@@ -282,7 +282,7 @@ fn build_upward(steps: &[(Comb, String)], terminal: Terminal) -> Option<Vec<Sele
     let inner = one_plain(&steps[0].1)?;
     let mut subject = one_plain(&s[p + 2..])?;
     subject.has = Some(Has { rel, inner: Box::new(inner) });
-    Some(vec![Selector { parts: vec![subject], combs: Vec::new(), terminal, strict_desc: false }])
+    Some(vec![Selector { parts: vec![subject], combs: Vec::new(), terminal, strict_desc: false, context_depth: None }])
 }
 
 /// Split an absolute/relative path into `(combinator, step)` pairs. The first pair's combinator is

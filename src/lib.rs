@@ -79,6 +79,29 @@ fn compile_one(q: &str) -> Option<Selector> {
     }
 }
 
+/// Group-relative XPath uses an explicit context depth on the first compound.
+fn compile_sub(q: &str) -> Option<Selector> {
+    let qt = q.trim();
+    let (mut selector, depth) = if qt == "." {
+        (compile_one("*")?, 0)
+    } else if qt == "text()" || qt == "./text()" {
+        (xpath::compile("//*/text()")?, 0)
+    } else if qt == ".//text()" {
+        (xpath::compile("//*//text()")?, 0)
+    } else if let Some(name) = qt.strip_prefix(".//@") {
+        (xpath::compile(&format!("//*//@{name}"))?, 0)
+    } else if let Some(name) = qt.strip_prefix("./@").or_else(|| qt.strip_prefix('@')) {
+        (xpath::compile(&format!("//*/@{name}"))?, 0)
+    } else if qt.starts_with("./") && !qt.starts_with(".//") {
+        (compile_one(&format!(".//{}", &qt[2..]))?, 1)
+    } else {
+        return compile_one(q);
+    };
+    selector.strict_desc = false;
+    selector.context_depth = Some(depth);
+    Some(selector)
+}
+
 /// Compile a flat query string to its member selectors (all sharing one output column); empty if
 /// unsupported. CSS comma groups and XPath unions / `or`-expansions both yield multiple members. The
 /// shared front-end for [`extract_grouped`] and [`budget_usage`].
@@ -105,7 +128,7 @@ fn compile_schema(
     let grouped = groups
         .iter()
         .map(|g| {
-            (compile_one(&g.container), g.subfields.iter().map(|(_, sel)| compile_one(sel)).collect())
+            (compile_one(&g.container), g.subfields.iter().map(|(_, sel)| compile_sub(sel)).collect())
         })
         .collect();
     (flat, grouped)
@@ -278,7 +301,9 @@ pub fn container_support(q: &str) -> Support {
 }
 
 fn group_container_reason(q: &str) -> String {
-    if compile_one(q).is_some() {
+    if let Some(reason) = group_shape_reason(q) {
+        reason
+    } else if compile_one(q).is_some() {
         "selector requires deferred-close matching, which is unsupported for a grouped container \
          (empty group)"
             .to_string()
@@ -292,7 +317,7 @@ fn group_container_reason(q: &str) -> String {
 /// position inside a group is also out of scope (empty column).
 pub fn subfield_support(q: &str) -> Support {
     let container = compile_one("*");
-    let input: Vec<matcher::GroupInput> = vec![(container, vec![compile_one(q)])];
+    let input: Vec<matcher::GroupInput> = vec![(container, vec![compile_sub(q)])];
     let schema = matcher::CompiledSchema::compile(&[], &input);
     if schema.group_sub_routed(0, 0) {
         Support::Supported
@@ -302,15 +327,35 @@ pub fn subfield_support(q: &str) -> Support {
 }
 
 fn group_sub_reason(q: &str) -> String {
-    if q.contains('+') || q.contains('~') {
+    if let Some(reason) = group_shape_reason(q) {
+        reason
+    } else if compile_sub(q).is_some_and(|s| {
+        s.combs
+            .iter()
+            .any(|c| matches!(c, selector::Comb::Adjacent | selector::Comb::General))
+    }) {
         "sibling combinator (`+`/`~`) inside a grouped sub-field is unsupported (empty column)"
             .to_string()
-    } else if compile_one(q).is_some() {
+    } else if compile_sub(q).is_some() {
         "selector requires deferred-close matching, which is unsupported inside a grouped sub-field \
          (empty column)"
             .to_string()
     } else {
         diagnostics::reason(q)
+    }
+}
+
+fn group_shape_reason(q: &str) -> Option<String> {
+    let members = compile_query(q);
+    if members
+        .iter()
+        .any(|s| matches!(s.terminal, selector::Terminal::NormalizeSpace(_)))
+    {
+        Some("normalize-space() is supported for flat fields, but its scalar output is unsupported in a group".into())
+    } else if members.len() > 1 {
+        Some("a grouped container or sub-field requires a single selector; CSS comma groups and XPath unions/or-expansions are unsupported in this context".into())
+    } else {
+        None
     }
 }
 
@@ -550,9 +595,10 @@ impl Plan {
     /// answered without tokenizing the body. The columns are unchanged apart from the values that would
     /// have been discarded anyway, so the `Item` a cardinality layer builds is identical.
     ///
-    /// Declaring it does not force it: a schema whose answer could still change (groups, deferred
-    /// predicates, reverse positions, outer-HTML, `normalize-space`) is not armed, and one column left
-    /// out of `first_only` disarms the whole schema. See `matcher::CompiledSchema::arm_early_exit`.
+    /// Immediate first-value text/attribute columns also stop retaining subsequent values when groups
+    /// or all-value fields still require EOF. Deferred predicates, reverse positions, mixed deferred
+    /// columns and `normalize-space` disarm retention. Outer-HTML captures retain start-order semantics.
+    /// See `matcher::CompiledSchema::arm_early_exit` for the narrower whole-scan early-exit conditions.
     /// `&[]` — what [`compile`](Plan::compile) passes — arms nothing, which is why plain
     /// [`extract`]/[`extract_grouped`], whose contract is EVERY value, are unaffected.
     pub fn compile_first_only(queries: &[String], groups: &[GroupQuery], first_only: &[bool]) -> Plan {
@@ -721,7 +767,7 @@ mod tests {
             subfields: vec![
                 ("t".to_string(), ".//h3/text()".to_string()), // supported
                 ("bad".to_string(), "a + b::text".to_string()), // unsupported sub (sibling)
-                ("child".to_string(), "./h3/text()".to_string()), // unsupported (relative child)
+                ("child".to_string(), "./h3[last()]/text()".to_string()), // unsupported (deferred group)
             ],
         }];
         let a = audit_schema(&queries, &groups);
@@ -731,7 +777,7 @@ mod tests {
         assert!(a.groups[0].container.is_supported());
         assert!(a.groups[0].subfields[0].is_supported());
         assert!(a.groups[0].subfields[1].reason().unwrap().contains("sibling combinator"));
-        assert!(a.groups[0].subfields[2].reason().unwrap().contains("descendant"));
+        assert!(a.groups[0].subfields[2].reason().unwrap().contains("deferred-close"));
         assert!(!a.ok()); // has unsupported members
         assert!(!a.over_budget());
         assert_eq!(a.max_members, matcher::MAX_MEMBERS);
@@ -1102,11 +1148,11 @@ mod tests {
         let html = "<html><body><div><h3>A</h3></div><h3>B</h3></body></html>";
         assert_eq!(ex(html, "./h3/text()"), Vec::<String>::new());
         assert_eq!(ex(html, "./body/h3/text()"), Vec::<String>::new());
-        // grouped direct-child `./h3/text()` is empty (unsupported) rather than leaking the nested
+        // grouped direct-child `./h3/text()` selects only the immediate child, excluding the nested
         // `NEST`, while the `.//h3/text()` descendant control collects both, in document order.
         let ghtml = "<html><body><div class=card><h3>A</h3><div><h3>NEST</h3></div></div></body></html>";
         let rows = grp(ghtml, ".card", &["./h3/text()", ".//h3/text()"]);
-        assert_eq!(rows, vec![vec![Vec::<String>::new(), v(&["A", "NEST"])]]);
+        assert_eq!(rows, vec![vec![v(&["A"]), v(&["A", "NEST"])]]);
     }
 
     #[test]
