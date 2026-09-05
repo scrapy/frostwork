@@ -5,7 +5,7 @@ build-backend = "maturin"
 
 [project]
 name = "frostwork"
-version = "0.1.3"
+version = "0.1.4"
 description = "Treeless, one-pass HTML extraction — CSS/XPath selectors matched on a streaming scan, no DOM."
 readme = "README.md"
 license = "Apache-2.0"
@@ -89,7 +89,7 @@ module-name = "frostwork._frostwork"
 python-source = "python"
 
 [tool.bumpversion]
-current_version = "0.1.3"
+current_version = "0.1.4"
 commit = true
 tag = true
 tag_name = "{new_version}"
