@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+from dataclasses import dataclass
 import hashlib
 from importlib.metadata import version
 import json
@@ -24,7 +25,6 @@ from parsel import Selector
 
 from frostwork import Page, detect_encoding
 from frostwork.audit import _load_module, _report_dict
-from frostwork.page import Item, _shape
 from diff_lxml import verdict
 
 
@@ -41,7 +41,7 @@ def differences(actual, expected, path='$'):
         for key in expected.keys() & actual.keys():
             out.extend(differences(actual[key], expected[key], f'{path}.{key}'))
         return sorted(out, key=lambda row: row['field'])
-    if isinstance(actual, list):
+    if isinstance(actual, (list, tuple)):
         out = []
         for i in range(max(len(actual), len(expected))):
             if i >= len(actual):
@@ -58,33 +58,61 @@ def differences(actual, expected, path='$'):
         {'field': path, 'kind': 'changed', 'actual': actual, 'expected': expected}]
 
 
+def select(node, query):
+    # Inspect leading whitespace for routing, but preserve the selector itself: trailing whitespace
+    # can be escaped CSS identifier data (e.g. an id ending in a space).
+    start = query.lstrip()
+    xpath = start.startswith(('/', './', '@', 'text()', 'normalize-space(', 'string(')) or start.strip() == '.'
+    return node.xpath(query) if xpath else node.css(query)
+
+
 def values(node, query, *, first=False):
-    query = query.strip()
-    xpath = query.startswith(('/', '.', '@', 'text()', 'normalize-space(', 'string('))
-    # A CSS .class is not a relative XPath.
-    xpath = xpath and not (query.startswith('.') and not query.startswith(('./', './/')) and query != '.')
-    selected = node.xpath(query) if xpath else node.css(query)
+    selected = select(node, query)
     if first:
         value = selected.get()
         return [] if value is None else [value]
     return selected.getall()
 
 
+def shape(column, card):
+    """Independent reference for Page cardinality; sharing its implementation would hide regressions."""
+    kind, separator = card
+    if kind == 'all': return list(column)
+    if kind == 'join': return separator.join(column)
+    return column[0] if column else None
+
+
+@dataclass
+class OracleItem:
+    columns: dict
+    item: dict
+
+    def get_all(self, name):
+        return list(self.columns[name])
+
+    def to_dict(self):
+        return dict(self.item)
+
+
 def oracle(page, body, encoding):
     root = Selector(body=body, encoding=encoding or 'utf-8')
-    columns = [values(root, f.selector, first=f.card[0] == 'first') for f in page._fields.values()]
-    groups = {}
+    columns, item = {}, {}
+    for name, field in page._fields.items():
+        columns[name] = values(root, field.selector, first=field.card[0] == 'first')
+        value = shape(columns[name], field.card)
+        for transform in field.transforms:
+            value = transform(value)
+        item[name] = value
     for name, group in page._groups.items():
         rows = []
-        selector = group.container
-        nodes = root.xpath(selector) if selector.startswith(('/', './')) else root.css(selector)
+        nodes = select(root, group.container)
         if group.one:
             nodes = nodes[:1]
         for node in nodes:
-            rows.append({sn: _shape(values(node, f.selector, first=f.card[0] == 'first'), f.card)
+            rows.append({sn: shape(values(node, f.selector, first=f.card[0] == 'first'), f.card)
                          for sn, f in group.subfields.items()})
-        groups[name] = (rows[0] if rows else None) if group.one else rows
-    return Item._from_columns(page._fields, columns, groups, {})
+        item[name] = (rows[0] if rows else None) if group.one else rows
+    return OracleItem(columns, item)
 
 
 def timed_pair(frost, parsel, rounds, iterations):

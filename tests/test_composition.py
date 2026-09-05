@@ -9,9 +9,48 @@ SUBS = ['@id', './@id', 'text()', './text()', './/text()', './h3/text()', './h3[
         './h3/b/text()', './div/h3/text()', './/h3/text()', './/@id', './*/@id']
 
 
+@pytest.mark.parametrize('query', ['html + html::text', 'html ~ html::text',
+                                  ':contains("alpha") + ::text', 'html:has(body) + html::text'])
+def test_second_document_root_keeps_its_sibling_relationship(current_oracle, query):
+    from frostwork import extract
+    body = b'alpha</html>>'
+    expected = Selector(body=body).css(query).getall()
+    assert expected == ['>']
+    assert extract(body, [query]) == [expected]
+
+
+@pytest.mark.parametrize('query,expected', [
+    ('html#a + html::attr(id)', ['b']), ('html#a ~ html::attr(id)', ['b', 'c']),
+    ('html#a + html + html::attr(id)', ['c']),
+    ('html:contains("alpha") + html p::text', ['beta']),
+    ('html:contains("alpha") ~ html p::text', ['beta', 'gamma']),
+    ('html:has(.hit) + html p::text', ['beta']),
+    ('html:has(.hit) ~ html p::text', ['beta', 'gamma']),
+])
+def test_document_sibling_triggers_accumulate_and_reset_between_roots(current_oracle, query, expected):
+    from frostwork import extract
+    body = (b'<html id=a><body><p class=hit>alpha</p></body></html>'
+            b'<html id=b><p>beta</p></html><html id=c><p>gamma</p>')
+    assert Selector(body=body).css(query).getall() == expected
+    assert extract(body, [query]) == [expected]
+
+
+@pytest.mark.parametrize('query,expected', [
+    ('#after::text', []), ('body #after::text', []),
+    ("//div[@id='after']/text()", ['late']), ("//html/div[@id='after']/text()", ['late']),
+    ('html + html > #after::text', ['late']),
+])
+def test_documented_tail_scope_distinguishes_css_from_document_xpath(current_oracle, query, expected):
+    from frostwork import extract
+    body = b'<html><body>before</body></html><div id="after">late</div>'
+    node = Selector(body=body)
+    assert (node.xpath(query) if query.startswith('/') else node.css(query)).getall() == expected
+    assert extract(body, [query]) == [['late'] if query == '#after::text' else expected]
+
+
 @pytest.mark.parametrize('encoding', ['utf-8', 'windows-1252', 'utf-16'])
 @pytest.mark.parametrize('container', ['.card', 'article', '//article', 'img'])
-def test_group_context_anchors_match_parsel(encoding, container):
+def test_group_context_anchors_match_parsel(current_oracle, encoding, container):
     body = HTML.encode(encoding)
     assert check([], [(container, [(str(i), q) for i, q in enumerate(SUBS)])]).ok
     _, groups = extract_grouped(body, [], [(container, [(str(i), q) for i, q in enumerate(SUBS)])], encoding=encoding)
@@ -38,6 +77,22 @@ def test_context_paths_compose_with_page_group_cardinality():
     assert item['first_card'] == {'id': 'outer', 'title': 'A'}
 
 
+@pytest.mark.parametrize('method', ['field', 'field_all', 'field_join'])
+def test_callable_truthiness_does_not_disable_a_page_transform(method):
+    class Processor:
+        def __bool__(self):
+            raise AssertionError('a callable is not a boolean option')
+
+        def __call__(self, value):
+            return {'processed': value}
+
+    page = getattr(Page(), method)('name', 'p::text', map=Processor())
+    expected = ['a', 'b'] if method == 'field_all' else 'ab' if method == 'field_join' else 'a'
+    item = page.extract(b'<p>a</p><p>b</p>')
+    assert item.to_dict() == {'name': {'processed': expected}}
+    assert item.validate(required=['name']).item == item.to_dict()
+
+
 def test_group_context_node_outer_html_and_empty_attributes():
     html = b'<div id=""><b>one</b><div id="nested">two</div></div>'
     _, (rows,) = extract_grouped(html, [], [('div', [('self', '.'), ('id', '@id'), ('child', './b')])])
@@ -58,7 +113,7 @@ def test_context_paths_on_webpoet_groups():
 
 @pytest.mark.parametrize('name', ['sm:text-lg', 'w-1/2', 'item.foo', 'a,b', 'a>b', 'x*', '(box)',
                                   '1-start', 'café', 'x+y', 'x~y'])
-def test_escaped_identifiers_match_in_flat_and_grouped_contexts(name):
+def test_escaped_identifiers_match_in_flat_and_grouped_contexts(current_oracle, name):
     from html import escape
     from frostwork import extract
     escaped = ''.join(f'\\{ord(char):x} ' for char in name)
@@ -77,7 +132,7 @@ def test_escaped_identifiers_match_in_flat_and_grouped_contexts(name):
 @pytest.mark.parametrize('query,name', [(r'.sm\:text-lg::text', 'sm:text-lg'),
                                       (r'.a\,b::text', 'a,b'), (r'.x\*::text', 'x*'),
                                       (r'.x\>::text', 'x>'), (r'#a\ b::text', 'a b')])
-def test_literal_css_escapes_are_data_not_combinators(query, name):
+def test_literal_css_escapes_are_data_not_combinators(current_oracle, query, name):
     from frostwork import extract
     html = f'<p class="{name}" id="{name}">direct<b>nested</b></p>'.encode()
     assert extract(html, [query]) == [Selector(body=html).css(query).getall()] == [['direct']]
@@ -90,7 +145,7 @@ def test_invalid_identifier_escapes_stay_unsupported(query):
 
 @pytest.mark.parametrize('suffix', ['', '<h4>end</h4>'])
 @pytest.mark.parametrize('groups', [[], [('article', [('id', '@id'), ('text', './/text()')])]])
-def test_first_value_retention_with_full_scan_consumers(suffix, groups):
+def test_first_value_retention_with_full_scan_consumers(current_oracle, suffix, groups):
     from frostwork._frostwork import Plan
     body = ('<article id=""><p id="p" class="x">first<b>nested</b>tail</p>'
             '<p id="second" class="y">second</p></article>' + suffix).encode()
@@ -111,7 +166,7 @@ def test_first_value_retention_with_full_scan_consumers(suffix, groups):
 @pytest.mark.parametrize('deferred', ['p:last-child::text', 'p:has(b) ::text',
                                       'p:contains("first")::text', 'normalize-space(//article)',
                                       'p::text, p:contains("first")::text'])
-def test_first_value_declaration_does_not_discard_deferred_or_reordered_values(deferred):
+def test_first_value_declaration_does_not_discard_deferred_or_reordered_values(current_oracle, deferred):
     from frostwork._frostwork import Plan
     body = b'<article><p>first<b>nested</b>tail</p><p>last</p></article>'
     queries = [deferred, 'p::text', 'p::attr(id)']
@@ -130,7 +185,31 @@ def test_first_outer_html_still_uses_start_order_with_nested_matches():
     assert cols[1] == ['end']
 
 
-def test_mixed_first_benchmark_extracts_equal_nonempty_values():
+def test_mixed_cardinality_preserves_complete_columns_across_the_selector_basket():
+    """The differential checks these complete columns against Parsel; vary what each consumer keeps."""
+    import random
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
+    import conformant
+    from diff_lxml import _batches
+    from frostwork._frostwork import Plan
+
+    rng = random.Random(431)
+    batches = list(_batches(conformant.BASKET))
+    for _ in range(150):
+        body = conformant.generate(rng)
+        for queries in batches:
+            first = [bool(rng.getrandbits(1)) for _ in queries]
+            for groups in [[], [('p', [('text', 'text()')])]]:
+                expected, expected_rows = Plan(queries, groups).extract_grouped(body)
+                actual, rows = Plan(queries, groups, first).extract_grouped(body)
+                assert rows == expected_rows
+                assert [col[:1] if flag else col for col, flag in zip(actual, first)] == [
+                    col[:1] if flag else col for col, flag in zip(expected, first)]
+
+
+def test_mixed_first_benchmark_extracts_equal_nonempty_values(current_oracle):
     import sys
     from pathlib import Path
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
@@ -148,7 +227,7 @@ def test_mixed_first_benchmark_extracts_equal_nonempty_values():
 
 @pytest.mark.parametrize('query', [r'.\d800::text', r'#\dfff::text', r'[id="\d800"]::text',
                                    r'[id="\0"]::text', r'[class*="\d800"]::text'])
-def test_non_executable_css_escapes_cannot_match_replacement_characters(query):
+def test_non_executable_css_escapes_cannot_match_replacement_characters(current_oracle, query):
     from frostwork import extract
     body = '<p class="�" id="�">hit</p>'.encode()
     with pytest.raises((UnicodeError, ValueError)):
@@ -161,7 +240,7 @@ def test_non_executable_css_escapes_cannot_match_replacement_characters(query):
                                       ('a\\b', r'[data-k="a\\b"]::text'),
                                       ('\v', r'[data-k="\b"]::text'),
                                       ('\ufffe', r'[data-k="\fffe"]::text')])
-def test_quoted_escape_refusals_share_the_identifier_safety_boundary(name, query):
+def test_quoted_escape_refusals_share_the_identifier_safety_boundary(current_oracle, name, query):
     from html import escape
     from frostwork import extract
     body = f'<p data-k="{escape(name)}">hit</p>'.encode()

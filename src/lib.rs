@@ -2309,6 +2309,23 @@ mod tests {
                    Vec::<String>::new());
     }
 
+    #[test]
+    fn document_roots_share_sibling_triggers() {
+        for q in ["html + html::text", "html ~ html::text", ":contains(\"alpha\") + ::text",
+                  "html:has(body) + html::text"] {
+            assert_eq!(ex("alpha</html>>", q), v(&[">"]), "{q}");
+        }
+        let html = "<html id=a><body><p class=hit>alpha</p></body></html>\
+                    <html id=b><p>beta</p></html><html id=c><p>gamma</p>";
+        assert_eq!(ex(html, "html#a + html::attr(id)"), v(&["b"]));
+        assert_eq!(ex(html, "html#a ~ html::attr(id)"), v(&["b", "c"]));
+        assert_eq!(ex(html, "html#a + html + html::attr(id)"), v(&["c"]));
+        for pred in [":contains(\"alpha\")", ":has(.hit)"] {
+            assert_eq!(ex(html, &format!("html{pred} + html p::text")), v(&["beta"]));
+            assert_eq!(ex(html, &format!("html{pred} ~ html p::text")), v(&["beta", "gamma"]));
+        }
+    }
+
     /// `</head>` is an unconditional closer like `</body>`/`</html>`: libxml2 gives it the same end
     /// priority, so no open element out-ranks it. With `head` left at priority 0 an open `<tr>` blocked
     /// it and everything after the `</head>` stayed inside the head. Found by `tools/seq_sweep.py`.

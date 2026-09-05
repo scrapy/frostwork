@@ -413,7 +413,7 @@ expected values. A new beyond-lxml capability goes in that sweep, not in the fuz
 | construct | lxml / Parsel | Frostwork | gate |
 |---|---|---|---|
 | an element or attribute **name longer than 100 characters** | libxml2 parses names into a fixed 100-byte buffer and silently keeps the first 100, so the page's real name matches nothing | the whole name, as html5lib and every browser keep it | `tests/test_python.py::test_names_longer_than_libxml2s_buffer_are_kept_whole` |
-| **content after `</html>`** | libxml2 stops building the tree there and discards the rest | kept, under the second root `<html>` libxml2 itself builds for a second `<html>` start tag | `src/lib.rs::content_after_close_html_is_kept`, which pins the browser comparison in both directions |
+| **content after `</html>`** | Parsel's CSS starts from the first root; document-rooted XPath can see the tail | both CSS and XPath scan the tail under libxml2's second root `<html>` | `tests/test_composition.py::test_documented_tail_scope_distinguishes_css_from_document_xpath` |
 | a **FORM FEED between class names** (`class="a&#12;b"`) | one class — cssselect's `.x` goes through `normalize-space(@class)`, which is XML whitespace and has no FF | two classes — HTML's ASCII whitespace set, which has it | `src/lib.rs::class_lists_split_on_ascii_whitespace_only`, which sweeps both separator sets; `[attr~=v]` tokenizes identically and is checked there too |
 | **outer HTML that re-parses to what was parsed** | lxml HTML-*escapes* raw-text content when it serializes, so `<i><noframes><address>x</address></noframes></i>` comes back with `&lt;address&gt;` and does not round-trip | raw source, which does | `tools/diff_lxml.py::verdict`, which re-parses **both** serializations rather than comparing bytes — the comparison that sees it, on `<noframes>`, `<noscript>` and `<iframe>` content |
 
@@ -512,9 +512,10 @@ bucket, not this list, is where the next bug will be:
   that line and also asserts the direct evaluation agrees — an upstream regression reopens the divergence
   loudly rather than passing silently.
 - **Content after `</html>` is KEPT** ([➕](#values-libxml2-loses)) — **only partly browser-equivalent,
-  and the second port hazard.** libxml2 stops building the tree at `</html>` and silently discards
-  everything after it, so `<html><body>…</body></html><div>late</div>` gives lxml/Parsel an empty column
-  for `div::text` while Frostwork returns `late`. Keeping it is deliberate: trailing markup after
+  and the second port hazard.** libxml2 puts trailing content in a second root `<html>`. Parsel's CSS
+  starts from the first root, so `<html><body>…</body></html><div>late</div>` gives
+  `Selector.css('div::text')` an empty column while Frostwork returns `late`. Document-rooted XPath
+  can still find that content in both engines. Keeping it is deliberate: trailing markup after
   `</html>` is common in the wild (injected analytics, chat widgets, CDN/proxy-appended snippets), and
   silently dropping real content is the worse failure for a scraper — same reasoning as `:is()`/`:has()`
   above and the browser-aligned encoding choices below.
@@ -522,8 +523,8 @@ bucket, not this list, is where the next bug will be:
   **This is not a marginal divergence**, as a 1000-page Common Crawl sample shows. The tag is not always
   a trailing stray: it is also written in the *wrong place*. One sampled page ends its
   head `</head></html><body><header>…` and puts 14 of its 17 KB after the `</html>`; another (a large
-  retail page) carries a second `</html>` at the halfway mark. libxml2 keeps 2 elements of 100+ on the
-  first and 40 `<a>` of 119 on the second, so a Parsel spider sees a near-empty page where a browser
+  retail page) carries a second `</html>` at the halfway mark. Parsel's first-root view contains
+  2 elements of 100+ on the first and 40 `<a>` of 119 on the second, so a CSS-based spider sees a near-empty page where a browser
   sees the site. 28 of that sample's divergences are this one rule, and every one of them is Frostwork
   recovering a page rather than losing one — re-running the engine on each page *truncated at* its
   first `</html>` makes all 28 agree, which is how they were attributed.
@@ -536,18 +537,24 @@ bucket, not this list, is where the next bug will be:
   byte stream going forwards, and re-parenting means moving elements that are already closed. So they
   stay where the byte stream put them, after `<body>` closed. Therefore:
 
-  | selector shape | lxml/Parsel | Frostwork | browser |
+  For a trailing `<div id="after">late</div>` after an explicit `</body></html>`:
+
+  | selector shape | Parsel | Frostwork | browser |
   |---|---|---|---|
-  | unscoped (`div::text`, `#after::text`) | ∅ empty | ✅ finds it | ✅ finds it |
-  | ancestor-scoped (`body div::text`, `body ::text`) | ∅ empty | ∅ empty | ✅ finds it |
-  | `html`-scoped (`//html/script`, `html > div`) | ✅ finds it | ✅ finds it | ✅ finds it |
+  | CSS `#after::text` | ∅ empty | ✅ finds it | ✅ finds it |
+  | CSS `body #after::text` | ∅ empty | ∅ empty | ✅ finds it |
+  | XPath `//div[@id='after']/text()` | ✅ finds it | ✅ finds it | ✅ finds it |
+  | XPath `//html/div[@id='after']/text()` | ✅ finds it | ✅ finds it | ∅ empty (inside `body`) |
+  | CSS `html + html > #after::text` | ✅ finds it | ✅ finds it | ∅ empty (only one root) |
 
   So an unscoped selector is browser-equivalent, while a `body`-scoped one agrees with lxml instead.
 
-  The last row is why the tail is not left bare: libxml2 does not simply discard it, it starts a
+  These paths are why the tail is not left bare: libxml2 does not simply discard it, it starts a
   **second root `<html>`** and puts the tail in that (the same shape it builds for a second `<html>`
   START tag — see the frame entry above). Frostwork synthesizes the same second root, so an
-  `html`-scoped selector agrees. Leaving the tail parentless instead made `//html/script` miss a real
+  document-rooted XPath agrees. Sibling selectors can also reach the second root from the first;
+  Frostwork tracks both immediate and deferred sibling predicates at document level. Leaving the tail
+  parentless instead made `//html/script` miss a real
   page's trailing script that `//script` found — the values were all present, only the frame was not.
 
   **Migration caveat.** This is an *extra*-value divergence, the one direction that can surprise a

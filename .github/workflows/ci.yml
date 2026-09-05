@@ -98,9 +98,10 @@ jobs:
   bindings:
     name: bindings (py${{ matrix.python }} / ${{ matrix.os }})
     # The heavy differential runs once (above) on 3.12/linux. This matrix only builds the extension and
-    # runs the Python suite, cheaply covering the newest CPython, the next prerelease one, and macOS. The
-    # abi3 FLOOR is a separate job below, and since the floor moved to 3.10 it runs this same suite rather
-    # than a stand-in.
+    # runs the public Python API, typing and docs suite, covering the newest CPython, the next prerelease
+    # one, and macOS. Tree-rule meta-gates stay in the differential job: a prerelease source build of
+    # lxml can link an older system libxml2. The abi3 FLOOR is a separate job below and runs the full
+    # suite against the pinned manylinux oracle wheel.
     strategy:
       fail-fast: false
       matrix:
@@ -129,7 +130,7 @@ jobs:
       - if: matrix.prerelease
         run: .venv/bin/pip install --force-reinstall --no-binary charset-normalizer,time-machine charset-normalizer time-machine
       - run: .venv/bin/maturin develop --release
-      - run: .venv/bin/python -m pytest tests/test_python.py -q
+      - run: .venv/bin/python -m pytest tests/ --ignore=tests/test_gates.py --ignore=tests/test_make_gates.py -q
       - run: .venv/bin/python examples/basic.py  # keep the documented example runnable
 
   abi3-floor:

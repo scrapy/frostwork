@@ -40,6 +40,28 @@ def test_page_audit_and_export_name_the_same_mixed_schema():
     assert [field.name for field in page.check().unsupported] == ['missing', 'bad']
 
 
+@pytest.mark.parametrize('method', ['many', 'one'])
+@pytest.mark.parametrize('spec', [(), 0, None, {'p::text': 'all'}, (0,),
+                                 ('p::text', 'all', 'ignored'), ('p::text', 'first', 'ignored'),
+                                 ('p::text', 'join', False), ('p::text', 'join', '|', 'ignored')])
+def test_malformed_group_cardinality_is_rejected_before_extraction(method, spec):
+    page = Page()
+    with pytest.raises(TypeError, match='many/one sub-spec'):
+        getattr(page, method)('rows', 'div', {'name': spec})
+    assert len(page) == 0  # a rejected declaration cannot leave a partial schema
+
+
+@pytest.mark.parametrize('spec,expected', [
+    ('p::text', 'a'), (('p::text',), 'a'), (['p::text', 'first'], 'a'),
+    (('p::text', 'all'), ['a', 'b']), (('p::text', 'join'), 'ab'),
+    (('p::text', 'join', '|'), 'a|b'),
+])
+def test_valid_group_cardinality_forms_preserve_their_values(spec, expected):
+    assert Page().one('row', 'div', {'name': spec}).extract(b'<div><p>a</p><p>b</p></div>').to_dict() == {
+        'row': {'name': expected},
+    }
+
+
 def test_items_keep_their_schema_when_the_page_is_extended():
     page = Page().field('title', 'h1::text', map=str.upper)
     first = page.extract(b'<h1>first</h1>')

@@ -7,6 +7,9 @@ first public release.
 
 ### Correctness
 
+- Sibling selectors retain document-level history across multiple HTML roots. Content after `</html>`
+  can now match `html + html` and `html ~ html`, including preceding `:has()`/`:contains()` predicates.
+  The minimized malformed-HTML regression is covered by the rule audit and both language suites.
 - Python and Rust `Item.get_all()` now consistently respect the field declaration: a single-valued
   `field` returns zero or one raw match, while `field_all` and `field_join` return every raw match.
   Previously, adding an unrelated field could expose additional matches by disabling early exit.
@@ -23,7 +26,16 @@ first public release.
   anchored to the actual container; nested descendants cannot satisfy the first child step.
 - Grouped extraction and schema audits share input normalization: malformed subfield pairs are
   rejected instead of unpacking a string or mapping key into unrelated selectors. Extraction also
-  accepts subfield mappings directly.
+  accepts subfield mappings directly. `Page.many/one` rejects malformed cardinality tuples and
+  non-string separators at declaration time instead of ignoring extra arguments.
+- `Page` always applies a supplied callable transform, even when that callable has a false boolean
+  value. First, all and joined fields use the same rule.
+- Saved-response verification uses independent item shaping, so a cardinality bug cannot change both
+  the engine result and its reference. It preserves escaped CSS whitespace, handles padded XPath
+  consistently and checks types inside tuple-valued transforms.
+- Rule-mutation checks propagate failures while restoring both normal builds, including after failed
+  setup. Release wheels now exercise the expanded public API suite and run a core smoke check before
+  optional dependencies are installed.
 
 ### Developer experience
 

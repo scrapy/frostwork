@@ -290,8 +290,8 @@ def constructs(html: bytes) -> set:
     last = html.rfind(b"<")
     if last != -1 and _TAG_RE.match(html, last) and b">" not in html[last:]:
         found.add("truncated-tag")
-    # Content after `</html>`: libxml2 discards it, the engine KEEPS it (browser behavior) — a
-    # deliberate divergence, so it explains a disagreement rather than being a candidate bug.
+    # Content after `</html>`: Parsel's CSS starts from the first root, while the engine scans the
+    # second root too. This page-scoped label is approximate; XPath and sibling paths can see the tail.
     close = low.rfind(b"</html>")
     if close != -1 and html[close + 7:].strip():
         found.add("after-html")

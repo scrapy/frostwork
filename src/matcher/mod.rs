@@ -906,6 +906,10 @@ pub struct Matcher<'a> {
     // Ordinary all-value schemas leave this zero. Outer-HTML scatters directly at finish, so the
     // streaming emitters can skip every bit here without masking an all-value or deferred column.
     satisfied: u128,
+    // Root elements are siblings under the document, which has no OpenElem on the stack. Keep its
+    // trigger bits too: libxml2 can create another <html> after </html>.
+    document_seen: u64,
+    document_prev: u64,
     // How many elements with a pending outer-HTML capture are OPEN. Stopping while one is would make
     // `finish_grouped` close it at end-of-input and hand its column a span the element does not have;
     // see `CompiledSchema::arm_early_exit`. Only maintained for an armed schema.
@@ -1593,6 +1597,8 @@ impl<'a> Matcher<'a> {
             decode_names: schema.non_ascii_interesting && input.encoding() != encoding_rs::UTF_8,
             mixed: Vec::new(),
             satisfied: 0,
+            document_seen: 0,
+            document_prev: 0,
             open_captures: 0,
             open_instances: Vec::new(),
             next_seq: 0,
@@ -1771,10 +1777,7 @@ impl<'a> Matcher<'a> {
                 // later sibling (a normal entry anchored to it) matches; emit no value here. `C` closes
                 // before any following sibling opens, so the trigger is visible in time.
                 if let Some(bit) = he.trigger {
-                    if let Some(parent) = self.stack.last_mut() {
-                        parent.seen |= 1u64 << bit;
-                        parent.prev |= 1u64 << bit;
-                    }
+                    self.fire_sibling_trigger(bit);
                     continue;
                 }
                 match he.tail {
@@ -1818,10 +1821,7 @@ impl<'a> Matcher<'a> {
                 // Preceding-sibling trigger (`C[.="x"] ~ S`): fire the boundary bit on the parent (see
                 // the `:has` case above); emit no value here.
                 if let Some(bit) = te.trigger {
-                    if let Some(parent) = self.stack.last_mut() {
-                        parent.seen |= 1u64 << bit;
-                        parent.prev |= 1u64 << bit;
-                    }
+                    self.fire_sibling_trigger(bit);
                     continue;
                 }
                 match te.tail {
@@ -2064,6 +2064,23 @@ impl<'a> Matcher<'a> {
 }
 
 impl<'a> Matcher<'a> {
+    /// Mutable sibling history for a child at this depth, including children of the document.
+    fn sibling_bits_mut(&mut self, child_depth: usize) -> (&mut u64, &mut u64) {
+        if child_depth == 0 {
+            (&mut self.document_seen, &mut self.document_prev)
+        } else {
+            let parent = &mut self.stack[child_depth - 1];
+            (&mut parent.seen, &mut parent.prev)
+        }
+    }
+
+    /// A deferred predicate resolved after its subject was popped from the stack.
+    fn fire_sibling_trigger(&mut self, bit: usize) {
+        let (seen, prev) = self.sibling_bits_mut(self.stack.len());
+        *seen |= 1u64 << bit;
+        *prev |= 1u64 << bit;
+    }
+
     /// Sibling anchor bits for `stack[top]`, computed at its open. For each boundary `i` of each
     /// multi-segment entry, bit `seg_bits[i]` is set iff `top` matches the head compound of segment
     /// `i+1` AND its parent's `prev`/`seen` carry `seg_bits[i]` (a preceding sibling was a subject of
@@ -2071,14 +2088,19 @@ impl<'a> Matcher<'a> {
     /// for a sibling followed by a descendant/child step, where the anchor is the sibling element, not
     /// the subject. Only run when `has_sibling` (bits are globally unique per boundary, no collision).
     fn compute_anchors(&self, top: usize) -> u64 {
-        let parent = if top >= 1 { Some(&self.stack[top - 1]) } else { None };
+        let (seen, prev) = if top >= 1 {
+            let parent = &self.stack[top - 1];
+            (parent.seen, parent.prev)
+        } else {
+            (self.document_seen, self.document_prev)
+        };
         let mut anchor = 0u64;
         for cs in &self.schema.entries {
             if cs.dead || cs.segments.len() == 1 {
                 continue;
             }
             for i in 0..cs.segments.len() - 1 {
-                if gate_open(parent, cs.seg_bits[i], cs.adj[i])
+                if gate_open(seen, prev, cs.seg_bits[i], cs.adj[i])
                     && compound_matches(&cs.segments[i + 1].parts[0], &self.stack[top])
                 {
                     anchor |= 1u64 << cs.seg_bits[i];
@@ -2678,14 +2700,14 @@ impl<'a> TokenSink<'a> for Matcher<'a> {
                 }
             }
         }
-        if top >= 1 {
+        {
             // Mask out Case-B deferred boundaries: their trigger is fired pred-gated at `C`'s close, not
             // here at open. `trig_immediate_mask` is all-ones unless a Case-B selector is compiled, so
             // this is a no-op (one AND) on the common hot path.
             let applied = trig & self.schema.trig_immediate_mask;
-            let p = &mut self.stack[top - 1];
-            p.seen |= applied;
-            p.prev = applied;
+            let (seen, prev) = self.sibling_bits_mut(top);
+            *seen |= applied;
+            *prev = applied;
         }
         self.emit_attrs();
         if self_closing || void {

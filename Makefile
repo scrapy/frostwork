@@ -122,11 +122,11 @@ MUTANTS ?= 40
 # make this faster; the close dimension is already compressed to one name per behaviour class.
 DETECTORS ?=
 gate-mutate:
-	cargo build --release --features mutate
-	$(MATURIN) develop --release --features python,mutate
-	-$(PY) tools/mutate_rules.py --sample $(MUTANTS) $(if $(DETECTORS),--detectors $(DETECTORS),) --gate
-	cargo build --release
-	$(MATURIN) develop --release
+	@set -eu; \
+	trap 'status=$$?; trap - EXIT; cargo build --release || status=$$?; $(MATURIN) develop --release || status=$$?; exit $$status' EXIT; \
+	cargo build --release --features mutate; \
+	$(MATURIN) develop --release --features python,mutate; \
+	$(PY) tools/mutate_rules.py --sample $(MUTANTS) $(if $(DETECTORS),--detectors $(DETECTORS),) --gate
 
 gate-mutate-full:
 	$(MAKE) gate-mutate MUTANTS=0 DETECTORS=audit,corpus-fixtures

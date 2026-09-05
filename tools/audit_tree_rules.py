@@ -461,11 +461,23 @@ def audit_frame_in_element(a: Audit):
                           "head + body::attr(id)", "html > body > p::text", "p::text"])
         # A second `<html>` once the first has closed: libxml2 builds a second ROOT element for it, so
         # the count and the attributes are a real cell — asked through XPath, since parsel's CSS is
-        # scoped to the first root and cannot see the second.
+        # scoped to the first root unless a sibling path reaches the second (covered separately below).
         for doc in ("<html a=1 /><html a=2><p>x</p>", "<html a=1></html><html a=2><p>x</p>",
                     "<html a=1></html><p>x</p>"):
             a.check_many("frame-second-root", doc, doc.encode(),
                          ["//html/@a", "//html/@class", "//p/text()"])
+        # CSS can reach a following root through a sibling combinator. The document needs the same
+        # immediate/deferred trigger history as an element, including resetting '+' for a non-match.
+        a.check_many("frame-root-siblings", "text after closing html", b'alpha</html>>',
+                     ['html + html::text', 'html ~ html::text', ':contains("alpha") + ::text',
+                      'html:has(body) + html::text'])
+        a.check_many("frame-root-siblings", "adjacent and general history",
+                     b'<html id=a><body><p class=hit>alpha</p></body></html>'
+                     b'<html id=b><p>beta</p></html><html id=c><p>gamma</p>',
+                     ['html#a + html::attr(id)', 'html#a ~ html::attr(id)',
+                      'html#a + html + html::attr(id)',
+                      'html:contains("alpha") + html p::text', 'html:contains("alpha") ~ html p::text',
+                      'html:has(.hit) + html p::text', 'html:has(.hit) ~ html p::text'])
 
 
 def audit_implied_body(a: Audit):

@@ -77,6 +77,17 @@ def main() -> int:
     check("Page field_all", item.get_all("images"), ["/a.png", "/b.png"])
     check("Page many rows", item.value("cards"), [{"h": "One"}, {"h": "Two"}])
     check("Item.empty_fields", item.empty_fields(), ["gone"])
+    validation = item.validate(required=['title', 'cards'], counts={'images': (2, 2)},
+                               group_required={'cards': ['h']})
+    check("Item.validate", validation.ok, True)
+    check("validation item", validation.item, item.to_dict())
+    check("required field failure", item.validate(required=['gone']).ok, False)
+
+    class Response:
+        body = PRODUCT
+        encoding = 'utf-8'
+
+    check("Page.extract_response", page.extract_response(Response()).to_dict(), item.to_dict())
 
     # 4. the schema audit, including the operand rules
     report = frostwork.check(["h1::text", "//*[@id=$pid]", "a[id=2]::text"])

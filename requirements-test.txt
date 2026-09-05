@@ -32,7 +32,7 @@ zyte-common-items==0.29.0
 # answered by `web_poet.pages.is_injectable` and `andi.plan`, both of which are already installed (andi is
 # a web-poet dependency), and `tests/test_python.py` asks it exactly the way scrapy-poet does. Pinning
 # Scrapy + Twisted to gate a layer this repository contains no code for would be a large test dependency
-# asserting a version matrix nothing here exercises; README.md says so rather than implying otherwise.
+# asserting a version matrix nothing here exercises; the demo project runs actual Scrapy crawls.
 clear-html==0.5.0
 zyte-parsers==0.6.0
 price-parser==0.5.1

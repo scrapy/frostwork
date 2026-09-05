@@ -291,13 +291,10 @@ pub(super) fn sub_hits(
     }
 }
 
-/// Is sibling gate `bit` open on `parent`? `adjacent` reads the immediately-preceding child's trigger
+/// Is sibling gate `bit` open? `adjacent` reads the immediately-preceding child's trigger
 /// (`+`), else any preceding child's (`~`).
-pub(super) fn gate_open(parent: Option<&OpenElem>, bit: usize, adjacent: bool) -> bool {
-    match parent {
-        Some(p) => (if adjacent { p.prev } else { p.seen }) & (1u64 << bit) != 0,
-        None => false,
-    }
+pub(super) fn gate_open(seen: u64, prev: u64, bit: usize, adjacent: bool) -> bool {
+    (if adjacent { prev } else { seen }) & (1u64 << bit) != 0
 }
 
 /// Evaluate one selector against `stack[top]`: `(is_subject_match, sibling_trigger_bits)`. Each

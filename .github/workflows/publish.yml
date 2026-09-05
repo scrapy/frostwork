@@ -136,7 +136,7 @@ jobs:
           python -m twine check --strict dist/*.tar.gz
           python tools/release_check.py --distribution dist/*.tar.gz
           python -m pip install --no-build-isolation dist/*.tar.gz
-          python -m pytest tests/test_python.py -q
+          python -m pytest tests/ -q
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: wheels-sdist
@@ -166,15 +166,21 @@ jobs:
         with:
           name: ${{ matrix.artifact }}
           path: dist
-      - name: install the built wheel + test deps, then run the suite
+      - name: install the built wheel without optional dependencies
+        shell: bash
+        run: |
+          python -m pip install --no-deps --no-index --find-links dist frostwork
+          python tools/abi3_smoke.py
+      - name: install test deps and check the built wheel
         shell: bash
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements-test.txt -r requirements-release.txt
           python -m twine check --strict dist/*.whl
           python tools/release_check.py --distribution dist/*.whl
-          python -m pip install --no-index --find-links dist frostwork
-          python -m pytest tests/test_python.py -q
+          # Tree-rule meta-gates require libxml2 >= 2.14; the Windows oracle wheel carries 2.11.
+          # Those run in the quality job. Exercise every public API, typing and documentation test here.
+          python -m pytest tests/ --ignore=tests/test_gates.py --ignore=tests/test_make_gates.py -q
 
   publish:
     name: Publish to PyPI

@@ -40,7 +40,7 @@ def marked_blocks():
     out = []
     for doc in DOCS:
         pattern = r"<!--\s*doc-test:\s*([a-z0-9-]+)\s*-->\s*```python\n(.*?)```"
-        for example_id, block in re.findall(pattern, doc.read_text(), re.S):
+        for example_id, block in re.findall(pattern, doc.read_text(encoding="utf-8"), re.S):
             out.append((example_id, f"{doc.name}:{example_id}", block))
     return out
 

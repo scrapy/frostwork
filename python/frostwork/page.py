@@ -509,11 +509,19 @@ def _sub_spec(spec) -> Tuple[str, _Card]:
     This is what lets ``Page.many`` express the same per-subfield cardinality as ``webpoet.Many``."""
     if isinstance(spec, str):
         return spec, ("first", None)
-    sel = spec[0]
-    kind = spec[1] if len(spec) > 1 else "first"
+    parts = _as_tuple(spec)
+    if parts is None or not 1 <= len(parts) <= 3 or not isinstance(parts[0], str):
+        raise TypeError(f"many/one sub-spec {spec!r}: expected a selector or (selector, cardinality[, separator])")
+    sel = parts[0]
+    kind = parts[1] if len(parts) > 1 else "first"
     if kind == "join":
-        return sel, ("join", spec[2] if len(spec) > 2 else "")
+        separator = parts[2] if len(parts) > 2 else ""
+        if not isinstance(separator, str):
+            raise TypeError(f"many/one sub-spec {spec!r}: join separator must be a string")
+        return sel, ("join", separator)
     if kind in ("all", "first"):
+        if len(parts) == 3:
+            raise TypeError(f"many/one sub-spec {spec!r}: only 'join' accepts a separator")
         return sel, (kind, None)
     raise ValueError(f"many/one sub-spec {spec!r}: cardinality must be 'first', 'all', or 'join'")
 
@@ -574,19 +582,19 @@ class Page:
         """Single-valued field: :meth:`Item.value` returns its first match (or ``None``). ``map``
         is an optional transform applied to that shaped value. :meth:`Item.get_all` returns at most
         that first raw match; use :meth:`field_all` to request every match."""
-        return self._add(name, selector, ("first", None), (map,) if map else ())
+        return self._add(name, selector, ("first", None), (map,) if map is not None else ())
 
     def field_all(self, name: str, selector: str, *, map: Optional[Callable] = None) -> "Page":
         """Multi-valued field: :meth:`Item.value` returns every match in document order. ``map`` (if
         given) is applied to the whole list."""
-        return self._add(name, selector, ("all", None), (map,) if map else ())
+        return self._add(name, selector, ("all", None), (map,) if map is not None else ())
 
     def field_join(
         self, name: str, selector: str, separator: str = "", *, map: Optional[Callable] = None
     ) -> "Page":
         """Field that joins every match with ``separator`` into one string (empty column -> ``""``).
         ``map`` (if given) is applied to the joined string."""
-        return self._add(name, selector, ("join", separator), (map,) if map else ())
+        return self._add(name, selector, ("join", separator), (map,) if map is not None else ())
 
     def many(self, name: str, container: str, subfields: dict) -> "Page":
         """Add a repeated nested field: for every element matching ``container`` (document order),

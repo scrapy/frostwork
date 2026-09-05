@@ -93,6 +93,8 @@ licensing information alongside it. Do not decode and re-encode a saved response
 A schema counts as verified only when it is supported, has at least one saved response and agrees on
 **every whole item** and every retained raw flat column tested for it. A transform cannot hide a raw
 value loss. Group subfields are compared after their declared cardinality shaping.
+The Parsel reference shapes its own values independently of Frostwork's `Item` implementation; both
+apply the transforms declared in the schema. Transforms must be deterministic for a useful comparison.
 
 | Report result | Meaning |
 | --- | --- |
