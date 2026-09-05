@@ -1,18 +1,16 @@
 # Frostwork for Python (Scrapy / web-poet)
 
-Python bindings over the Rust core, built with [PyO3](https://pyo3.rs) and
-[maturin](https://maturin.rs). Matching stays in Rust; the `Page`/`Item` layer and web-poet integration
-provide the Python-facing API.
+Choose the API that fits your application. All use the same Rust matcher.
 
-For an existing Scrapy spider, start with the [migration workflow](MIGRATION.md); for a runnable
-project, use [frostwork-demo](https://github.com/shaneaevans/frostwork-demo).
+| Your code | Start here |
+| --- | --- |
+| Ordinary Scrapy callback, ItemLoader or standalone named item | [`Page` / `Item`](#2-declarative-page--item); reuse the schema across responses |
+| Existing web-poet or scrapy-poet integration | [`FrostPage` / `FrostBrowserPage`](#3-web-poet-page-objects--frostpage--frostbrowserpage) |
+| A list of selectors and positional result columns | [`extract`](#1-the-primitive) |
+| An existing spider to port | [Migration workflow](MIGRATION.md) and [runnable demo](https://github.com/shaneaevans/frostwork-demo) |
 
-Three layers, smallest to largest:
-
-1. `frostwork.extract` — the one-pass primitive.
-2. `frostwork.Page` / `frostwork.Item` — a declarative `{field: selector}` schema (mirror of the Rust API).
-3. `frostwork.webpoet.FrostPage` / `FrostBrowserPage` — a web-poet page object whose selector fields
-   share a single scan.
+To check selectors, see [schema auditing](#4-auditing-a-schema--check--strict-validation).
+To check extracted values, see [item validation](#5-response-adapters-and-item-validation).
 
 ## Install
 
@@ -24,6 +22,9 @@ pip install "frostwork[webpoet]"
 ```
 
 Published wheels contain the Rust extension and do not require a Rust toolchain.
+
+This guide follows the main branch. Features in the [unreleased changelog](../CHANGELOG.md) require a
+development build until the next release.
 
 ### Development build
 
@@ -37,23 +38,22 @@ python -m venv .venv
 `extract`/`Page`/`frostwork-audit`. Wheels are **abi3** (`abi3-py310`): one wheel runs on CPython ≥ 3.10
 (tested up to the 3.15 prerelease).
 
-**3.10 is the floor for everything** — core and extra alike. The wheel is `abi3-py310` so the engine can
-borrow a `str`'s UTF-8 view instead of copying the document (`PyUnicode_AsUTF8AndSize` is limited-API
-only from 3.10), and web-poet requires 3.10 as well. Python 3.9 reached end of life in October 2025. The
-extra supports `web-poet >= 0.24.1, < 0.25`, the release line exercised by the integration gates.
+The extra supports `web-poet >= 0.24.1, < 0.25`, the release line exercised by the integration gates.
 
 ## 1. The primitive
 
+<!-- doc-test: primitive -->
 ```python
 import frostwork
 
 html = b"<div class=product><h1>Widget</h1><span class=price>$9</span><img src=/a.png></div>"
 cols = frostwork.extract(html, ["h1::text", ".price::text", "img::attr(src)", "//img/@src"])
-# -> [['Widget'], ['$9'], ['/a.png'], ['/a.png']]     one column per query, in query order
+assert cols == [["Widget"], ["$9"], ["/a.png"], ["/a.png"]]  # one column per query
 ```
 
-`extract(html, queries, encoding=None, *, strict=True)` accepts `bytes` (preferred) or a `str`, which is
-encoded as UTF-8. Pass the response's charset label as `encoding`; `None` checks the BOM and declarations
+`extract(html, queries, encoding=None, *, strict=True)` accepts original `bytes` or an already-decoded
+`str`, whose UTF-8 view is borrowed without copying the document. Pass the response's charset label as
+`encoding` with bytes; use `None` or a UTF-8 label with `str`. `None` checks the BOM and declarations
 before defaulting to UTF-8. An unknown label raises, while a known label excluded by WHATWG is ignored and
 sniffing continues.
 
@@ -67,41 +67,41 @@ frostwork.detect_encoding(b"<html><body><meta charset=windows-1252>")   # 'windo
 frostwork.detect_encoding(b"<p>x</p>", "latin-1")                       # 'windows-1252'
 ```
 
-It is the same resolution `extract` runs, not a second opinion — useful when the rest of a pipeline needs
-the label too. Parsel cannot answer it (`Selector(body=…)` never looks at `<meta charset>`), and w3lib
-stops at `<body>` and at the first declaration it cannot resolve; see
-[COMPATIBILITY.md](COMPATIBILITY.md#encoding) for the enumerated differences.
+Use it when another part of the pipeline needs the selected label. See
+[encoding compatibility](COMPATIBILITY.md#encoding) for the differences from Parsel and w3lib.
 
 ## 2. Declarative `Page` / `Item`
 
+<!-- doc-test: named-item -->
 ```python
 from frostwork import Page
 
+html = b"<h1>Widget</h1><span class=price>$9</span><img src=/a.png><div class=desc>Small mug</div>"
 page = (Page()
         .field("title",  "h1::text")            # first match  -> str | None
         .field("price",  ".price::text")
         .field_all("images", "img::attr(src)")  # every match  -> list[str]
         .field_join("desc", ".desc ::text", " "))  # matches joined -> str
 
-item = page.extract(html, encoding=None)         # ONE streaming pass fills every field
-item.get("title")        # 'Widget'      (first value; cardinality-independent)
-item.get_all("images")   # ['/a.png', ...]
-item.value("desc")       # cardinality-aware value
-item.to_dict()           # {'title': 'Widget', 'images': [...], ...}
-item.to_json()           # same, JSON (UTF-8 preserved)
+item = page.extract(html)
+assert item.get("title") == "Widget"
+assert item.get_all("images") == ["/a.png"]
+assert item.value("desc") == "Small mug"
+assert item.to_dict() == {
+    "title": "Widget", "price": "$9", "images": ["/a.png"], "desc": "Small mug",
+}
 ```
 
 Build the schema once and reuse the `Page` across responses. The document scan is shared; matching
 work grows with selector count instead of repeating a full parse/query workflow per field.
+Use `item.to_json()` for JSON output (Unicode preserved).
 
-A schema of nothing but `field(...)` (single-valued) also **stops scanning** once every field has a
-value, so a page whose fields live in the head never tokenizes the body. It is automatic and has no
-accuracy trade-off — the values skipped are the ones a single-valued field discards anyway. One
-`field_all`/`field_join`, one `many`/`one` group, or one deferred selector (`:has()`, `:last-child`, a
-text predicate) turns it off, because those answers can still change further down the page.
+Eligible single-valued schemas stop scanning once every field has a value. Groups, multi-valued fields
+and deferred selectors require a complete scan; immediate first-value text/attribute fields can still
+stop retaining later matches. See the [performance boundaries](BENCHMARKS.md#single-valued-schemas-stop-scanning).
 
 Pass `map=fn` to transform a field's shaped value in Python (never in the scan) — e.g.
-`.field("price", ".price::text", map=lambda s: s.lstrip("$"))` or
+`.field("price", ".price::text", map=lambda s: s.lstrip("$") if s is not None else None)` or
 `.field_all("prices", ".price::text", map=lambda xs: [float(x) for x in xs])`. `Item.value` /
 `to_dict` reflect the transform; `get` / `get_all` return the raw matches.
 
@@ -144,17 +144,17 @@ class ProductPage(FrostPage, Returns[Product]):
 
 Every item field must fit the `Returns[...]` type or `to_item()` raises. Pass
 `skip_nonitem_fields=True` when the page intentionally contains helper fields that are not item attributes.
-Complete examples on this page are executed by the test suite as written.
+Examples marked in the Markdown source with `doc-test` are executed by the test suite as written.
 
 `field(selector, *, all=False, join=None, cached=False, meta=None, out=None)`:
 
 | declaration | field value | static type |
 | --- | --- | --- |
-| `field(sel)` | first match, or `None` | `str \ | None` |
+| `field(sel)` | first match, or `None` | `str \| None` |
 | `field(sel, all=True)` | `list[str]` of every match, document order | `list[str]` |
 | `field(sel, join=sep)` | every match joined into one `str` with `sep` | `str` |
 | `field(sel).map(fn)` | the shaped value with `fn` applied (chainable) | `fn`'s return type |
-| `field(sel).re_first(rx)` | first regex match over the matched string (group 1 if any, else whole) | `str \ | None` |
+| `field(sel).re_first(rx)` | first regex match over the matched string (group 1 if any, else whole) | `str \| None` |
 | `field(sel).typed_as(T)` | unchanged — a no-op that re-annotates the field as `T` | `T` |
 
 The package ships `py.typed`. These annotations describe the value before a processor runs; use
@@ -175,13 +175,6 @@ Reach for `.map()` for a local value tweak and `out=` for an ecosystem processor
 scalar string, so it raises at declaration on an `all=True` field; use `join=` or a list-aware `.map()`
 instead.
 
-```python
-class ProductPage(FrostPage, Returns[Product], skip_nonitem_fields=True):
-    price   = field(".price::text").map(parse_amount)          # "£51.77" -> "51.77"
-    symbol  = field(".price::text").re_first(r"^\D+")           # -> "£"
-    rating  = field("p.star-rating::attr(class)").map(rating_to_int)
-```
-
 The page body is scanned as `response.body` bytes using the response's resolved `response.encoding`, which
 aligns charset selection with Parsel. The legacy decoder differences listed in
 [COMPATIBILITY.md](COMPATIBILITY.md) still apply. For a browser snapshot or another input, see
@@ -189,18 +182,27 @@ aligns charset selection with Parsel. The legacy decoder differences listed in
 
 **Recipe — relative → absolute URLs.** Frostwork returns the raw attribute value; to resolve it
 against the page URL, extract into a helper field and compose a computed `@web_poet.field` that calls
-`self.response.urljoin`. Mark the helper non-item with `skip_nonitem_fields=True` so it's dropped:
+`self.response.urljoin`. `skip_nonitem_fields=True` excludes the helper from the typed output:
 
+<!-- doc-test: absolute-urls -->
 ```python
+import attrs
 import web_poet
+from typing import Optional
+from web_poet import Returns
 from frostwork.webpoet import FrostPage, field
 
-class ProductPage(FrostPage, Returns[Product], skip_nonitem_fields=True):
-    _href = field("a.next::attr(href)")          # helper column (relative), not an item attr
+@attrs.define
+class NextLink:
+    url: Optional[str]
+
+class NextLinkPage(FrostPage, Returns[NextLink], skip_nonitem_fields=True):
+    _href = field("a.next::attr(href)")
 
     @web_poet.field
-    def url(self):                                # computed: composes with the batched selectors
-        return self.response.urljoin(self._href)  # -> absolute
+    def url(self) -> Optional[str]:
+        href = self._href
+        return str(self.response.urljoin(href)) if href is not None else None
 ```
 
 Any field that reads *other* fields or the response is just a normal `@web_poet.field` method — it
@@ -222,16 +224,21 @@ Use `Many` for a list of scoped rows and `One` for the first row (or `None`). Ea
 `field(...)` evaluated relative to the container in the same extraction pass. Pass a class or callable as
 `item=` to build typed rows with `item(**row)`.
 
+<!-- doc-test: grouped-offers -->
 ```python
-from frostwork.webpoet import FrostPage, field, Many, One
+import attrs
+from typing import Optional
+from frostwork.webpoet import FrostPage, Many, One, field
 
-class ProductPage(FrostPage, Returns[Product], skip_nonitem_fields=True):
-    name        = field("h1::text")
-    images      = Many(".thumb", item=Image, url=field("img::attr(src)"))          # -> list[Image]
-    breadcrumbs = Many(".crumb", item=Breadcrumb, name=field("a::text"), url=field("a::attr(href)"))
-    rating      = One(".reviews", item=AggregateRating,
-                      ratingValue=field(".stars::text").map(float),
-                      reviewCount=field(".count::text").re_first(r"\d+").map(int))
+@attrs.define
+class Offer:
+    name: Optional[str]
+    price: Optional[str]
+
+class OffersPage(FrostPage):
+    offers = Many(".offer", item=Offer,
+                  name=field("./h2/text()"), price=field(".price::text"))
+    first = One(".offer", name=field("./h2/text()"))  # a dict, or None
 ```
 
 A subfield uses the first match by default; `all=True` and `join=` provide the same cardinality choices as
@@ -239,6 +246,8 @@ a flat field. Scoping and cardinality are differentially checked against Parsel.
 has the same shape, with a selector string for the first match or a tuple for `all`/`join`:
 
 ```python
+from frostwork import Page
+
 Page().many("offers", ".offer", {"price": ".p::text", "tags": (".tag::text", "all")})
 ```
 
@@ -259,15 +268,15 @@ Pick the base that matches the input the framework will inject:
 A `BrowserResponse` already contains decoded HTML, so Frostwork does not sniff a charset from it. Any
 remaining `<meta charset>` is ignored.
 
-The `str` is handed over **unencoded** — `frostwork_input()` may return `bytes` *or* `str`, and the engine
-borrows CPython's UTF-8 view of a `str` rather than allocating a second copy of the document. Return the
-original bytes where you have them, the `str` itself where you do not, and never
-`str.encode("utf-8")`. Because a `str` is scanned as UTF-8, the only `encoding` it accepts is `None` or a
-UTF-8 label; anything else is refused instead of decoding those bytes wrongly.
+Return original bytes when available and pass decoded `str` directly without re-encoding it. The
+[primitive input rules](#1-the-primitive) apply to both.
 
 For any other dependency, override the hook:
 
 ```python
+import attrs
+from frostwork.webpoet import FrostFields, field
+
 @attrs.define
 class MyPage(FrostFields):
     blob: bytes
@@ -339,7 +348,7 @@ the tag from each match's source is safe. Selectors whose original context canno
 closed. Processors needing document context should accept `page` and read it there.
 
 Reparsing happens once per match. It is inexpensive for the common scalar case but can lose to Parsel on a
-many-match field; see [BENCHMARKS.md](BENCHMARKS.md#performance-boundaries).
+many-match field; see [BENCHMARKS.md](BENCHMARKS.md#where-the-design-trades-off).
 
 `Many`/`One` subfields support `.map()`, not web-poet field keywords: web-poet sees the group as the field,
 not each row column. Use a hand-written `@web_poet.field` to process a whole group.

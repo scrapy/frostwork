@@ -1,6 +1,7 @@
 """Execute the complete examples marked with ``<!-- doc-test: NAME -->`` in the public docs."""
 
 import asyncio
+import ast
 import re
 from pathlib import Path
 
@@ -11,9 +12,11 @@ pytest.importorskip("web_poet")
 from web_poet import HttpResponse  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
-DOCS = [ROOT / "README.md", ROOT / "docs" / "PYTHON.md"]
+DOCS = [ROOT / "README.md", ROOT / "docs" / "PYTHON.md", ROOT / "docs" / "MIGRATION.md"]
 
-EXPECTED_EXAMPLES = {"frost-page", "product-page", "zyte-product-page", "runtime-validation"}
+PAGE_EXAMPLES = {"frost-page", "product-page", "zyte-product-page", "absolute-urls", "grouped-offers"}
+INLINE_EXAMPLES = {"page-quickstart", "primitive", "named-item", "runtime-validation",
+                   "migration-schema", "group-context"}
 
 PRODUCT_HTML = (
     b"<html><head><meta itemprop='brand' content='Acme'></head><body>"
@@ -76,13 +79,13 @@ def test_every_marked_documentation_block_builds_and_produces_an_item():
     blocks = marked_blocks()
     ids = [example_id for example_id, _source, _block in blocks]
     assert len(ids) == len(set(ids)), f"duplicate documentation example ids: {ids}"
-    assert set(ids) == EXPECTED_EXAMPLES, f"documentation example ids changed: {ids}"
+    assert set(ids) == PAGE_EXAMPLES | INLINE_EXAMPLES, f"documentation example ids changed: {ids}"
 
     for _example_id, source, block in blocks:
         namespace = _run(block, source)
-        if _example_id == "runtime-validation":
-            assert namespace["report"].ok
-            assert namespace["report"].item["offers"] == [{"price": "9"}]
+        if _example_id in INLINE_EXAMPLES:
+            # Value assertions live in these runnable examples, alongside the extraction itself.
+            assert any(isinstance(node, ast.Assert) for node in ast.walk(ast.parse(block))), source
             continue
         pages = _page_objects(namespace)
         assert pages, f"{source}: a marked block defines no page object"
@@ -132,3 +135,26 @@ def test_the_documented_zyte_composition_runs_the_real_processors():
     assert "<script>" not in item.descriptionHtml            # clear-html ran
     assert item.aggregateRating.ratingValue == 3.8           # rating_processor ran
     assert item.images == [Image(url="/i/hero.jpg")]         # a scalar terminal: URL strings, not a node
+
+
+@pytest.mark.parametrize('body,url', [
+    (b'<a class=next href="../p/2">Next</a>', 'http://example.com/p/2'),
+    (b'<a class=next href="">Reload</a>', 'http://example.com/p/1'),
+    (b'<p>No next page</p>', None),
+])
+def test_the_url_recipe_returns_its_declared_item_and_handles_missing_links(body, url):
+    source, block = next((source, block) for name, source, block in marked_blocks() if name == 'absolute-urls')
+    ns = _run(block, source)
+    assert asyncio.run(ns['NextLinkPage'](response=_resp(body)).to_item()) == ns['NextLink'](url=url)
+
+
+def test_the_group_recipe_preserves_rows_and_child_scope():
+    source, block = next((source, block) for name, source, block in marked_blocks() if name == 'grouped-offers')
+    ns = _run(block, source)
+    body = (b'<div class=offer><aside><h2>Related</h2></aside><h2>Mug</h2><b class=price>9</b></div>'
+            b'<div class=offer><h2>Cup</h2></div>')
+    assert asyncio.run(ns['OffersPage'](response=_resp(body)).to_item()) == {
+        'offers': [ns['Offer'](name='Mug', price='9'), ns['Offer'](name='Cup', price=None)],
+        'first': {'name': 'Mug'},
+    }
+    assert asyncio.run(ns['OffersPage'](response=_resp(b'')).to_item()) == {'offers': [], 'first': None}

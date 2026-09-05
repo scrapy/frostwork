@@ -27,6 +27,10 @@ first public release.
 
 ### Developer experience
 
+- Documentation starts with reusable `Page` schemas for ordinary Scrapy callbacks and an API chooser.
+  URL and grouped-item recipes are self-contained and tested with missing values; migration examples
+  are executed from the docs. The compatibility guide distinguishes selector support from value parity.
+  Release checks render Markdown and check repository links against heading IDs; Twine skips that step.
 - Source audits use the grouped compiler for literal `Page.many/one` and web-poet `Many/One` fields,
   with context-specific diagnostics. Dynamic-only scans report unknown coverage; `--require-complete`
   can fail CI on unresolved sites or empty scans. Full schema audits still check shared budgets.

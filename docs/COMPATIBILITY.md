@@ -1,8 +1,7 @@
 # Frostwork compatibility contract
 
-Frostwork is a **no-fallback** engine: unlike engines that route anything outside their native subset
-to a full parser (Parsel/lxml) so results always match, Frostwork answers **every** query itself. So a
-query falls into one of four buckets:
+Frostwork executes supported selectors itself, without a DOM or parser fallback. This reference describes
+four kinds of behavior:
 
 | bucket | meaning |
 |---|---|
@@ -16,21 +15,18 @@ the correctness bar is non-whitespace value parity with lxml (libxml2 2.14), not
 that can return a bare element covers selector matching and ordering; that value still inherits the
 documented raw-source outer-HTML exception.
 
-**Parity is the bar, not the ceiling.** "Close to lxml" is a one-directional phrase and this contract is
-not: a dozen constructs below run *here* and refuse, truncate or mis-decode *there*, from `:has([data-x])`
-to a UTF-16 response body. They are one section — [Beyond lxml](#beyond-lxml) — so a coverage number
-read off this document is not mistaken for the whole comparison.
-
-For a quick, always-current headline of what runs, see the generated
-[selector support snapshot](SUPPORT_SNAPSHOT.md) (regenerate with
-`python tools/support_snapshot.py > docs/SUPPORT_SNAPSHOT.md`; `--check` fails CI on drift). The
-exhaustive contract is the rest of this document.
+For a quick list of representative selectors, see the generated
+[support snapshot](SUPPORT_SNAPSHOT.md). Jump to [CSS](#css-selectors), [XPath](#xpath-downward-subset),
+[groups](#nested--grouped-extraction-many--one), [value semantics](#value-semantics),
+[documented divergences](#documented-divergences---where-close-gives-way), [encoding](#encoding) or
+[limits](#limits). [Beyond lxml](#beyond-lxml) collects cases where Frostwork answers and Parsel cannot.
 
 Because an unsupported selector is indistinguishable from a legitimately-empty field at the engine
 level, public Python APIs validate schemas and raise `UnsupportedSelector` by default. Pass
 `strict=False` to request permissive empty results. The Rust `frostwork::audit_schema` and Python
-`frostwork.check` report each selector's bucket (with an advisory reason) plus budget usage. See
-[PYTHON.md](PYTHON.md) §4.
+`frostwork.check` report selector support (with an advisory refusal reason) and budget usage. A green
+audit does not classify a page's values into the four buckets or prove parity on that page; use the
+[saved-response workflow](MIGRATION.md) for that. See the [Python audit API](PYTHON.md#4-auditing-a-schema--check--strict-validation).
 
 ---
 

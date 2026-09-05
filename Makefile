@@ -148,11 +148,12 @@ bench-migration: ext
 	$(PY) tools/verify_migration.py tests/migration/pages.py:REGISTRY tests/migration/manifest.json --json target/migration-report.json --benchmark $(BENCH_ARGS)
 
 # The README is valid on GitHub even when every relative link is broken on PyPI. Check both the source
-# policy and the Core Metadata from the artifact, then ask Twine's renderer to validate the long
-# description. The artifact path names the current version exactly so a stale local build cannot be
-# mistaken for the candidate.
+# policy and the Core Metadata from the artifact, and render the docs to check their repository links.
+# Twine checks metadata but skips Markdown rendering. The artifact path names the current version
+# exactly so a stale build cannot be mistaken for the candidate.
 release-check:
 	$(PY) tools/release_check.py
+	$(PY) tools/check_docs.py
 	$(MATURIN) sdist --out target/release-check
 	$(PY) -m twine check --strict $(RELEASE_SDIST)
 	$(PY) tools/release_check.py --distribution $(RELEASE_SDIST)

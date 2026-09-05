@@ -258,5 +258,6 @@ coverage-guided fuzzer for parser changes with a meaningful fuzzing budget.
 
 `make ci` includes `make release-check`: it builds the sdist, validates the Core Metadata and public
 project URLs, rejects README links that would resolve under `pypi.org/project/frostwork/`, and runs
-Twine's strict long-description renderer. The tag, public-index installation and provenance checks are
-described in [RELEASING.md](RELEASING.md).
+Twine's strict metadata checks. `tools/check_docs.py` renders the public Markdown and validates repository
+links against the actual rendered heading IDs; Twine itself skips Markdown rendering. The tag,
+public-index installation and provenance checks are described in [RELEASING.md](RELEASING.md).

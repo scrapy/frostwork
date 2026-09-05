@@ -29,8 +29,9 @@ make corpus-real
 ```
 
 Use a larger real corpus and a meaningful coverage-guided fuzzing budget for parser changes. The
-`release-check` part of `make ci` builds the sdist, validates its Core Metadata, asks Twine to render the
-long description strictly, and rejects relative README links or stale pre-publication copy.
+`release-check` part of `make ci` renders the public Markdown and checks repository links and heading
+anchors, builds the sdist, validates its Core Metadata with Twine, and rejects relative README links or
+stale pre-publication copy. Twine skips Markdown rendering; `tools/check_docs.py` checks it explicitly.
 
 ## Create and push the release
 

@@ -2,27 +2,18 @@
 
 Fast HTML extraction for Python and Rust, without a DOM.
 
-Frostwork compiles a set of CSS or XPath selectors, scans an HTML response once, and emits only the
-requested values. It does not build a document tree, so working memory tracks parser state and pending
-matches rather than the whole page. Supported results are continuously checked against lxml; the exact
-coverage and known differences — in **both** directions — are listed in the
-[compatibility contract](https://github.com/scrapy/frostwork/blob/main/docs/COMPATIBILITY.md).
+Frostwork compiles a set of CSS or XPath selectors and extracts their values in one scan of an HTML
+response. Reuse the schema across Scrapy callbacks, web-poet pages or standalone code. Working memory
+tracks parser state, pending matches and returned values, without storing a document tree.
 
-**~14× faster than Parsel (what Scrapy uses) and ~8× faster than lxml at the median on the measured
-production-selector corpus, and ~7× faster than selectolax/lexbor on the workload both can express.
-Often much faster on large, selector-rich product and listing pages, where each of them must traverse a
-DOM per field.**
+Frostwork supports a focused selector subset, continuously checked against Parsel/lxml. Python rejects
+unsupported selectors before scanning; `strict=False` requests empty columns. There is no parser fallback.
+Check the [compatibility contract](https://github.com/scrapy/frostwork/blob/main/docs/COMPATIBILITY.md)
+before migrating code that needs arbitrary tree traversal.
 
-Because Frostwork never builds that DOM, working memory stays essentially constant as page size grows for
-a fixed-output schema; it scales with parser state and returned values instead of the page tree. Results
-depend on page shape, selector count and output volume;
-[BENCHMARKS.md](https://github.com/scrapy/frostwork/blob/main/docs/BENCHMARKS.md) has the full
-methodology and performance boundaries.
-
-Frostwork deliberately supports a focused subset of CSS and XPath. Python fails before scanning when a
-selector is unsupported; `strict=False` opts into an empty column instead. Unsupported selectors never
-fall back to another parser or produce guessed results. If an application needs arbitrary DOM access, use
-lxml — Frostwork is for schemas known in advance.
+The [benchmarks](https://github.com/scrapy/frostwork/blob/main/docs/BENCHMARKS.md) compare throughput,
+memory and selector coverage with Parsel, lxml and other engines, including workloads where Frostwork
+loses. Performance depends on page shape, selector count and output volume.
 
 ## Install
 
@@ -37,28 +28,35 @@ Published wheels contain the Rust extension, so installing from PyPI does not ne
 Building an editable checkout does; see the
 [Python development guide](https://github.com/scrapy/frostwork/blob/main/docs/PYTHON.md#development-build).
 
-## Extracting values
+## Extract a named item
 
-The primitive API takes the response body and all selectors together, and answers them in one scan:
+Build a `Page` once, then reuse it for each response:
 
+<!-- doc-test: page-quickstart -->
 ```python
-from frostwork import extract
+from frostwork import Page
 
-html = b"<h1>Widget</h1><span class=price>$9</span><a href=/p/1>buy</a>"
-title, price, link = extract(html, [
-    "h1::text",
-    ".price::text",
-    "a::attr(href)",
-])
+PRODUCT = (Page()
+           .field("name", "h1::text")              # first match, or None
+           .field("price", ".price::text")
+           .field_all("images", "img::attr(src)")) # every match, or []
 
-assert title == ["Widget"]
-assert price == ["$9"]
-assert link == ["/p/1"]
+html = b"<h1>Widget</h1><span class=price>$9</span><img src=/a.png>"
+assert PRODUCT.extract(html).to_dict() == {
+    "name": "Widget", "price": "$9", "images": ["/a.png"],
+}
 ```
 
-`extract(..., encoding="windows-1252")` accepts the charset label a Scrapy response supplies; without one,
-Frostwork checks the BOM and `<meta>` declarations before defaulting to UTF-8. `frostwork.Page` adds names
-and per-field cardinality for applications that do not use web-poet.
+In an ordinary Scrapy callback, pass the original bytes and the response's encoding:
+
+```python
+def parse_product(self, response):
+    yield PRODUCT.extract(response.body, encoding=response.encoding).to_dict()
+```
+
+Use `field_all` whenever you need every match, and `field_join` to join text nodes. Without an explicit
+encoding, Frostwork checks the BOM and declarations before defaulting to UTF-8. For positional columns
+without field names, use the [primitive `extract` API](https://github.com/scrapy/frostwork/blob/main/docs/PYTHON.md#1-the-primitive).
 
 The same engine is a Rust library — `frostwork::extract(html, &queries, None)`, with `Page`/`Plan` for named
 fields and compile-once reuse. See the
@@ -90,73 +88,28 @@ class ProductPage(FrostPage):
 `to_item()` returns a dict here. Add `Returns[YourItem]` for a typed item, as shown in the
 [Python guide](https://github.com/scrapy/frostwork/blob/main/docs/PYTHON.md#3-web-poet-page-objects--frostpage--frostbrowserpage).
 
-Install `scrapy-poet` and enable it in `settings.py` with `ADDONS = {"scrapy_poet.Addon": 300}`
-(Scrapy ≥ 2.10; see [scrapy-poet's setup guide](https://scrapy-poet.readthedocs.io/en/stable/intro/setup.html)
-for older versions). It then builds the page object from the callback's **annotation**:
+For injection, install and configure `scrapy-poet` using its
+[setup guide](https://scrapy-poet.readthedocs.io/en/stable/intro/setup.html), or copy the working settings
+and explicitly assigned callbacks from the demo. Outside Scrapy, construct the page directly:
+`item = await ProductPage(response=http_response).to_item()`.
 
-```python
-import scrapy
+## Before migrating a spider
 
-class ProductSpider(scrapy.Spider):
-    name = "products"
-    start_urls = ["https://example.com/catalogue/"]
+Run `frostwork-audit --scan myproject/spiders/` to inspect selector literals without importing the spider.
+Once you have a schema, `PRODUCT.check().raise_for_status()` checks its selectors and shared budgets.
+Then [compare complete items on saved responses](https://github.com/scrapy/frostwork/blob/main/docs/MIGRATION.md)
+before switching a callback.
 
-    def parse(self, response):
-        for href in response.css("a.product::attr(href)").getall():
-            yield response.follow(href, callback=self.parse_product)
+The main compatibility boundaries are:
 
-    async def parse_product(self, response, page: ProductPage):
-        yield await page.to_item()
-```
+- **Selector context:** grouped fields support fewer shapes than flat fields. Audit the actual schema.
+- **HTML values:** bare-element selectors return source HTML, which can differ from lxml serialization.
+- **Encoding:** decoding follows browser behavior, including documented differences from Parsel/w3lib.
 
-Requests with `callback=None` — including those created from `start_urls` — do not reliably receive
-dependencies in `parse`. Use an explicitly assigned callback for injected page objects. Outside Scrapy,
-construct the page directly: `item = await ProductPage(response=http_response).to_item()`.
-
-This repository does not pin or test a Scrapy/Twisted matrix; use
-[scrapy-poet's documentation](https://scrapy-poet.readthedocs.io/) for setup details. Frostwork does gate
-the injection boundary: every shipped page base is injectable and can be planned as a callback dependency.
-Field processors, groups, response types and schema auditing are covered in the
-[Python guide](https://github.com/scrapy/frostwork/blob/main/docs/PYTHON.md).
-
-## How it differs from lxml
-
-Frostwork is not a subset of lxml, and not a superset — the set difference runs both ways, and both
-halves are proven by the same gates.
-
-**What it does not answer.** Supported CSS is tags, IDs, classes, attribute operators,
-descendant/child/sibling combinators, `:not()`, `:is()`/`:where()`, subject `:has()`, `:contains()`, and
-structural positions such as `:nth-child()`/`:last-of-type`; supported XPath is downward paths, attribute
-and text predicates, unions, positional predicates, `following-sibling::`, `ancestor::`, `parent::` and
-top-level `normalize-space()`; values are text, attributes, descendant attributes, joined text and raw
-outer HTML. Anything that cannot be answered without retaining more tree state stays unsupported, and
-reverse positions and `:has()` have placement restrictions. An unsupported selector never falls back and
-never guesses — `check()` reports the verdict before a scrape, and `frostwork-audit --scan
-myproject/spiders/` classifies selector literals in existing code without importing it.
-
-**What it answers and lxml does not.** A dozen constructs run here and refuse, truncate or mis-decode
-there:
-
-- **Valid CSS cssselect rejects** — `div:has([data-x])`, `div:has(a, img)`, `p:not(.a, .b)`,
-  `[type=submit i]`. Parsel raises `SelectorSyntaxError`; Frostwork matches them with the semantics the
-  spec defines.
-- **Values libxml2 drops** — names longer than its 100-byte buffer, and everything after a `</html>`,
-  which real pages put *before* the content that matters (one crawled page keeps 14 of its 17 KB there).
-- **Encoding, the widest gap — and the one place the browser, not lxml, is the standard.**
-  `parsel.Selector(body=…)` never sniffs `<meta charset>`; `frostwork.detect_encoding` does, at any
-  depth and past the `<body>` and unsupported-label cut-offs where w3lib gives up. It reads a UTF-16
-  body, which lxml's HTML parser cannot parse at all, and decodes with the WHATWG indexes browsers use
-  — where Python's legacy codecs return U+FFFD for 457 euc-jp and 192 big5 sequences of ordinary prose.
-  The rule is **never diverge from the browser**: a price is right when it matches what the site shows
-  a person, so where Frostwork's text differs from Scrapy's on an oddly-encoded page, Frostwork is the
-  one agreeing with the browser. Every such difference is
-  [tabulated with its reason](https://github.com/scrapy/frostwork/blob/main/docs/COMPATIBILITY.md#the-rule-never-diverge-from-the-browser).
-- **A schema verdict before the scrape**, and **one pass for the whole schema** — a page object of
-  single-valued fields stops scanning once every field has a value, which a tree parser cannot do.
-
-Three of those return *extra* values, the one direction that can surprise a port. The
-[compatibility contract](https://github.com/scrapy/frostwork/blob/main/docs/COMPATIBILITY.md) lists supported, divergent, beyond and unsupported forms
-with examples, the gate behind each, and the migration caveats.
+The [compatibility contract](https://github.com/scrapy/frostwork/blob/main/docs/COMPATIBILITY.md) contains
+the exact limits and cases where Frostwork returns values Parsel cannot. The
+[Python guide](https://github.com/scrapy/frostwork/blob/main/docs/PYTHON.md) covers groups, processors,
+response adapters and runtime item validation.
 
 ## Build, test, benchmark
 
