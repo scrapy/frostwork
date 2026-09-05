@@ -3,6 +3,8 @@
 All notable user-facing changes will be recorded here. Frostwork will follow semantic versioning after its
 first public release.
 
+## 0.1.5 (unreleased)
+
 ## 0.1.4 (2026-09-05)
 
 ### Correctness
