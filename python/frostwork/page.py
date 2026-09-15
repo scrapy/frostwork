@@ -45,6 +45,28 @@ __all__ = [
 # A field's cardinality: ("first", None) | ("all", None) | ("join", separator).
 _Card = Tuple[str, Optional[str]]
 _Subfields = Union[Mapping[str, str], Iterable[Tuple[str, str]]]
+# A query as the native layer takes it: the selector alone, or paired with its declared syntax.
+_Query = Union[str, Tuple[str, Optional[str]]]
+
+_SYNTAXES = (None, "css", "xpath")
+
+
+def _check_syntax(syntax: Optional[str]) -> Optional[str]:
+    if syntax not in _SYNTAXES:
+        raise ValueError(f"frostwork: syntax must be 'css', 'xpath' or None, got {syntax!r}")
+    return syntax
+
+
+def _query(selector: str, syntax: Optional[str]) -> _Query:
+    """Pair ``selector`` with its declared ``syntax`` for the native layer. Without one, the engine
+    reads a selector starting with ``/``, ``./`` or ``normalize-space(`` as XPath and anything else as
+    CSS."""
+    return selector if _check_syntax(syntax) is None else (selector, syntax)
+
+
+def _query_text(query: _Query) -> str:
+    return query if isinstance(query, str) else query[0]
+
 
 Bytesish = Union[bytes, bytearray, memoryview, str]
 
@@ -139,16 +161,18 @@ def _group_list(groups) -> list:
 
 
 @lru_cache(maxsize=256)
-def _validate_flat(selectors: Tuple[str, ...]) -> None:
+def _validate_flat(selectors: Tuple[str, ...], syntax: Optional[str]) -> None:
     """Cache successful primitive-schema validation; selectors are commonly reused per response."""
-    check(selectors).raise_for_status()
+    check(selectors, syntax=syntax).raise_for_status()
 
 
 @lru_cache(maxsize=128)
 def _validate_grouped(
-    selectors: Tuple[str, ...], groups: Tuple[Tuple[str, Tuple[Tuple[str, str], ...]], ...]
+    selectors: Tuple[str, ...],
+    groups: Tuple[Tuple[str, Tuple[Tuple[str, str], ...]], ...],
+    syntax: Optional[str],
 ) -> None:
-    check(selectors, groups).raise_for_status()
+    check(selectors, groups, syntax=syntax).raise_for_status()
 
 
 def detect_encoding(html: Bytesish, encoding: Optional[str] = None) -> str:
@@ -180,6 +204,7 @@ def extract(
     encoding: Optional[str] = None,
     *,
     strict: bool = True,
+    syntax: Optional[str] = None,
 ) -> List[List[str]]:
     """One streaming pass over ``html``: return one value-column per query, in query order.
 
@@ -188,12 +213,14 @@ def extract(
     (as Scrapy passes from ``Content-Type``); ``None`` sniffs (BOM → ``<meta>`` → UTF-8).
     Unsupported queries raise :class:`UnsupportedSelector` before scanning. Pass ``strict=False``
     to use the engine's permissive empty-column behavior. There is never a parser fallback.
+    ``syntax`` declares every query ``"css"`` or ``"xpath"``; ``None`` routes each by its prefix
+    (``/``, ``./`` and ``normalize-space(`` are XPath).
     """
     query_list = _query_list(queries)
     encoding = _check_encoding(html, encoding)
     if strict:
-        _validate_flat(tuple(query_list))
-    return _extract(_as_scan_input(html), query_list, encoding)
+        _validate_flat(tuple(query_list), syntax)
+    return _extract(_as_scan_input(html), [_query(q, syntax) for q in query_list], encoding)
 
 
 def extract_grouped(
@@ -203,6 +230,7 @@ def extract_grouped(
     encoding: Optional[str] = None,
     *,
     strict: bool = True,
+    syntax: Optional[str] = None,
 ) -> Tuple[List[List[str]], list]:
     """One streaming pass returning ``(flat_columns, grouped)``. ``groups`` is a list of
     ``(container_selector, [(subfield_name, subfield_selector), ...])`` (a subfield mapping is also
@@ -210,15 +238,28 @@ def extract_grouped(
     ``container_selector`` (document order) each sub-field is extracted **scoped to it**
     (descendant-or-self). ``grouped[g]`` is that group's rows, each a list of sub-field value-columns
     (``[group][row][subfield][value]``). Unsupported selectors raise by default; pass
-    ``strict=False`` for permissive empty columns. Same no-DOM, no-fallback semantics as
-    :func:`extract`."""
+    ``strict=False`` for permissive empty columns. ``syntax`` applies to every selector, as in
+    :func:`extract`. Same no-DOM, no-fallback semantics as :func:`extract`."""
     query_list = _query_list(queries)
     group_list = _group_list(groups)
     encoding = _check_encoding(html, encoding)
     if strict:
         group_key = tuple((container, tuple(subfields)) for container, subfields in group_list)
-        _validate_grouped(tuple(query_list), group_key)
-    return _extract_grouped(_as_scan_input(html), query_list, group_list, encoding)
+        _validate_grouped(tuple(query_list), group_key, syntax)
+    return _extract_grouped(
+        _as_scan_input(html),
+        [_query(q, syntax) for q in query_list],
+        _tag_groups(group_list, syntax),
+        encoding,
+    )
+
+
+def _tag_groups(groups, syntax: Optional[str]) -> list:
+    """``(container, [(sub, sel)])`` groups with every selector paired with ``syntax``."""
+    return [
+        (_query(container, syntax), [(sub, _query(sel, syntax)) for sub, sel in subfields])
+        for container, subfields in groups
+    ]
 
 
 # --------------------------------------------------------------------------- schema audit / validation
@@ -332,12 +373,12 @@ class SchemaReport:
 
 def _field_reports(fields, tuples) -> List[FieldReport]:
     return [
-        FieldReport(n, sel, sup, reason)
+        FieldReport(n, _query_text(sel), sup, reason)
         for (n, sel), (sup, reason) in zip(fields, tuples)
     ]
 
 
-def check(queries=None, groups=None) -> SchemaReport:
+def check(queries=None, groups=None, *, syntax: Optional[str] = None) -> SchemaReport:
     """Audit a schema without parsing any HTML: report which selectors the engine supports (with an
     advisory reason for those it does not) and the budget usage.
 
@@ -348,22 +389,32 @@ def check(queries=None, groups=None) -> SchemaReport:
     (auto-named ``group[i]``) — with ``subfields`` given as ``{subname: sel}`` or
     ``[(subname, sel), ...]`` in any of them. Anything else raises :class:`TypeError` naming these
     shapes rather than auditing the wrong strings: a mapping is destructured, never iterated, since
-    auditing its *keys* would report a green schema that was never looked at. Returns a
+    auditing its *keys* would report a green schema that was never looked at. ``syntax`` declares
+    every selector ``"css"`` or ``"xpath"``, as in :func:`extract`. Returns a
     :class:`SchemaReport`; call :meth:`SchemaReport.raise_for_status` for strict validation.
 
         >>> import frostwork
         >>> [(f.name, f.supported) for f in frostwork.check({"blurb": ":contains(x)::text"}).fields]
         [('blurb', False)]
     """
-    named_fields = _named_fields(queries or [])
-    named_groups = _named_groups(groups or [])
+    named_fields = [(name, _query(sel, syntax)) for name, sel in _named_fields(queries or [])]
+    named_groups = [
+        (name, _query(container, syntax), [(sub, _query(sel, syntax)) for sub, sel in subs])
+        for name, container, subs in _named_groups(groups or [])
+    ]
+    return _audit(named_fields, named_groups)
+
+
+def _audit(named_fields, named_groups) -> SchemaReport:
+    """:func:`check` over ``(name, query)`` fields and ``(name, container, [(sub, query)])`` groups
+    whose queries are already in the native shape, so each may carry its own syntax."""
     flat_t, groups_t, (members, max_members, sib_bits, max_sib_bits) = _audit_schema(
         [sel for _name, sel in named_fields], [(c, subs) for _name, c, subs in named_groups]
     )
     fields = _field_reports(named_fields, flat_t)
     group_reports = []
     for (gn, gc, subs), (ctuple, subtuples) in zip(named_groups, groups_t):
-        container = FieldReport(f"{gn}<container>", gc, ctuple[0], ctuple[1])
+        container = FieldReport(f"{gn}<container>", _query_text(gc), ctuple[0], ctuple[1])
         subfields = _field_reports(subs, subtuples)
         group_reports.append(GroupReport(gn, container, subfields))
     return SchemaReport(fields, group_reports, members, max_members, sib_bits, max_sib_bits)
@@ -469,6 +520,11 @@ class _Field:
     card: _Card
     transforms: _Transforms = ()
     index: int = 0  # position in the native result columns, assigned when the schema is built
+    syntax: Optional[str] = None
+
+    @property
+    def query(self) -> _Query:
+        return _query(self.selector, self.syntax)
 
     def value(self, name: str, col: List[str]):
         try:
@@ -482,6 +538,11 @@ class _Group:
     container: str
     subfields: dict[str, _Field]
     one: bool
+    syntax: Optional[str] = None
+
+    @property
+    def query(self) -> _Query:
+        return _query(self.container, self.syntax)
 
 
 def _shape(col: List[str], card: _Card, transforms: _Transforms = ()) -> Any:
@@ -539,11 +600,14 @@ class Page:
         self._strict = strict
         self._validated = False
 
-    def _add(self, name: str, selector: str, card: _Card, transforms: _Transforms) -> "Page":
+    def _add(
+        self, name: str, selector: str, card: _Card, transforms: _Transforms, syntax: Optional[str]
+    ) -> "Page":
         self._ensure_new_name(name)
         # Replace rather than mutate: extracted Items can share this schema without per-response
         # metadata copies, and keep their original declarations if the Page is extended later.
-        self._fields = {**self._fields, name: _Field(selector, card, transforms, len(self._fields))}
+        field = _Field(selector, card, transforms, len(self._fields), _check_syntax(syntax))
+        self._fields = {**self._fields, name: field}
         self._invalidate()
         return self
 
@@ -571,32 +635,45 @@ class Page:
         """
         if self._plan is None:
             garg = [
-                (g.container, [(sn, sub.selector) for sn, sub in g.subfields.items()])
+                (g.query, [(sn, sub.query) for sn, sub in g.subfields.items()])
                 for g in self._groups.values()
             ]
             first_only = [f.card[0] == "first" for f in self._fields.values()]
-            self._plan = _Plan([f.selector for f in self._fields.values()], garg, first_only)
+            self._plan = _Plan([f.query for f in self._fields.values()], garg, first_only)
         return self._plan
 
-    def field(self, name: str, selector: str, *, map: Optional[Callable] = None) -> "Page":
+    def field(
+        self, name: str, selector: str, *, map: Optional[Callable] = None, syntax: Optional[str] = None
+    ) -> "Page":
         """Single-valued field: :meth:`Item.value` returns its first match (or ``None``). ``map``
         is an optional transform applied to that shaped value. :meth:`Item.get_all` returns at most
-        that first raw match; use :meth:`field_all` to request every match."""
-        return self._add(name, selector, ("first", None), (map,) if map is not None else ())
+        that first raw match; use :meth:`field_all` to request every match. ``syntax`` declares the
+        selector ``"css"`` or ``"xpath"``; ``None`` routes it by its prefix, as in :func:`extract`."""
+        return self._add(name, selector, ("first", None), (map,) if map is not None else (), syntax)
 
-    def field_all(self, name: str, selector: str, *, map: Optional[Callable] = None) -> "Page":
+    def field_all(
+        self, name: str, selector: str, *, map: Optional[Callable] = None, syntax: Optional[str] = None
+    ) -> "Page":
         """Multi-valued field: :meth:`Item.value` returns every match in document order. ``map`` (if
         given) is applied to the whole list."""
-        return self._add(name, selector, ("all", None), (map,) if map is not None else ())
+        return self._add(name, selector, ("all", None), (map,) if map is not None else (), syntax)
 
     def field_join(
-        self, name: str, selector: str, separator: str = "", *, map: Optional[Callable] = None
+        self,
+        name: str,
+        selector: str,
+        separator: str = "",
+        *,
+        map: Optional[Callable] = None,
+        syntax: Optional[str] = None,
     ) -> "Page":
         """Field that joins every match with ``separator`` into one string (empty column -> ``""``).
         ``map`` (if given) is applied to the joined string."""
-        return self._add(name, selector, ("join", separator), (map,) if map is not None else ())
+        return self._add(name, selector, ("join", separator), (map,) if map is not None else (), syntax)
 
-    def many(self, name: str, container: str, subfields: dict) -> "Page":
+    def many(
+        self, name: str, container: str, subfields: dict, *, syntax: Optional[str] = None
+    ) -> "Page":
         """Add a repeated nested field: for every element matching ``container`` (document order),
         extract each ``subfields`` entry **scoped to it** (descendant-or-self). :meth:`Item.value`
         returns a ``list`` of ``dict`` rows. All in the same streaming pass.
@@ -606,18 +683,28 @@ class Page:
         joined string — so ``Page.many`` matches ``webpoet.Many``'s expressiveness::
 
             .many("offers", ".offer", {"price": ".p::text", "tags": (".tag::text", "all")})
-        """
-        return self._add_group(name, container, subfields, one=False)
 
-    def one(self, name: str, container: str, subfields: dict) -> "Page":
+        ``syntax`` declares the container and every sub-field ``"css"`` or ``"xpath"``.
+        """
+        return self._add_group(name, container, subfields, one=False, syntax=syntax)
+
+    def one(
+        self, name: str, container: str, subfields: dict, *, syntax: Optional[str] = None
+    ) -> "Page":
         """Like :meth:`many`, but :meth:`Item.value` returns the **first** container's ``dict`` row, or
         ``None`` if none match. Same rich sub-specs as :meth:`many`."""
-        return self._add_group(name, container, subfields, one=True)
+        return self._add_group(name, container, subfields, one=True, syntax=syntax)
 
-    def _add_group(self, name: str, container: str, subfields: dict, *, one: bool) -> "Page":
+    def _add_group(
+        self, name: str, container: str, subfields: dict, *, one: bool, syntax: Optional[str]
+    ) -> "Page":
         self._ensure_new_name(name)
-        subs = {sn: _Field(*_sub_spec(spec), index=i) for i, (sn, spec) in enumerate(subfields.items())}
-        self._groups = {**self._groups, name: _Group(container, subs, one)}
+        _check_syntax(syntax)
+        subs = {
+            sn: _Field(*_sub_spec(spec), index=i, syntax=syntax)
+            for i, (sn, spec) in enumerate(subfields.items())
+        }
+        self._groups = {**self._groups, name: _Group(container, subs, one, syntax)}
         self._invalidate()
         return self
 
@@ -629,8 +716,13 @@ class Page:
         """Audit this page's whole schema (flat fields + ``many``/``one`` groups) without touching any
         HTML: which selectors are supported, advisory reasons for those that are not, and budget usage.
         See :class:`SchemaReport`."""
-        schema = self.frost_schema()
-        return check(schema["fields"], schema["groups"])
+        return _audit(
+            [(name, f.query) for name, f in self._fields.items()],
+            [
+                (name, g.query, [(sn, sub.query) for sn, sub in g.subfields.items()])
+                for name, g in self._groups.items()
+            ],
+        )
 
     def frost_schema(self) -> dict:
         """Named selectors in the same audit format as ``FrostFields.frost_schema()``."""

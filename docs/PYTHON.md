@@ -51,11 +51,16 @@ cols = frostwork.extract(html, ["h1::text", ".price::text", "img::attr(src)", "/
 assert cols == [["Widget"], ["$9"], ["/a.png"], ["/a.png"]]  # one column per query
 ```
 
-`extract(html, queries, encoding=None, *, strict=True)` accepts original `bytes` or an already-decoded
-`str`, whose UTF-8 view is borrowed without copying the document. Pass the response's charset label as
-`encoding` with bytes; use `None` or a UTF-8 label with `str`. `None` checks the BOM and declarations
-before defaulting to UTF-8. An unknown label raises, while a known label excluded by WHATWG is ignored and
-sniffing continues.
+`extract(html, queries, encoding=None, *, strict=True, syntax=None)` accepts original `bytes` or an
+already-decoded `str`, whose UTF-8 view is borrowed without copying the document. Pass the response's
+charset label as `encoding` with bytes; use `None` or a UTF-8 label with `str`. `None` checks the BOM and
+declarations before defaulting to UTF-8. An unknown label raises, while a known label excluded by WHATWG
+is ignored and sniffing continues.
+
+A query starting with `/`, `./` or `normalize-space(` is read as XPath and anything else as CSS. Pass
+`syntax="css"` or `syntax="xpath"` to declare every query instead, when the caller knows: a relative
+XPath step such as `h1` would otherwise be read as a CSS type selector and answer with every `<h1>`,
+where declared as XPath it is refused as unsupported, like every relative path.
 
 Unsupported queries raise `UnsupportedSelector` before the HTML is scanned. Pass `strict=False` for
 permissive empty columns. [COMPATIBILITY.md](COMPATIBILITY.md) defines selector, value and encoding behavior.
@@ -102,7 +107,9 @@ stop retaining later matches. See the [performance boundaries](BENCHMARKS.md#sin
 
 Pass `map=fn` to transform a field's shaped value in Python (never in the scan) — e.g.
 `.field("price", ".price::text", map=lambda s: s.lstrip("$") if s is not None else None)` or
-`.field_all("prices", ".price::text", map=lambda xs: [float(x) for x in xs])`. `Item.value` /
+`.field_all("prices", ".price::text", map=lambda xs: [float(x) for x in xs])`. Every `field*` method
+and `many`/`one` take `syntax="css"` or `syntax="xpath"` to declare their selectors, as `extract` does;
+in `many`/`one` it covers the container and every sub-field. `Item.value` /
 `to_dict` reflect the transform; `get` / `get_all` return the raw matches.
 
 `get_all(name)` follows the field declaration: `field` returns zero or one raw match,
@@ -372,6 +379,9 @@ for f in report.unsupported:
     print(f.name, "->", f.reason)
 report.raise_for_status()   # raises UnsupportedSelector unless report.ok
 ```
+
+`check(..., syntax="xpath")` declares every selector in the call, as `extract` does; `Page.check()`
+uses each field's own declaration.
 
 ### Accepted schema shapes
 

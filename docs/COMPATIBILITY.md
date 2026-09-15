@@ -102,6 +102,11 @@ audit does not classify a page's values into the four buckets or prove parity on
 XPath compiles to the **same** selector model as CSS, so a supported XPath query has identical
 semantics and performance to its CSS equivalent.
 
+A query is read as XPath when it starts with `/`, `./` or `normalize-space(`, and as CSS otherwise,
+unless the caller declares its syntax (`syntax="css"` / `syntax="xpath"` in the Python API, a `Query`
+in Rust). Declared as XPath, a relative path (`h1`, `td/text()`) is ∅ unsupported; read as CSS it would
+match every `<h1>`, which is a wrong value rather than a divergence.
+
 ## Nested / grouped extraction (`Many` / `One`)
 
 | feature | status |

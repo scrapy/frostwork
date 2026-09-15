@@ -8,23 +8,25 @@
 //! authoritative decision — at worst it is vague. Keeping it out of the parser preserves the
 //! "one matching implementation" rule; this is a separate explainer, not a second parser.
 
+use crate::{Query, Syntax};
+
 /// A best-effort human explanation for why `q` is unsupported. Assumes the caller already determined
 /// (via the real compiler) that `q` does not compile; the string is advisory only.
-pub fn reason(q: &str) -> String {
+pub fn reason(q: &str, syntax: Syntax) -> String {
     let qt = q.trim();
     if qt.is_empty() {
         return "empty selector".to_string();
     }
     // Route through the compiler's own rule, never a copy of it: an explainer that disagreed about
     // whether a query is XPath or CSS would confidently name a cause from the wrong taxonomy.
-    if crate::is_xpath(qt) {
+    if crate::is_xpath(qt, syntax) {
         xpath_reason(qt)
-    } else if qt.starts_with('.') && looks_like_xpath_step(qt) {
+    } else if syntax == Syntax::Auto && qt.starts_with('.') && looks_like_xpath_step(qt) {
         // `.foo` is a CSS class; but `.` / `./` / `.//` are XPath context paths. The compiler only
         // treats a leading `./` as XPath, so a bare `.`-path that is not `./…` is reported as CSS.
         xpath_reason(qt)
     } else {
-        css_reason(qt)
+        css_reason(qt, syntax)
     }
 }
 
@@ -65,7 +67,10 @@ fn has_uppercase_name(qt: &str) -> bool {
 }
 
 fn xpath_reason(qt: &str) -> String {
-    let msg = if crate::xpath::has_variable_ref(qt) {
+    let msg = if is_relative_step(qt) {
+        "relative path (`h1`, `td/text()`) — a flat query is evaluated from the document root, so \
+         write `//h1`; a grouped sub-field takes `.//h1` (descendants) or `./h1` (children)"
+    } else if crate::xpath::has_variable_ref(qt) {
         "XPath variable reference (`$name`) is unsupported — Frostwork's API takes no variable \
          bindings (unlike `sel.xpath(q, name=…)`); inline the value as a quoted literal"
     } else if has_unquoted_comparand(qt) {
@@ -103,7 +108,7 @@ fn xpath_reason(qt: &str) -> String {
     msg.to_string()
 }
 
-fn css_reason(qt: &str) -> String {
+fn css_reason(qt: &str, syntax: Syntax) -> String {
     // A comma group is asked about FIRST, and per member. Every probe below substring-matches the WHOLE
     // query, so without this a group holding one `:has()` member reports the `:has()` shape rules even
     // when that member is supported alone and the real refusal is that a group cannot hold a deferred
@@ -111,7 +116,7 @@ fn css_reason(qt: &str) -> String {
     // group.
     let members = crate::selector::split_top_commas(qt);
     if members.len() > 1 {
-        return comma_group_reason(&members);
+        return comma_group_reason(&members, syntax);
     }
     let lower = qt.to_ascii_lowercase();
     let msg = if lower.contains(":has(") {
@@ -187,17 +192,20 @@ fn css_reason(qt: &str) -> String {
 /// always goes after a `;`: the leading clause is the categorical one, and a caller that histograms these
 /// reasons (`tools/bench_engines.py`) keys on it, so a selector in front of the first `;` would give every
 /// column its own bucket.
-fn comma_group_reason(members: &[&str]) -> String {
-    if let Some(m) = members.iter().find(|m| !crate::flat_query_support(m).is_supported()) {
+fn comma_group_reason(members: &[&str], syntax: Syntax) -> String {
+    if let Some(m) = members
+        .iter()
+        .find(|m| !crate::flat_query_support(&Query::new(**m, syntax)).is_supported())
+    {
         return format!(
             "a comma-group member is itself unsupported — {}; the member is `{}`",
-            reason(m.trim()),
+            reason(m.trim(), syntax),
             m.trim()
         );
     }
     let deferred = members
         .iter()
-        .find(|m| crate::compile_one(m).is_some_and(|s| crate::matcher::carries_deferred(&s)));
+        .find(|m| crate::compile_one(m, syntax).is_some_and(|s| crate::matcher::carries_deferred(&s)));
     if let Some(m) = deferred {
         return format!(
             "a comma-group member needs deferred-close matching (a reverse position, `:has()`, or a \
@@ -209,7 +217,7 @@ fn comma_group_reason(members: &[&str]) -> String {
     let outer = members
         .iter()
         .filter(|m| {
-            crate::compile_one(m)
+            crate::compile_one(m, syntax)
                 .is_some_and(|s| matches!(s.terminal, crate::selector::Terminal::OuterHtml))
         })
         .count();
@@ -265,6 +273,13 @@ fn has_unsupported_function(qt: &str) -> bool {
         }
     }
     false
+}
+
+/// A path with no anchor at all (`h1`, `td/text()`): neither absolute nor `.`-rooted, and not a
+/// `normalize-space(...)` wrapper. Only reachable under a declared [`Syntax::XPath`], since the
+/// auto-routing rule reads such a string as CSS.
+fn is_relative_step(qt: &str) -> bool {
+    !qt.starts_with(['/', '.']) && !qt.starts_with("normalize-space(")
 }
 
 /// The path begins with a single-slash CHILD step from the context node (`./x`, not `.//x`).
@@ -357,35 +372,43 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_declared_syntax_picks_the_taxonomy() {
+        assert!(reason("h1", Syntax::XPath).contains("relative path"));
+        assert!(reason("td/text()", Syntax::XPath).contains("relative path"));
+        assert!(reason("/html", Syntax::Css).contains("CSS"));
+        assert!(reason("h1, /x", Syntax::Css).contains("CSS")); // members inherit the declared syntax
+    }
+
+    #[test]
     fn xpath_categories() {
-        assert!(reason("//a[position()<3]").contains("positional"));
-        assert!(reason("//a[last()]").contains("positional"));
+        assert!(reason("//a[position()<3]", Syntax::Auto).contains("positional"));
+        assert!(reason("//a[last()]", Syntax::Auto).contains("positional"));
         // a SUPPORTED text-pred form won't reach reason() in practice; an unsupported one (combined
         // with another predicate) does, and still classifies as a text-content predicate.
-        assert!(reason("//p[@x][text()=\"y\"]").contains("text-content"));
-        assert!(reason("//ancestor::div").contains("axis"));
-        assert!(reason("count(//a)").contains("function") || reason("count(//a)").contains("CSS"));
-        assert!(reason("./h3").contains("descendant"));
-        assert!(reason("/div").contains("document root"));
-        assert!(reason("//DIV").contains("case-sensitive"));
-        assert!(reason("//*[@id=$pid]").contains("variable"));
-        assert!(reason("//div[@id=foo]").contains("unquoted"));
-        assert!(reason("//span[@x=2]/text()").contains("unquoted"));
+        assert!(reason("//p[@x][text()=\"y\"]", Syntax::Auto).contains("text-content"));
+        assert!(reason("//ancestor::div", Syntax::Auto).contains("axis"));
+        assert!(reason("count(//a)", Syntax::Auto).contains("function") || reason("count(//a)", Syntax::Auto).contains("CSS"));
+        assert!(reason("./h3", Syntax::Auto).contains("descendant"));
+        assert!(reason("/div", Syntax::Auto).contains("document root"));
+        assert!(reason("//DIV", Syntax::Auto).contains("case-sensitive"));
+        assert!(reason("//*[@id=$pid]", Syntax::Auto).contains("variable"));
+        assert!(reason("//div[@id=foo]", Syntax::Auto).contains("unquoted"));
+        assert!(reason("//span[@x=2]/text()", Syntax::Auto).contains("unquoted"));
         // the unquoted probe must not steal the more specific classifications
-        assert!(reason("//li[@x][position()=last()]").contains("positional"));
-        assert!(reason("//p[@x][text()=\"y\"]").contains("text-content"));
+        assert!(reason("//li[@x][position()=last()]", Syntax::Auto).contains("positional"));
+        assert!(reason("//p[@x][text()=\"y\"]", Syntax::Auto).contains("text-content"));
     }
 
     #[test]
     fn css_categories() {
-        assert!(reason("div:has(a)").contains(":has()"));
-        assert!(reason("div:contains('x')").contains(":contains()"));
-        assert!(reason("li:nth-last-child(2)").contains("nth"));
-        assert!(reason("li:last-child").contains("position"));
-        assert!(reason("div:not(a b)").contains("combinator argument"));
-        assert!(reason("svg|rect").contains("namespace"));
-        assert!(reason("div::before").contains("pseudo-element"));
-        assert!(reason("div:hover").contains("pseudo"));
+        assert!(reason("div:has(a)", Syntax::Auto).contains(":has()"));
+        assert!(reason("div:contains('x')", Syntax::Auto).contains(":contains()"));
+        assert!(reason("li:nth-last-child(2)", Syntax::Auto).contains("nth"));
+        assert!(reason("li:last-child", Syntax::Auto).contains("position"));
+        assert!(reason("div:not(a b)", Syntax::Auto).contains("combinator argument"));
+        assert!(reason("svg|rect", Syntax::Auto).contains("namespace"));
+        assert!(reason("div::before", Syntax::Auto).contains("pseudo-element"));
+        assert!(reason("div:hover", Syntax::Auto).contains("pseudo"));
     }
 
     /// The three mechanisms that empty a comma group are named separately, and the leading clause stays
@@ -393,26 +416,26 @@ mod tests {
     /// would give every column its own bucket and hide the shape of the gap.
     #[test]
     fn comma_group_causes_are_disaggregated() {
-        let bad_member = reason("h1::text, div:hover");
+        let bad_member = reason("h1::text, div:hover", Syntax::Auto);
         assert!(bad_member.contains("member is itself unsupported"), "{bad_member}");
         assert!(bad_member.contains("pseudo"), "{bad_member}");
         assert!(!bad_member.split(';').next().unwrap().contains("div:hover"), "{bad_member}");
 
-        let deferred = reason("h1::text, li:last-child::text");
+        let deferred = reason("h1::text, li:last-child::text", Syntax::Auto);
         assert!(deferred.contains("deferred-close"), "{deferred}");
         assert!(!deferred.split(';').next().unwrap().contains("li:last-child"), "{deferred}");
 
-        assert!(reason("b, b::text").contains("mixes an element"), "{}", reason("b, b::text"));
+        assert!(reason("b, b::text", Syntax::Auto).contains("mixes an element"), "{}", reason("b, b::text", Syntax::Auto));
 
         // A comma inside a functional pseudo is an argument list, not a group: the parser's own splitter
         // says so, and the `:is()` shape rules are the right explanation here.
-        assert!(reason("div:is(.a .b, .c)").contains(":is()"));
+        assert!(reason("div:is(.a .b, .c)", Syntax::Auto).contains(":is()"));
     }
 
     #[test]
     fn generic_fallbacks_do_not_panic() {
         for q in ["", "   ", ">>>", "[[[", "div >>> span", "//", "./", ".//"] {
-            let _ = reason(q);
+            let _ = reason(q, Syntax::Auto);
         }
     }
 }

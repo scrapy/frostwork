@@ -38,7 +38,7 @@ pub type GroupRows = Vec<Vec<Vec<String>>>;
 /// sniffed (BOM -> `<meta>` -> UTF-8). Structural tokenization runs on raw bytes for every
 /// ASCII-compatible encoding; only the small emitted values are decoded with the resolved encoding.
 /// UTF-16LE/BE are transcoded to UTF-8 up front (rare).
-pub fn extract(html: &[u8], queries: &[String], encoding: Option<&str>) -> Vec<Vec<String>> {
+pub fn extract<Q: AsQuery>(html: &[u8], queries: &[Q], encoding: Option<&str>) -> Vec<Vec<String>> {
     extract_grouped(html, queries, &[], encoding).0
 }
 
@@ -46,25 +46,96 @@ pub fn extract(html: &[u8], queries: &[String], encoding: Option<&str>) -> Vec<V
 /// selector **scoped to that element** (descendant-or-self), all in the same streaming pass. The
 /// subfield names are carried for the caller's convenience; the engine keys sub-columns positionally.
 #[derive(Clone, Debug)]
-pub struct GroupQuery {
-    pub container: String,
-    pub subfields: Vec<(String, String)>, // (name, selector)
+pub struct GroupQuery<Q = String> {
+    pub container: Q,
+    pub subfields: Vec<(String, Q)>, // (name, selector)
 }
 
-/// Is `qt` an XPath query (absolute/`.`-rooted path, or a `normalize-space(...)` wrapper) rather than
-/// CSS? The one routing rule, shared by [`compile_query`] / [`compile_one`] and by [`diagnostics`] —
-/// an explainer that classified a query differently from the compiler would name the wrong cause.
-pub(crate) fn is_xpath(qt: &str) -> bool {
-    qt.starts_with('/') || qt.starts_with("./") || qt.starts_with("normalize-space(")
+/// The grammar a query string is written in. `Auto` applies the routing rule in [`is_xpath`]; the
+/// other two bypass it, so a relative XPath step such as `h1` reaches the XPath compiler (which
+/// refuses it) instead of being read as a CSS type selector and matching every `<h1>`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Syntax {
+    #[default]
+    Auto,
+    Css,
+    XPath,
+}
+
+/// A query string with its grammar declared. A plain `String`/`&str` in the same position is the
+/// same query under [`Syntax::Auto`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Query {
+    pub text: String,
+    pub syntax: Syntax,
+}
+
+impl Query {
+    pub fn new(text: impl Into<String>, syntax: Syntax) -> Query {
+        Query { text: text.into(), syntax }
+    }
+}
+
+/// What the schema entry points accept as a query: a `str`/`String`, routed by [`Syntax::Auto`], or a
+/// [`Query`] carrying its own syntax.
+pub trait AsQuery {
+    fn text(&self) -> &str;
+    fn syntax(&self) -> Syntax {
+        Syntax::Auto
+    }
+}
+
+impl AsQuery for str {
+    fn text(&self) -> &str {
+        self
+    }
+}
+
+impl AsQuery for String {
+    fn text(&self) -> &str {
+        self
+    }
+}
+
+impl AsQuery for Query {
+    fn text(&self) -> &str {
+        &self.text
+    }
+    fn syntax(&self) -> Syntax {
+        self.syntax
+    }
+}
+
+impl<T: AsQuery + ?Sized> AsQuery for &T {
+    fn text(&self) -> &str {
+        (**self).text()
+    }
+    fn syntax(&self) -> Syntax {
+        (**self).syntax()
+    }
+}
+
+/// Is `qt` an XPath query rather than CSS? Under [`Syntax::Auto`] that means an absolute/`.`-rooted
+/// path or a `normalize-space(...)` wrapper. The one routing rule, shared by [`compile_query`] /
+/// [`compile_one`] and by [`diagnostics`] — an explainer that classified a query differently from the
+/// compiler would name the wrong cause.
+pub(crate) fn is_xpath(qt: &str, syntax: Syntax) -> bool {
+    match syntax {
+        Syntax::Auto => {
+            qt.starts_with('/') || qt.starts_with("./") || qt.starts_with("normalize-space(")
+        }
+        Syntax::Css => false,
+        Syntax::XPath => true,
+    }
 }
 
 /// Compile a single query string to one `Selector` (CSS first-member, or downward XPath); `None` if
 /// unsupported. Used for group containers and sub-fields (MVP: no comma groups there). A
 /// `normalize-space(...)` value is rejected here — it is a flat-query terminal, not a container/
 /// sub-field selector (the grouped paths don't route its scalar output).
-fn compile_one(q: &str) -> Option<Selector> {
+fn compile_one(q: &str, syntax: Syntax) -> Option<Selector> {
     let qt = q.trim();
-    if is_xpath(qt) {
+    if is_xpath(qt, syntax) {
         match xpath::compile(qt) {
             Some(s) if matches!(s.terminal, selector::Terminal::NormalizeSpace(_)) => None,
             other => other,
@@ -80,10 +151,13 @@ fn compile_one(q: &str) -> Option<Selector> {
 }
 
 /// Group-relative XPath uses an explicit context depth on the first compound.
-fn compile_sub(q: &str) -> Option<Selector> {
+fn compile_sub(q: &str, syntax: Syntax) -> Option<Selector> {
     let qt = q.trim();
+    if syntax == Syntax::Css {
+        return compile_one(q, syntax);
+    }
     let (mut selector, depth) = if qt == "." {
-        (compile_one("*")?, 0)
+        (compile_one("*", Syntax::Css)?, 0)
     } else if qt == "text()" || qt == "./text()" {
         (xpath::compile("//*/text()")?, 0)
     } else if qt == ".//text()" {
@@ -93,9 +167,9 @@ fn compile_sub(q: &str) -> Option<Selector> {
     } else if let Some(name) = qt.strip_prefix("./@").or_else(|| qt.strip_prefix('@')) {
         (xpath::compile(&format!("//*/@{name}"))?, 0)
     } else if qt.starts_with("./") && !qt.starts_with(".//") {
-        (compile_one(&format!(".//{}", &qt[2..]))?, 1)
+        (compile_one(&format!(".//{}", &qt[2..]), Syntax::XPath)?, 1)
     } else {
-        return compile_one(q);
+        return compile_one(q, syntax);
     };
     selector.strict_desc = false;
     selector.context_depth = Some(depth);
@@ -105,11 +179,10 @@ fn compile_sub(q: &str) -> Option<Selector> {
 /// Compile a flat query string to its member selectors (all sharing one output column); empty if
 /// unsupported. CSS comma groups and XPath unions / `or`-expansions both yield multiple members. The
 /// shared front-end for [`extract_grouped`] and [`budget_usage`].
-fn compile_query(q: &str) -> Vec<Selector> {
+fn compile_query(q: &str, syntax: Syntax) -> Vec<Selector> {
     let qt = q.trim();
-    // XPath (absolute / `.`-rooted path, or a `normalize-space(...)` wrapper) compiles to the same
-    // Selector model; else CSS.
-    if is_xpath(qt) {
+    // XPath compiles to the same Selector model; else CSS.
+    if is_xpath(qt, syntax) {
         xpath::compile_members(qt)
     } else {
         selector::parse_list(q)
@@ -120,15 +193,18 @@ fn compile_query(q: &str) -> Vec<Selector> {
 /// a schema — [`budget_usage`], [`audit_schema`], [`Plan::compile`] — goes through here, so all three
 /// necessarily agree on which selectors compiled: an audit that routed a query differently from the
 /// `Plan` that runs it would promise support for a column that comes back empty.
-fn compile_schema(
-    queries: &[String],
-    groups: &[GroupQuery],
+fn compile_schema<Q: AsQuery>(
+    queries: &[Q],
+    groups: &[GroupQuery<Q>],
 ) -> (Vec<Vec<Selector>>, Vec<matcher::GroupInput>) {
-    let flat = queries.iter().map(|q| compile_query(q)).collect();
+    let flat = queries.iter().map(|q| compile_query(q.text(), q.syntax())).collect();
     let grouped = groups
         .iter()
         .map(|g| {
-            (compile_one(&g.container), g.subfields.iter().map(|(_, sel)| compile_sub(sel)).collect())
+            (
+                compile_one(g.container.text(), g.container.syntax()),
+                g.subfields.iter().map(|(_, sel)| compile_sub(sel.text(), sel.syntax())).collect(),
+            )
         })
         .collect();
     (flat, grouped)
@@ -152,7 +228,7 @@ pub fn detect_encoding(html: &[u8], label: Option<&str>) -> &'static str {
 /// The `(member-selector, sibling-bit)` demand of a schema. A caller
 /// that would rather fail loud than get silently-empty columns compares this against
 /// [`MAX_MEMBERS`] / [`MAX_SIB_BITS`]; the Python binding raises `ValueError`.
-pub fn budget_usage(queries: &[String], groups: &[GroupQuery]) -> (usize, usize) {
+pub fn budget_usage<Q: AsQuery>(queries: &[Q], groups: &[GroupQuery<Q>]) -> (usize, usize) {
     let (flat, grouped) = compile_schema(queries, groups);
     matcher::budget_usage(&flat, &grouped)
 }
@@ -182,10 +258,10 @@ pub fn budget_usage(queries: &[String], groups: &[GroupQuery]) -> (usize, usize)
 /// A routed query is uniform on the node-vs-scalar axis: [`compile_query`]'s comma/union rule refuses a
 /// mix of outer-HTML and value terminals (deferred captures cannot interleave with streamed values in
 /// document order), so the first member's terminal settles it for the whole query.
-pub fn selector_terminals(queries: &[String]) -> Vec<Option<&'static str>> {
+pub fn selector_terminals<Q: AsQuery>(queries: &[Q]) -> Vec<Option<&'static str>> {
     queries
         .iter()
-        .map(|q| compile_query(q).first().map(|s| terminal_name(&s.terminal)))
+        .map(|q| compile_query(q.text(), q.syntax()).first().map(|s| terminal_name(&s.terminal)))
         .collect()
 }
 
@@ -207,11 +283,11 @@ const FRAME_NAMES: [&str; 3] = ["html", "head", "body"];
 /// Two rules, both conservative. A synthesized frame carries no attributes (see [`matcher::frame`]), so a
 /// compound with an id/class/attribute cannot match one. And `:not()`, positions and `:has()` only NARROW
 /// what matches, so ignoring them over-reports the frame case — a refusal rather than a wrong node.
-pub fn selector_node_identity(queries: &[String]) -> Vec<(Option<String>, bool)> {
+pub fn selector_node_identity<Q: AsQuery>(queries: &[Q]) -> Vec<(Option<String>, bool)> {
     queries
         .iter()
         .map(|q| {
-            let members = compile_query(q);
+            let members = compile_query(q.text(), q.syntax());
             if members.is_empty() {
                 return (None, true); // does not compile: fail closed on both axes
             }
@@ -277,21 +353,21 @@ impl Support {
 /// compiler's: a reverse selector parses but is routed/dropped inside `CompiledSchema::compile` (a
 /// subtree/comma-grouped/ancestor reverse yields an empty column), so we ask the compiled schema whether
 /// column 0 ended up live rather than trusting parse success.
-pub fn flat_query_support(q: &str) -> Support {
-    let members = compile_query(q);
+pub fn flat_query_support(q: &(impl AsQuery + ?Sized)) -> Support {
+    let members = compile_query(q.text(), q.syntax());
     let supported = !members.is_empty()
         && matcher::CompiledSchema::compile(std::slice::from_ref(&members), &[]).flat_col_supported(0);
     if supported {
         Support::Supported
     } else {
-        Support::Unsupported(diagnostics::reason(q))
+        Support::Unsupported(diagnostics::reason(q.text(), q.syntax()))
     }
 }
 
 /// Support of a group CONTAINER selector (single CSS/XPath selector, no comma group). A reverse position
 /// on a container is out of scope (the group would never open), so reject it.
-pub fn container_support(q: &str) -> Support {
-    let input: Vec<matcher::GroupInput> = vec![(compile_one(q), Vec::new())];
+pub fn container_support(q: &(impl AsQuery + ?Sized)) -> Support {
+    let input: Vec<matcher::GroupInput> = vec![(compile_one(q.text(), q.syntax()), Vec::new())];
     let schema = matcher::CompiledSchema::compile(&[], &input);
     if schema.group_container_routed(0) {
         Support::Supported
@@ -300,24 +376,24 @@ pub fn container_support(q: &str) -> Support {
     }
 }
 
-fn group_container_reason(q: &str) -> String {
+fn group_container_reason(q: &(impl AsQuery + ?Sized)) -> String {
     if let Some(reason) = group_shape_reason(q) {
         reason
-    } else if compile_one(q).is_some() {
+    } else if compile_one(q.text(), q.syntax()).is_some() {
         "selector requires deferred-close matching, which is unsupported for a grouped container \
          (empty group)"
             .to_string()
     } else {
-        diagnostics::reason(q)
+        diagnostics::reason(q.text(), q.syntax())
     }
 }
 
 /// Support of a grouped SUB-FIELD selector. Stricter than a container: a sub-field must be a single
 /// segment (no sibling `+`/`~`), matching the `Many`/`One` MVP (see `matcher::SubSel`); a reverse
 /// position inside a group is also out of scope (empty column).
-pub fn subfield_support(q: &str) -> Support {
-    let container = compile_one("*");
-    let input: Vec<matcher::GroupInput> = vec![(container, vec![compile_sub(q)])];
+pub fn subfield_support(q: &(impl AsQuery + ?Sized)) -> Support {
+    let container = compile_one("*", Syntax::Css);
+    let input: Vec<matcher::GroupInput> = vec![(container, vec![compile_sub(q.text(), q.syntax())])];
     let schema = matcher::CompiledSchema::compile(&[], &input);
     if schema.group_sub_routed(0, 0) {
         Support::Supported
@@ -326,27 +402,27 @@ pub fn subfield_support(q: &str) -> Support {
     }
 }
 
-fn group_sub_reason(q: &str) -> String {
+fn group_sub_reason(q: &(impl AsQuery + ?Sized)) -> String {
     if let Some(reason) = group_shape_reason(q) {
         reason
-    } else if compile_sub(q).is_some_and(|s| {
+    } else if compile_sub(q.text(), q.syntax()).is_some_and(|s| {
         s.combs
             .iter()
             .any(|c| matches!(c, selector::Comb::Adjacent | selector::Comb::General))
     }) {
         "sibling combinator (`+`/`~`) inside a grouped sub-field is unsupported (empty column)"
             .to_string()
-    } else if compile_sub(q).is_some() {
+    } else if compile_sub(q.text(), q.syntax()).is_some() {
         "selector requires deferred-close matching, which is unsupported inside a grouped sub-field \
          (empty column)"
             .to_string()
     } else {
-        diagnostics::reason(q)
+        diagnostics::reason(q.text(), q.syntax())
     }
 }
 
-fn group_shape_reason(q: &str) -> Option<String> {
-    let members = compile_query(q);
+fn group_shape_reason(q: &(impl AsQuery + ?Sized)) -> Option<String> {
+    let members = compile_query(q.text(), q.syntax());
     if members
         .iter()
         .any(|s| matches!(s.terminal, selector::Terminal::NormalizeSpace(_)))
@@ -395,7 +471,7 @@ impl SchemaAudit {
 
 /// Audit a schema (same shape [`extract_grouped`] accepts) without touching any HTML: report which
 /// selectors are supported (with advisory reasons for those that are not) and the budget usage.
-pub fn audit_schema(queries: &[String], groups: &[GroupQuery]) -> SchemaAudit {
+pub fn audit_schema<Q: AsQuery>(queries: &[Q], groups: &[GroupQuery<Q>]) -> SchemaAudit {
     // Compile ONCE and derive every support verdict from the exact routes extraction will use. This
     // prevents the audit/strict-mode logic from drifting from matcher eligibility rules (notably the
     // deferred `:has` / text-predicate exclusions in grouped containers and sub-fields).
@@ -410,7 +486,7 @@ pub fn audit_schema(queries: &[String], groups: &[GroupQuery]) -> SchemaAudit {
                 if schema.flat_col_routed(i) {
                     Support::Supported
                 } else {
-                    Support::Unsupported(diagnostics::reason(q))
+                    Support::Unsupported(diagnostics::reason(q.text(), q.syntax()))
                 }
             })
             .collect(),
@@ -584,7 +660,7 @@ pub struct Plan {
 
 impl Plan {
     /// Compile `queries` + `groups` (the same shapes [`extract_grouped`] accepts) once for reuse.
-    pub fn compile(queries: &[String], groups: &[GroupQuery]) -> Plan {
+    pub fn compile<Q: AsQuery>(queries: &[Q], groups: &[GroupQuery<Q>]) -> Plan {
         Self::compile_first_only(queries, groups, &[])
     }
 
@@ -601,7 +677,11 @@ impl Plan {
     /// See `matcher::CompiledSchema::arm_early_exit` for the narrower whole-scan early-exit conditions.
     /// `&[]` — what [`compile`](Plan::compile) passes — arms nothing, which is why plain
     /// [`extract`]/[`extract_grouped`], whose contract is EVERY value, are unaffected.
-    pub fn compile_first_only(queries: &[String], groups: &[GroupQuery], first_only: &[bool]) -> Plan {
+    pub fn compile_first_only<Q: AsQuery>(
+        queries: &[Q],
+        groups: &[GroupQuery<Q>],
+        first_only: &[bool],
+    ) -> Plan {
         let (flat, grouped) = compile_schema(queries, groups);
         let budget = matcher::budget_usage(&flat, &grouped);
         let mut schema = matcher::CompiledSchema::compile(&flat, &grouped);
@@ -632,10 +712,10 @@ impl Plan {
 /// (`[group][row][subfield][value]`). The caller (the Python/Rust `Page` layer) applies per-field
 /// cardinality (first/all/join) and, for `One`, takes the first row. This is the one-shot form; to run
 /// the same selectors over many pages, compile a [`Plan`] once and reuse it.
-pub fn extract_grouped(
+pub fn extract_grouped<Q: AsQuery>(
     html: &[u8],
-    queries: &[String],
-    groups: &[GroupQuery],
+    queries: &[Q],
+    groups: &[GroupQuery<Q>],
     encoding: Option<&str>,
 ) -> (FlatColumns, Vec<GroupRows>) {
     Plan::compile(queries, groups).extract(html, encoding)
@@ -755,6 +835,43 @@ mod tests {
         assert_eq!(selector_node_identity(&q), want);
     }
 
+    /// A declared syntax bypasses the prefix rule: XPath `h1` is a relative step the XPath compiler
+    /// refuses, where the CSS reading would have answered with every `<h1>`; CSS `/html` is not a
+    /// selector, where the XPath reading would have answered with the root element.
+    #[test]
+    fn a_declared_syntax_overrides_prefix_routing() {
+        let html = b"<html><body><h1>T</h1></body></html>";
+        let auto = ["h1".to_string(), "/html".to_string()];
+        assert_eq!(extract(html, &auto, None), vec![v(&["<h1>T</h1>"]), v(&["<html><body><h1>T</h1></body></html>"])]);
+        let declared = [Query::new("h1", Syntax::XPath), Query::new("/html", Syntax::Css)];
+        assert_eq!(extract(html, &declared, None), vec![v(&[]), v(&[])]);
+        let audit = audit_schema(&declared, &[]);
+        assert_eq!(audit.flat.len(), 2);
+        assert!(audit.flat[0].reason().unwrap().contains("relative"));
+        assert!(audit.flat[1].reason().unwrap().contains("CSS"));
+        assert_eq!(selector_terminals(&declared), vec![None, None]);
+        assert_eq!(
+            audit_schema(&[Query::new("//h1/text()", Syntax::XPath), Query::new("h1::text", Syntax::Css)], &[]).flat,
+            vec![Support::Supported, Support::Supported]
+        );
+        // Grouped: the container and a sub-field each carry their own syntax.
+        let group = GroupQuery {
+            container: Query::new("//body", Syntax::XPath),
+            subfields: vec![
+                ("bare".to_string(), Query::new("h1", Syntax::XPath)),
+                ("desc".to_string(), Query::new(".//h1/text()", Syntax::XPath)),
+                ("css".to_string(), Query::new("h1::text", Syntax::Css)),
+            ],
+        };
+        let audit = audit_schema(&[], std::slice::from_ref(&group));
+        assert!(audit.groups[0].container.is_supported());
+        assert!(!audit.groups[0].subfields[0].is_supported());
+        assert!(audit.groups[0].subfields[1].is_supported());
+        assert!(audit.groups[0].subfields[2].is_supported());
+        let rows = extract_grouped(html, &[], &[group], None).1.pop().unwrap();
+        assert_eq!(rows, vec![vec![v(&[]), v(&["T"]), v(&["T"])]]);
+    }
+
     #[test]
     fn audit_schema_reports_support_and_budget() {
         let queries = vec![
@@ -799,14 +916,14 @@ mod tests {
     fn grouped_audit_uses_matcher_routes() {
         let groups = vec![
             GroupQuery {
-                container: "div:has(a)".into(),
-                subfields: vec![("x".into(), "div::text".into())],
+                container: "div:has(a)",
+                subfields: vec![("x".into(), "div::text")],
             },
             GroupQuery {
-                container: ".root".into(),
+                container: ".root",
                 subfields: vec![
-                    ("has".into(), "p:has(a)::text".into()),
-                    ("text".into(), ".//p[contains(.,\"x\")]/text()".into()),
+                    ("has".into(), "p:has(a)::text"),
+                    ("text".into(), ".//p[contains(.,\"x\")]/text()"),
                 ],
             },
         ];
@@ -861,8 +978,8 @@ mod tests {
         assert_eq!(ex(h, "div:has(a, img) ::text"), v(&["x", "z"]));
         assert_eq!(ex(h, "div:has(a, img) a::text"), v(&["x", "z"]));
         // MIXED relative combinators have no faithful `Has` to build, so they are REPORTED, not guessed
-        assert!(!audit_schema(&["div:has(> a, img)::attr(id)".into()], &[]).ok());
-        assert!(audit_schema(&["div:has(a, img)::attr(id)".into()], &[]).ok());
+        assert!(!audit_schema(&["div:has(> a, img)::attr(id)"], &[]).ok());
+        assert!(audit_schema(&["div:has(a, img)::attr(id)"], &[]).ok());
     }
 
     /// `:not()` takes a selector list too (Selectors 4). `:not(a, b)` is exactly `:not(a):not(b)` — the
@@ -882,8 +999,8 @@ mod tests {
         let av = "<p title=\"x, y\">A</p><p title=z>B</p>";
         assert_eq!(ex(av, "p:not([title=\"x, y\"])::text"), v(&["B"]));
         // an empty member is a syntax error to cssselect, so it is REPORTED rather than ignored
-        assert!(!audit_schema(&["p:not(.a, )::text".into()], &[]).ok());
-        assert!(audit_schema(&["p:not(.a, .b)::text".into()], &[]).ok());
+        assert!(!audit_schema(&["p:not(.a, )::text"], &[]).ok());
+        assert!(audit_schema(&["p:not(.a, .b)::text"], &[]).ok());
     }
 
     /// The Selectors 4 case-sensitivity flag, `[a=v i]`. cssselect rejects it outright, so the oracle is
@@ -924,7 +1041,7 @@ mod tests {
         assert_eq!(ex(h, "[href^=\"\" i]::attr(id)"), Vec::<String>::new());
         // `i` is only a flag after whitespace: `[type=SubMiti]` is a five-character value
         assert_eq!(ex(h, "[type=SubMiti]::attr(id)"), Vec::<String>::new());
-        assert!(audit_schema(&["[type=submit i]::attr(id)".into()], &[]).ok());
+        assert!(audit_schema(&["[type=submit i]::attr(id)"], &[]).ok());
     }
 
     #[test]
@@ -1079,16 +1196,16 @@ mod tests {
         // REFUSED, because an offset would not name one node. Two different attributes of one element
         // are two nodes in lxml's union (it returns both, in source order) sharing the element's offset,
         // so a `(col, offset)` dedupe would drop one.
-        assert!(!audit_schema(&["p::attr(id), p:contains(\"alpha\")::attr(class)".into()], &[]).ok());
-        assert!(!audit_schema(&["p::text, p:contains(\"alpha\")::attr(id)".into()], &[]).ok());
+        assert!(!audit_schema(&["p::attr(id), p:contains(\"alpha\")::attr(class)"], &[]).ok());
+        assert!(!audit_schema(&["p::text, p:contains(\"alpha\")::attr(id)"], &[]).ok());
         // and a member whose value comes from a SUBTREE re-scan carries no document offset at all
-        assert!(!audit_schema(&["h2::text, div:contains(\"alpha\") ::text".into()], &[]).ok());
-        assert!(!audit_schema(&["h2::text, div:contains(\"alpha\") a::attr(href)".into()], &[]).ok());
+        assert!(!audit_schema(&["h2::text, div:contains(\"alpha\") ::text"], &[]).ok());
+        assert!(!audit_schema(&["h2::text, div:contains(\"alpha\") a::attr(href)"], &[]).ok());
         // the other deferred tiers stay out of a comma group
-        assert!(!audit_schema(&["h2::text, div:has(a) p::text".into()], &[]).ok());
-        assert!(!audit_schema(&["h2::text, li:last-child::text".into()], &[]).ok());
+        assert!(!audit_schema(&["h2::text, div:has(a) p::text"], &[]).ok());
+        assert!(!audit_schema(&["h2::text, li:last-child::text"], &[]).ok());
         // every refusal above is REPORTED, so none of them is a silently empty column
-        assert!(audit_schema(&["h2::text, p:contains(\"alpha\")::text".into()], &[]).ok());
+        assert!(audit_schema(&["h2::text, p:contains(\"alpha\")::text"], &[]).ok());
     }
 
     /// `:has()` and text-content predicates share the reverse tier's span re-scan, so their values may
@@ -1909,19 +2026,19 @@ mod tests {
     fn encoding_legacy_and_sniff() {
         // windows-1252 (é = 0xE9), explicit label
         assert_eq!(
-            extract(b"<p class=\"c\">caf\xe9</p>", &["p::text".into()], Some("windows-1252"))[0],
+            extract(b"<p class=\"c\">caf\xe9</p>", &["p::text"], Some("windows-1252"))[0],
             v(&["café"])
         );
         // Shift_JIS (日本 = 0x93FA 0x967B), explicit label, in an attribute value too
         assert_eq!(
-            extract(b"<a title=\"\x93\xfa\x96\x7b\">x</a>", &["a::attr(title)".into()], Some("shift_jis"))[0],
+            extract(b"<a title=\"\x93\xfa\x96\x7b\">x</a>", &["a::attr(title)"], Some("shift_jis"))[0],
             v(&["日本"])
         );
         // <meta charset> sniff (no label)
         assert_eq!(
             extract(
                 b"<html><head><meta charset=windows-1252></head><body><p>caf\xe9</p></body></html>",
-                &["p::text".into()],
+                &["p::text"],
                 None,
             )[0],
             v(&["café"])
@@ -1937,19 +2054,19 @@ mod tests {
         // windows-1252: `data-año` is `data-a\xf1o`, one byte where UTF-8 writes two
         let w1252 = b"<p data-a\xf1o=\"v\">t</p>";
         assert_eq!(
-            extract(w1252, &["[data-año]::text".into()], Some("windows-1252"))[0],
+            extract(w1252, &["[data-año]::text"], Some("windows-1252"))[0],
             v(&["t"])
         );
         // the predicate's VALUE and the `::attr()` terminal read the same materialized name
         assert_eq!(
-            extract(w1252, &["[data-año=\"v\"]::attr(data-año)".into()], Some("windows-1252"))[0],
+            extract(w1252, &["[data-año=\"v\"]::attr(data-año)"], Some("windows-1252"))[0],
             v(&["v"])
         );
         // shift_jis: a name whose bytes hold no ASCII at all
         assert_eq!(
             extract(
                 "<p 属性=\"v\">t</p>".as_bytes(),
-                &["[属性]::text".into()],
+                &["[属性]::text"],
                 Some("utf-8"),
             )[0],
             v(&["t"])
@@ -1957,14 +2074,14 @@ mod tests {
         assert_eq!(
             extract(
                 &encoding_rs::SHIFT_JIS.encode("<p 属性=\"v\">t</p>").0,
-                &["[属性]::text".into()],
+                &["[属性]::text"],
                 Some("shift_jis"),
             )[0],
             v(&["t"])
         );
         // a name the page spells in a DIFFERENT legacy encoding still must not match
         assert_eq!(
-            extract(w1252, &["[data-año]::text".into()], Some("shift_jis"))[0],
+            extract(w1252, &["[data-año]::text"], Some("shift_jis"))[0],
             v(&[])
         );
     }
@@ -1980,12 +2097,12 @@ mod tests {
         let body = b"<p>\x1b$B3t<02q<R\x1b(B</p><div>after</div>";
         assert!(body.windows(2).any(|w| w == b"<R"), "vector must contain the ambiguous pair");
         assert_eq!(
-            extract(body, &["p::text".into()], Some("iso-2022-jp"))[0],
+            extract(body, &["p::text"], Some("iso-2022-jp"))[0],
             v(&["株式会社"])
         );
         // and nothing downstream was reshaped by the phantom tag
         assert_eq!(
-            extract(body, &["div::text".into(), "r::text".into()], Some("iso-2022-jp")),
+            extract(body, &["div::text", "r::text"], Some("iso-2022-jp")),
             vec![v(&["after"]), v(&[])]
         );
     }
@@ -1996,7 +2113,7 @@ mod tests {
             body.push(c as u8);
             body.push(0);
         }
-        assert_eq!(extract(&body, &["p::text".into()], None)[0], v(&["hi"]));
+        assert_eq!(extract(&body, &["p::text"], None)[0], v(&["hi"]));
     }
 
     /// Raw NUL is deleted from the WHOLE document before tokenizing, as Parsel/w3lib do. Dropping it
@@ -2031,8 +2148,8 @@ mod tests {
             body.push(c as u8);
             body.push(0);
         }
-        assert_eq!(extract(&body, &["div::text".into()], None)[0], v(&["hi"]));
-        assert_eq!(extract(&body, &["div#ab::text".into()], None)[0], v(&["hi"]));
+        assert_eq!(extract(&body, &["div::text"], None)[0], v(&["hi"]));
+        assert_eq!(extract(&body, &["div#ab::text"], None)[0], v(&["hi"]));
     }
 
     #[test]
@@ -2496,12 +2613,12 @@ mod tests {
         // libxml2 removes ONLY the leading document BOM; a U+FEFF inside a text node is real content
         // (encoding_rs' `decode` would strip it per-value — the bug this guards against).
         let lead = b"\xEF\xBB\xBF<p>x</p>"; // BOM at doc start -> dropped
-        assert_eq!(extract(lead, &["p::text".into()], None)[0], v(&["x"]));
+        assert_eq!(extract(lead, &["p::text"], None)[0], v(&["x"]));
         let mid = b"<p>\xEF\xBB\xBFx</p>"; // U+FEFF mid-text -> preserved
-        assert_eq!(extract(mid, &["p::text".into()], None)[0], v(&["\u{FEFF}x"]));
+        assert_eq!(extract(mid, &["p::text"], None)[0], v(&["\u{FEFF}x"]));
         // and in an attribute value
         let attr = "<a title=\"\u{FEFF}hi\">t</a>".as_bytes();
-        assert_eq!(extract(attr, &["a::attr(title)".into()], None)[0], v(&["\u{FEFF}hi"]));
+        assert_eq!(extract(attr, &["a::attr(title)"], None)[0], v(&["\u{FEFF}hi"]));
     }
     /// An INDENTED BOM still counts as the document BOM, because Parsel parses `text.strip()` — see
     /// [`document_bounds`]. What makes this worth a test rather than a footnote is the size of the
@@ -2575,12 +2692,12 @@ mod tests {
     #[test]
     fn trailing_whitespace_is_not_a_text_node() {
         let doc = b"<select><option>a<option class=c>\n\t ";
-        assert_eq!(extract(doc, &["option::text".into()], None)[0], v(&["a"]));
+        assert_eq!(extract(doc, &["option::text"], None)[0], v(&["a"]));
         // ...and a document that is nothing but whitespace has no content at all
-        assert_eq!(extract(b"  \n ", &["p::text".into()], None)[0], v(&[]));
+        assert_eq!(extract(b"  \n ", &["p::text"], None)[0], v(&[]));
         // non-whitespace at the end is untouched, trailing whitespace INSIDE it too
         let kept = b"<p>a </p>\n";
-        assert_eq!(extract(kept, &["p::text".into()], None)[0], v(&["a "]));
+        assert_eq!(extract(kept, &["p::text"], None)[0], v(&["a "]));
     }
 
     /// VERTICAL TAB is in Python's strip set and not in Rust's `is_ascii_whitespace`. Omitting it here
@@ -2601,7 +2718,7 @@ mod tests {
         assert_eq!(extract(page("\u{0b}\u{feff}").as_bytes(), &q, None), want);
         // trailing, the other end of the same strip: no text node for the last option
         let doc = b"<select><option>a<option class=c>\x0b";
-        assert_eq!(extract(doc, &["option::text".into()], None)[0], v(&["a"]));
+        assert_eq!(extract(doc, &["option::text"], None)[0], v(&["a"]));
         // ...but a vertical tab INSIDE the document is ordinary character data, not whitespace to
         // strip and not HTML whitespace either — it must survive in the value verbatim.
         assert_eq!(ex("<p>a\u{0b}b</p>", "p::text"), v(&["a\u{0b}b"]));
@@ -2613,7 +2730,7 @@ mod tests {
     #[test]
     fn nul_is_deleted_after_the_ends_are_trimmed() {
         // the NUL is the last byte, so it blocks the strip and the space before it survives
-        assert_eq!(extract(b"<option>x \x00", &["option::text".into()], None)[0], v(&["x "]));
+        assert_eq!(extract(b"<option>x \x00", &["option::text"], None)[0], v(&["x "]));
         // and here it blocks the strip that would otherwise promote the U+FEFF to offset 0, leaving it
         // a character — which opens the body, so the head is gone
         let doc = b"\x00 \xEF\xBB\xBF<html a=1><head><title>T</title></head><body><p>p</p>";

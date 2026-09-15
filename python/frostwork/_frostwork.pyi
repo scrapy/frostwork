@@ -5,24 +5,28 @@ one-pass primitives crossing the PyO3 boundary. `html` must be `bytes` (or a `by
 as web-poet's `HttpResponseBody`); the pure-Python wrappers accept other bytes-likes and `str`.
 """
 
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional, Sequence, Tuple, Union
+
+Query = Union[str, Tuple[str, Optional[str]]]
+"""A selector string, routed as CSS or XPath by its prefix, or ``(selector, syntax)`` with ``syntax``
+one of ``"css"``, ``"xpath"`` or ``None`` (auto)."""
 
 def extract(
-    html: Union[bytes, str], queries: List[str], encoding: Optional[str] = ...
+    html: Union[bytes, str], queries: Sequence[Query], encoding: Optional[str] = ...
 ) -> List[List[str]]:
     """One streaming pass: one value-column per query, in query order."""
 
 def extract_grouped(
     html: Union[bytes, str],
-    flat_queries: List[str],
-    groups: List[Tuple[str, List[Tuple[str, str]]]],
+    flat_queries: Sequence[Query],
+    groups: Sequence[Tuple[Query, Sequence[Tuple[str, Query]]]],
     encoding: Optional[str] = ...,
 ) -> Tuple[List[List[str]], List[List[List[List[str]]]]]:
     """One streaming pass returning ``(flat_columns, grouped)`` — ``grouped[g][row][subfield][value]``."""
 
 def audit_schema(
-    flat_queries: List[str],
-    groups: List[Tuple[str, List[Tuple[str, str]]]],
+    flat_queries: Sequence[Query],
+    groups: Sequence[Tuple[Query, Sequence[Tuple[str, Query]]]],
 ) -> Tuple[
     List[Tuple[bool, Optional[str]]],
     List[Tuple[Tuple[bool, Optional[str]], List[Tuple[bool, Optional[str]]]]],
@@ -30,13 +34,13 @@ def audit_schema(
 ]:
     """Support/reason per selector plus ``(members, max_members, sib_bits, max_sib_bits)`` — no HTML parsed."""
 
-def selector_terminals(queries: List[str]) -> List[Optional[str]]:
+def selector_terminals(queries: Sequence[Query]) -> List[Optional[str]]:
     """The value terminal each query produces: ``"text"``, ``"attr"``, ``"outer"``, ``"normalize-space"``,
     or ``None`` if it does not compile. ``"outer"`` means the column holds the matched element's raw
     source — a NODE reference, not a scalar — which is what ``frostwork.webpoet`` re-parses before handing
     a field to a processor. Derived from the compiler, so it cannot drift from how a query is routed."""
 
-def selector_node_identity(queries: List[str]) -> List[Tuple[Optional[str], bool]]:
+def selector_node_identity(queries: Sequence[Query]) -> List[Tuple[Optional[str], bool]]:
     """Per query, ``(pinned_tag, can_match_a_synthesized_frame)`` — the matched-node identity an
     outer-HTML value cannot always carry. ``pinned_tag`` is the tag name every match must have (the
     subject's name test, when every comma/union member agrees) or ``None``; the flag is ``True`` when a
@@ -56,8 +60,8 @@ class Plan:
 
     def __init__(
         self,
-        flat_queries: List[str],
-        groups: List[Tuple[str, List[Tuple[str, str]]]],
+        flat_queries: Sequence[Query],
+        groups: Sequence[Tuple[Query, Sequence[Tuple[str, Query]]]],
         first_only: Optional[List[bool]] = ...,
     ) -> None:
         """``first_only[c]`` declares that flat column ``c``'s consumer keeps only the FIRST value. When
