@@ -90,9 +90,9 @@ def _query_list(queries) -> List[str]:
 def _check_encoding(html: Bytesish, encoding: Optional[str]) -> Optional[str]:
     """Validate a caller charset label instead of letting the engine silently ignore it.
 
-    The engine accepts WHATWG charset labels; Python codec spellings (``latin-1``, ``utf_8``) are
-    normalized through :mod:`codecs`. A label that names no encoding at all raises rather than
-    silently falling through to BOM/``<meta>`` sniffing, and a non-UTF-8 label combined with
+    The engine accepts WHATWG charset labels; Python codec spellings (``latin-1``, ``utf_8``,
+    ``cp932``) are normalized through :mod:`codecs`. A label that names no encoding at all raises
+    rather than silently falling through to BOM/``<meta>`` sniffing, and a non-UTF-8 label combined with
     already-decoded ``str`` input raises rather than silently double-transcoding.
 
     A label that IS a real encoding but not a WHATWG one is a third case, and it must not raise: the
@@ -110,15 +110,13 @@ def _check_encoding(html: Bytesish, encoding: Optional[str]) -> Optional[str]:
     canonical = _resolve_label(encoding)
     if canonical is None:
         try:
-            python_name = codecs.lookup(encoding).name
+            codecs.lookup(encoding)
         except LookupError:
             raise ValueError(
                 f"frostwork: unknown encoding label {encoding!r} — pass a WHATWG charset label "
                 "(e.g. 'utf-8', 'windows-1252', 'shift_jis') or None to sniff from BOM/<meta>"
             ) from None
-        canonical = _resolve_label(python_name)
-        if canonical is None:
-            return None  # real encoding, not a WHATWG one -> failure, continue (sniff)
+        return None  # real encoding, not a WHATWG one -> failure, continue (sniff)
     if isinstance(html, str) and canonical != "UTF-8":
         raise ValueError(
             f"frostwork: `html` is already-decoded str (tokenized as UTF-8), but "
@@ -165,13 +163,7 @@ def detect_encoding(html: Bytesish, encoding: Optional[str] = None) -> str:
     validation :func:`extract` applies to a *caller's* label is deliberately not repeated here, since
     the question this answers is "what will be used", not "is this input acceptable".
     """
-    label = encoding
-    if label is not None and _resolve_label(label) is None:
-        try:  # a Python codec spelling (`latin-1`, `utf_8`) is normalized the way `extract` does
-            label = codecs.lookup(label).name
-        except LookupError:
-            label = None
-    return _detect_encoding(_as_scan_input(html), label)
+    return _detect_encoding(_as_scan_input(html), encoding)
 
 
 def extract(

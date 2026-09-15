@@ -57,11 +57,32 @@ fn canonical_label(label: &str) -> Option<&'static str> {
 /// mojibake-producing label through. `utf-8-sig` is the case that forces the second `None`: Python
 /// resolves it and WHATWG does not name it, so the label is ignored and the text scanned as UTF-8 —
 /// which is what it is.
+///
+/// Some canonical Python names are WHATWG encodings under a spelling WHATWG does not list:
+/// `codecs.lookup("shift_jis").name` is `cp932`, and that is what `w3lib.encoding.resolve_encoding`
+/// (Scrapy's `response.encoding`) hands over. Those are translated here, in the Python binding, so the
+/// engine itself stays WHATWG-only.
 fn whatwg_via_python_codecs(py: Python<'_>, label: &str) -> Option<&'static str> {
     let codecs = py.import("codecs").ok()?;
     let info = codecs.call_method1("lookup", (label,)).ok()?;
     let name: String = info.getattr("name").ok()?.extract().ok()?;
-    canonical_label(&name)
+    let whatwg = match name.as_str() {
+        "cp932" => "shift_jis",
+        "euc_jp" => "euc-jp",
+        "iso2022_jp" => "iso-2022-jp",
+        "big5hkscs" | "cp950" => "big5",
+        "cp949" | "euc_kr" => "euc-kr",
+        "cp874" => "windows-874",
+        "iso8859-16" => "iso-8859-16",
+        "mac-roman" => "macintosh",
+        "mac-cyrillic" => "x-mac-cyrillic",
+        "utf-16-le" => "utf-16le",
+        "utf-16-be" => "utf-16be",
+        "hz" => "hz-gb-2312",
+        "iso2022_kr" => "iso-2022-kr",
+        other => other,
+    };
+    canonical_label(whatwg)
 }
 
 /// The document to scan, as Python hands it over: raw `bytes` off the wire, or an already-decoded
@@ -129,23 +150,24 @@ impl Html<'_> {
     ///
     /// Resolution has to consult BOTH label universes, or the same argument means different things
     /// through the two entry points. WHATWG defines `iso-8859-1` but not `latin-1`, and Python defines
-    /// `utf_8`/`utf-8-sig`/`U8` which WHATWG does not — so `frostwork.extract` (which normalizes through
-    /// `codecs`) and a direct `Plan` call (which does not go through it, and is the path
-    /// `frostwork.webpoet` uses) would disagree on both sets. `codecs` is consulted only when this
-    /// crate cannot resolve the label itself, so the common path stays inside Rust.
-    fn encoding<'e>(&self, py: Python<'_>, label: Option<&'e str>) -> PyResult<Option<&'e str>> {
+    /// `utf_8`/`utf-8-sig`/`U8`/`cp932` which WHATWG does not — so `frostwork.extract` (which normalizes
+    /// through `codecs`) and a direct `Plan` call (the path `frostwork.webpoet` uses) would disagree on
+    /// both sets. Every Python entry point comes through here, so the engine below sees only the WHATWG
+    /// name, or `None` to sniff. `codecs` is consulted only when this crate cannot resolve the label
+    /// itself, so the common path stays inside Rust.
+    fn encoding(&self, py: Python<'_>, label: Option<&str>) -> PyResult<Option<&'static str>> {
+        let resolved = label.and_then(|l| canonical_label(l).or_else(|| whatwg_via_python_codecs(py, l)));
         let Html::Str(_) = self else {
-            return Ok(label); // bytes: pass the label through, `None` still sniffs
+            return Ok(resolved); // bytes: `None` (no label, or one nothing resolves) still sniffs
         };
-        let Some(l) = label else { return Ok(Some("utf-8")) };
-        let resolved = canonical_label(l).or_else(|| whatwg_via_python_codecs(py, l));
+        let Some(l) = label else { return Ok(Some("UTF-8")) };
         match resolved {
             Some(name) if name != "UTF-8" => Err(PyValueError::new_err(format!(
                 "frostwork: html is already-decoded str (tokenized as UTF-8), but encoding={l:?} \
                  resolves to {name}, which would decode those bytes wrongly — pass the original bytes \
                  with the label, or drop the label."
             ))),
-            _ => Ok(Some("utf-8")),
+            _ => Ok(Some("UTF-8")),
         }
     }
 }
@@ -259,14 +281,15 @@ fn extract_grouped(
     Ok(py.detach(|| crate::extract_grouped(bytes, &flat_queries, &gq, encoding)))
 }
 
-/// Resolve `label` against the engine's charset-label set (WHATWG labels), returning the canonical
-/// encoding name (e.g. `"UTF-8"`, `"windows-1252"`) or `None` if unrecognized. The pure-Python
-/// layer uses this to fail fast on labels the engine would otherwise silently ignore (it would
-/// fall through to BOM/`<meta>` sniffing — a plausible-wrong-decode, which the no-fallback
-/// philosophy forbids surfacing silently).
+/// Resolve `label` the way every Python entry point does — WHATWG labels first, then Python's codec
+/// set ([`whatwg_via_python_codecs`]) — returning the canonical encoding name (e.g. `"UTF-8"`,
+/// `"windows-1252"`) or `None` if nothing names a WHATWG encoding. The pure-Python layer uses this to
+/// fail fast on labels the engine would otherwise silently ignore (it would fall through to
+/// BOM/`<meta>` sniffing — a plausible-wrong-decode, which the no-fallback philosophy forbids
+/// surfacing silently).
 #[pyfunction]
-fn resolve_label(label: &str) -> Option<&'static str> {
-    canonical_label(label)
+fn resolve_label(py: Python<'_>, label: &str) -> Option<&'static str> {
+    canonical_label(label).or_else(|| whatwg_via_python_codecs(py, label))
 }
 
 /// The encoding `extract` would scan this document with, as a WHATWG canonical name. `encoding` is the
@@ -279,8 +302,8 @@ fn resolve_label(label: &str) -> Option<&'static str> {
 #[pyfunction]
 #[pyo3(signature = (html, encoding=None))]
 fn detect_encoding(py: Python<'_>, html: Html<'_>, encoding: Option<&str>) -> PyResult<&'static str> {
+    let encoding = html.encoding(py, encoding)?; // refuses a label that would decode a str wrongly
     if let Html::Str(_) = html {
-        html.encoding(py, encoding)?; // refuses a label that would decode those bytes wrongly
         return Ok("UTF-8");
     }
     Ok(crate::detect_encoding(html.as_bytes(), encoding))

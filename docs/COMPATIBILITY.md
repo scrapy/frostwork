@@ -445,6 +445,12 @@ construction.
   name — the whole resolution above, reachable without extracting anything. Parsel cannot answer it at
   all (`Selector(body=…)` never sniffs), and w3lib answers differently in the places tabulated below. It
   is the same function `extract` runs, not a second opinion.
+
+  The label may be a WHATWG label or the Python codec name of a WHATWG encoding (`cp932`, `euc_jp`,
+  `big5hkscs`, `cp949`, `utf-16-le`, …), which is what `w3lib.encoding.resolve_encoding`, i.e. Scrapy's
+  `response.encoding`, returns from a `Content-Type` header. A label naming a real encoding WHATWG has
+  no equivalent for (`utf-7`, `utf-32`, `cp437`, …) is ignored the way a browser ignores it, "failure,
+  continue": the document is sniffed instead, and `detect_encoding` reports what that landed on.
 - **`frostwork.check` / `frostwork-audit`** answer "will this schema run?" *before* a scrape, per selector,
   with a reason. lxml has no equivalent question to ask — every selector "works", and a wrong one is an
   empty column at runtime. See [PYTHON.md](PYTHON.md) §4 and [MIGRATION.md](MIGRATION.md).
