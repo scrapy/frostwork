@@ -44,7 +44,8 @@ def selector_node_identity(queries: List[str]) -> List[Tuple[Optional[str], bool
     with its CONTENT and names nothing. ``frostwork.webpoet``'s ``.as_node()`` reads both."""
 
 def resolve_label(label: str) -> Optional[str]:
-    """Canonical WHATWG encoding name for ``label`` (e.g. ``"UTF-8"``), or ``None`` if unrecognized."""
+    """Canonical WHATWG encoding name for ``label`` (e.g. ``"UTF-8"``), or ``None`` if neither WHATWG
+    nor Python's codec set names a WHATWG encoding by it."""
 
 def detect_encoding(html: Union[bytes, str], encoding: Optional[str] = ...) -> str:
     """The encoding ``extract`` would scan this document with, as a WHATWG name: BOM → BOM-less UTF-16

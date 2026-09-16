@@ -178,6 +178,71 @@ def test_extract_normalizes_python_codec_spellings():
 
 
 @pytest.mark.parametrize(
+    "python_name,whatwg_label,text",
+    [
+        ("cp932", "shift_jis", "日本"),
+        ("euc_jp", "euc-jp", "日本"),
+        ("iso2022_jp", "iso-2022-jp", "日本"),
+        ("big5hkscs", "big5", "繁體"),
+        ("cp950", "big5", "繁體"),
+        ("cp949", "euc-kr", "한국"),
+        ("euc_kr", "euc-kr", "한국"),
+        ("cp874", "tis-620", "ไทย"),
+        ("iso8859-16", "iso-8859-16", "și"),
+        ("mac-roman", "macintosh", "café"),
+        ("mac-cyrillic", "x-mac-cyrillic", "Привет"),
+        ("utf-16-le", "utf-16le", "日本"),
+        ("utf-16-be", "utf-16be", "日本"),
+    ],
+)
+def test_python_codec_names_of_whatwg_encodings_decode_like_the_label(python_name, whatwg_label, text):
+    """`w3lib.encoding.resolve_encoding` (Scrapy's `response.encoding`, and what `FrostPage` scans with)
+    returns `codecs.lookup(...).name`, which for these encodings is a Python spelling WHATWG does not
+    list. Each must decode exactly as the WHATWG label does, through every entry point, or the label
+    is silently dropped and the values come back as UTF-8 mojibake."""
+    raw = f"<html><body><h1>{text}</h1></body></html>".encode(python_name)
+    want = [[text]]
+    assert frostwork.extract(raw, ["h1::text"], whatwg_label) == want
+    assert frostwork.extract(raw, ["h1::text"], python_name) == want
+    assert _Plan(["h1::text"], []).extract(raw, python_name) == want  # the `FrostPage` path
+    assert frostwork.detect_encoding(raw, python_name) == frostwork.detect_encoding(raw, whatwg_label)
+
+
+def test_every_python_text_codec_is_a_whatwg_encoding_or_declared_not_one():
+    """The universe the label table is asked about is Python's whole codec set, not the names someone
+    thought of. A codec not resolved here is either a WHATWG encoding missing from
+    `encoding::label_encoding` (a header can hand it over and the label would be ignored) or one WHATWG
+    has no equivalent for, listed below so a new Python codec shows up as a failure."""
+    import codecs
+    import encodings
+    import encodings.aliases
+    import pkgutil
+
+    from frostwork._frostwork import resolve_label
+
+    names = set()
+    for alias in [*encodings.aliases.aliases, *encodings.aliases.aliases.values(),
+                  *(m.name for m in pkgutil.iter_modules(encodings.__path__))]:
+        with contextlib.suppress(LookupError):
+            info = codecs.lookup(alias)
+            if info._is_text_encoding:
+                names.add(info.name)
+    unresolved = {n for n in names if resolve_label(n) is None}
+    not_whatwg = {
+        "utf-7", "utf-32", "utf-32-be", "utf-32-le", "utf-8-sig",
+        "johab", "euc_jis_2004", "euc_jisx0213", "shift_jis_2004", "shift_jisx0213",
+        "iso2022_jp_1", "iso2022_jp_2", "iso2022_jp_2004", "iso2022_jp_3", "iso2022_jp_ext",
+        "cp037", "cp1006", "cp1026", "cp1125", "cp1140", "cp273", "cp424", "cp437", "cp500", "cp720",
+        "cp737", "cp775", "cp850", "cp852", "cp855", "cp856", "cp857", "cp858", "cp860", "cp861",
+        "cp862", "cp863", "cp864", "cp865", "cp869", "cp875", "hp-roman8", "koi8-t", "kz1048",
+        "ptcp154", "palmos", "mac-arabic", "mac-croatian", "mac-farsi", "mac-greek", "mac-iceland",
+        "mac-latin2", "mac-romanian", "mac-turkish",
+        "charmap", "idna", "punycode", "raw-unicode-escape", "unicode-escape", "undefined",
+    }
+    assert unresolved == not_whatwg
+
+
+@pytest.mark.parametrize(
     "label,name,doc_name",
     [
         ("windows-1252", "data-año", "data-a\xf1o"),
