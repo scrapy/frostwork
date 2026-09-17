@@ -91,6 +91,60 @@ fn charset_param(content: &str) -> Option<String> {
     Some(rest[..end].to_string())
 }
 
+/// The encoding an HTTP `Content-Type` header declares in its `charset` parameter, or `None` when it
+/// declares none this crate can resolve.
+///
+/// This is the HTTP parameter grammar, not the `<meta http-equiv>` one [`charset_param`] reads, and the
+/// difference that matters is that a quoted-string is OPAQUE: a `charset=` written inside one belongs to
+/// that value and declares nothing. A header that says something unusable has still said it, so the
+/// FIRST `charset` wins even when its value names no encoding; the `None` that comes back is the same
+/// `None` as "said nothing", which sends [`resolve`] on to the document's own declaration.
+///
+/// The value of an unquoted parameter stops at `,` as well as `;`, because duplicate headers reach a
+/// scraper joined with commas and the first charset is the one the first header declared.
+pub fn transport_encoding(content_type: &str) -> Option<&'static Encoding> {
+    let b = content_type.as_bytes();
+    // Parameters start past the media type; `charset` is only a parameter name, never part of one.
+    let mut i = b.iter().position(|&c| c == b';')? + 1;
+    while i < b.len() {
+        let name = i;
+        while i < b.len() && !matches!(b[i], b'=' | b';') {
+            i += 1;
+        }
+        let is_charset = b[name..i].trim_ascii().eq_ignore_ascii_case(b"charset");
+        if i >= b.len() || b[i] == b';' {
+            i += 1; // a parameter with no value declares nothing
+            continue;
+        }
+        i += 1;
+        let mut value = Vec::new();
+        if b.get(i) == Some(&b'"') {
+            i += 1;
+            while i < b.len() && b[i] != b'"' {
+                if b[i] == b'\\' && i + 1 < b.len() {
+                    i += 1; // a backslash escapes the next byte, so `\"` does not end the string
+                }
+                value.push(b[i]);
+                i += 1;
+            }
+            i += 1;
+            while i < b.len() && b[i] != b';' {
+                i += 1;
+            }
+        } else {
+            while i < b.len() && !matches!(b[i], b';' | b',') {
+                value.push(b[i]);
+                i += 1;
+            }
+        }
+        if is_charset {
+            return Encoding::for_label(value.trim_ascii()); // `for_label` trims and case-folds
+        }
+        i += 1;
+    }
+    None
+}
+
 /// Turn a label read out of the DOCUMENT (a `<meta>` or an XML declaration) into an encoding, applying
 /// the two WHATWG corrections that exist because the prescan could only READ the declaration by treating
 /// the bytes as ASCII-compatible:
@@ -372,6 +426,30 @@ mod tests {
         assert_eq!(
             meta_prescan(b"<!-- charset=big5 --><meta charset=shift_jis>"),
             Some(encoding_rs::SHIFT_JIS)
+        );
+    }
+
+    #[test]
+    fn transport_encoding_reads_the_charset_parameter() {
+        assert_eq!(
+            transport_encoding("text/html; charset=windows-1252"),
+            Some(encoding_rs::WINDOWS_1252)
+        );
+        assert_eq!(transport_encoding("text/html;charset=\"UTF-8\""), Some(encoding_rs::UTF_8));
+        assert_eq!(transport_encoding("text/html; charset = utf-8 "), Some(encoding_rs::UTF_8));
+        // no parameter at all, and a media type that merely CONTAINS the word
+        assert_eq!(transport_encoding("text/html"), None);
+        assert_eq!(transport_encoding("text/charset=big5"), None);
+        // a quoted-string is opaque: the `charset=` inside it is part of that value
+        assert_eq!(
+            transport_encoding(r#"text/html; x="a\"; charset=big5"; charset=utf-8"#),
+            Some(encoding_rs::UTF_8)
+        );
+        // the first `charset` wins, including one that names nothing
+        assert_eq!(transport_encoding("text/html; charset=nonsense; charset=big5"), None);
+        assert_eq!(
+            transport_encoding("text/html; charset=utf-8, text/html; charset=big5"),
+            Some(encoding_rs::UTF_8)
         );
     }
 

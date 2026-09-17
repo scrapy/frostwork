@@ -16,6 +16,7 @@ import pytest
 import frostwork
 from frostwork import Page
 from frostwork._frostwork import Plan as _Plan
+from frostwork.encoding import FrostworkEncodingBackend
 
 # ONE specimen of an unsupported selector, and one fragment of its advisory reason. Tests that need "a
 # selector the engine declines" reach for these rather than inlining an example: `:contains('x')` was
@@ -2775,6 +2776,84 @@ def test_detect_encoding_reports_what_extract_will_use():
     b = b"<meta charset=windows-1252><p>caf\xe9</p>"
     assert frostwork.detect_encoding(b) == "windows-1252"
     assert frostwork.extract(b, ["p::text"])[0] == ["café"]
+
+
+def test_encoding_backend_resolves_and_decodes_with_the_engine():
+    # The backend is what makes `.encoding`/`.text` and `extract` agree on CHARACTERS: the decision
+    # names the encoding and decodes with it, so a caller cannot end up with two answers.
+    backend = FrostworkEncodingBackend()
+    body = "<p>café</p>".encode("windows-1252")
+    decision = backend.resolve(body, "text/html; charset=windows-1252")
+    assert decision.name == frostwork.detect_encoding(body, "windows-1252") == "windows-1252"
+    assert decision.decode(body) == "<p>café</p>"
+    assert frostwork.extract(body, ["p::text"], decision.name)[0] == ["café"]
+
+    # the resolution order, and every label that names no encoding ignored rather than refused
+    utf16 = b"\xff\xfe" + "<p>x</p>".encode("utf-16-le")
+    for want, args in [
+        ("UTF-16LE", (utf16, "text/html; charset=big5", "shift_jis")),  # a BOM outranks both labels
+        ("windows-1252", (body, "text/html; charset=big5", "windows-1252")),  # caller over header
+        ("Big5", (body, "text/html; charset=big5", None)),
+        ("Big5", (body, 'text/html; charset="big5"', None)),
+        ("Shift_JIS", (b"<meta charset=shift_jis><p>x", "text/html", None)),  # header declares none
+        ("windows-1252", (body, "", "latin-1")),  # a Python codec spelling, as everywhere else here
+        ("UTF-8", (b"<p>x", "text/html; charset=bogus", None)),
+        ("UTF-8", (b"<p>x", "", "bogus")),
+    ]:
+        assert backend.resolve(*args).name == want, args
+
+    # `ascii_compatible` is what tells a caller a URL in this document cannot be read as ASCII
+    assert backend.resolve(utf16).ascii_compatible is False
+    assert decision.ascii_compatible is True
+
+    # `.text` is the DOCUMENT's characters, not the tokenizer's input: the strip and NUL deletion
+    # `extract` applies are Parsel's input contract and would change what a caller reads back.
+    raw = b" \x00<p>a </p> "
+    assert backend.resolve(raw).decode(raw) == " \x00<p>a </p> "
+
+    # the surface w3lib's (structural) backend protocol asks for, spelled out because nothing here
+    # imports it: a policy identifier, and a decision that names, describes and decodes.
+    assert isinstance(backend.policy_id, str) and backend.policy_id
+    assert backend.resolve(b"<p>x") is not None
+
+
+def test_content_type_charset_is_read_like_w3lib():
+    # The header parameter grammar is the one piece of the backend the engine did not already own, so
+    # it is oracled against the implementation Scrapy uses today. Only the PARSING is compared: every
+    # label below is one both label tables know, because the label table is where the two are meant to
+    # differ (w3lib resolves through Python codecs, this through WHATWG).
+    from w3lib.encoding import http_content_type_encoding
+
+    from frostwork._frostwork import resolve_label
+
+    backend = FrostworkEncodingBackend()
+    for header in [
+        "text/html; charset=windows-1252",
+        "text/html;charset=big5",
+        "text/html; charset=BIG5",
+        "text/html",
+        "text/html; boundary=x; charset=shift_jis",
+        "text/html; charset=big5; charset=windows-1252",  # the first one wins
+        "text/html; charset=nonsense; charset=big5",  # including an unusable first one
+        "text/html; charset=big5, text/html; charset=windows-1252",  # joined duplicate headers
+        "text/html; charset",  # a parameter with no value
+    ]:
+        oracle = http_content_type_encoding(header)
+        want = resolve_label(oracle) if oracle else "UTF-8"  # nothing declared -> the engine sniffs
+        assert want is not None, header  # a label w3lib knows and WHATWG does not is a different test
+        assert backend.resolve(b"<p>x", header).name == want, header
+
+    # ...and the shapes where w3lib's released parser (a bare `charset=([\w-]+)` search) reads a header
+    # no browser reads that way. It has no notion of parameters at all, so it finds a declaration inside
+    # the media type and inside another parameter's quoted value, and misses a quoted or spaced one.
+    for header, want in [
+        ('text/html; charset="big5"', "Big5"),
+        ("text/html; charset = big5 ", "Big5"),
+        ("TEXT/HTML; CHARSET=big5", "Big5"),
+        ("text/charset=big5", "UTF-8"),  # a media type, not a parameter
+        (r'text/html; x="a\"; charset=big5"; charset=shift_jis', "Shift_JIS"),  # opaque quoted-string
+    ]:
+        assert backend.resolve(b"<p>x", header).name == want, header
 
 
 def test_single_valued_page_stops_scanning_without_changing_the_item():

@@ -6,6 +6,7 @@
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use pyo3::types::PyString;
 
 /// A schema over the fixed-width bitset budgets is a *caller* bug (too many selectors), distinct from
 /// an unsupported *query* (which is contract-defined to yield an empty column). Silence would be the
@@ -309,6 +310,66 @@ fn detect_encoding(py: Python<'_>, html: Html<'_>, encoding: Option<&str>) -> Py
     Ok(crate::detect_encoding(html.as_bytes(), encoding))
 }
 
+/// The encoding a response is in, as `w3lib.encoding`'s backend protocol asks for it: the name and
+/// ASCII-compatibility of the resolved encoding, plus the decoder that produces its text. It holds the
+/// encoding and not the document, so resolving stays independent of decoding — which is the point of the
+/// protocol: a caller reading `.encoding` must not pay for decoding a body nobody has asked for.
+#[pyclass(frozen, module = "frostwork._frostwork")]
+struct EncodingDecision {
+    enc: &'static encoding_rs::Encoding,
+}
+
+#[pymethods]
+impl EncodingDecision {
+    #[getter]
+    fn name(&self) -> &'static str {
+        self.enc.name()
+    }
+
+    /// Whether ASCII bytes decode to the same ASCII characters. `encoding_rs`'s answer, never a list
+    /// written here — see the header of `crate::encoding` for what a list gets wrong.
+    #[getter]
+    fn ascii_compatible(&self) -> bool {
+        self.enc.is_ascii_compatible()
+    }
+
+    /// `body` decoded with this encoding: a leading BOM removed, undecodable bytes replaced with
+    /// U+FFFD — the characters `w3lib.encoding.to_unicode` would produce for the same decision.
+    ///
+    /// This is the DOCUMENT's text, not the tokenizer's input: the whitespace strip and NUL deletion
+    /// `extract` applies belong to Parsel's input contract (`crate::normalize`) and would change the
+    /// characters a caller reads back. The GIL is released for the decode, and a UTF-8 body is not
+    /// copied on the Rust side before Python takes it.
+    fn decode<'py>(&self, py: Python<'py>, body: &[u8]) -> Bound<'py, PyString> {
+        let text = py.detach(|| self.enc.decode(body).0);
+        PyString::new(py, &text)
+    }
+}
+
+/// The encoding of a response, resolved once: BOM → `encoding` → `content_type`'s charset →
+/// `<meta>`/XML declaration → UTF-8. `frostwork.encoding.FrostworkEncodingBackend` wraps this as the
+/// backend a `w3lib.encoding.EncodingContext` (and through it a Scrapy or web-poet response) resolves
+/// with, so `.encoding`, `.text` and `extract` answer about the same characters.
+///
+/// Both labels are publisher- or caller-supplied text rather than schema, so one that names no encoding
+/// is IGNORED rather than refused — WHATWG's "failure, continue", which is what a browser does and what
+/// leaves the document's own declaration a chance. (`frostwork.extract` raises on an unknown label
+/// instead, because a label written into a call is a programming error.) `encoding` is additionally
+/// resolved through Python's codec set, as every Python entry point here resolves a caller's label; the
+/// header is WHATWG-only, because that is what the publisher's bytes are read by.
+#[pyfunction]
+#[pyo3(signature = (body, content_type="", encoding=None))]
+fn resolve_document(
+    py: Python<'_>,
+    body: &[u8],
+    content_type: &str,
+    encoding: Option<&str>,
+) -> EncodingDecision {
+    let explicit = encoding.and_then(|l| canonical_label(l).or_else(|| whatwg_via_python_codecs(py, l)));
+    let label = explicit.or_else(|| crate::transport_encoding(content_type));
+    EncodingDecision { enc: crate::encoding::resolve(body, label) }
+}
+
 /// `Support` as a Python-facing `(supported: bool, reason: Optional[str])` tuple.
 fn support_tuple(s: &crate::Support) -> (bool, Option<String>) {
     (s.is_supported(), s.reason().map(str::to_string))
@@ -369,6 +430,8 @@ fn _frostwork(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(selector_node_identity, m)?)?;
     m.add_function(wrap_pyfunction!(resolve_label, m)?)?;
     m.add_function(wrap_pyfunction!(detect_encoding, m)?)?;
+    m.add_function(wrap_pyfunction!(resolve_document, m)?)?;
+    m.add_class::<EncodingDecision>()?;
     m.add_class::<Plan>()?;
     Ok(())
 }

@@ -149,6 +149,13 @@ pub fn detect_encoding(html: &[u8], label: Option<&str>) -> &'static str {
     encoding::resolve(html, label).name()
 }
 
+/// The encoding an HTTP `Content-Type` header declares, as a WHATWG canonical name, or `None` when it
+/// declares none. The `label` [`detect_encoding`] takes, for a caller holding the header a response
+/// arrived with.
+pub fn transport_encoding(content_type: &str) -> Option<&'static str> {
+    encoding::transport_encoding(content_type).map(|e| e.name())
+}
+
 /// The `(member-selector, sibling-bit)` demand of a schema. A caller
 /// that would rather fail loud than get silently-empty columns compares this against
 /// [`MAX_MEMBERS`] / [`MAX_SIB_BITS`]; the Python binding raises `ValueError`.

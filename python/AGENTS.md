@@ -1,7 +1,9 @@
 # python/ — the Frostwork Python package
 
 Pure Python over the `_frostwork` extension: `page.py` (`extract` wrapper + `Page`/`Item`),
-`webpoet.py` (`FrostPage`/`field` web-poet integration, soft dep), `audit.py` (`frostwork-audit`
+`webpoet.py` (`FrostPage`/`field` web-poet integration, soft dep), `encoding.py`
+(`FrostworkEncodingBackend`, the engine's detection/decoding as a `w3lib.encoding` backend, so a
+response's `.encoding`/`.text` and `extract` agree on characters), `audit.py` (`frostwork-audit`
 CLI: schema audit + `--scan`), `scan.py` (ast-based selector-literal scan for un-ported source —
 inline `.css()`, ItemLoaders, LinkExtractors). `pyproject.toml` = maturin build;
 `tests/test_python.py` = pytest suite; `tests/test_doc_examples.py` EXECUTES the marked fenced blocks in

@@ -52,6 +52,25 @@ def detect_encoding(html: Union[bytes, str], encoding: Optional[str] = ...) -> s
     prefix → ``encoding`` label → 4096-byte ``<meta>``/XML-declaration prescan → UTF-8. A ``str`` is
     already-decoded text, so the answer is ``"UTF-8"`` without sniffing."""
 
+class EncodingDecision:
+    """The encoding a response is in, as `w3lib.encoding`'s backend protocol asks for it —
+    `frostwork.encoding.FrostworkEncodingBackend.resolve` returns one."""
+
+    @property
+    def name(self) -> str:
+        """Canonical WHATWG name of the resolved encoding."""
+    @property
+    def ascii_compatible(self) -> bool:
+        """Whether ASCII bytes decode to the same ASCII characters."""
+    def decode(self, body: bytes) -> str:
+        """``body`` decoded with this encoding: leading BOM removed, undecodable bytes replaced."""
+
+def resolve_document(
+    body: bytes, content_type: str = ..., encoding: Optional[str] = ...
+) -> EncodingDecision:
+    """Resolve the encoding of a response: BOM → ``encoding`` → ``content_type``'s charset →
+    ``<meta>``/XML declaration → UTF-8. Labels that name no encoding are ignored."""
+
 class Plan:
     """A schema compiled once (budget validated at construction) and reused across pages."""
 
