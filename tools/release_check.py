@@ -46,6 +46,7 @@ STALE_DESCRIPTION_TEXT = (
 )
 MARKDOWN_LINK = re.compile(r"!?(?:\[[^]]*\])\(\s*([^)\s]+)")
 RELEASE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
+RELEASE_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 
 
 def _read_utf8(path: Path) -> str:
@@ -156,14 +157,21 @@ def source_errors(*, tag: str | None = None) -> list[str]:
     top = _top_changelog_heading(changelog)
     if top is None:
         errors.append("CHANGELOG.md has no version heading")
-    elif tag is None and top[1] != "unreleased":
-        errors.append(f"top changelog section must be unreleased between releases, got {top!r}")
-    elif tag is not None:
+    elif tag is None:
+        # Two states are legal between releases: the section user-facing changes accumulate in, and
+        # the release that has just happened, whose heading the version bump dated.
+        released = top[0] == version and RELEASE_DATE.fullmatch(top[1])
+        if top[1] != "unreleased" and not released:
+            errors.append(
+                f"top changelog section must be unreleased, or {version} with its release date, "
+                f"got {top!r}"
+            )
+    else:
         if not RELEASE.fullmatch(tag):
             errors.append(f"release tag must be X.Y.Z without a prefix, got {tag!r}")
         if version != tag:
             errors.append(f"release tag {tag} does not match package version {version}")
-        if top[0] != tag or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", top[1]):
+        if top[0] != tag or not RELEASE_DATE.fullmatch(top[1]):
             errors.append(f"top changelog section must be {tag} with a release date, got {top!r}")
     return errors
 

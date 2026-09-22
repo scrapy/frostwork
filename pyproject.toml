@@ -93,6 +93,9 @@ current_version = "0.1.4"
 commit = true
 tag = true
 tag_name = "{new_version}"
+# Setup hooks run before any file is touched, so a missing or stale real-web stamp stops the release
+# with nothing to undo. `make corpus-real` writes the stamp; docs/RELEASING.md covers the window.
+setup_hooks = ["make corpus-fresh"]
 
 [[tool.bumpversion.files]]
 filename = "Cargo.toml"

@@ -9,9 +9,11 @@ The public settings are part of the release boundary even though they do not liv
 
 - PyPI's Trusted Publisher must name owner `scrapy`, repository `frostwork`, workflow `publish.yml`, and
   environment `pypi`.
-- The GitHub `pypi` environment should require a maintainer's approval.
+- The GitHub `pypi` environment must exist, because the Trusted Publisher names it, and it carries no
+  required reviewers: creating the release tag is the authorization to publish. Its deployment-branch
+  rule, if any, has to admit tags.
 - A GitHub repository ruleset should prevent updates and deletion of tags matching `[0-9]+.[0-9]+.[0-9]+`
-  and restrict who can create them.
+  and restrict who can create them. That restriction is what limits who can publish.
 
 Review those settings when a maintainer leaves. Trusted Publishers belong to the PyPI project rather than
 to the account that originally configured them.
@@ -27,6 +29,21 @@ make gate-mutate-full
 make soak
 make corpus-real
 ```
+
+`gate-mutate-full` and `soak` also run weekly on `main` (`.github/workflows/scheduled.yml`), so reading
+that run covers them unless the engine changed since. `corpus-real` has no such run — it fetches live
+third-party pages — and it is the one gate that sees markup nobody here wrote, so the bump refuses to
+start until it has passed at the sources this tree is about to release:
+
+```bash
+make corpus-fresh                      # what the bump's setup hook runs
+make corpus-real                       # stamps fixtures/realweb/.passed with HEAD on success
+```
+
+The stamp holds the commit the gate passed at, and `CORPUS_SOURCES` — the engine, the package and the
+gate's own two scripts — is what has to match it. A documentation or workflow commit therefore keeps a
+stamp valid, while an uncommitted engine edit invalidates it, because the comparison reads the working
+tree.
 
 Use a larger real corpus and a meaningful coverage-guided fuzzing budget for parser changes. The
 `release-check` part of `make ci` renders the public Markdown and checks repository links and heading
@@ -69,5 +86,6 @@ page.
 A manual `workflow_dispatch` runs the gates and artifact builds but skips publishing, public verification
 and GitHub Release creation.
 
-After a release, confirm the PyPI provenance names the expected tag, commit and workflow. Add the next
-`## X.Y.Z (unreleased)` changelog heading before accumulating more user-facing changes.
+After a release, confirm the PyPI provenance names the expected tag, commit and workflow. The dated
+heading may stay at the top of the changelog until the next user-facing change opens its own
+`## X.Y.Z (unreleased)` section.

@@ -5,6 +5,27 @@ first public release.
 
 ## 0.1.5 (unreleased)
 
+### Python API and tooling
+
+- Selectors can declare their syntax instead of being routed by prefix: pass `syntax="css"` or
+  `syntax="xpath"` to `extract`, `extract_grouped`, `check` and every `Page` field, `many` and `one`
+  (where it covers the container and its sub-fields); in Rust, pass a `Query` wherever a selector
+  string is accepted. Without a declaration the prefix rule is unchanged — `/`, `./` and
+  `normalize-space(` are XPath, everything else is CSS.
+
+  Relative XPath is what needs it. Declared as XPath, `h1` or `td/text()` is refused as unsupported,
+  like every relative path; read as CSS, `h1` matches every `<h1>` instead, which is a wrong value
+  rather than a refusal. `frostwork-audit` now audits each call site in the language of the call it
+  came from, so a `.css()` site is explained as CSS and an `.xpath()` site as XPath.
+
+- Charset labels accept the Python codec names of WHATWG encodings — `cp932`, `euc_jp`, `big5hkscs`,
+  `cp949`, `utf-16-le` and the rest — which is what `w3lib.encoding.resolve_encoding`, and therefore
+  Scrapy's `response.encoding`, returns from a `Content-Type` header. Such a label was previously
+  ignored and the document sniffed instead, so a Shift_JIS page passed as `cp932` could decode wrongly.
+  Every Python entry point resolves labels the same way now, `Plan` and the web-poet integration
+  included. A label naming a real encoding WHATWG has no equivalent for (`utf-7`, `cp437`) is still
+  ignored, the way a browser ignores it, and sniffing continues.
+
 ## 0.1.4 (2026-09-05)
 
 ### Correctness

@@ -46,3 +46,48 @@ def test_mutation_gate_propagates_failure_and_restores_both_builds(tmp_path, fai
     assert commands[-2:] == ['cargo-normal', 'extension-normal']
     if failure not in ('cargo-mutant', 'extension-mutant'):
         assert 'detector' in commands
+
+
+@pytest.mark.skipif(os.name == 'nt' or shutil.which('make') is None or shutil.which('git') is None,
+                    reason='local POSIX Make gate')
+@pytest.mark.parametrize('state, passes', [('no-stamp', False), ('unchanged', True),
+                                           ('unrelated-change', True), ('uncommitted-engine-edit', False),
+                                           ('committed-engine-edit', False), ('unknown-commit', False)])
+def test_corpus_freshness_gate_reads_the_stamped_commit(tmp_path, state, passes):
+    """`corpus-real` stamps the commit it passed at; a release off any other engine tree is refused."""
+    shutil.copyfile(ROOT / 'Makefile', tmp_path / 'Makefile')
+    (tmp_path / 'src').mkdir()
+    (tmp_path / 'src' / 'lib.rs').write_text('fn main() {}\n', encoding='utf-8')
+    (tmp_path / 'README.md').write_text('docs\n', encoding='utf-8')
+
+    def git(*args):
+        return subprocess.run(['git', '-c', 'user.email=t@t', '-c', 'user.name=t', *args],
+                              cwd=tmp_path, capture_output=True, text=True, check=True).stdout.strip()
+
+    git('init', '-q')
+    git('add', '-A')
+    git('commit', '-qm', 'init')
+
+    corpus = tmp_path / 'realweb'
+    corpus.mkdir()
+    if state != 'no-stamp':
+        sha = '0' * 40 if state == 'unknown-commit' else git('rev-parse', 'HEAD')
+        (corpus / '.passed').write_text(sha + '\n', encoding='utf-8')
+    if state == 'unrelated-change':
+        (tmp_path / 'README.md').write_text('docs, rewritten\n', encoding='utf-8')
+    if state in ('uncommitted-engine-edit', 'committed-engine-edit'):
+        (tmp_path / 'src' / 'lib.rs').write_text('fn main() { todo!() }\n', encoding='utf-8')
+    if state == 'committed-engine-edit':
+        git('commit', '-qam', 'engine')
+
+    run = subprocess.run(['make', 'corpus-fresh', 'REALWEB=' + str(corpus)],
+                         cwd=tmp_path, capture_output=True, text=True)
+    assert (run.returncode == 0) == passes, run.stdout + run.stderr
+    if not passes:
+        assert 'make corpus-real' in run.stdout
+
+
+def test_the_release_bump_runs_the_freshness_gate():
+    """A gate nothing calls is a gate nobody runs: the bump's setup hook is where this one fires."""
+    pyproject = (ROOT / 'pyproject.toml').read_text(encoding='utf-8')
+    assert 'setup_hooks = ["make corpus-fresh"]' in pyproject
