@@ -4,22 +4,55 @@
 //! (`python/frostwork/`), so there is nothing to keep in sync between two implementations of the
 //! matching logic — there is only one (the Rust core).
 
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
+
+use crate::{GroupQuery, Query, Syntax};
 
 /// A schema over the fixed-width bitset budgets is a *caller* bug (too many selectors), distinct from
 /// an unsupported *query* (which is contract-defined to yield an empty column). Silence would be the
 /// worst outcome — the caller would just see empty columns — so raise `ValueError` instead.
-fn check_budget(queries: &[String], groups: &[crate::GroupQuery]) -> PyResult<()> {
+fn check_budget(queries: &[Query], groups: &[GroupQuery<Query>]) -> PyResult<()> {
     budget_error(crate::budget_usage(queries, groups))
 }
 
 /// The `(container, [(name, selector)])` tuples Python passes, as the engine's `GroupQuery` list.
-fn group_queries(groups: Vec<(String, Vec<(String, String)>)>) -> Vec<crate::GroupQuery> {
+type PyGroups = Vec<(Query, Vec<(String, Query)>)>;
+
+fn group_queries(groups: PyGroups) -> Vec<GroupQuery<Query>> {
     groups
         .into_iter()
-        .map(|(container, subfields)| crate::GroupQuery { container, subfields })
+        .map(|(container, subfields)| GroupQuery { container, subfields })
         .collect()
+}
+
+/// A query as Python spells it: a selector `str`, routed by the auto-detection rule, or a
+/// `(selector, syntax)` tuple whose `syntax` is `"css"`, `"xpath"` or `None`.
+impl FromPyObject<'_, '_> for Query {
+    type Error = PyErr;
+
+    fn extract(ob: pyo3::Borrowed<'_, '_, PyAny>) -> PyResult<Self> {
+        if let Ok(text) = ob.extract::<String>() {
+            return Ok(Query::new(text, Syntax::Auto));
+        }
+        let Ok((text, syntax)) = ob.extract::<(String, Option<String>)>() else {
+            return Err(PyTypeError::new_err(format!(
+                "frostwork: a query must be a selector str or a (selector, syntax) tuple, got {}",
+                ob.get_type().name().map(|n| n.to_string()).unwrap_or_else(|_| "?".into())
+            )));
+        };
+        let syntax = match syntax.as_deref() {
+            None => Syntax::Auto,
+            Some("css") => Syntax::Css,
+            Some("xpath") => Syntax::XPath,
+            Some(other) => {
+                return Err(PyValueError::new_err(format!(
+                    "frostwork: syntax must be 'css', 'xpath' or None, got {other:?}"
+                )))
+            }
+        };
+        Ok(Query::new(text, syntax))
+    }
 }
 
 /// Raise `ValueError` if a schema's `(members, sibling-bits)` demand exceeds the fixed-width budget.
@@ -195,11 +228,7 @@ impl Plan {
     /// must get.
     #[new]
     #[pyo3(signature = (flat_queries, groups, first_only=None))]
-    fn new(
-        flat_queries: Vec<String>,
-        groups: Vec<(String, Vec<(String, String)>)>,
-        first_only: Option<Vec<bool>>,
-    ) -> PyResult<Self> {
+    fn new(flat_queries: Vec<Query>, groups: PyGroups, first_only: Option<Vec<bool>>) -> PyResult<Self> {
         let first_only = first_only.unwrap_or_default();
         let inner =
             crate::Plan::compile_first_only(&flat_queries, &group_queries(groups), &first_only);
@@ -250,7 +279,7 @@ impl Plan {
 fn extract(
     py: Python<'_>,
     html: Html<'_>,
-    queries: Vec<String>,
+    queries: Vec<Query>,
     encoding: Option<&str>,
 ) -> PyResult<Vec<Vec<String>>> {
     check_budget(&queries, &[])?;
@@ -270,8 +299,8 @@ fn extract(
 fn extract_grouped(
     py: Python<'_>,
     html: Html<'_>,
-    flat_queries: Vec<String>,
-    groups: Vec<(String, Vec<(String, String)>)>,
+    flat_queries: Vec<Query>,
+    groups: PyGroups,
     encoding: Option<&str>,
 ) -> PyResult<(Vec<Vec<String>>, Vec<Vec<Vec<Vec<String>>>>)> {
     let gq = group_queries(groups);
@@ -320,14 +349,14 @@ fn support_tuple(s: &crate::Support) -> (bool, Option<String>) {
 /// re-parse before handing it to a field processor. Derived from the same compiler front-end `extract`
 /// uses, so it cannot drift from how the query is actually routed.
 #[pyfunction]
-fn selector_terminals(queries: Vec<String>) -> Vec<Option<&'static str>> {
+fn selector_terminals(queries: Vec<Query>) -> Vec<Option<&'static str>> {
     crate::selector_terminals(&queries)
 }
 
 /// Per query, `(pinned_tag, can_match_a_synthesized_frame)` — the matched-node identity the web-poet layer
 /// needs before it re-parses an outer-HTML value; see [`crate::selector_node_identity`].
 #[pyfunction]
-fn selector_node_identity(queries: Vec<String>) -> Vec<(Option<String>, bool)> {
+fn selector_node_identity(queries: Vec<Query>) -> Vec<(Option<String>, bool)> {
     crate::selector_node_identity(&queries)
 }
 
@@ -342,8 +371,8 @@ fn selector_node_identity(queries: Vec<String>) -> Vec<(Option<String>, bool)> {
 #[pyfunction]
 #[allow(clippy::type_complexity)]
 fn audit_schema(
-    flat_queries: Vec<String>,
-    groups: Vec<(String, Vec<(String, String)>)>,
+    flat_queries: Vec<Query>,
+    groups: PyGroups,
 ) -> (
     Vec<(bool, Option<String>)>,
     Vec<((bool, Option<String>), Vec<(bool, Option<String>)>)>,

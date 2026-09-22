@@ -327,6 +327,105 @@ def test_extract_grouped_normalizes_list_shaped_groups():
     assert grouped == [[[["x"]]]]
 
 
+# --- declared syntax -----------------------------------------------------------------------------
+#
+# Without a declaration the engine routes a query by its prefix (`/`, `./`, `normalize-space(` are
+# XPath), so a caller that KNOWS its syntax — web-poet has separate css()/xpath() constructors — could
+# not say so, and a relative XPath step such as `h1` was answered as the CSS type selector: parsel's
+# `sel.xpath("h1")` on a document gives nothing, Frostwork gave every `<h1>`. A wrong value outside the
+# documented divergences, which is exactly what the no-fallback contract forbids.
+
+SYNTAX_HTML = b"<html><body><h1>T</h1></body></html>"
+
+
+def test_explicit_xpath_is_never_read_as_css():
+    report = frostwork.check(["h1"], syntax="xpath")
+    assert not report.ok
+    assert "relative path" in report.unsupported[0].reason
+    assert report.unsupported[0].selector == "h1"  # the report names the selector, not the tagging
+    with pytest.raises(frostwork.UnsupportedSelector):
+        frostwork.extract(SYNTAX_HTML, ["h1"], syntax="xpath")
+    # permissive mode: an empty column, never the CSS answer
+    assert frostwork.extract(SYNTAX_HTML, ["h1", "*"], syntax="xpath", strict=False) == [[], []]
+    assert frostwork.extract(SYNTAX_HTML, ["//h1/text()"], syntax="xpath") == [["T"]]
+
+
+def test_explicit_css_is_never_read_as_xpath():
+    assert frostwork.check(["/html"]).ok  # auto: an absolute path
+    report = frostwork.check(["/html"], syntax="css")
+    assert not report.ok
+    assert "CSS" in report.unsupported[0].reason
+    assert frostwork.extract(SYNTAX_HTML, ["/html"], syntax="css", strict=False) == [[]]
+
+
+def test_syntax_none_keeps_prefix_routing():
+    queries = ["h1", "//h1/text()", "./h1", "normalize-space(//h1)"]
+    assert frostwork.extract(SYNTAX_HTML, queries, syntax=None, strict=False) == frostwork.extract(
+        SYNTAX_HTML, queries, strict=False
+    )
+    assert [f.supported for f in frostwork.check(queries, syntax=None).fields] == [
+        f.supported for f in frostwork.check(queries).fields
+    ]
+
+
+def test_check_honours_syntax_for_groups_too():
+    report = frostwork.check(
+        [], [("rows", "//body", {"bare": "h1", "desc": ".//h1/text()"})], syntax="xpath"
+    )
+    group = report.groups[0]
+    assert group.container.supported
+    assert [sf.supported for sf in group.subfields] == [False, True]
+    assert group.subfields[0].selector == "h1"
+    _flat, grouped = frostwork.extract_grouped(
+        SYNTAX_HTML, [], [("//body", {"bare": "h1", "desc": ".//h1/text()"})], syntax="xpath", strict=False
+    )
+    assert grouped == [[[[], ["T"]]]]
+
+
+def test_page_fields_carry_their_own_syntax():
+    page = (
+        Page(strict=False)
+        .field("xp", "h1", syntax="xpath")
+        .field("css", "h1", syntax="css")
+        .field_all("auto", "h1")
+        .field_join("joined", "//h1/text()", "|", syntax="xpath")
+        .many("rows", "//body", {"bare": "h1", "desc": ".//h1/text()"}, syntax="xpath")
+    )
+    assert page.extract(SYNTAX_HTML).to_dict() == {
+        "xp": None,
+        "css": "<h1>T</h1>",
+        "auto": ["<h1>T</h1>"],
+        "joined": "T",
+        "rows": [{"bare": None, "desc": "T"}],
+    }
+    report = page.check()
+    assert [f.name for f in report.unsupported] == ["xp", "bare"]
+    with pytest.raises(frostwork.UnsupportedSelector, match="'xp'"):
+        Page().field("xp", "h1", syntax="xpath").extract(SYNTAX_HTML)
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda: Page().field("f", "h1", syntax="sql"),
+        lambda: Page().many("g", "ul", {"x": "li"}, syntax="sql"),
+        lambda: frostwork.check(["h1"], syntax="sql"),
+        lambda: frostwork.extract(SYNTAX_HTML, ["h1"], syntax="sql"),
+        lambda: _Plan([("h1", "sql")], []),
+    ],
+)
+def test_an_unknown_syntax_is_refused(call):
+    with pytest.raises(ValueError, match="syntax must be 'css', 'xpath' or None"):
+        call()
+
+
+def test_native_plan_takes_tagged_queries():
+    plan = _Plan([("h1", "xpath"), ("h1", "css"), ("h1", None), "h1"], [(("//body", "xpath"), [("s", ("h1", "xpath"))])])
+    flat, grouped = plan.extract_grouped(SYNTAX_HTML)
+    assert flat == [[], ["<h1>T</h1>"], ["<h1>T</h1>"], ["<h1>T</h1>"]]
+    assert grouped == [[[[]]]]
+
+
 def test_extract_deeply_nested_is_declines_without_crashing():
     # a pathological `:is(:is(:is(...)))` must decline (unsupported), never overflow the stack.
     deep = ":is(" * 5000 + "a" + ")" * 5000

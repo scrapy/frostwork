@@ -262,12 +262,13 @@ def judge(sites: Iterable[Site]) -> List[Verdict]:
                 )
             )
             continue
+        syntax = None if site.kind == "auto" else site.kind
         if site.context == "group-container":
-            field = check([], [(sel, [])]).groups[0].container
+            field = check([], [(sel, [])], syntax=syntax).groups[0].container
         elif site.context == "group-subfield":
-            field = check([], [("*", [("value", sel)])]).groups[0].subfields[0]
+            field = check([], [("*", [("value", sel)])], syntax=syntax).groups[0].subfields[0]
         else:
-            field = check([sel]).fields[0]
+            field = check([sel], syntax=syntax).fields[0]
         out.append(Verdict(site, field.supported, field.reason))
     return out
 

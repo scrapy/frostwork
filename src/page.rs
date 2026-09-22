@@ -567,7 +567,7 @@ mod tests {
 
         // ...and the values are what a FULL scan's cardinality reduction gives, which is the whole
         // contract: `extract` still sees the tail, and its first values are the same two.
-        let cols = crate::extract(&doc, &["title::text".into(), "link::attr(href)".into()], None);
+        let cols = crate::extract(&doc, &["title::text", "link::attr(href)"], None);
         assert_eq!(cols[0].first().map(String::as_str), item.get("t"));
         assert_eq!(cols[1].first().map(String::as_str), item.get("c"));
         assert_eq!(cols[0].len(), 2, "extract itself is never armed — it must still see the tail");
