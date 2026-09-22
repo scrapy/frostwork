@@ -14,7 +14,7 @@
 #   make corpus-real fetch REAL pages into fixtures/realweb (gitignored), then gate over them
 #   make corpus-fresh  fail unless corpus-real passed at the engine sources in this tree
 #   make gate-mutate flip rule-table cells one at a time and check a gate notices (sampled)
-#   make gate-mutate-full  every rule cell, with the fast gates only (~an hour) — nightly
+#   make gate-mutate-full  every rule cell, with the fast gates only (hours; SHARD=K/N splits it) — weekly
 #   make soak        multi-million differential/fuzz soak across independent seeds
 #   make py          rebuild the extension (maturin --release), Python suite + tree-rule audit +
 #                    the generated start-close table vs the oracle (tools/gen_tree_rules.py --check)
@@ -136,12 +136,14 @@ MUTANTS ?= 40
 # (~2.3s). That is the trade that took the close-rule survivors to 0 — do not shrink the universe to
 # make this faster; the close dimension is already compressed to one name per behaviour class.
 DETECTORS ?=
+SHARD ?=
 gate-mutate:
 	@set -eu; \
 	trap 'status=$$?; trap - EXIT; cargo build --release || status=$$?; $(MATURIN) develop --release || status=$$?; exit $$status' EXIT; \
 	cargo build --release --features mutate; \
 	$(MATURIN) develop --release --features python,mutate; \
-	$(PY) tools/mutate_rules.py --sample $(MUTANTS) $(if $(DETECTORS),--detectors $(DETECTORS),) --gate
+	$(PY) -u tools/mutate_rules.py --sample $(MUTANTS) $(if $(DETECTORS),--detectors $(DETECTORS),) \
+		$(if $(SHARD),--shard $(SHARD),) --gate
 
 gate-mutate-full:
 	$(MAKE) gate-mutate MUTANTS=0 DETECTORS=audit,corpus-fixtures
