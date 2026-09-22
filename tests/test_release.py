@@ -17,6 +17,37 @@ def test_current_source_is_release_ready():
     assert release_check.source_errors(tag=release_check._automatic_tag()) == []
 
 
+def _changelog_errors(monkeypatch, heading: str) -> list:
+    """Branch-state errors with the top changelog heading replaced by ``heading``."""
+    original = release_check._read_utf8
+    changelog = ROOT / "CHANGELOG.md"
+    top = release_check._top_changelog_heading(original(changelog))
+
+    def read(path):
+        text = original(path)
+        if path == changelog:
+            return text.replace(f"## {top[0]} ({top[1]})", heading, 1)
+        return text
+
+    monkeypatch.setattr(release_check, "_read_utf8", read)
+    return [error for error in release_check.source_errors(tag=None) if "changelog" in error]
+
+
+def test_the_just_released_state_is_legal_on_a_branch(monkeypatch):
+    # The release commit lands on main with its heading dated, and main's CI runs with no tag.
+    version = release_check._toml(ROOT / "pyproject.toml")["project"]["version"]
+    assert _changelog_errors(monkeypatch, f"## {version} (2026-09-05)") == []
+
+
+def test_changelog_gate_rejects_a_date_on_an_unreleased_version(monkeypatch):
+    assert _changelog_errors(monkeypatch, "## 99.0.0 (2026-09-05)")
+
+
+def test_changelog_gate_rejects_an_undated_released_heading(monkeypatch):
+    version = release_check._toml(ROOT / "pyproject.toml")["project"]["version"]
+    assert _changelog_errors(monkeypatch, f"## {version} (soon)")
+
+
 def test_source_metadata_is_read_as_utf8_on_every_host(monkeypatch):
     original = Path.read_text
     expected = {ROOT / "README.md", ROOT / "CHANGELOG.md"}

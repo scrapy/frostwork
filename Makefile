@@ -12,6 +12,7 @@
 #   make gate-corpus [CORPUS=<dir>]  value-parity gate over a page corpus (defaults to tests/corpus)
 #   make gate-seq    every tag SEQUENCE up to depth 4, compared on the whole tree
 #   make corpus-real fetch REAL pages into fixtures/realweb (gitignored), then gate over them
+#   make corpus-fresh  fail unless corpus-real passed at the engine sources in this tree
 #   make gate-mutate flip rule-table cells one at a time and check a gate notices (sampled)
 #   make gate-mutate-full  every rule cell, with the fast gates only (~an hour) — nightly
 #   make soak        multi-million differential/fuzz soak across independent seeds
@@ -102,6 +103,20 @@ REALWEB ?= fixtures/realweb
 corpus-real: build
 	$(PY) tools/corpus_fetch.py --out $(REALWEB)
 	$(PY) tools/bench_corpus.py $(REALWEB) --gate
+	@git rev-parse HEAD > $(REALWEB)/.passed
+
+# The release bump's precondition, because `corpus-real` is the one gate no workflow can run for us and
+# the stamp it leaves on success is the only evidence it ran. The stamp holds the commit it passed at,
+# and everything that decides its verdict is compared against that commit: the engine, the package and
+# the two scripts the gate itself is made of. The comparison reads the WORKING TREE, so uncommitted
+# engine edits invalidate a stamp as much as new commits do.
+CORPUS_SOURCES ?= src python tools/bench_corpus.py tools/corpus_fetch.py
+corpus-fresh:
+	@test -f $(REALWEB)/.passed \
+	  || { echo "no $(REALWEB)/.passed — run 'make corpus-real'"; exit 1; }
+	@sha=$$(cat $(REALWEB)/.passed); \
+	  git diff --quiet $$sha -- $(CORPUS_SOURCES) 2>/dev/null \
+	  || { echo "$(REALWEB)/.passed is from $$sha; this tree differs — run 'make corpus-real'"; exit 1; }
 
 # Tag SEQUENCES, exhaustively, compared on the whole TREE rather than a few selector values. The rule
 # sweeps are two-dimensional and the crawl corpus is luck; this is the surface where the state at token N
