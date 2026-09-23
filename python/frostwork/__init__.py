@@ -20,6 +20,7 @@ from .page import (
     detect_encoding,
     extract,
     extract_grouped,
+    resolve_label,
 )
 from .validation import FieldProcessingError, ItemValidationError, ValidationIssue, ValidationReport
 
@@ -35,6 +36,7 @@ __all__ = [
     "extract_grouped",
     "check",
     "detect_encoding",
+    "resolve_label",
     "Page",
     "Item",
     "SchemaReport",

@@ -72,6 +72,14 @@ frostwork.detect_encoding(b"<html><body><meta charset=windows-1252>")   # 'windo
 frostwork.detect_encoding(b"<p>x</p>", "latin-1")                       # 'windows-1252'
 ```
 
+`resolve_label(label)` answers the label half, or returns `None` for a label that names no WHATWG
+encoding:
+
+```python
+frostwork.resolve_label("cp874")   # 'windows-874'
+frostwork.resolve_label("cp437")   # None
+```
+
 Use it when another part of the pipeline needs the selected label. See
 [encoding compatibility](COMPATIBILITY.md#encoding) for the differences from Parsel and w3lib.
 
