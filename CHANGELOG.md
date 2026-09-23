@@ -3,7 +3,7 @@
 All notable user-facing changes will be recorded here. Frostwork will follow semantic versioning after its
 first public release.
 
-## 0.1.6 (unreleased)
+## 0.1.6 (2026-09-23)
 
 ### Python API and tooling
 
