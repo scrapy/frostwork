@@ -239,6 +239,8 @@ def test_every_python_text_codec_is_a_whatwg_encoding_or_declared_not_one():
         "mac-latin2", "mac-romanian", "mac-turkish",
         "charmap", "idna", "punycode", "raw-unicode-escape", "unicode-escape", "undefined",
     }
+    if sys.platform == "win32":
+        not_whatwg |= {"mbcs", "oem"}
     assert unresolved == not_whatwg
 
 
