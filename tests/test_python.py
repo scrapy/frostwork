@@ -208,6 +208,13 @@ def test_python_codec_names_of_whatwg_encodings_decode_like_the_label(python_nam
     assert frostwork.detect_encoding(raw, python_name) == frostwork.detect_encoding(raw, whatwg_label)
 
 
+def test_resolve_label_is_public():
+    assert "resolve_label" in frostwork.__all__
+    assert frostwork.resolve_label("cp874") == "windows-874"
+    assert frostwork.resolve_label("latin-1") == "windows-1252"
+    assert frostwork.resolve_label("cp437") is None
+
+
 def test_every_python_text_codec_is_a_whatwg_encoding_or_declared_not_one():
     """The universe the label table is asked about is Python's whole codec set, not the names someone
     thought of. A codec not resolved here is either a WHATWG encoding missing from

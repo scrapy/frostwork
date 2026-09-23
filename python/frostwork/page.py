@@ -190,6 +190,15 @@ def detect_encoding(html: Bytesish, encoding: Optional[str] = None) -> str:
     return _detect_encoding(_as_scan_input(html), encoding)
 
 
+def resolve_label(label: str) -> Optional[str]:
+    """The WHATWG name of the encoding charset *label* names (``"cp874"`` → ``"windows-874"``), or
+    ``None`` if it names none (``"cp437"``).
+
+    *label* can be a WHATWG label or a Python codec name, e.g. Scrapy's ``response.encoding``.
+    """
+    return _resolve_label(label)
+
+
 def extract(
     html: Bytesish,
     queries: Iterable[str],

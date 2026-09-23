@@ -3,6 +3,15 @@
 All notable user-facing changes will be recorded here. Frostwork will follow semantic versioning after its
 first public release.
 
+## 0.1.6 (unreleased)
+
+### Python API and tooling
+
+- `frostwork.resolve_label(label)` returns the WHATWG name of the encoding a charset label names, or
+  `None`. It accepts the same labels as `extract`, Python codec names included (`cp874` →
+  `windows-874`), so a caller can check whether a Python-side encoding such as Scrapy's
+  `response.encoding` is the one Frostwork will decode with.
+
 ## 0.1.5 (2026-09-23)
 
 ### Python API and tooling
