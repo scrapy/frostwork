@@ -19,7 +19,8 @@ build serves every mutant (a rebuild per mutant would take hours):
     cargo build --release --features mutate
     .venv/bin/maturin develop --release --features python,mutate
     .venv/bin/python tools/mutate_rules.py --sample 40      # a few minutes
-    .venv/bin/python tools/mutate_rules.py --all            # the full sweep
+    .venv/bin/python tools/mutate_rules.py --all            # the full sweep (hours)
+    .venv/bin/python tools/mutate_rules.py --all --shard 3/8   # every 8th mutant, from the 3rd
 
     # then put the normal build back — a mutate build must never be shipped or benchmarked:
     cargo build --release && .venv/bin/maturin develop --release
@@ -228,6 +229,8 @@ def main() -> int:
     ap.add_argument("--detectors", help="comma-separated subset to run (default: all). The `unit` "
                                        "detector costs ~2.7s per mutant and catches no start-close cell, "
                                        "so a full sc sweep is much faster without it.")
+    ap.add_argument("--shard", help="K/N: test only every Nth of the chosen mutants, starting at the "
+                                    "Kth (1-based), so N jobs together cover the whole selection")
     ap.add_argument("--gate", action="store_true", help="exit nonzero if any mutant SURVIVES")
     ap.add_argument("--json", help="write the full matrix here")
     args = ap.parse_args()
@@ -253,6 +256,12 @@ def main() -> int:
         for kind, items in sorted(by_kind.items()):
             chosen += rng.sample(items, min(per, len(items)))
         chosen = chosen[: args.sample]
+    selected = len(chosen)
+    if args.shard:
+        k, _, n = args.shard.partition("/")
+        if not (k.isdigit() and n.isdigit() and 1 <= int(k) <= int(n)):
+            raise SystemExit(f"--shard must be K/N with 1 <= K <= N, got {args.shard!r}")
+        chosen = chosen[int(k) - 1 :: int(n)]
 
     corpus = args.corpus if args.corpus and os.path.isdir(os.path.join(ROOT, args.corpus)) else None
     if args.corpus and not corpus:
@@ -268,8 +277,9 @@ def main() -> int:
         dets = [d for d in dets if d.name in want]
 
     print("RULE-TABLE MUTATION SWEEP")
-    print(f"  mutants   : {len(chosen)} of {len(all_m)}"
-          f"{' (FULL)' if len(chosen) == len(all_m) else f' (sample, seed={args.seed})'}")
+    print(f"  mutants   : {selected} of {len(all_m)}"
+          f"{' (FULL)' if selected == len(all_m) else f' (sample, seed={args.seed})'}"
+          f"{f', shard {args.shard}: {len(chosen)}' if args.shard else ''}")
     print(f"  detectors : {', '.join(d.name for d in dets)}\n")
 
     # sanity: with no mutation every detector must be GREEN, or a "caught" result means nothing
