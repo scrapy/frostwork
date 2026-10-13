@@ -118,6 +118,12 @@ fn css_reason(qt: &str, syntax: Syntax) -> String {
     if members.len() > 1 {
         return comma_group_reason(&members, syntax);
     }
+    // An unsupported pseudo refuses the selector whatever else it holds, and the shape probes below
+    // would match the supported pseudo next to it (`li:nth-child(2):hover`).
+    if let Some(p) = unsupported_pseudo(qt) {
+        let kind = if p.starts_with("::") { "pseudo-element" } else { "pseudo-class" };
+        return format!("{kind} `{p}` is unsupported; supported terminals are `::text` and `::attr(name)`");
+    }
     let lower = qt.to_ascii_lowercase();
     let msg = if lower.contains(":has(") {
         ":has() is supported on ONE compound of a lone selector, as a relative selector LIST whose \
@@ -165,10 +171,6 @@ fn css_reason(qt: &str, syntax: Syntax) -> String {
          (`:not(.x)`) and a compound LIST (`:not(.x, .y)`) are both fine"
     } else if has_namespace_prefix(qt) {
         "namespace prefix (`ns|tag`) is unsupported"
-    } else if lower.contains("::before") || lower.contains("::after") {
-        "pseudo-element (`::before`, `::after`) is unsupported"
-    } else if has_other_pseudo(qt) {
-        "pseudo-class/element is unsupported; supported terminals are `::text` and `::attr(name)`"
     } else {
         "invalid or unsupported CSS selector for the Frostwork subset (tag/`*`, `.class`, `#id`, \
          `[attr]`/`[attr=v]`, descendant/`>`/`+`/`~`, `::text`/`::attr(name)`)"
@@ -359,12 +361,52 @@ fn not_arg_has_combinator(qt: &str) -> bool {
     false
 }
 
-/// A `:` or `::` pseudo that is not one of the supported value terminals.
-fn has_other_pseudo(qt: &str) -> bool {
-    let l = qt.to_ascii_lowercase();
-    // strip the two supported terminals, then any remaining `:` is an unsupported pseudo
-    let stripped = l.replace("::text", "").replace("::attr(", "@@ATTR@@(");
-    stripped.contains(':')
+/// The first `:name`/`::name` pseudo, as written, that the parser does not support. Quoted strings
+/// and escaped characters (`.md\\:flex`) are data, and so is the argument of `::attr()`.
+fn unsupported_pseudo(qt: &str) -> Option<&str> {
+    const CLASSES: &[&str] = &[
+        "not", "is", "where", "has", "contains", "first-child", "first-of-type", "nth-child",
+        "nth-of-type", "last-child", "last-of-type", "only-child", "only-of-type", "nth-last-child",
+        "nth-last-of-type",
+    ];
+    let b = qt.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'\\' => i += 2,
+            q @ (b'"' | b'\'') => {
+                i += 1;
+                while i < b.len() && b[i] != q {
+                    i += if b[i] == b'\\' { 2 } else { 1 };
+                }
+                i += 1;
+            }
+            b':' => {
+                let start = i;
+                while i < b.len() && b[i] == b':' {
+                    i += 1;
+                }
+                let name_start = i;
+                while i < b.len() && (b[i].is_ascii_alphanumeric() || matches!(b[i], b'-' | b'_' | 0x80..)) {
+                    i += 1;
+                }
+                let name = qt[name_start..i].to_ascii_lowercase();
+                match (name_start - start, name.as_str()) {
+                    (_, "") => {}
+                    (2, "text") => {}
+                    (2, "attr") => {
+                        while i < b.len() && b[i] != b')' {
+                            i += 1;
+                        }
+                    }
+                    (1, n) if CLASSES.contains(&n) => {}
+                    _ => return Some(&qt[start..i]),
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -407,8 +449,24 @@ mod tests {
         assert!(reason("li:last-child", Syntax::Auto).contains("position"));
         assert!(reason("div:not(a b)", Syntax::Auto).contains("combinator argument"));
         assert!(reason("svg|rect", Syntax::Auto).contains("namespace"));
-        assert!(reason("div::before", Syntax::Auto).contains("pseudo-element"));
-        assert!(reason("div:hover", Syntax::Auto).contains("pseudo"));
+        assert!(reason("div::before", Syntax::Auto).starts_with("pseudo-element `::before` is unsupported"));
+        assert!(reason("h1:hover::text", Syntax::Auto).starts_with("pseudo-class `:hover` is unsupported"));
+        assert!(reason("p::First-Line", Syntax::Auto).starts_with("pseudo-element `::First-Line` "));
+        assert!(reason("div:not(:focus-within)", Syntax::Auto).starts_with("pseudo-class `:focus-within` "));
+        assert!(reason("a[title=\":\"]:visited", Syntax::Auto).starts_with("pseudo-class `:visited` "));
+        assert!(reason("a[title='\\':x']::attr(xlink:href):checked", Syntax::Auto)
+            .starts_with("pseudo-class `:checked` "));
+        assert!(reason(".md\\:flex:hover", Syntax::Auto).starts_with("pseudo-class `:hover` "));
+        assert!(!reason("a[title=\":\"] b c d e f g h", Syntax::Auto).contains("pseudo"));
+        for q in [
+            "li:nth-child(2):hover::text",
+            "div:has(a):hover::text",
+            "li:is(.a, .b):hover::text",
+            "p:contains(\"x\"):hover::text",
+            "li:last-child:hover::text",
+        ] {
+            assert!(reason(q, Syntax::Auto).starts_with("pseudo-class `:hover` "), "{q}");
+        }
     }
 
     /// The three mechanisms that empty a comma group are named separately, and the leading clause stays
