@@ -2,10 +2,11 @@
 
 Python harness (needs `parsel`). `oracle.py` guards the oracle toolchain (libxml2 ≥ 2.14 — a pinned
 lxml does *not* pin its vendored libxml2); `diff_lxml.py` is the gate; `conformant.py`/`families.py`/
-`foreign.py` generate test pages; `enc_check.py` (encoding parity) with `decoder_sweep.py` as its importable half — the two-byte
-enumeration and the four disagreement classes live there because `enc_check` runs its gate at module
-level, so nothing in it could be exercised by a test, and a sweep that quietly narrows reads exactly
-like a clean run; `sel_fuzz.py`/`diff_fuzz.py`
+`foreign.py` generate test pages; `enc_check.py` (encoding parity) with two importable parts,
+`decoder_sweep.py` and `enc_cases.py` — `enc_check` runs its gate at module level, so nothing in it could
+be exercised by a test, and a sweep that quietly narrows reads exactly like a clean run; the sweep holds
+the two-byte enumeration and the four disagreement classes, and `enc_cases.py` the documents, which
+`tests/test_encoding.py` also runs through `frostwork.encoding`; `sel_fuzz.py`/`diff_fuzz.py`
 (selector + malformed-HTML fuzz), `soak.py` (multi-seed soak), `support_snapshot.py`
 (regenerates/checks `docs/SUPPORT_SNAPSHOT.md`), `abi3_smoke.py` (stdlib-only check that the
 extension works with no dependencies present), `ab_bench.py` (A/B two `bench` builds by
@@ -14,6 +15,8 @@ builds disagree on the VALUE COUNT — and `--corpus <dir>` runs the same compar
 their own production selectors, which is the mode that matters: the generated tables scored the
 signature filter at −13% to −55% and the corpus scored it at zero, while the tokenizer fix the tables
 could not see was worth −75% on a real page),
+`bench_encoding.py` (`frostwork.encoding` against Python's codecs, w3lib and charset-normalizer),
+`bench_navigation.py` (`frostwork.navigation` against w3lib's base URL and meta refresh functions),
 `bench_matrix.py`/`bench_corpus.py`/`bench_mem.py`/
 `bench_webpoet.py` (benchmarks; the last one times `to_item()` at the PAGE-OBJECT level and verifies both
 items are identical before timing either; `--boundaries` measures the three shapes where the healthy-path

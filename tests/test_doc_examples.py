@@ -16,7 +16,7 @@ DOCS = [ROOT / "README.md", ROOT / "docs" / "PYTHON.md", ROOT / "docs" / "MIGRAT
 
 PAGE_EXAMPLES = {"frost-page", "product-page", "zyte-product-page", "absolute-urls", "grouped-offers"}
 INLINE_EXAMPLES = {"page-quickstart", "primitive", "named-item", "runtime-validation",
-                   "migration-schema", "group-context"}
+                   "migration-schema", "group-context", "encoding-steps", "navigation"}
 
 PRODUCT_HTML = (
     b"<html><head><meta itemprop='brand' content='Acme'></head><body>"

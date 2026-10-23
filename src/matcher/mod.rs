@@ -38,6 +38,7 @@ mod compile;
 mod frame;
 mod deferred;
 mod matching;
+mod navigation;
 mod sig;
 
 use compile::{
@@ -46,6 +47,8 @@ use compile::{
 };
 use decode::{decode_attr, decode_bytes, finalize};
 pub(crate) use decode::EncodedInput;
+pub(crate) use navigation::{document_url, NavCollector};
+pub use navigation::{NavOptions, Navigation};
 use deferred::TextMatchState;
 #[cfg(test)]
 use deferred::TextAccum;
@@ -943,6 +946,8 @@ pub struct Matcher<'a> {
     // ask about it — see `frame.rs`, which explains why this is one owner of NAMED questions rather than
     // the insertion-mode enum it looks like it should be.
     frame: DocumentFrame,
+    // The base URL and meta refresh, collected in the same pass when the caller asked for them.
+    nav: Option<NavCollector>,
 }
 
 /// The offset of the first byte that is not HTML whitespace, if any — where character data becomes
@@ -1544,6 +1549,25 @@ impl CompiledSchema {
         m.finish_grouped()
     }
 
+    /// Whether the schema has no flat query and no group.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.n_flat_cols == 0 && self.n_groups == 0
+    }
+
+    /// [`run`](Self::run), also collecting the base URL and meta refresh into `nav` in the same pass.
+    pub(crate) fn run_with_navigation(
+        &self,
+        input: EncodedInput,
+        nav: NavCollector,
+    ) -> (FlatColumns, Vec<GroupRows>, NavCollector) {
+        let mut m = Matcher::new(self, input);
+        m.nav = Some(nav);
+        crate::tokenizer::tokenize(input.bytes(), &mut m);
+        let nav = m.nav.take().expect("set above");
+        let (flat, grouped) = m.finish_grouped();
+        (flat, grouped, nav)
+    }
+
     /// Does flat column `col` have a LIVE (matchable) entry — a normal member or a deferred reverse
     /// member that survived compile-time routing? The audit uses this so its supported/unsupported
     /// verdict is EXACTLY what the matcher does: a reverse form the compiler drops to empty (subtree
@@ -1608,6 +1632,7 @@ impl<'a> Matcher<'a> {
             tail_spans: Vec::new(),
             pending_text: None,
             frame: DocumentFrame::default(),
+            nav: None,
         }
     }
 
@@ -2482,11 +2507,17 @@ impl<'a> TokenSink<'a> for Matcher<'a> {
     /// is `0 == 0`... which would be `true`, hence the explicit disarm: an unarmed schema must never
     /// stop, least of all before it starts.
     fn done(&self) -> bool {
-        self.schema.stop_mask != 0
+        let fields_done = self.schema.stop_mask != 0
             && self.satisfied == self.schema.stop_mask
             // ...and no capturing element is still open, or closing the stack at finish would give its
             // column an end-of-input span. See `CompiledSchema::arm_early_exit`.
-            && self.open_captures == 0
+            && self.open_captures == 0;
+        match &self.nav {
+            None => fields_done,
+            Some(nav) => {
+                nav.done() && (fields_done || self.schema.is_empty())
+            }
+        }
     }
 
     /// A doctype leaves no node AND does not end the surrounding text node, so it is absorbed into the
@@ -2587,6 +2618,11 @@ impl<'a> TokenSink<'a> for Matcher<'a> {
         } else {
             self.materialize_attrs::<false>(raw_attrs)
         };
+        if let Some(nav) = self.nav.as_mut() {
+            if nav.wants(name) {
+                nav.start_tag(name, raw_attrs, self.stack.iter().map(|e| e.tag), self.input.encoding());
+            }
+        }
         // The element's signature is built from the MATERIALIZED attributes only. That is sound because
         // `collect_interesting` adds `class`/`id` to the interesting set whenever any compiled compound
         // references them, so a `req` carrying class/id bits implies this element's `sig` saw the same

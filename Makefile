@@ -58,8 +58,9 @@ bootstrap:
 	python3 -m venv .venv
 	.venv/bin/pip install -r requirements-test.txt -r requirements-release.txt
 
-# The competitor parsers `bench-engines` measures against. Separate from `bootstrap` because they are
-# not oracles — nothing gated depends on them, and `make ci` runs without them installed.
+# The competitors `bench-engines` and `tools/bench_encoding.py` measure against. Separate from
+# `bootstrap` because they are not oracles — nothing gated depends on them, and `make ci` runs without
+# them installed.
 bootstrap-bench:
 	.venv/bin/pip install -r requirements-bench.txt
 

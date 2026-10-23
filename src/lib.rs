@@ -21,7 +21,7 @@ pub mod selector;
 mod tokenizer;
 mod xpath;
 
-pub use matcher::{MAX_MEMBERS, MAX_SIB_BITS};
+pub use matcher::{NavOptions, Navigation, MAX_MEMBERS, MAX_SIB_BITS};
 pub use page::{CompiledPage, Field, Item, Page};
 pub use selector::Selector;
 
@@ -526,8 +526,9 @@ pub fn audit_schema<Q: AsQuery>(queries: &[Q], groups: &[GroupQuery<Q>]) -> Sche
     }
 }
 
-/// Resolve the page encoding and yield `(bytes_to_tokenize, value_encoding)`. A non-ASCII-compatible
-/// encoding is transcoded to a fresh UTF-8 `Vec` once (owned `Cow`); everything else borrows the input,
+/// Resolve the page encoding and yield `(bytes_to_tokenize, value_encoding, document_encoding)`, where
+/// the last is the page's own encoding, which a transcoded page no longer shares with its values. A
+/// non-ASCII-compatible encoding is transcoded to a fresh UTF-8 `Vec` once (owned `Cow`); everything else borrows the input,
 /// with a document-leading UTF-8 BOM stripped — libxml2 strips ONLY the leading BOM (a U+FEFF elsewhere
 /// is real content), and per-value decoding must not re-strip it (see `matcher::finalize`), so it is
 /// handled here, once per page.
@@ -545,7 +546,7 @@ fn prepare_bytes<'h>(
     html: &'h [u8],
     encoding: Option<&str>,
     url: Option<&str>,
-) -> (Cow<'h, [u8]>, &'static encoding_rs::Encoding) {
+) -> (Cow<'h, [u8]>, &'static encoding_rs::Encoding, &'static encoding_rs::Encoding) {
     let enc = encoding::resolve(html, encoding, url);
     if !enc.is_ascii_compatible() {
         // Transcode FIRST: in UTF-16 every ASCII character carries a 0x00 byte, so deleting NUL bytes
@@ -554,9 +555,9 @@ fn prepare_bytes<'h>(
         // which is why it cannot read a UTF-16 page at all — a divergence in our favour, already
         // documented under Encoding in docs/COMPATIBILITY.md.)
         let utf8 = enc.decode(html).0.into_owned().into_bytes();
-        return (normalize(Cow::Owned(utf8), true), encoding_rs::UTF_8);
+        return (normalize(Cow::Owned(utf8), true), encoding_rs::UTF_8, enc);
     }
-    (normalize(Cow::Borrowed(html), enc == encoding_rs::UTF_8), enc)
+    (normalize(Cow::Borrowed(html), enc == encoding_rs::UTF_8), enc, enc)
 }
 
 /// Parsel's own input normalization, applied ONCE to the whole document before it is tokenized:
@@ -715,9 +716,58 @@ impl Plan {
         url: Option<&str>,
     ) -> (FlatColumns, Vec<GroupRows>) {
         // Keep the prepared `Cow` alive here: the matcher borrows its bytes for the whole scan.
-        let (bytes, value_enc) = prepare_bytes(html, encoding, url);
+        let (bytes, value_enc, _) = prepare_bytes(html, encoding, url);
         self.schema.run(matcher::EncodedInput::new(&bytes, value_enc))
     }
+
+    /// [`extract`](Plan::extract), also reading the document's base URL and meta refresh in the same
+    /// pass, as a browser does (see [`Navigation`]). `url` is the document URL, which a relative
+    /// `<base href>` or refresh URL resolves against. When it is not absolute, only absolute URLs in
+    /// the document resolve, and a relative refresh URL is ignored.
+    pub fn extract_with_navigation(
+        &self,
+        html: &[u8],
+        encoding: Option<&str>,
+        url: &str,
+        options: NavOptions,
+    ) -> (FlatColumns, Vec<GroupRows>, Navigation) {
+        let doc_url = url::Url::parse(url).ok();
+        let (bytes, value_enc, doc_enc) = prepare_bytes(html, encoding, Some(url));
+        // With no fields to extract, a document that never spells a tag that can change the answer
+        // needs no scan. Checked on the prepared bytes, where NUL deletion can have joined a tag name.
+        if self.schema.is_empty()
+            && !has_start_tag(&bytes, b"base")
+            && !(options.meta_refresh && has_start_tag(&bytes, b"meta"))
+        {
+            let base_url = options.base_url.then(|| matcher::document_url(doc_url.as_ref(), url));
+            let nav = Navigation { base_url, meta_refresh: None };
+            return (Vec::new(), Vec::new(), nav);
+        }
+        let nav = matcher::NavCollector::new(doc_url, doc_enc, options);
+        let (flat, grouped, nav) =
+            self.schema.run_with_navigation(matcher::EncodedInput::new(&bytes, value_enc), nav);
+        (flat, grouped, nav.finish(url))
+    }
+}
+
+/// Whether `<name` occurs in `bytes`, ASCII-case-insensitively: a superset of the start tags named `name`.
+fn has_start_tag(bytes: &[u8], name: &[u8]) -> bool {
+    memchr::memchr_iter(b'<', bytes).any(|i| {
+        bytes.get(i + 1..i + 1 + name.len()).is_some_and(|candidate| candidate.eq_ignore_ascii_case(name))
+    })
+}
+
+/// The base URL and meta refresh of `html`, as a browser reads them; see
+/// [`Plan::extract_with_navigation`].
+pub fn navigation(
+    html: &[u8],
+    encoding: Option<&str>,
+    url: &str,
+    options: NavOptions,
+) -> Navigation {
+    static EMPTY: std::sync::OnceLock<Plan> = std::sync::OnceLock::new();
+    let plan = EMPTY.get_or_init(|| Plan::compile::<&str>(&[], &[]));
+    plan.extract_with_navigation(html, encoding, url, options).2
 }
 
 /// One streaming pass returning both flat query columns and grouped (`Many`/`One`) results.

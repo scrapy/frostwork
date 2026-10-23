@@ -9,7 +9,9 @@ parsel cross-check that values survive the FFI boundary unchanged.
 import asyncio
 import contextlib
 import re
+import subprocess
 import sys
+import types
 
 import pytest
 
@@ -213,6 +215,26 @@ def test_resolve_label_is_public():
     assert frostwork.resolve_label("cp874") == "windows-874"
     assert frostwork.resolve_label("latin-1") == "windows-1252"
     assert frostwork.resolve_label("cp437") is None
+
+
+def test_page_resolve_label_is_deprecated():
+    with pytest.warns(DeprecationWarning, match=r"frostwork\.resolve_label\(\)"):
+        assert frostwork.page.resolve_label("cp874") == "windows-874"
+
+
+def test_page_detect_encoding_is_deprecated():
+    with pytest.warns(DeprecationWarning, match=r"frostwork\.detect_encoding\(\)"):
+        assert frostwork.page.detect_encoding(b"<p>x", "cp874") == "windows-874"
+
+
+def test_submodules_are_attributes():
+    code = "import frostwork; frostwork.encoding.decode, frostwork.page.extract, frostwork.validation.ValidationReport"
+    subprocess.check_call([sys.executable, "-c", code])
+
+
+def test_dir_lists_the_public_api():
+    names = {name for name in dir(frostwork) if not isinstance(getattr(frostwork, name), types.ModuleType)}
+    assert {name for name in names if not name.startswith("_")} == set(frostwork.__all__) - {"__version__"}
 
 
 def test_every_python_text_codec_is_a_whatwg_encoding_or_declared_not_one():

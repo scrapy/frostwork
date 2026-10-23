@@ -227,7 +227,7 @@ fn start_tag_name(head: &[u8], lt: usize) -> Option<&[u8]> {
 /// A flat byte window is wrong in both directions: it would drop late head declarations and honour late
 /// body declarations no browser does. It also costs ~35µs on every label-less page, a whole extra pass
 /// over the document, which stopping at the real head boundary does not.
-fn meta_prescan(head: &[u8]) -> Option<&'static Encoding> {
+pub(crate) fn meta_prescan(head: &[u8]) -> Option<&'static Encoding> {
     if let Some(enc) = xml_decl_encoding(head) {
         return enc.into();
     }
@@ -303,29 +303,9 @@ fn meta_prescan(head: &[u8]) -> Option<&'static Encoding> {
 /// the top-level domain of `url` when given. The intentional differences from w3lib (Scrapy's decoder)
 /// are in the encoding section of docs/COMPATIBILITY.md and gated in `tools/enc_check.py`; each one is
 /// a place where w3lib and browsers disagree and Frostwork follows the browser.
-///
-/// No UTF-32: the WHATWG Encoding Standard has no UTF-32, and neither does any browser, so a UTF-32 BOM
-/// is not a BOM here. w3lib does recognize it (its BOM table predates the standard).
 pub fn resolve(html: &[u8], override_label: Option<&str>, url: Option<&str>) -> &'static Encoding {
-    if html.starts_with(&[0xEF, 0xBB, 0xBF]) {
-        return encoding_rs::UTF_8;
-    }
-    if html.starts_with(&[0xFF, 0xFE]) {
-        return encoding_rs::UTF_16LE;
-    }
-    if html.starts_with(&[0xFE, 0xFF]) {
-        return encoding_rs::UTF_16BE;
-    }
-    // A UTF-16 document with NO BOM, detected the way XML 1.0 Appendix F (and libxml2's own
-    // `xmlDetectEncoding`) does it: `<?` encoded as UTF-16 is `3C 00 3F 00` / `00 3C 00 3F`. This sits with
-    // the BOM checks rather than after the label, on the same reasoning WHATWG gives a BOM priority — the
-    // bytes are unambiguous, and no ASCII-compatible document can begin with a NUL. Without it the whole
-    // document decoded as mojibake, and libxml2 (the value oracle) reads these files correctly.
-    if html.starts_with(&[0x3C, 0x00, 0x3F, 0x00]) {
-        return encoding_rs::UTF_16LE;
-    }
-    if html.starts_with(&[0x00, 0x3C, 0x00, 0x3F]) {
-        return encoding_rs::UTF_16BE;
+    if let Some((enc, _)) = bom(html) {
+        return enc;
     }
     if let Some(label) = override_label {
         if let Some(enc) = Encoding::for_label(label.as_bytes()) {
@@ -346,26 +326,53 @@ pub fn resolve(html: &[u8], override_label: Option<&str>, url: Option<&str>) -> 
     //
     // Deliberately NOT stopped at `<body>` (w3lib's regex does), because a real page can carry a late
     // `<meta charset>` inside the body and browsers still honour it.
-    if let Some(enc) = meta_prescan(html) {
-        return enc;
+    meta_prescan(html).unwrap_or_else(|| autodetect(html, url))
+}
+
+/// The encoding the start of `html` fixes before any label is consulted, with the length of the BOM
+/// that announced it: a UTF-8 or UTF-16 BOM, or the BOM-less UTF-16 start of an XML declaration
+/// (length 0).
+///
+/// No UTF-32: the WHATWG Encoding Standard has no UTF-32, and neither does any browser, so a UTF-32 BOM
+/// is not a BOM here. w3lib does recognize it (its BOM table predates the standard).
+pub(crate) fn bom(html: &[u8]) -> Option<(&'static Encoding, usize)> {
+    if html.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        return Some((encoding_rs::UTF_8, 3));
     }
-    autodetect(html, url.and_then(tld).as_deref())
+    if html.starts_with(&[0xFF, 0xFE]) {
+        return Some((encoding_rs::UTF_16LE, 2));
+    }
+    if html.starts_with(&[0xFE, 0xFF]) {
+        return Some((encoding_rs::UTF_16BE, 2));
+    }
+    // A UTF-16 document with NO BOM, detected the way XML 1.0 Appendix F (and libxml2's own
+    // `xmlDetectEncoding`) does it: `<?` encoded as UTF-16 is `3C 00 3F 00` / `00 3C 00 3F`. This sits with
+    // the BOM checks rather than after the label, on the same reasoning WHATWG gives a BOM priority — the
+    // bytes are unambiguous, and no ASCII-compatible document can begin with a NUL. Without it the whole
+    // document decoded as mojibake, and libxml2 (the value oracle) reads these files correctly.
+    if html.starts_with(&[0x3C, 0x00, 0x3F, 0x00]) {
+        return Some((encoding_rs::UTF_16LE, 0));
+    }
+    if html.starts_with(&[0x00, 0x3C, 0x00, 0x3F]) {
+        return Some((encoding_rs::UTF_16BE, 0));
+    }
+    None
 }
 
 /// WHATWG's optional frequency-analysis step, as Firefox runs it: chardetng, with UTF-8 decided up
 /// front by a strict decode, as Chrome and Scrapy do. A body cut off inside a UTF-8 sequence is still
-/// UTF-8.
+/// UTF-8. The guess is informed by the top-level domain of `url` when given.
 ///
 /// The decode is `simdutf8::compat`, which returns what `std::str::from_utf8` does. Not `basic`: it
 /// reads the whole document before failing and has no `error_len()` to tell a truncated tail apart.
-fn autodetect(html: &[u8], tld: Option<&[u8]>) -> &'static Encoding {
+pub(crate) fn autodetect(html: &[u8], url: Option<&str>) -> &'static Encoding {
     match simdutf8::compat::from_utf8(html) {
         Ok(_) => encoding_rs::UTF_8,
         Err(e) if e.error_len().is_none() => encoding_rs::UTF_8,
         Err(_) => {
             let mut detector = chardetng::EncodingDetector::new(chardetng::Iso2022JpDetection::Deny);
             detector.feed(html, true);
-            detector.guess(tld, chardetng::Utf8Detection::Deny)
+            detector.guess(url.and_then(tld).as_deref(), chardetng::Utf8Detection::Deny)
         }
     }
 }
@@ -452,6 +459,18 @@ mod tests {
         let long = "<p>café €</p>".repeat(40).into_bytes();
         assert_eq!(resolve(&[&long[..], b"\xe2\x82"].concat(), None, None), encoding_rs::UTF_8);
         assert_ne!(resolve(&[&long[..], b"\xe9t\xe9</p>"].concat(), None, None), encoding_rs::UTF_8);
+    }
+
+    #[test]
+    fn autodetection_reads_the_whole_document() {
+        // Firefox 144 reports windows-1251 for this page: the 46 000 Shift_JIS bytes at the start do not
+        // decide the guess.
+        let japanese = "<p>日本語のページです。こんにちは、世界。</p>\n".repeat(1000);
+        let russian = "<p>Привет мир, это страница.</p>\n".repeat(10_000);
+        let (japanese, _, _) = encoding_rs::SHIFT_JIS.encode(&japanese);
+        let (russian, _, _) = encoding_rs::WINDOWS_1251.encode(&russian);
+        assert_eq!(autodetect(&japanese, None), encoding_rs::SHIFT_JIS);
+        assert_eq!(autodetect(&[&japanese[..], &russian[..]].concat(), None), encoding_rs::WINDOWS_1251);
     }
 }
 
