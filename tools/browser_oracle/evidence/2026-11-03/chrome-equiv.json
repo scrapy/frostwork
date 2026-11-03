@@ -1,0 +1,50 @@
+{
+ "browser": "Chrome/156.0.8078.80",
+ "mode": "equiv",
+ "date": "2026-11-03",
+ "coverage": {
+  "seed": 12345,
+  "tokens": 70,
+  "minUses": 245,
+  "maxUses": 309
+ },
+ "equiv": {
+  "docs": 5002,
+  "eligible": 4478,
+  "containsShadowrootmode": 524,
+  "pageLoadFailures": 0,
+  "domparser": {
+   "differ": 112,
+   "differEligible": 0,
+   "examples": [
+    "<!DOCTYPE html><br><template shadowrootmode=open><div/><dt><frameset><i>",
+    "<!DOCTYPE html><p><tbody><template shadowrootmode=closed><head><dd></table><annotation-xml encoding=\"text/html\">",
+    "<tr><template shadowrootmode=open></html><body><selectedcontent><selectedcontent>",
+    "<!DOCTYPE html><?pi?><colgroup><template shadowrootmode=open><select>"
+   ],
+   "eligibleExamples": []
+  },
+  "parseHTMLUnsafe": {
+   "differ": 333,
+   "differEligible": 297,
+   "examples": [
+    "<!DOCTYPE html><caption><frame><title>T</title><option><option><!--c--><marquee>",
+    "<option><svg><p></i><b><!--c-->",
+    "<!DOCTYPE html><p><frameset><mi><!--c--><!--c-->",
+    "<tbody><style>s</style><![CDATA[x]]><br><option><li><math>"
+   ],
+   "eligibleExamples": [
+    "<!DOCTYPE html><caption><frame><title>T</title><option><option><!--c--><marquee>",
+    "<option><svg><p></i><b><!--c-->",
+    "<!DOCTYPE html><p><frameset><mi><!--c--><!--c-->",
+    "<tbody><style>s</style><![CDATA[x]]><br><option><li><math>"
+   ]
+  },
+  "srcdoc": {
+   "differ": 0,
+   "differEligible": 0,
+   "examples": [],
+   "eligibleExamples": []
+  }
+ }
+}

@@ -1,0 +1,78 @@
+{
+ "browser": "Chrome/156.0.8078.80",
+ "fidelity": {
+  "navigate, scripts run": {
+   "scriptRan": true,
+   "noscriptRawtext": true,
+   "templateInert": true,
+   "fosteredOutOfTable": true,
+   "tbodyInserted": true,
+   "selfCloseIgnored": true,
+   "divKeptInSelect": true
+  },
+  "navigate, CSP script-src 'none'": {
+   "scriptRan": false,
+   "noscriptRawtext": true,
+   "templateInert": true,
+   "fosteredOutOfTable": true,
+   "tbodyInserted": true,
+   "selfCloseIgnored": true,
+   "divKeptInSelect": true
+  },
+  "navigate, CSP sandbox": {
+   "scriptRan": false,
+   "noscriptRawtext": false,
+   "templateInert": true,
+   "fosteredOutOfTable": true,
+   "tbodyInserted": true,
+   "selfCloseIgnored": true,
+   "divKeptInSelect": true
+  },
+  "navigate, CDP script execution disabled": {
+   "scriptRan": false,
+   "noscriptRawtext": false,
+   "templateInert": true,
+   "fosteredOutOfTable": true,
+   "tbodyInserted": true,
+   "selfCloseIgnored": true,
+   "divKeptInSelect": true
+  },
+  "srcdoc iframe in CSP page": {
+   "scriptRan": false,
+   "noscriptRawtext": true,
+   "templateInert": true,
+   "fosteredOutOfTable": true,
+   "tbodyInserted": true,
+   "selfCloseIgnored": true,
+   "divKeptInSelect": true
+  },
+  "DOMParser": {
+   "scriptRan": false,
+   "noscriptRawtext": false,
+   "templateInert": true,
+   "fosteredOutOfTable": true,
+   "tbodyInserted": true,
+   "selfCloseIgnored": true,
+   "divKeptInSelect": true
+  },
+  "Document.parseHTMLUnsafe": {
+   "scriptRan": false,
+   "noscriptRawtext": false,
+   "templateInert": true,
+   "fosteredOutOfTable": true,
+   "tbodyInserted": true,
+   "selfCloseIgnored": true,
+   "divKeptInSelect": true
+  }
+ },
+ "throughput": {
+  "small, navigate, 1 tab": 98,
+  "small, navigate, 8 tabs": 181,
+  "small, srcdoc, 50 at a time": 520,
+  "small, DOMParser": 20477,
+  "60 KB, navigate, 1 tab": 57,
+  "60 KB, navigate, 8 tabs": 110,
+  "60 KB, srcdoc, 50 at a time": 115
+ },
+ "bigBytes": 41269
+}

@@ -77,6 +77,17 @@ real zyte processors are too lenient to notice a wrong node (clear-html renders 
 `<title>` as from the `<html>` around it), so the element-universe sweep in `tests/test_python.py` is that
 contract's gate, and a single-detector survivor list would have called it dead code.
 
+`browser_oracle/` is the prototype oracle for the proposed browser mode (`docs/BROWSER_MODE.md`,
+section 5), and the one Node tool here (Node 22 or later, no packages). `probe.cjs` drives stock Chrome
+over CDP and Firefox over WebDriver BiDi, headless from throwaway profiles, and serves exact bytes with
+`Content-Security-Policy: script-src 'none'`, the one way of blocking page scripts that leaves the
+parser's scripting flag on. Its `equiv` mode compares a page load with `DOMParser`, `parseHTMLUnsafe` and
+`srcdoc` node for node over a seeded generator that refuses to run unless every token is emitted (a float
+LCG silently emitted 28 of its 60), and its `claims` mode evaluates `claims.json` on all three.
+`lab_compare.py` grades the engine against the encoding-hacks browser column with three encoding labels.
+`evidence/<date>/` holds the outputs the proposal quotes, each stamped with its browser build. No gate
+calls any of it yet.
+
 Three tools own the tree-construction rules and share ONE element universe: `gen_tree_rules.py`
 derives the rules from libxml2 and GENERATES the Rust table (`--check` gates on drift, `--report`
 prints the derivation); `audit_tree_rules.py` asks lxml whether every rule cell is RIGHT, by value,
