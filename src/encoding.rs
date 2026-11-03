@@ -26,29 +26,41 @@ use encoding_rs::Encoding;
 /// and no attribute name this cares about, so a mangled byte can only turn "not a declaration" into
 /// "still not a declaration", the answer a browser reaches too.
 fn meta_attrs(head: &[u8], from: usize) -> (Vec<(String, String)>, usize) {
+    let mut attrs = Vec::new();
+    let after = walk_attrs(head, from, |name, value| {
+        attrs.push((
+            String::from_utf8_lossy(name).to_ascii_lowercase(),
+            String::from_utf8_lossy(value).to_string(),
+        ));
+    });
+    (attrs, after)
+}
+
+/// Call `f` with the raw name and value of each attribute of the tag whose name ends at `from`, and
+/// return the offset just past the tag.
+fn walk_attrs(head: &[u8], from: usize, mut f: impl FnMut(&[u8], &[u8])) -> usize {
     const WS: [u8; 5] = [b' ', b'\t', b'\n', b'\r', 0x0c];
     let n = head.len();
     let mut i = from;
-    let mut attrs = Vec::new();
     loop {
         while i < n && (WS.contains(&head[i]) || head[i] == b'/') {
             i += 1;
         }
         if i >= n || head[i] == b'>' {
-            return (attrs, (i + 1).min(n));
+            return (i + 1).min(n);
         }
         let ns = i;
         while i < n && !WS.contains(&head[i]) && !matches!(head[i], b'=' | b'>' | b'/') {
             i += 1;
         }
-        let name = String::from_utf8_lossy(&head[ns..i]).to_ascii_lowercase();
+        let name = &head[ns..i];
         // whitespace is allowed on BOTH sides of `=` (`charset\n=\nwindows-1252` is a real declaration)
         while i < n && WS.contains(&head[i]) {
             i += 1;
         }
         if i >= n || head[i] != b'=' {
             if !name.is_empty() {
-                attrs.push((name, String::new())); // valueless attribute
+                f(name, b""); // valueless attribute
             }
             continue;
         }
@@ -63,7 +75,7 @@ fn meta_attrs(head: &[u8], from: usize) -> (Vec<(String, String)>, usize) {
             while i < n && head[i] != q {
                 i += 1;
             }
-            let v = String::from_utf8_lossy(&head[vs..i]).to_string();
+            let v = &head[vs..i];
             i = (i + 1).min(n);
             v
         } else {
@@ -71,10 +83,10 @@ fn meta_attrs(head: &[u8], from: usize) -> (Vec<(String, String)>, usize) {
             while i < n && !WS.contains(&head[i]) && head[i] != b'>' {
                 i += 1;
             }
-            String::from_utf8_lossy(&head[vs..i]).to_string()
+            &head[vs..i]
         };
         if !name.is_empty() {
-            attrs.push((name, value));
+            f(name, value);
         }
     }
 }
@@ -203,7 +215,8 @@ fn start_tag_name(head: &[u8], lt: usize) -> Option<&[u8]> {
 /// honours abrupt closes (`<!-->`, `<!--->`, `--!>`), so a local `-->`-only search would read a live
 /// `<meta charset>` after one of them as still commented out and ignore the declaration.
 ///
-/// ONE left-to-right pass, allocation-free, skipping comments on the way past them.
+/// ONE left-to-right pass, allocation-free outside `<meta>` tags, skipping comments and every other
+/// tag on the way past them.
 ///
 /// Both properties are load-bearing. Lowercasing the document to search it would be an allocation and
 /// a memcpy the size of the page on every label-less parse; and finding each `<meta` first, then
@@ -239,38 +252,32 @@ pub(crate) fn meta_prescan(head: &[u8]) -> Option<&'static Encoding> {
         if hit >= limit {
             return None;
         }
-        // The head ends at `</head>` or at the first start tag that may not appear in it — and with
-        // it ends the browser's willingness to re-decode, once past the floor.
-        if let Some(name) = start_tag_name(head, hit) {
-            if is_raw_text(name) {
-                mfrom = skip_raw_text(head, hit, name).max(hit + 1);
-                continue;
-            }
-            if !is_head_element(name) {
-                limit = limit.min(PRESCAN_FLOOR.max(hit));
-            }
-        } else if head[hit..].len() >= 7 && head[hit..hit + 7].eq_ignore_ascii_case(b"</head>") {
-            limit = limit.min(PRESCAN_FLOOR.max(hit));
-        }
         // a COMMENT declares nothing: `<!-- <meta charset=big5> -->` must not switch the decode.
         // `scan_comment` owns the abrupt-close shapes (`<!-->`, `--!>`); `.max` guarantees progress.
         if head[hit..].starts_with(b"<!--") {
             mfrom = crate::tokenizer::scan_comment(head, hit).max(hit + 1);
             continue;
         }
-        match head.get(hit + 1..hit + 5) {
-            Some(name) if name.eq_ignore_ascii_case(b"meta") => {}
-            // no 4 bytes left to compare: no later `<` can match either
-            None => return None,
-            Some(_) => {
-                mfrom = hit + 1;
-                continue;
-            }
+        // `</` + letter is an end tag, whose name `start_tag_name` finds one byte further on
+        let end_tag = head.get(hit + 1) == Some(&b'/');
+        let Some(name) = start_tag_name(head, hit + usize::from(end_tag)) else {
+            mfrom = hit + 1;
+            continue;
+        };
+        let tag_start = hit + usize::from(end_tag) + 1 + name.len();
+        if !end_tag && is_raw_text(name) {
+            mfrom = skip_raw_text(head, hit, name).max(hit + 1);
+            continue;
         }
-        let tag_start = hit + b"<meta".len();
-        // require a tag-name terminator so `<metadata …>` is not a meta tag
-        if !matches!(head.get(tag_start), Some(b' ' | b'\t' | b'\n' | b'\r' | 0x0c | b'/' | b'>')) {
-            mfrom = tag_start;
+        // The head ends at `</head>` or at the first start tag that may not appear in it — and with
+        // it ends the browser's willingness to re-decode, once past the floor.
+        if (end_tag && name.eq_ignore_ascii_case(b"head")) || (!end_tag && !is_head_element(name)) {
+            limit = limit.min(PRESCAN_FLOOR.max(hit));
+        }
+        // Any other tag is skipped WITH its attributes, as WHATWG's prescan does, so a `<meta` inside
+        // a quoted value (`<img alt="<meta charset=big5>">`) is text.
+        if end_tag || !name.eq_ignore_ascii_case(b"meta") {
+            mfrom = walk_attrs(head, tag_start, |_, _| {}).max(hit + 1);
             continue;
         }
         let (attrs, after) = meta_attrs(head, tag_start);
@@ -525,6 +532,17 @@ mod w3lib_oracle_tests {
         assert_eq!(scan(br#"<meta content="text/html; charset=big5">"#), None); // no http-equiv
         assert_eq!(scan(b"<meta charset=utf-16>"), Some(encoding_rs::UTF_8)); // UTF-16 decl -> UTF-8
         assert_eq!(scan(b"<metadata charset=big5>"), None); // not a <meta> tag
+    }
+
+    /// Other tags are skipped with their attributes, so markup inside an attribute value is text.
+    #[test]
+    fn a_meta_inside_an_attribute_value_declares_nothing() {
+        assert_eq!(scan(br#"<img alt="<meta charset=big5>">"#), None);
+        assert_eq!(scan(br#"</p title='<meta charset=big5>'>"#), None);
+        assert_eq!(
+            scan(br#"<img alt="<meta charset=big5>"><meta charset=shift_jis>"#),
+            Some(encoding_rs::SHIFT_JIS)
+        );
     }
 
     /// Browser behaviour w3lib also implements, and the prescan did not.

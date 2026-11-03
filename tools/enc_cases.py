@@ -77,6 +77,11 @@ BROWSER_DIFFERENCES = [
      b'<html><head></head><body><meta charset="windows-1252">' + W1252 + b"</body></html>",
      ["café"], ["caf�"],
      "w3lib's regex has a `|body` alternative and gives up there; browsers honour a late <meta charset>"),
+    ("a <meta> inside an attribute value declares nothing",
+     b'<html><head><img alt="<meta charset=big5>"></head><body>' + U8 + b"</body></html>",
+     ["café"], ["caf矇"],
+     "WHATWG's prescan skips every other tag together with its attributes, and Chromium 156 and Firefox "
+     "144 ignore the <meta> inside the value; w3lib's regex finds it anywhere in its window"),
     ("an invalid charset does not end the prescan",
      b'<html><head><meta charset="not-a-charset"><meta charset="windows-1252"></head><body>'
      + W1252 + b"</body></html>",
