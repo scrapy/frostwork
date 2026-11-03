@@ -106,9 +106,6 @@ DATA_MODE_NAMES = sorted(VOID_SET + NONVOID_SET)
 # page, which is why "unobservable" has to be measured rather than argued.
 PRIORITY_UNOBSERVABLE = {"html", "head"}
 PRIORITY_NAMES = sorted(set(DATA_MODE_NAMES) - set(UNOBSERVABLE_AS_OPEN) - PRIORITY_UNOBSERVABLE)
-# `void:` mutants cover the whole void set plus the HTML5-era names libxml2 deliberately keeps OPEN,
-# since flipping one of THOSE to void is the mistake the contract exists to prevent.
-VOID_NAMES = VOID_SET + ["embed", "source", "track", "wbr"]
 
 
 def mutants() -> list[tuple[str, str]]:
@@ -132,7 +129,7 @@ def mutants() -> list[tuple[str, str]]:
     # unwind a `<tbody>`) unprobed while the sweep reports full protection.
     for name in PRIORITY_NAMES:
         out.append((f"prio:{name}", f"end_priority({name})"))
-    for n in VOID_NAMES:
+    for n in VOID_SET:
         out.append((f"void:{n}", f"void({n})"))
     return out
 

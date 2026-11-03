@@ -8,7 +8,7 @@
 //! **Do not add a second, hand-written close table ORed with the generated one.** Derived over the whole
 //! element universe, the generated relation closes every pair a hand-written one would and 163 more,
 //! so a hand-written table can only mask it, never correct it — and it asserts the HTML5 rule, which is
-//! a *symmetric* `dd`/`dt` and `rt`/`rp` auto-close that libxml2 2.14 does not do in either direction.
+//! a *symmetric* `dd`/`dt` and `rt`/`rp` auto-close that libxml2 2.15 does not do in either direction.
 //! The oracle wins here.
 
 mod generated;
@@ -115,7 +115,7 @@ mod tests {
         assert!(!implies("td", "tr"));
         // the whole `<p>`-closing column lives in `arms_without_generator_coverage` below, which owns it
         // cell by cell — duplicating rows here just means a rule change fails twice.
-        // libxml2 2.14 NESTS a same-tag dt/dd repeat, and never auto-closes ruby annotations at all.
+        // libxml2 2.15 NESTS a same-tag dt/dd repeat, and never auto-closes ruby annotations at all.
         assert!(!implies("dt", "dt"));
         assert!(!implies("dd", "dd"));
         assert!(!implies("rt", "rt"));
@@ -128,7 +128,7 @@ mod tests {
         assert!(!implies("caption", "caption"));
     }
 
-    /// The `<p>`-closing set and the table-section arms, cell by cell against libxml2 2.14.6. Generated
+    /// The `<p>`-closing set and the table-section arms, cell by cell against libxml2 2.15.4. Generated
     /// differential pages do not exercise these shapes, so this test provides direct Rust regression
     /// coverage; `tools/audit_tree_rules.py` independently checks the rule table against libxml2.
     #[test]

@@ -1,6 +1,6 @@
 # tools/ — the differential/benchmark harness
 
-Python harness (needs `parsel`). `oracle.py` guards the oracle toolchain (libxml2 ≥ 2.14 — a pinned
+Python harness (needs `parsel`). `oracle.py` guards the oracle toolchain (libxml2 ≥ 2.15 — a pinned
 lxml does *not* pin its vendored libxml2); `diff_lxml.py` is the gate; `conformant.py`/`families.py`/
 `foreign.py` generate test pages; `enc_check.py` (encoding parity) with `decoder_sweep.py` as its importable half — the two-byte
 enumeration and the four disagreement classes live there because `enc_check` runs its gate at module

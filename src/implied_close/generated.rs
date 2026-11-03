@@ -14,8 +14,8 @@ use crate::tokenizer::DataMode;
 /// libxml2 itself, over an element universe that is a proven superset of the engine's
 /// own names. Do not hand-edit: `--check` fails on drift.
 pub mod sc {
-    pub const OTHER: u8 = 0; // applet area article aside audio base basefont bdi blink button canvas command data
-    // datalist del details dialog embed figcaption figure footer frame header hgroup html
+    pub const OTHER: u8 = 0; // applet area article aside audio base basefont bdi bgsound blink button canvas command
+    // data datalist del details dialog embed figcaption figure footer frame header hgroup html
     // image input ins isindex keygen label link main mark marquee math menuitem meta meter nav
     // nobr noembed noframes noscript object output param picture plaintext progress rb rp rt
     // rtc ruby script search section select slot source spacer style summary svg template
@@ -158,17 +158,16 @@ pub fn start_closes(inc: u8, top: u8) -> bool {
     }
 }
 
-/// Void elements: no end tag, no children. libxml2 2.14's set, NOT HTML5's — it does
-/// NOT treat the HTML5-era `embed`/`source`/`track`/`wbr` as void (it keeps them open
-/// as ordinary containers), and it DOES treat the HTML4 `basefont`/`frame`/`isindex`
-/// as void. Derived by `tools/gen_tree_rules.py`, same as the classes above.
+/// Void elements: no end tag, no children. libxml2 2.15's set, which is HTML5's plus the
+/// HTML4 `isindex`. Derived by `tools/gen_tree_rules.py`, same as the classes above.
 pub fn is_void(name: &str) -> bool {
     crate::mutate::is_void(
         name,
         matches!(
             name,
-            "area" | "base" | "basefont" | "br" | "col" | "frame" | "hr" | "img" | "input" |
-            "isindex" | "link" | "meta" | "param"
+            "area" | "base" | "basefont" | "bgsound" | "br" | "col" | "embed" | "frame" | "hr" |
+            "img" | "input" | "isindex" | "keygen" | "link" | "meta" | "param" | "source" |
+            "track" | "wbr"
         ),
     )
 }
@@ -207,7 +206,7 @@ pub fn frame_content(name: &str) -> FrameContent {
 /// after it.
 ///
 /// Derived by `tools/gen_tree_rules.py` over the whole element universe, which is why it
-/// is libxml2 2.14's set and not HTML5's: `listing` and `noscript` look like they belong
+/// is libxml2 2.15's set and not HTML5's: `listing` and `noscript` look like they belong
 /// here and do not (libxml2 parses their content as markup, having scripting disabled),
 /// while the obsolete `xmp`/`plaintext` do belong. Deriving the set is what keeps a
 /// non-obvious name from being left out of it.

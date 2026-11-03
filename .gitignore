@@ -13,3 +13,5 @@ __pycache__/
 /tools/results/
 # Fuzzer run logs (fuzz.sh output, one per worker)
 /fuzz-*.log
+# lxml built against a pinned libxml2 (`make oracle`)
+/.oracle-wheels/

@@ -41,7 +41,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import oracle  # noqa: E402  — libxml2 >= 2.14, same requirement as every other gate
+import oracle  # noqa: E402  — libxml2 >= 2.15, same requirement as every other gate
 import parsel  # noqa: E402
 
 # One token per behaviour class the engine special-cases. Marked `{}` where an id goes, so every element

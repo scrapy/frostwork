@@ -70,7 +70,7 @@ PRODUCT = (
 def _oracle():
     """The Parsel/lxml oracle for a cross-check, or skip the test.
 
-    Value parity is only defined against **libxml2 >= 2.14** (docs/TESTING.md, tools/oracle.py): an
+    Value parity is only defined against **libxml2 >= 2.15** (docs/TESTING.md, tools/oracle.py): an
     older vendored libxml2 parses CR-in-attribute-values and a raw `<` in text differently, so a
     mismatch there is the oracle's behaviour, not Frostwork's. A pinned lxml does not pin the libxml2 it
     carries — the lxml 6.1.1 Windows wheel ships 2.11.9 — so this has to be checked at run time rather
@@ -78,9 +78,9 @@ def _oracle():
     """
     parsel = pytest.importorskip("parsel")
     etree = pytest.importorskip("lxml.etree")
-    if etree.LIBXML_VERSION < (2, 14):
+    if etree.LIBXML_VERSION < (2, 15):
         got = ".".join(map(str, etree.LIBXML_VERSION))
-        pytest.skip(f"oracle libxml2 is {got}; value parity is defined against >= 2.14")
+        pytest.skip(f"oracle libxml2 is {got}; value parity is defined against >= 2.15")
     return parsel
 
 

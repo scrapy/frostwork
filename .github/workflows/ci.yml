@@ -62,6 +62,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -m venv .venv
+      - uses: ./.github/actions/oracle
       # pin the oracle exactly: an lxml/parsel upgrade silently moving the reference must be a
       # deliberate bump, not an incidental one that quietly changes what "parity" means.
       - run: .venv/bin/pip install -r requirements-test.txt -r requirements-release.txt
@@ -99,9 +100,8 @@ jobs:
     name: bindings (py${{ matrix.python }} / ${{ matrix.os }})
     # The heavy differential runs once (above) on 3.12/linux. This matrix only builds the extension and
     # runs the public Python API, typing and docs suite, covering the newest CPython, the next prerelease
-    # one, and macOS. Tree-rule meta-gates stay in the differential job: a prerelease source build of
-    # lxml can link an older system libxml2. The abi3 FLOOR is a separate job below and runs the full
-    # suite against the pinned manylinux oracle wheel.
+    # one, and macOS. Tree-rule meta-gates stay in the differential job. The abi3 FLOOR is a separate
+    # job below and runs the full suite.
     strategy:
       fail-fast: false
       matrix:
@@ -121,10 +121,7 @@ jobs:
           python-version: ${{ matrix.python }}
           allow-prereleases: ${{ matrix.prerelease || false }}
       - run: python -m venv .venv
-      # lxml has no prebuilt wheel yet for a prerelease CPython either, so pip falls back to a source
-      # build, which needs these headers.
-      - if: matrix.prerelease
-        run: sudo apt-get update && sudo apt-get install -y libxml2-dev libxslt1-dev
+      - uses: ./.github/actions/oracle
       - run: .venv/bin/pip install -r requirements-test.txt
       # web-poet pulls two mypyc/C test deps whose published wheels don't load on a prerelease CPython
       - if: matrix.prerelease
@@ -151,6 +148,7 @@ jobs:
         with:
           python-version: "3.10"
       - run: python -m venv .venv
+      - uses: ./.github/actions/oracle
       - run: .venv/bin/pip install -r requirements-test.txt
       - run: .venv/bin/maturin develop --release
       - run: .venv/bin/python -m pytest tests/ -q
