@@ -39,7 +39,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import conformant
 import foreign
 from diff_lxml import run_engine, run_support, parsel_vals, verdict
-import oracle  # same libxml2 >= 2.14 requirement as the gate (parsel is the oracle here too)
+import oracle  # same libxml2 >= 2.15 requirement as the gate (parsel is the oracle here too)
 
 TAGS = ["div", "p", "span", "a", "li", "td", "th", "ul", "ol", "dl", "dt", "dd", "option", "select",
         "table", "tr", "b", "em", "strong", "i", "small", "label", "img", "input", "section",

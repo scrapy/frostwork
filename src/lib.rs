@@ -1382,7 +1382,7 @@ mod tests {
             v(&["a", "b"])
         );
     }
-    // libxml2 2.14 NESTS a same-tag dt/dd repeat instead of auto-closing it (unlike `li`/`td`/`option`
+    // libxml2 2.15 NESTS a same-tag dt/dd repeat instead of auto-closing it (unlike `li`/`td`/`option`
     // above), and never auto-closes ruby annotations at all. A rule table ported from the HTML5 spec
     // asserts the opposite for both and over-closes, which is why this one is derived from the oracle.
     #[test]
@@ -1422,7 +1422,7 @@ mod tests {
     /// engine's tag ids: it closes an open `<b>` for an incoming `<td>` but NOT an open `<em>`, and an
     /// open `<h1>` for an incoming `<table>` but NOT an open `<div>` — pairs a coarser id space lumps
     /// together.
-    /// These cases were taken from libxml2 2.14. `tools/audit_tree_rules.py` re-checks the complete
+    /// These cases match libxml2 2.15. `tools/audit_tree_rules.py` re-checks the complete
     /// (open x incoming) table, and `tools/mutate_rules.py` checks that flipping a cell is noticed.
     #[test]
     fn start_close_pairs_match_libxml2() {
@@ -1578,19 +1578,15 @@ mod tests {
         }
     }
 
-    /// libxml2 treats the HTML4 `basefont`/`frame`/`isindex` as EMPTY elements. Treating them as
-    /// containers would nest everything after one a level too deep.
+    /// libxml2 treats the obsolete `basefont`/`bgsound`/`frame`/`isindex`/`keygen` and the HTML5
+    /// `embed`/`source`/`track`/`wbr` as EMPTY elements. Treating them as containers would nest
+    /// everything after one a level too deep.
     #[test]
-    fn html4_void_elements_hold_no_children() {
-        for t in ["basefont", "frame", "isindex"] {
+    fn uncommon_void_elements_hold_no_children() {
+        for t in ["basefont", "bgsound", "frame", "isindex", "keygen", "embed", "source", "track", "wbr"] {
             let h = format!("<div><{t}><span>x</span></div>");
             assert_eq!(ex(&h, "div > span::text"), v(&["x"]), "<{t}> must be void");
             assert_eq!(ex(&h, &format!("{t} span::text")), Vec::<String>::new());
-        }
-        // the deliberate other half of the contract: libxml2 keeps these HTML5-era names OPEN
-        for t in ["embed", "source", "track", "wbr"] {
-            let h = format!("<div><{t}><span>x</span></div>");
-            assert_eq!(ex(&h, &format!("{t} span::text")), v(&["x"]), "<{t}> must be NON-void");
         }
     }
 

@@ -3,7 +3,7 @@ same label. Validates the engine decodes emitted values per the resolved encodin
 import subprocess, json, os, sys
 from parsel import Selector as PS
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import oracle  # parity is defined against libxml2 >= 2.14 here too (meta sniffing moved between them)
+import oracle  # parity is defined against libxml2 >= 2.15 here too (meta sniffing moved between them)
 oracle.require()
 BIN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "target", "release", "differ")
 

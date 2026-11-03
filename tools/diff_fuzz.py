@@ -37,7 +37,7 @@ import conformant  # well-formed base-page generator
 import foreign  # svg/math/template base pages (mutating foreign content is a rich desync surface)
 from diff_lxml import run_engine, parsel_vals, verdict, is_node_query, _batches  # engine driver + oracle + grader
 import audit_tree_rules  # the single Python home for the engine's tag tables (checked against lxml there)
-import oracle  # same libxml2 >= 2.14 requirement (an older oracle invents divergences of its own)
+import oracle  # same libxml2 >= 2.15 requirement (an older oracle invents divergences of its own)
 
 CORPUS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "fuzz", "corpus", "extract")
 

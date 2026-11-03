@@ -417,13 +417,9 @@ def test_mutation_sweep_enumerates_every_rule_table():
     assert not (prio & {"html", "head"})
     assert "body" in prio, "a <body> after </body> is a reachable open element"
     assert not (prio & set(mutate_rules.UNOBSERVABLE_AS_OPEN)), "a void/rawtext name is never on the stack"
-    # the void set is derived, so the HTML4 names libxml2 treats as empty are in it...
-    for n in ("basefont", "frame", "isindex"):
+    # the void set is derived, so the obsolete names libxml2 treats as empty are in it beside the current ones
+    for n in ("basefont", "frame", "isindex", "bgsound", "embed", "keygen", "source", "track", "wbr"):
         assert f"void:{n}" in specs, f"{n} missing from the void universe"
-    # ...and so are the HTML5-era names it deliberately keeps OPEN, or the sweep cannot tell
-    # "correctly absent" from "never considered"
-    for n in ("embed", "source", "track", "wbr"):
-        assert f"void:{n}" in specs
     # every DATA MODE is mutable, over the WHOLE universe rather than the modes we already know about:
     # "the raw-text set is the four names we remembered" is the bug this dimension exists to catch
     assert {f"mode:{n}" for n in ELEMENTS} <= set(specs)

@@ -130,9 +130,12 @@ jobs:
         with:
           command: sdist
           args: --out dist
+      - uses: ./.github/actions/oracle
+        with:
+          python: python
+      - run: python -m pip install -r requirements-test.txt -r requirements-release.txt
       - name: build/install the actual sdist and run the Python suite
         run: |
-          python -m pip install -r requirements-test.txt -r requirements-release.txt
           python -m twine check --strict dist/*.tar.gz
           python tools/release_check.py --distribution dist/*.tar.gz
           python -m pip install --no-build-isolation dist/*.tar.gz
@@ -178,8 +181,8 @@ jobs:
           python -m pip install -r requirements-test.txt -r requirements-release.txt
           python -m twine check --strict dist/*.whl
           python tools/release_check.py --distribution dist/*.whl
-          # Tree-rule meta-gates require libxml2 >= 2.14; the Windows oracle wheel carries 2.11.
-          # Those run in the quality job. Exercise every public API, typing and documentation test here.
+          # Tree-rule meta-gates require libxml2 >= 2.15; the lxml wheels installed here carry 2.14
+          # (2.11 on Windows). Those run in the quality job. Exercise every public API, typing and documentation test here.
           python -m pytest tests/ --ignore=tests/test_gates.py --ignore=tests/test_make_gates.py -q
 
   publish:

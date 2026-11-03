@@ -12,8 +12,7 @@ So this walks the rule tables directly and asks lxml about each cell:
   * the START-CLOSE relation over the WHOLE element universe — for every (open A, incoming B), does B
     close A? Not a representative subset: `tools/gen_tree_rules.ELEMENTS`, which `--check-universe`
     proves is a superset of both the engine's own names and an outside element index
-  * the VOID set over that same universe, plus the four tags the contract claims libxml2 keeps OPEN
-    (embed/source/track/wbr)
+  * the VOID set over that same universe, plus each name the contract lists as void
   * the per-element DATA MODE over that same universe (raw text / RCDATA / PLAINTEXT / normal)
   * the `<p>`-closing set, block-by-block and item-by-item, plus the tags that must NOT close it
   * TABLE SCOPE — which end tags libxml2 refuses to unwind a table for
@@ -39,7 +38,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import oracle  # noqa: E402  — same libxml2 >= 2.14 requirement as the differential gate
+import oracle  # noqa: E402  — same libxml2 >= 2.15 requirement as the differential gate
 # the harness's own oracle driver: same css/xpath dispatch and same parsel-error handling as the gate
 from diff_lxml import parsel_vals  # noqa: E402
 # ONE element universe and ONE oracle derivation, shared with the table generator and the mutation
@@ -56,12 +55,11 @@ WRAP = {"li": "ul", "dd": "dl", "dt": "dl", "option": "select", "optgroup": "sel
         "colgroup": "table"}
 # Extra markup needed between the wrapper and the element (a cell needs a row).
 EXTRA = {"td": "<tr>", "th": "<tr>"}
-VOID = "area base basefont br col frame hr img input isindex link meta param".split()
-NONVOID_CLAIMED = "embed source track wbr".split()      # contract: libxml2 keeps these OPEN
-# ...and the mirror image: HTML4 names libxml2 treats as EMPTY that HTML5 does not have at all. The
-# engine let all three hold children, so `<div><basefont><span>x</span></div>` put the span inside the
-# basefont. Named here so the contract sentence is a test, not a comment.
-VOID_HTML4_ONLY = "basefont frame isindex".split()
+# The void set COMPATIBILITY.md states, asserted by name so the contract sentence is a test, not a
+# comment. The engine once let the HTML4 `basefont`/`frame`/`isindex` hold children, which put the span
+# of `<div><basefont><span>x</span></div>` inside the basefont.
+VOID = ("area base basefont bgsound br col embed frame hr img input isindex keygen link meta param source "
+        "track wbr").split()
 # The data mode of each name the contract names. `listing` and `noscript` are in here BECAUSE they look
 # like raw-text elements and are not: libxml2 parses their content as markup (it has scripting off).
 DATA_MODE_CLAIM = {
@@ -209,16 +207,7 @@ def audit_void(a: Audit):
             html = f'<html><body><xwrap><{t} id="Z">A</xwrap></body></html>'.encode()
             a.check_many("void", f"<xwrap><{t}>A", html,
                          [f"xwrap > {t}::attr(id)", "xwrap::text", f"xwrap > {t}::text"])
-        # The four HTML5-era names libxml2 keeps OPEN, asserted by NAME so the contract sentence in
-        # COMPATIBILITY.md is testable rather than decorative. Same for the three HTML4 names it treats
-        # as void; letting one hold children is the failure this cell catches.
-        for t in NONVOID_CLAIMED:
-            html = f"<html><body><xwrap><{t}>A</xwrap></body></html>".encode()
-            lx, _ = a.check("void-claim", f"{t} must be NON-void", html, f"{t}::text")
-            if lx != ["A"]:
-                a.fails.append(("void-claim", f"contract says {t} is NON-void, libxml2 disagrees",
-                                f"{t}::text", ["A"], lx, html))
-        for t in VOID_HTML4_ONLY:
+        for t in VOID:
             html = f"<html><body><xwrap><{t}>A</xwrap></body></html>".encode()
             lx, _ = a.check("void-claim", f"{t} must be void", html, "xwrap::text")
             if lx != ["A"]:

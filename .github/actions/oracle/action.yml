@@ -1,0 +1,22 @@
+name: oracle
+description: Install the pinned lxml built against the libxml2 the engine is written to (`make oracle`)
+inputs:
+  python:
+    description: interpreter to install into
+    default: .venv/bin/python
+runs:
+  using: composite
+  steps:
+    - id: py
+      shell: bash
+      env:
+        PY: ${{ inputs.python }}
+      run: echo "version=$("$PY" -c 'import sys; print(sys.version.split()[0])')" >> "$GITHUB_OUTPUT"
+    - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: .oracle-wheels
+        key: oracle-${{ runner.os }}-${{ runner.arch }}-py${{ steps.py.outputs.version }}-${{ hashFiles('requirements-test.txt', 'Makefile') }}
+    - shell: bash
+      env:
+        PY: ${{ inputs.python }}
+      run: make oracle PY="$PY"

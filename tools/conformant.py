@@ -15,7 +15,7 @@ from __future__ import annotations
 
 TEXTBITS = ["alpha", " beta ", "g&amp;h", "x&lt;y", "café", "  ", "\n ", "1 2 3", "a&nbsp;b", ""]
 PHRASING = ["span", "b", "em", "strong", "i", "small", "label"]
-VOID = ["br", "img", "input"]  # libxml2-void only; wbr/embed/source/track are non-void in libxml2
+VOID = ["br", "img", "input", "wbr", "embed"]
 
 
 def _attr(rng, n):
