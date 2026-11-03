@@ -1,6 +1,6 @@
 """Oracle-toolchain guard for the differential harness.
 
-Frostwork's correctness bar is value-parity with **libxml2 2.14** (docs/COMPATIBILITY.md — tree
+Frostwork's correctness bar is value-parity with **libxml2 2.15** (docs/COMPATIBILITY.md — tree
 construction is matched empirically to that version, not to the HTML5 spec). `requirements-test.txt`
 pins `lxml`, but a pinned lxml does NOT pin the libxml2 it is built against: a wheel VENDORS its own
 copy, and the same lxml release ships different ones per platform. lxml 6.1.1 carries libxml2 2.14.x in
@@ -20,7 +20,7 @@ import os
 import sys
 
 # The libxml2 the engine is written against; see docs/TESTING.md ("what the oracle must be").
-MIN_LIBXML2 = (2, 14)
+MIN_LIBXML2 = (2, 15)
 
 # cssselect is the SELECTOR-ACCEPTANCE oracle, and 1.5.0 is the release that fixed its `:is()`/`:where()`
 # mis-translation (it ORed a combined compound's base condition with the alternatives; see
@@ -95,9 +95,8 @@ def require(allow_old: bool = False) -> None:
         f"{banner()}\n"
         "  A pinned lxml does not pin its vendored libxml2 (the Windows wheel of lxml 6.1.1 carries\n"
         "  2.11.9), and CR-in-attribute-values / raw `<` in text parse differently there — so this run\n"
-        "  would grade the engine against the wrong spec. Install an lxml wheel built on libxml2 >=\n"
-        f"  {want} (Linux/macOS wheels, or build lxml with --with-libxml2), or pass --allow-old-libxml2 /\n"
-        f"  set {_ENV_OVERRIDE}=1 to proceed with a warning."
+        "  would grade the engine against the wrong spec. Run `make oracle` to build lxml on libxml2\n"
+        f"  >= {want}, or pass --allow-old-libxml2 / set {_ENV_OVERRIDE}=1 to proceed with a warning."
     )
     if allow_old or os.environ.get(_ENV_OVERRIDE) == "1":
         print(f"WARNING: {msg}\n", file=sys.stderr)

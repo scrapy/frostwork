@@ -1,5 +1,7 @@
 # Reproducible correctness oracle and local/CI test toolchain.
 # Bump parsel+lxml+cssselect together and rerun the full differential soak deliberately.
+# Install with `make bootstrap`: `make oracle` replaces the lxml wheel with one built on the libxml2 the
+# engine is written against.
 parsel==1.11.0
 w3lib==2.5.0
 lxml==6.1.1

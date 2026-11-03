@@ -29,6 +29,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -m venv .venv
+      - uses: ./.github/actions/oracle
       # the same pinned oracle the gates use: an lxml/parsel upgrade must be a deliberate bump.
       - run: .venv/bin/pip install -r requirements-test.txt
       - run: make soak
@@ -54,5 +55,6 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -m venv .venv
+      - uses: ./.github/actions/oracle
       - run: .venv/bin/pip install -r requirements-test.txt
       - run: make gate-mutate-full SHARD=${{ matrix.shard }}/8

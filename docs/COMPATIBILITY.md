@@ -11,7 +11,7 @@ four kinds of behavior:
 | ∅ **unsupported** | the engine produces an **empty result**; public Python APIs raise by default and expose this behavior with `strict=False` |
 
 The promise is *close to lxml, always one streaming pass, never a DOM*. Unless a row marks an exception,
-the correctness bar is non-whitespace value parity with lxml (libxml2 2.14), not the HTML5 spec. A ✅ row
+the correctness bar is non-whitespace value parity with lxml (libxml2 2.15), not the HTML5 spec. A ✅ row
 that can return a bare element covers selector matching and ordering; that value still inherits the
 documented raw-source outer-HTML exception.
 
@@ -127,14 +127,14 @@ column (the container still yields a row). See [PYTHON.md](PYTHON.md) for the `M
 
 ---
 
-## Tree-construction contract — matches libxml2 2.14, NOT the HTML5 spec
+## Tree-construction contract — matches libxml2 2.15, NOT the HTML5 spec
 
 The engine runs the HTML5 *tokenizer* plus a minimal, **libxml2-matching** implied-close reshape (no
-DOM, no full tree construction). These rules were derived empirically against libxml2 2.14 (see
+DOM, no full tree construction). These rules were derived empirically against libxml2 2.15 (see
 `src/implied_close/`):
 
 - **Implied end tags** (auto-close to siblings) are NOT uniform per family — every cell below is
-  verified individually against libxml2 2.14.6, because the families disagree with each other and with
+  verified individually against libxml2 2.15.4, because the families disagree with each other and with
   HTML5:
   - **auto-close a same-tag repeat**: `li`, `option`, `tr`, `td`, `th`, `tbody`, `p`.
   - **NEST a same-tag repeat**: `dt`, `dd`, `rt`, `rp`, `optgroup`, `thead`, `tfoot`, `caption`. So
@@ -269,13 +269,10 @@ DOM, no full tree construction). These rules were derived empirically against li
   `dir`, `center`, `address`, `blockquote`, `fieldset`, `form`, `pre`, `table`, `hr`) — **not** the
   HTML5 sectioning elements (`section`, `article`, `header`, `footer`, `nav`, `main`, `figure`,
   `details`, …), which libxml2 treats as ordinary inline-ish containers that do **not** close `<p>`.
-- **Void set**: `area base basefont br col frame hr img input isindex link meta param` — libxml2 2.14's
-  set, derived by `tools/gen_tree_rules.py`, not HTML5's. Both differences from HTML5 are deliberate and
-  both are tested by name:
-  - the HTML4-only `basefont`, `frame` and `isindex` **are** empty, so in
-    `<div><basefont><span>x</span></div>` the span belongs directly to the div;
-  - the HTML5-era `embed`/`source`/`track`/`wbr` are **non-void** — libxml2 keeps them open as ordinary
-    containers.
+- **Void set**: `area base basefont bgsound br col embed frame hr img input isindex keygen link meta
+  param source track wbr` — libxml2 2.15's set, derived by `tools/gen_tree_rules.py`: the names an HTML5
+  parser treats as void, plus `isindex`, so in `<div><isindex><span>x</span></div>` the span belongs
+  directly to the div.
 - **Data modes** (how an element's *content* is tokenized). Anything other than "ordinary markup" means
   the content is character data, so a `<` inside it starts no tag. This is not a cosmetic distinction:
   a missing mode *invents* elements that are not in the document and then honours the wrong end tag,

@@ -32,7 +32,7 @@ from families import FAMILIES, build_page  # tagged construct generators
 import conformant  # content-model-aware generator (the clean invariant gate)
 import encpages  # legacy-encoding pages x non-ASCII selector literals (the byte/UTF-8 boundary)
 import foreign  # svg/math/template foreign-content generator (also a clean parity gate)
-import oracle  # oracle-toolchain guard: the verdicts only mean anything against libxml2 >= 2.14
+import oracle  # oracle-toolchain guard: the verdicts only mean anything against libxml2 >= 2.15
 
 # unconstrained grammar generator (adversarial: measures SKIP-set distance, not a gate)
 try:  # optional: unconstrained-grammar generator for the adversarial (SKIP-distance) mode

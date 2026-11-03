@@ -5,6 +5,7 @@
 # See AGENTS.md / CLAUDE.md for what each check proves.
 #
 #   make bootstrap   create .venv and install the pinned test/oracle toolchain
+#   make oracle      build the pinned lxml on a static libxml2 (LIBXML2=…) and install it; bootstrap runs it
 #   make bootstrap-bench  add the pinned COMPETITOR parsers (selectolax, bs4) for bench-engines
 #   make test        Rust unit vectors + clippy (python feature OFF — it must be, see below)
 #   make gate        the correctness gate: build the bins, then differential + encoding parity vs lxml
@@ -41,10 +42,12 @@
 
 PY      ?= .venv/bin/python
 MATURIN ?= .venv/bin/maturin
+LIBXML2 ?= 2.15.4
+WHEELHOUSE ?= .oracle-wheels/libxml2-$(LIBXML2)
 FUZZ_ITERS ?= 6000
 
 .DEFAULT_GOAL := help
-.PHONY: help bootstrap bootstrap-bench test build ext gate gate-corpus gate-seq corpus-real gate-mutate \
+.PHONY: help bootstrap oracle bootstrap-bench test build ext gate gate-corpus gate-seq corpus-real gate-mutate \
 	gate-mutate-full fuzz-smoke soak py gate-webpoet gate-webpoet-mutate bench bench-smoke bench-webpoet \
 	bench-engines bench-engines-mem verify-migration bench-migration release-check ci
 
@@ -56,7 +59,21 @@ help:
 
 bootstrap:
 	python3 -m venv .venv
+	$(MAKE) oracle
 	.venv/bin/pip install -r requirements-test.txt -r requirements-release.txt
+
+# An lxml wheel vendors the libxml2 its release shipped with, which is not necessarily the one the engine
+# is written against, so the oracle is the pinned lxml built from source on a static libxml2 $(LIBXML2).
+# The built wheel is kept in $(WHEELHOUSE) and reused while it matches the interpreter. Run it before
+# installing requirements-test.txt, which then finds its lxml pin satisfied.
+LXML := $(shell sed -n 's/^lxml==//p' requirements-test.txt)
+oracle:
+	$(PY) -m pip install --no-index --find-links $(WHEELHOUSE) --force-reinstall --no-deps lxml==$(LXML) \
+	|| { STATIC_DEPS=true LIBXML2_VERSION=$(LIBXML2) CFLAGS="-O2 -fPIC -fno-lto" LDFLAGS="-fno-lto" \
+	     $(PY) -m pip wheel --no-deps --no-binary lxml -w $(WHEELHOUSE) lxml==$(LXML) \
+	  && $(PY) -m pip install --no-index --find-links $(WHEELHOUSE) --force-reinstall --no-deps lxml==$(LXML); }
+	$(PY) -c "import sys; sys.path.insert(0, 'tools'); import lxml.etree as e, oracle; \
+	  assert e.LIBXML_VERSION[:2] >= oracle.MIN_LIBXML2, e.LIBXML_VERSION; print('libxml2', e.LIBXML_VERSION)"
 
 # The competitors `bench-engines` and `tools/bench_encoding.py` measure against. Separate from
 # `bootstrap` because they are not oracles — nothing gated depends on them, and `make ci` runs without

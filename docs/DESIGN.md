@@ -53,7 +53,7 @@ bytes ─▶ tokenizer (TokenSink: start/text/end) ─▶ corrected-stack matche
 - **Selectors** — `selector.rs` parses the CSS subset; `xpath.rs` compiles the **downward** XPath
   subset to the *same* `Selector` model (so XPath and CSS share matching + performance).
 
-## Semantics: match libxml2 2.14, not the HTML5 spec
+## Semantics: match libxml2 2.15, not the HTML5 spec
 
 Frostwork runs the HTML5 *tokenizer* faithfully but not the HTML5 *tree-construction* algorithm.
 Instead it applies the small set of implied-close rules libxml2 actually uses (`implied_close/`).

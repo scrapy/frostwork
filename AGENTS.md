@@ -318,7 +318,7 @@ a way it has read 100% while the engine was wrong:
   so an upstream fix fails as stale. **Measure the browser, do not quote the spec at it**:
   `~/src/encoding-hacks` is the differential lab for that (real browser vs twelve scraper stacks
   over exact bytes and headers), and it is where a claim about "browser behaviour" gets settled.
-- **Close to libxml2 2.14, NOT the HTML5 spec.** Tree construction (implied end tags, void set,
+- **Close to libxml2 2.15, NOT the HTML5 spec.** Tree construction (implied end tags, void set,
   `<p>`-closing) is matched *empirically* to libxml2 — it is the oracle. See `implied_close/`.
 - **No fallback.** An unsupported query returns an empty column — never an error, never a wrong value.
   Widening coverage means adding it natively *and proving parity*, not routing elsewhere.

@@ -13,7 +13,7 @@ each subsystem, and which broader checks run separately.
 
 There is no single oracle for every layer:
 
-- **Extracted values:** Parsel/lxml, using libxml2 2.14 or newer.
+- **Extracted values:** Parsel/lxml, using libxml2 2.15 or newer.
 - **CSS selector acceptance:** cssselect/lxml's parser. A selector rejected by the oracle must be reported
   unsupported, not answered with an empty value that looks legitimate.
 - **HTML tree construction:** empirical parity with libxml2, not a separate HTML5 implementation.
@@ -23,7 +23,8 @@ There is no single oracle for every layer:
 - **web-poet page objects:** an equivalent Parsel-backed `web_poet.WebPage`, compared on the whole item.
 
 The lxml wheel vendors libxml2, so pinning an lxml version does not guarantee the same oracle on every
-platform. `tools/oracle.py` requires libxml2 2.14 or newer. `--allow-old-libxml2` (or
+platform. `make oracle` (run by `make bootstrap` and CI) builds the pinned lxml on a static libxml2, and
+`tools/oracle.py` requires libxml2 2.15 or newer. `--allow-old-libxml2` (or
 `FROSTWORK_ALLOW_OLD_LIBXML2=1`) is available for exploration, not release validation.
 
 The core differential assigns each input/selector pair one verdict:
