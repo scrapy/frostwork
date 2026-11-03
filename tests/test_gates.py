@@ -23,6 +23,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 pytest.importorskip("parsel")  # the harness modules import parsel at module level
 
 
+def _lxml_mode():
+    """`parser="lxml"` when the extension takes the keyword: these gates grade lxml mode explicitly."""
+    import seq_sweep
+
+    return seq_sweep.parser_kwargs("lxml")
+
+
 # --------------------------------------------------------------- corpus gate (tools/bench_corpus.py)
 def test_corpus_gate_fails_on_a_lost_value():
     """A SUPPORTED selector going from ["a","b"] to ["a"] is a regression, not a coverage gap.
@@ -236,7 +243,7 @@ def test_meta_prescan_matches_w3lib():
         doc = b"<html><head>" + head + b"</head><body>" + body + b"</body></html>"
         _, txt = html_to_unicode(None, doc, auto_detect_fun=None, default_encoding="utf8")
         want = parsel.Selector(text=txt).css("p.c::text").getall()
-        got = frostwork.extract(doc, ["p.c::text"], strict=False)[0]
+        got = frostwork.extract(doc, ["p.c::text"], strict=False, **_lxml_mode())[0]
         assert got == want, f"prescan disagrees with w3lib for {head!r}"
 
 
@@ -265,7 +272,7 @@ def test_the_browser_difference_list_is_two_sided():
     _, txt = html_to_unicode(None, doc, auto_detect_fun=None, default_encoding="utf8")
     assert parsel.Selector(text=txt).css("p.c::text").getall() != ["café"], \
         "w3lib now honours a <meta charset> after <body> — that row of the list is stale"
-    assert frostwork.extract(doc, ["p.c::text"], strict=False)[0] == ["café"], \
+    assert frostwork.extract(doc, ["p.c::text"], strict=False, **_lxml_mode())[0] == ["café"], \
         "the prescan must not stop at <body> (browser behaviour)"
 
 
@@ -347,7 +354,7 @@ def test_the_decoder_sweep_is_exhaustive_not_sampled():
         _, txt = html_to_unicode(None, doc, auto_detect_fun=None, default_encoding="utf8")
         assert parsel.Selector(text=txt).css("p.c::text").getall() == [theirs], \
             f"Parsel now decodes euc-jp {seq.hex()} differently — that row is stale"
-        assert frostwork.extract(doc, ["p.c::text"], strict=False)[0] == [mine], \
+        assert frostwork.extract(doc, ["p.c::text"], strict=False, **_lxml_mode())[0] == [mine], \
             f"euc-jp {seq.hex()} must follow the WHATWG index, which is what browsers show"
 
 
@@ -517,7 +524,7 @@ def test_the_sequence_gate_fails_on_a_tree_difference():
     # the span stops being the div's child while every text node stays exactly where it was.
     doc, ids = seq_sweep.build(("<div{}>", "<span{}>", "x"))
     sels = seq_sweep.fingerprint_selectors(ids)
-    mine = frostwork.extract(doc, sels, "utf-8")
+    mine = frostwork.extract(doc, sels, "utf-8", **seq_sweep.parser_kwargs("lxml"))
     assert seq_sweep.compare(sels, mine, mine) is None, "identical answers are not a difference"
 
     nested = sels.index('//*[@id="0"]//*/@id')
@@ -529,6 +536,162 @@ def test_the_sequence_gate_fails_on_a_tree_difference():
     # ...and it is invisible to the text columns, which is why this gate compares the whole tree
     texts = [i for i, s in enumerate(sels) if s.endswith("/text()")]
     assert texts and all(mine[i] == reshaped[i] for i in texts)
+
+
+# ------------------------------------------------- the browser gate (tools/browser_oracle, diff_browser.py)
+# Chrome 156's trees for two documents, in probe.cjs's `__ser` format, as `probe.cjs serve` returned them.
+# Literal, so these tests need no browser: they pin what the COMPARISON can see.
+CHROME_TBODY = ["#d", [["html", 0, [], [["head", 0, [], []], ["body", 0, [], [
+    ["table", 0, ["id", "0"], [["tbody", 0, [], [
+        ["tr", 0, ["id", "1"], [["td", 0, ["id", "2"], ["x"]]]]]]]]]]]]]]
+CHROME_CLONE = ["#d", [["html", 0, [], [["head", 0, [], []], ["body", 0, [], [
+    ["p", 0, ["id", "0"], [["b", 0, ["id", "1"], ["1"]]]], ["b", 0, ["id", "1"], ["2"]]]]]]]]
+
+
+def _splice(tree, name, index=0):
+    """`tree` with its `index`-th element named `name` replaced by that element's children."""
+    import copy
+
+    tree, seen = copy.deepcopy(tree), [0]
+
+    def walk(kids):
+        out = []
+        for k in kids:
+            if isinstance(k, list) and k[0] == name and seen[0] == index:
+                seen[0] += 1
+                out.extend(k[3])
+                continue
+            if isinstance(k, list) and k[0] == name:
+                seen[0] += 1
+            if isinstance(k, list) and k[0] == "#d":
+                k[1] = walk(k[1])
+            elif isinstance(k, list) and not k[0].startswith("#"):
+                k[3] = walk(k[3])
+            out.append(k)
+        return out
+
+    tree[1] = walk(tree[1])
+    return tree
+
+
+def test_the_sequence_fingerprint_sees_an_implied_tbody():
+    """An element with no id is invisible to every per-id column, and HTML5's builder creates them.
+
+    `<table id=0><tr id=1><td id=2>x` with and without its `<tbody>` answered all 13 of the old
+    fingerprint's selectors identically, so a browser mode with no implied `<tbody>` at all would have
+    passed the sequence gate. Seed exactly that regression into an oracle tree and require a difference.
+    """
+    import seq_sweep
+    from browser_oracle import tree as T
+
+    ids = ["0", "1", "2"]
+    sels = seq_sweep.fingerprint_selectors(ids)
+    oracle = T.fingerprint(CHROME_TBODY, sels)
+    regressed = _splice(CHROME_TBODY, "tbody")
+    assert regressed != CHROME_TBODY
+    diff = seq_sweep.compare(sels, T.fingerprint(regressed, sels), oracle)
+    assert diff, "a tree that lost its implied <tbody> must be a difference"
+
+    # the blind spot this closes: the old fingerprint's columns cannot tell the two trees apart
+    old = ["//*/@id"] + [c for i in ids for c in (f'//*[@id="{i}"]//*/@id', f'//*[@id="{i}"]/text()')] + [
+        "//html/*/@id", "//html//*/@id", "//head//*/@id", "//body//*/@id", "//body/text()", "//html/text()"]
+    assert len(old) == 13 and set(old) <= set(sels)
+    assert T.fingerprint(regressed, old) == T.fingerprint(CHROME_TBODY, old)
+
+
+def test_the_sequence_fingerprint_sees_a_removed_formatting_clone():
+    """A reconstructed formatting element copies its original's attributes, id included, so it shows as
+    a REPEATED id. A builder that forgot to reconstruct it leaves the `2` in the body instead; the
+    document-order column must be a list, not a set, for that to be a difference."""
+    import seq_sweep
+    from browser_oracle import tree as T
+
+    sels = seq_sweep.fingerprint_selectors(["0", "1"])
+    oracle = T.fingerprint(CHROME_CLONE, sels)
+    assert oracle[sels.index("//*/@id")] == ["0", "1", "1"], "the clone must read as a repeated id"
+    regressed = _splice(CHROME_CLONE, "b", index=1)
+    diff = seq_sweep.compare(sels, T.fingerprint(regressed, sels), oracle)
+    assert diff and diff[0] == "//*/@id", f"a lost clone must differ on the document-order column: {diff}"
+
+
+def test_the_native_fingerprint_answers_what_lxml_answers():
+    """The browser gate never rebuilds the browser's tree in lxml; `tree.py` evaluates the fingerprint
+    over the JSON tree itself. If that evaluator disagreed with XPath, the gate would grade its own bug
+    as the engine's. On lxml's OWN trees it must give parsel's answers exactly, and it must refuse a
+    shape it does not implement rather than answer it wrongly."""
+    import itertools
+
+    import parsel
+    import seq_sweep
+    from browser_oracle import tree as T
+
+    checked = 0
+    for n in (1, 2):
+        for seq in itertools.product(seq_sweep.ALPHABET, repeat=n):
+            doc, ids = seq_sweep.build(seq)
+            sels = seq_sweep.fingerprint_selectors(ids)
+            sel = parsel.Selector(text=doc.decode(), type="html")
+            want = [sel.xpath(s).getall() for s in sels]
+            assert T.fingerprint(T.from_lxml(sel.root), sels) == want, doc
+            checked += 1
+    assert checked > 500
+    for shape in ('//*[@id="0"]/..', "//p[last()]/@id", "//p", "count(//p)", '//*[@id="0"]/node()'):
+        with pytest.raises(ValueError):
+            T.evaluate(T.index(["#d", []]), shape)
+    # the document view is what a selector reaches: template content and shadow roots are not in it
+    view = T.document_view(["#d", [["div", 0, ["id", "h"], [["#shadow", "open", [["p", 0, ["id", "s"], []]]]]],
+                                   ["template", 0, ["id", "t"], [["#d", [["p", 0, ["id", "y"], []]]]]]]])
+    assert T.evaluate(T.index(view), "//*/@id") == ["h", "t"]
+
+
+def test_the_browser_gate_fails_on_novel_and_on_coverage():
+    """`diff_browser --gate` is green only when every divergence is attributed AND the run measured
+    something. Each of these alone reads exactly like a clean run, so each is seeded."""
+    import diff_browser as B
+
+    clean = dict(graded=10, selfcheck_checked=5)
+    assert B.gate_failures(B.Report(**clean)) == []
+    explained = B.Report(**clean, buckets={"implied <tbody>": [B.Divergence((), "//*/@id", ("engine", "chrome"))]})
+    assert B.gate_failures(explained) == [], "an attributed divergence is expected until its rule lands"
+    seeded = {
+        "novel": B.Report(**clean, novel=[B.Divergence(((0, "<td{}>"),), "//*/@id", ("engine", "chrome"))]),
+        "nothing graded": B.Report(graded=0, selfcheck_checked=5),
+        "token never emitted": B.Report(**clean, missing_tokens=["<col{}>"]),
+        "oracle error": B.Report(**clean, oracle_errors=[{"doc": "<p>", "error": "load timeout"}]),
+        "self-check ran on nothing": B.Report(graded=10, selfcheck_checked=0),
+        "fast path differs from a page load": B.Report(**clean, selfcheck_differ=["<p>"]),
+    }
+    for why, report in seeded.items():
+        assert B.gate_failures(report), f"{why} must fail the gate"
+
+
+def test_browser_attribution_is_by_the_smallest_repro_and_leaves_the_rest_novel():
+    """A divergence is filed under a section 3 construct only when its REDUCED document exhibits it.
+
+    A stray `<td>` outside any table is not in section 3's table, so it must reach NOVEL rather than be
+    absorbed by the `<tbody>` rule, which needs a table. The counterfactual rules must consult the
+    oracle: `<p><table>` is the quirks-mode row only if a doctype makes it agree. And the formatting
+    row is decided by the browser's tree (a repeated id), not by the tokens.
+    """
+    import diff_browser as B
+
+    def repro(tokens, differs=lambda doc: True, ids=()):
+        return B.Repro(tuple(enumerate(tokens)), "//*/@id", differs, list(ids))
+
+    assert B.attribute(repro(["<td{}>"])) is None
+    assert B.attribute(repro(["<table{}>", "<tr{}>"])) == "implied <tbody>"
+
+    no_doctype_needed = repro(["<p{}>", "<table{}>"], differs=lambda doc: not any("DOCTYPE" in t for _, t in doc))
+    assert B.attribute(no_doctype_needed) == "quirks-mode tree"
+    assert B.attribute(repro(["<p{}>", "<table{}>"])) == "<p> closers"
+
+    head = repro(["<div{}>"], differs=lambda doc: not any(t == "<head></head>" for _, t in doc))
+    assert B.attribute(head) == "<head>"
+    assert B.attribute(repro(["<div{}>"])) is None
+
+    tokens = ["<p{}>", "<b{}>", "t", "</p>", "t"]
+    assert B.attribute(repro(tokens, ids=["0", "1", "1"])) == "formatting reconstruction"
+    assert B.attribute(repro(tokens, ids=["0", "1"])) is None
 
 
 def test_the_rule_audit_has_no_bypass_for_a_start_close_divergence():

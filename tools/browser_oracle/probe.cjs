@@ -1,5 +1,5 @@
 // Real Chrome and Firefox as the tree-construction oracle for browser mode (docs/BROWSER_MODE.md,
-// section 5). Prototype: the gates do not call it yet.
+// section 5). `serve` is what tools/browser_oracle/client.py drives; the other modes are measurements.
 //
 //   node tools/browser_oracle/probe.cjs <chrome|firefox> <browser-binary> <mode> [arg]
 //
@@ -8,10 +8,12 @@
 //   equiv [N]       N random token sequences (default 5000): a page load against DOMParser,
 //                   parseHTMLUnsafe and srcdoc, compared node for node
 //   claims <file>   each claim's expressions against the page load, DOMParser and parseHTMLUnsafe
+//   serve [TABS]    the oracle as a service: newline-delimited JSON requests on stdin, one reply line
+//                   each on stdout, page loads spread over TABS tabs (default 8). See `serve` below.
 //
-// Prints one JSON object on stdout, carrying the browser build. Needs Node 22 or later (global
-// WebSocket). Each run starts the browser headless from a fresh temporary profile and deletes it on
-// exit. Pages come from an in-process server with exact bytes and headers, served with
+// The measurement modes print one JSON object on stdout, carrying the browser build. Needs Node 22 or
+// later (global WebSocket). Each run starts the browser headless from a fresh temporary profile and
+// deletes it on exit. Pages come from an in-process server with exact bytes and headers, served with
 // `Content-Security-Policy: script-src 'none'`: that blocks page scripts and leaves the parser's
 // scripting flag on, which CSP `sandbox` and CDP's script disabling both turn off.
 'use strict';
@@ -23,7 +25,7 @@ const path = require('node:path');
 
 const [, , WHICH, BIN, MODE = 'fidelity', ARG] = process.argv;
 if (!['chrome', 'firefox'].includes(WHICH) || !BIN) {
-  console.error('usage: node probe.cjs <chrome|firefox> <browser-binary> <fidelity|throughput|equiv [N]|claims FILE>');
+  console.error('usage: node probe.cjs <chrome|firefox> <browser-binary> <fidelity|throughput|equiv [N]|claims FILE|serve [TABS]>');
   process.exit(2);
 }
 
@@ -108,6 +110,8 @@ window.__srcdoc = (html, f2) => new Promise((res) => { const f = document.create
 
 // ---------------------------------------------------------------- exact bytes and headers
 const SEQ = [];
+// `serve`'s documents, keyed by a counter and deleted once their page has loaded.
+const SERVED = new Map();
 const server = http.createServer((req, res) => {
   const u = new URL(req.url, 'http://x');
   const h = { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' };
@@ -119,6 +123,7 @@ const server = http.createServer((req, res) => {
   else if (u.pathname.startsWith('/small/')) body = small(+u.pathname.slice(7));
   else if (u.pathname === '/big') body = BIG;
   else if (u.pathname.startsWith('/seq/')) body = SEQ[+u.pathname.slice(5)];
+  else if (u.pathname.startsWith('/doc/')) body = SERVED.get(+u.pathname.slice(5));
   else if (u.pathname === '/harness') body = '<!DOCTYPE html><meta charset="utf-8"><title>h</title><body>';
   if (body === undefined) { res.writeHead(404); return res.end(); }
   res.writeHead(200, h); res.end(body);
@@ -153,7 +158,7 @@ function launch(args, endpoint, profile) {
     const fail = (why) => { if (!found) { found = true; b.close().then(() => bad(new Error(`${why}\n${buf.slice(-2000)}`))); } };
     p.stderr.on('data', (d) => {
       buf += d; const m = buf.match(endpoint);
-      if (m && !found) { found = true; ok({ url: m[1], close: b.close }); }
+      if (m && !found) { found = true; ok({ url: m[1], close: b.close, pid: p.pid }); }
     });
     p.on('exit', (c) => fail(`browser exited ${c}`));
     setTimeout(() => fail('no endpoint'), 30000).unref();
@@ -214,7 +219,7 @@ async function chrome() {
         disableScripts: () => s('Emulation.setScriptExecutionDisabled', { value: true }),
       };
     }
-    return { version, tab };
+    return { version, tab, pid: b.pid };
   });
 }
 
@@ -245,7 +250,7 @@ async function firefox() {
         disableScripts: null,
       };
     }
-    return { version, tab };
+    return { version, tab, pid: b.pid };
   });
 }
 
@@ -371,8 +376,92 @@ async function claims(B, base, out) {
   }
 }
 
+// The oracle as a service, for client.py. The first stdout line is {"ready": true, "browser": build,
+// "tabs": n, "pid": the browser's process group}. Then each stdin line is a request
+// {"id": n, "docs": [string, ...], "selfcheck": bool}, answered in order by one line
+// {"id": n, "trees": [...], "paths": [...], "errors": [...]}:
+//   trees[i]   __ser's lossless tree of docs[i], or null when its page load failed
+//   paths[i]   "domparser" for a FAST_PATH_ELIGIBLE document, "page" for a CSP-served page load
+//   errors     [{index, error}] for every null tree
+// With "selfcheck", every eligible document is also page-loaded, and the reply carries
+// "selfcheck": {"checked": n, "differ": [index, ...], "failed": [index, ...]}: the eligible documents
+// whose two trees differ, and those whose page load failed.
+// A request that cannot be read is answered {"id": null, "error": ...}. The browser closes when stdin
+// ends.
+async function serve(B, base) {
+  const TABS = ARG ? +ARG : 8; const CHUNK = 200;
+  const h = await B.harness();
+  const tabs = await Promise.all([...Array(TABS)].map(() => B.tab()));
+  let served = 0;
+
+  const viaDomparser = async (docs) => {
+    const out = [];
+    for (let i = 0; i < docs.length; i += CHUNK) {
+      out.push(...await h.evaluate(
+        `${JSON.stringify(docs.slice(i, i + CHUNK))}.map(x => ${ser("new DOMParser().parseFromString(x, 'text/html')")})`));
+    }
+    return out;
+  };
+  // A shared queue over the tab pool. A tab whose load failed is replaced, so one wedged page cannot
+  // fail every document after it.
+  const viaPage = async (docs) => {
+    const out = Array(docs.length).fill(null); const errors = []; let next = 0;
+    await Promise.all(tabs.map(async (_, k) => {
+      while (next < docs.length) {
+        const i = next++; const key = served++; SERVED.set(key, docs[i]);
+        try {
+          await tabs[k].navigate(`${base}/doc/${key}?csp=script`); await B.lib(tabs[k]);
+          out[i] = await tabs[k].evaluate(ser('document'));
+        } catch (e) {
+          errors.push({ index: i, error: e.message.slice(0, 200) });
+          try { tabs[k] = await B.tab(); } catch { /* keep the old tab */ }
+        } finally { SERVED.delete(key); }
+      }
+    }));
+    return { out, errors };
+  };
+
+  async function answer(req) {
+    const docs = req.docs; const n = docs.length;
+    const eligible = docs.map(FAST_PATH_ELIGIBLE);
+    const fastIdx = [...Array(n).keys()].filter((i) => eligible[i]);
+    const slowIdx = req.selfcheck ? [...Array(n).keys()] : [...Array(n).keys()].filter((i) => !eligible[i]);
+    const [fast, slow] = await Promise.all([viaDomparser(fastIdx.map((i) => docs[i])),
+      viaPage(slowIdx.map((i) => docs[i]))]);
+    const trees = Array(n).fill(null); const paged = Array(n).fill(null);
+    fastIdx.forEach((i, j) => { trees[i] = fast[j]; });
+    slowIdx.forEach((i, j) => { paged[i] = slow.out[j]; if (!eligible[i]) trees[i] = slow.out[j]; });
+    const errors = slow.errors.map((e) => ({ ...e, index: slowIdx[e.index] })).filter((e) => !eligible[e.index]);
+    const parts = [`"id":${JSON.stringify(req.id)}`, `"trees":[${trees.map((t) => t ?? 'null').join(',')}]`,
+      `"paths":${JSON.stringify(eligible.map((e) => (e ? 'domparser' : 'page')))}`, `"errors":${JSON.stringify(errors)}`];
+    if (req.selfcheck) {
+      const loaded = fastIdx.filter((i) => paged[i] !== null);
+      parts.push(`"selfcheck":${JSON.stringify({ checked: loaded.length,
+        differ: loaded.filter((i) => paged[i] !== trees[i]),
+        failed: slow.errors.filter((e) => eligible[slowIdx[e.index]]).map((e) => slowIdx[e.index]) })}`);
+    }
+    return `{${parts.join(',')}}`;
+  }
+
+  process.stdout.write(`${JSON.stringify({ ready: true, browser: B.version, tabs: TABS, pid: B.pid })}\n`);
+  const rl = require('node:readline').createInterface({ input: process.stdin, crlfDelay: Infinity });
+  for await (const line of rl) {
+    if (!line.trim()) continue;
+    let reply;
+    try {
+      const req = JSON.parse(line);
+      if (!Array.isArray(req.docs) || !req.docs.every((d) => typeof d === 'string')) throw new Error('docs must be a list of strings');
+      reply = await answer(req);
+    } catch (e) {
+      let id = null; try { id = JSON.parse(line).id ?? null; } catch { /* unreadable */ }
+      reply = JSON.stringify({ id, error: e.message.slice(0, 500) });
+    }
+    process.stdout.write(`${reply}\n`);
+  }
+}
+
 (async () => {
-  const MODES = { fidelity, throughput, equiv, claims };
+  const MODES = { fidelity, throughput, equiv, claims, serve };
   if (!MODES[MODE]) throw new Error(`unknown mode ${MODE}`);
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -384,6 +473,8 @@ async function claims(B, base, out) {
     return harness;
   };
   const out = { browser: B.version, mode: MODE, date: new Date().toISOString().slice(0, 10) };
-  try { await MODES[MODE](B, base, out); console.log(JSON.stringify(out, null, 1)); }
-  finally { await B.close(); server.close(); }
+  try {
+    await MODES[MODE](B, base, out);
+    if (MODE !== 'serve') console.log(JSON.stringify(out, null, 1));
+  } finally { await B.close(); server.close(); }
 })().catch((e) => { console.error(e); process.exit(1); });

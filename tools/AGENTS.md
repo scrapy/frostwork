@@ -88,8 +88,45 @@ parser's scripting flag on. Its `equiv` mode compares a page load with `DOMParse
 LCG silently emitted 28 of its 60), and its `claims` mode evaluates `claims.json` on all three.
 `lab_compare.py` grades the engine against the encoding-hacks browser column with three encoding labels,
 and once through `Page.extract_response` on a web-poet `HttpResponse`.
-`evidence/<date>/` holds the outputs the proposal quotes, each stamped with its browser build. No gate
-calls any of it yet.
+`evidence/<date>/` holds the outputs the proposal quotes, each stamped with its browser build.
+
+`probe.cjs serve` is the oracle the gates call. It keeps one browser running, reads one JSON request per
+line on stdin (`{"id", "docs", "selfcheck"}`) and answers each with one line carrying a lossless tree per
+document and the path it took. `FAST_PATH_ELIGIBLE` is the only routing rule: a document with neither
+`noscript` nor `shadowrootmode` goes through `DOMParser`, and everything else is page-loaded from the
+in-process CSP server across a pool of tabs. With `selfcheck`, each eligible document is page-loaded too
+and any tree that differs is reported, so the fast path is trusted only as far as the run re-measures it.
+`browser_oracle/client.py` wraps it as `BrowserOracle("chrome" | "firefox")`, a context manager that
+batches documents, records the browser build and kills the process (and through it the browser) on exit;
+the binaries come from `FROSTWORK_CHROME`/`FROSTWORK_FIREFOX`, else the macOS install paths. A null tree
+is an oracle error and is kept in `errors`, never dropped.
+
+`browser_oracle/tree.py` evaluates the gate's XPath columns over the browser's JSON tree itself, with
+lxml's XPath semantics, because rebuilding that tree in lxml would lose the control characters and
+malformed names browsers keep. `document_view` drops HTML template content and shadow roots, which no
+selector reaches. The evaluator implements only the shapes `seq_sweep.fingerprint_selectors` emits and
+raises on any other, and `from_lxml` converts lxml's own tree to the same format so
+`tests/test_gates.py` can prove the evaluator returns parsel's answers on lxml's trees. Widen the
+evaluator and that test together whenever the fingerprint gains a shape.
+
+`diff_browser.py` is the browser differential (`make gate-browser`). It grades the engine on
+`seq_sweep`'s fingerprint against Chrome's tree, over `seq_sweep`'s short sequences plus seeded random
+documents from an HTML5-heavy alphabet in which every start tag carries an id, and it refuses to grade
+unless every token is emitted. Until browser mode implements a construct its divergences are expected,
+so each differing column is reduced to the smallest token subsequence that still differs on it (ids
+survive the reduction, so the column names the same element) and the reduced document is attributed to
+a row of `docs/BROWSER_MODE.md` section 3. Attribute by the repro, never by the page it came from. Some
+rows are decided by a counterfactual the oracle answers, such as whether a doctype or an explicit
+`<head></head>` makes the column agree, and formatting clones are read off the browser's tree as a
+repeated id. Anything no row explains is NOVEL. `--gate` fails on NOVEL and on coverage: nothing graded,
+a token never emitted, an oracle error, or a self-check difference. `gate_failures` and `attribute` are
+its decision functions, seeded in `tests/test_gates.py`. With `--browsers chrome,firefox` the columns
+where the two browsers disagree go into their own reduced table and the engine is graded against
+Chrome there. `--parser` (default `browser`) is passed to `frostwork.extract` only when the installed
+extension accepts it, and the run prints which mode it graded. `seq_sweep.parser_kwargs` is the one probe
+for that keyword: `seq_sweep` and the engine calls in `tests/test_gates.py` pass `parser="lxml"` through
+it, so lxml mode's gates keep grading libxml2 behaviour whatever the default mode is. When a Phase 2 rule lands, delete its row from `CONSTRUCTS` in
+the same change, so the gate holds that construct at zero from then on.
 
 Three tools own the tree-construction rules and share ONE element universe: `gen_tree_rules.py`
 derives the rules from libxml2 and GENERATES the Rust table (`--check` gates on drift, `--report`

@@ -12,6 +12,9 @@
 #   make fuzz-smoke  quick selector + malformed-HTML fuzz (crash/WRONG/OVERMATCH gate)
 #   make gate-corpus [CORPUS=<dir>]  value-parity gate over a page corpus (defaults to tests/corpus)
 #   make gate-seq    every tag SEQUENCE up to depth 4, compared on the whole tree
+#   make gate-browser  the same whole-tree fingerprint against real Chrome (BROWSERS=chrome,firefox for
+#                    both), each divergence reduced and filed under a docs/BROWSER_MODE.md construct;
+#                    fails on NOVEL or on coverage. Needs Node 22+ and the browsers (FROSTWORK_CHROME=…)
 #   make corpus-real fetch REAL pages into fixtures/realweb (gitignored), then gate over them
 #   make corpus-fresh  fail unless corpus-real passed at the engine sources in this tree
 #   make gate-mutate flip rule-table cells one at a time and check a gate notices (sampled)
@@ -47,7 +50,7 @@ WHEELHOUSE ?= .oracle-wheels/libxml2-$(LIBXML2)
 FUZZ_ITERS ?= 6000
 
 .DEFAULT_GOAL := help
-.PHONY: help bootstrap oracle bootstrap-bench test build ext gate gate-corpus gate-seq corpus-real gate-mutate \
+.PHONY: help bootstrap oracle bootstrap-bench test build ext gate gate-corpus gate-seq gate-browser corpus-real gate-mutate \
 	gate-mutate-full fuzz-smoke soak py gate-webpoet gate-webpoet-mutate bench bench-smoke bench-webpoet \
 	bench-engines bench-engines-mem verify-migration bench-migration release-check ci
 
@@ -141,6 +144,20 @@ corpus-fresh:
 SEQ_DEPTH ?= 4
 gate-seq:
 	$(PY) tools/seq_sweep.py --depth $(SEQ_DEPTH) --random 20000 --length 8 --gate
+
+# The browser-mode differential (docs/BROWSER_MODE.md, section 5): gate-seq's fingerprint graded against
+# the tree a real browser builds, over gate-seq's short sequences plus seeded random documents from an
+# HTML5-heavy alphabet. Until browser mode implements a construct its divergences are expected, so each
+# one is reduced to its smallest reproducing token subsequence and filed under the section 3 construct
+# that explains it. The gate fails on NOVEL (a divergence nothing explains) and on coverage: nothing
+# graded, a token never emitted, an oracle error, or a DOMParser tree that differs from a page load.
+# Not part of `ci`: it needs local browsers, and today's NOVEL list is the work browser mode starts from.
+BROWSERS ?= chrome
+BROWSER_SEQ_DEPTH ?= 2
+BROWSER_RANDOM ?= 1000
+gate-browser: ext
+	$(PY) tools/diff_browser.py --browsers $(BROWSERS) --seq-depth $(BROWSER_SEQ_DEPTH) \
+		--random $(BROWSER_RANDOM) --gate
 
 # "Is every rule cell RIGHT?" is what tools/audit_tree_rules.py answers. This answers "if a cell were
 # WRONG, would any gate notice?" — the only check here that finds blind spots without a human guessing
