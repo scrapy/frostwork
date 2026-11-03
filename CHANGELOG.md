@@ -3,6 +3,37 @@
 All notable user-facing changes will be recorded here. Frostwork will follow semantic versioning after its
 first public release.
 
+## 0.1.7 (unreleased)
+
+### Correctness
+
+- `FrostPage` and `Page.extract_response` give the engine the response's raw `Content-Type` header, its
+  URL and any encoding the user forced (the framework's `_encoding`), instead of the framework's resolved
+  `response.encoding`. Frostwork's own prescan and autodetection now run behind a web-poet or Scrapy
+  response, so a `<meta charset>` deep in the head or early in the body, a stray quote in a charset value,
+  `<meta charset=utf-16>`, an XML declaration after offset 0 and an HTTP `charset=x-user-defined` decode
+  as a browser decodes them. Over the encoding lab's 48 cases, a web-poet response now differs from
+  Chrome on 9, the same as the engine given the header alone, where it differed on 21. A forced encoding
+  is still honoured, below a BOM.
+
+### Python API and tooling
+
+- `content_type=` on `extract`, `extract_grouped`, `detect_encoding`, `Page.extract` and
+  `Plan.extract`/`extract_grouped` takes a raw `Content-Type` header value. Its charset ranks below
+  `encoding=` and above the document's declarations, is resolved with the WHATWG label table, and is
+  ignored when unusable rather than raising. See "Encoding inputs" in docs/PYTHON.md for the precedence
+  table and what an integration should pass.
+- `detect_encoding(..., explain=True)` returns `(name, source)`, where `source` names the rank that
+  decided: `"bom"`, `"utf16-prefix"`, `"encoding"`, `"content-type"`, `"xml-declaration"`, `"meta"`,
+  `"utf8"` or `"autodetect"`, or `"str"` for already-decoded text.
+- Every entry point makes the same encoding decision. `detect_encoding` and `Plan`, which `FrostPage`
+  calls, now raise `ValueError` on a label no codec knows, as `extract` already did, instead of
+  ignoring it.
+- `frostwork_input()` may return a `frostwork.webpoet.FrostInput(html, encoding, content_type, url)` to
+  pass a response's header and URL with its body. An `(html, encoding)` pair still works.
+- Rust: `EncodingHints`, `EncodingSource`, `resolve_encoding` and `Plan::extract_with` take the same
+  inputs.
+
 ## 0.1.6 (2026-09-23)
 
 ### Python API and tooling

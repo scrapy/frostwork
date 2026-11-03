@@ -21,6 +21,7 @@ pub mod selector;
 mod tokenizer;
 mod xpath;
 
+pub use encoding::{EncodingHints, EncodingSource};
 pub use matcher::{MAX_MEMBERS, MAX_SIB_BITS};
 pub use page::{CompiledPage, Field, Item, Page};
 pub use selector::Selector;
@@ -34,9 +35,10 @@ pub type GroupRows = Vec<Vec<Vec<String>>>;
 /// (there is no fallback — that is the whole point of Frostwork). Values match Parsel's per-text-node,
 /// whitespace-kept, entity-decoded semantics on the supported subset.
 ///
-/// `encoding` is an optional caller/HTTP charset label (as Scrapy passes); when `None` the encoding is
-/// sniffed (BOM -> `<meta>` -> autodetection). `url` is the URL of the response, if known: the
-/// top-level domain of its host informs autodetection. Structural tokenization runs on raw bytes for every
+/// `encoding` is an optional caller label for an encoding the user forced; a BOM still outranks it. When
+/// `None` the encoding is sniffed (BOM -> `<meta>` -> autodetection). `url` is the URL of the response,
+/// if known: the top-level domain of its host informs autodetection. To pass a response's `Content-Type`
+/// header as well, use [`Plan::extract_with`]. Structural tokenization runs on raw bytes for every
 /// ASCII-compatible encoding; only the small emitted values are decoded with the resolved encoding.
 /// UTF-16LE/BE are transcoded to UTF-8 up front (rare).
 pub fn extract<Q: AsQuery>(
@@ -217,8 +219,8 @@ fn compile_schema<Q: AsQuery>(
 }
 
 /// The encoding [`extract`] would scan `html` with, as a WHATWG canonical name (`"UTF-8"`,
-/// `"windows-1252"`, `"Shift_JIS"`, …). `label` is the caller/HTTP charset a response supplies, or
-/// `None` to sniff, and `url` the response URL, as in [`extract`].
+/// `"windows-1252"`, `"Shift_JIS"`, …). `label` is the caller's forced label, or `None` to sniff, and
+/// `url` the response URL, as in [`extract`].
 ///
 /// The same resolution `extract` runs — BOM → BOM-less UTF-16 prefix → label → browser-bounded
 /// `<meta>`/XML-declaration prescan → autodetection — exposed on its own because it is useful without an
@@ -228,7 +230,14 @@ fn compile_schema<Q: AsQuery>(
 /// answer is always a real encoding: an unresolvable label is ignored rather than propagated, per
 /// WHATWG's "failure, continue".
 pub fn detect_encoding(html: &[u8], label: Option<&str>, url: Option<&str>) -> &'static str {
-    encoding::resolve(html, label, url).name()
+    resolve_encoding(html, EncodingHints { encoding: label, content_type: None, url }).0
+}
+
+/// [`detect_encoding`] over every input a response carries (see [`EncodingHints`]), with the rank of the
+/// precedence table that decided it. This is what [`Plan::extract_with`] scans with.
+pub fn resolve_encoding(html: &[u8], hints: EncodingHints<'_>) -> (&'static str, EncodingSource) {
+    let (enc, source) = encoding::resolve_explained(html, hints);
+    (enc.name(), source)
 }
 
 /// The `(member-selector, sibling-bit)` demand of a schema. A caller
@@ -543,10 +552,9 @@ pub fn audit_schema<Q: AsQuery>(queries: &[Q], groups: &[GroupQuery<Q>]) -> Sche
 /// Whitespace stripping and NUL deletion happen here too, for the whole document (see [`normalize`]).
 fn prepare_bytes<'h>(
     html: &'h [u8],
-    encoding: Option<&str>,
-    url: Option<&str>,
+    hints: EncodingHints<'_>,
 ) -> (Cow<'h, [u8]>, &'static encoding_rs::Encoding) {
-    let enc = encoding::resolve(html, encoding, url);
+    let (enc, _) = encoding::resolve_explained(html, hints);
     if !enc.is_ascii_compatible() {
         // Transcode FIRST: in UTF-16 every ASCII character carries a 0x00 byte, so deleting NUL bytes
         // from the raw input would shred the document. What must go is the U+0000 CHARACTER, which only
@@ -704,9 +712,8 @@ impl Plan {
         self.budget
     }
 
-    /// Run the compiled schema over one page. `encoding` is an optional charset label (as Scrapy
-    /// passes from `Content-Type`); `None` sniffs (BOM → `<meta>` → autodetection), informed by `url`
-    /// as in [`extract`]. Returns `(flat_columns,
+    /// Run the compiled schema over one page. `encoding` is an optional caller label; `None` sniffs
+    /// (BOM → `<meta>` → autodetection), informed by `url` as in [`extract`]. Returns `(flat_columns,
     /// grouped)` — byte-identical to [`extract_grouped`] with the same schema.
     pub fn extract(
         &self,
@@ -714,8 +721,14 @@ impl Plan {
         encoding: Option<&str>,
         url: Option<&str>,
     ) -> (FlatColumns, Vec<GroupRows>) {
+        self.extract_with(html, EncodingHints { encoding, content_type: None, url })
+    }
+
+    /// [`extract`](Plan::extract) with every input a response carries, the raw `Content-Type` header
+    /// included (see [`EncodingHints`] and [`resolve_encoding`]).
+    pub fn extract_with(&self, html: &[u8], hints: EncodingHints<'_>) -> (FlatColumns, Vec<GroupRows>) {
         // Keep the prepared `Cow` alive here: the matcher borrows its bytes for the whole scan.
-        let (bytes, value_enc) = prepare_bytes(html, encoding, url);
+        let (bytes, value_enc) = prepare_bytes(html, hints);
         self.schema.run(matcher::EncodedInput::new(&bytes, value_enc))
     }
 }

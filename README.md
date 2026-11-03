@@ -47,16 +47,20 @@ assert PRODUCT.extract(html).to_dict() == {
 }
 ```
 
-In an ordinary Scrapy callback, pass the original bytes and the response's encoding:
+In an ordinary Scrapy callback, hand over the response itself. `extract_response` passes the original
+bytes with the `Content-Type` header and the URL, and Frostwork makes the encoding decision a browser
+would:
 
 ```python
 def parse_product(self, response):
-    yield PRODUCT.extract(response.body, encoding=response.encoding).to_dict()
+    yield PRODUCT.extract_response(response).to_dict()
 ```
 
-Use `field_all` whenever you need every match, and `field_join` to join text nodes. Without an explicit
-encoding, Frostwork checks the BOM and declarations, then autodetects the encoding. For positional columns
-without field names, use the [primitive `extract` API](https://github.com/scrapy/frostwork/blob/main/docs/PYTHON.md#1-the-primitive).
+Use `field_all` whenever you need every match, and `field_join` to join text nodes. Do not pass
+`response.encoding` yourself. It is Scrapy's own decision, and it would override the page's declarations;
+see [encoding inputs](https://github.com/scrapy/frostwork/blob/main/docs/PYTHON.md#encoding-inputs). For
+positional columns without field names, use the
+[primitive `extract` API](https://github.com/scrapy/frostwork/blob/main/docs/PYTHON.md#1-the-primitive).
 
 The same engine is a Rust library — `frostwork::extract(html, &queries, None)`, with `Page`/`Plan` for named
 fields and compile-once reuse. See the

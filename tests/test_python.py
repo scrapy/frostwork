@@ -162,7 +162,7 @@ def test_extract_unknown_encoding_label_raises():
 
 def test_extract_real_but_non_whatwg_label_is_ignored_not_raised():
     # `utf-7` is a real Python codec and NOT a WHATWG label, so w3lib (and therefore Scrapy's
-    # `response.encoding`, the documented input here) can hand it to us off a `Content-Type` header.
+    # `response.encoding`) can hand it to a caller off a `Content-Type` header.
     # WHATWG's rule for such a label is "failure, continue" — ignore it and keep sniffing — which is
     # what browsers do. Raising would crash a spider on publisher-controlled input; a crawled page
     # whose header said `charset=UTF-7` while its own <meta> said UTF-8 did exactly that.
@@ -196,9 +196,9 @@ def test_extract_normalizes_python_codec_spellings():
     ],
 )
 def test_python_codec_names_of_whatwg_encodings_decode_like_the_label(python_name, whatwg_label, text):
-    """`w3lib.encoding.resolve_encoding` (Scrapy's `response.encoding`, and what `FrostPage` scans with)
-    returns `codecs.lookup(...).name`, which for these encodings is a Python spelling WHATWG does not
-    list. Each must decode exactly as the WHATWG label does, through every entry point, or the label
+    """`w3lib.encoding.resolve_encoding` (Scrapy's `response.encoding`, which a caller may pass as a
+    forced label) returns `codecs.lookup(...).name`, which for these encodings is a Python spelling
+    WHATWG does not list. Each must decode exactly as the WHATWG label does, through every entry point, or the label
     is silently dropped and the values come back as UTF-8 mojibake."""
     raw = f"<html><body><h1>{text}</h1></body></html>".encode(python_name)
     want = [[text]]
@@ -1985,7 +1985,7 @@ def test_frostpage_encoding_from_response():
     class P(FrostPage):
         p = field("p::text")
 
-    # response declares windows-1252; FrostPage must scan with that encoding
+    # an encoding forced on the response (web-poet keeps it in `_encoding`) is what FrostPage scans with
     resp = _resp(body=b"<p>caf\xe9</p>", encoding="cp1252")
     item = asyncio.run(P(response=resp).to_item())
     assert item == {"p": "café"}
@@ -2872,12 +2872,16 @@ def test_detect_encoding_reports_what_extract_will_use():
         (b"<meta charset=nosuch><meta charset=gbk>", None, "GBK"),      # failure, continue
         (b"<p>x</p>", "iso-8859-1", "windows-1252"),                    # the WHATWG label table
         (b"<p>x</p>", "latin-1", "windows-1252"),                       # a Python codec spelling
-        (b"<p>x</p>", "bogus-label", "UTF-8"),                          # unresolvable -> sniff
+        (b"<p>x</p>", "utf-7", "UTF-8"),                                # not WHATWG -> sniff
         ('<?xml version="1.0"?><p>x</p>'.encode("utf-16-le"), None, "UTF-16LE"),
         (b"<p>x</p>", None, "UTF-8"),
         ("<p>café</p>", None, "UTF-8"),  # already-decoded str: those bytes ARE UTF-8
     ]:
         assert frostwork.detect_encoding(body, label) == want, (body[:40], label)
+
+    # a label no codec knows is the caller's mistake, refused here exactly as `extract` refuses it
+    with pytest.raises(ValueError, match="unknown encoding label"):
+        frostwork.detect_encoding(b"<p>x</p>", "bogus-label")
 
     # ...and it is the encoding `extract` actually decoded with, not a second opinion
     b = b"<meta charset=windows-1252><p>caf\xe9</p>"

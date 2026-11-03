@@ -446,10 +446,10 @@ trades accuracy — see the compatibility contract's
 
 ### Where the design trades off
 
-Two shapes where the curve above does not hold. Reproduce with
+One shape where the curve above does not hold. Reproduce with
 `make bench-webpoet BENCH_ARGS="--boundaries"`.
 
-**1. A node-taking processor (`.as_node()`) on a many-match field loses to Parsel.** The processor
+**A node-taking processor (`.as_node()`) on a many-match field loses to Parsel.** The processor
 contract is an lxml node, so each match is re-parsed on its own, where Parsel hands over elements from
 a tree it has already built.
 
@@ -465,13 +465,6 @@ Near parity at one to three matches, behind by ten. One `.as_node()` field per p
 since most zyte item fields are scalars — costs nothing measurable, and subtree size is not the
 problem: one match over a 1 KB, 30 KB and 250 KB subtree stays slightly ahead. It is the per-match
 repetition that costs.
-
-**2. A response with no charset anywhere costs a page-sized decode.** `frostwork_input()` reads
-`resp.encoding` so the bytes are scanned with the label Parsel would have decoded with; with no
-`Content-Type` charset, no BOM and no `<meta>`, web-poet falls through to `w3lib.html_to_unicode` over
-the whole body. The time is negligible (0.01 → 0.03 ms) but the decoded text is retained. Keeping it
-is deliberate: inference answers `cp1252` where Frostwork's own sniffer would default to `utf-8`, so
-*not* reading `resp.encoding` would decode some pages differently from Parsel.
 
 ## Method
 

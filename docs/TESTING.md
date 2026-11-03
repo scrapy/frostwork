@@ -107,8 +107,16 @@ recorded families now.
 `tools/enc_check.py` checks label handling, BOMs, the meta/XML prescan and emitted text/attribute values.
 Resolution cases are split into:
 
-- cases where browsers and w3lib agree; and
-- named differences where Frostwork must keep the browser/WHATWG answer and w3lib must keep the other one.
+- cases where browsers and w3lib agree;
+- named differences where Frostwork must keep the browser/WHATWG answer and w3lib must keep the other one;
+- named exceptions where Frostwork deliberately differs from a recorded browser answer, which fail as stale
+  if Frostwork starts agreeing; and
+- the precedence table, one row per pair of competing inputs (BOM, `encoding=`, `content_type=`, the
+  document's declarations), checking the winning encoding and the rank that decided it.
+
+The documents live in `tools/enc_cases.py`, so `tests/test_encoding_inputs.py` can run every one of them,
+with valid, unknown and ignored labels, through each Python entry point and a real web-poet `FrostPage`,
+and require one answer, a raised error included.
 
 Legacy decoder coverage enumerates the relevant byte space rather than sampling realistic strings. This is
 necessary because `encoding_rs` follows WHATWG indexes while Parsel ultimately uses Python codecs.

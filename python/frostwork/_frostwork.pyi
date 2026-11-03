@@ -5,17 +5,24 @@ one-pass primitives crossing the PyO3 boundary. `html` must be `bytes` (or a `by
 as web-poet's `HttpResponseBody`); the pure-Python wrappers accept other bytes-likes and `str`.
 """
 
-from typing import List, Optional, Sequence, Tuple, Union
+from typing import List, Literal, Optional, Sequence, Tuple, Union, overload
 
 Query = Union[str, Tuple[str, Optional[str]]]
 """A selector string, routed as CSS or XPath by its prefix, or ``(selector, syntax)`` with ``syntax``
 one of ``"css"``, ``"xpath"`` or ``None`` (auto)."""
+
+EncodingSource = Literal[
+    "bom", "utf16-prefix", "encoding", "content-type", "xml-declaration", "meta", "utf8", "autodetect",
+    "str",
+]
+"""The rank that decided an encoding (``detect_encoding(..., explain=True)``); ``"str"`` for decoded text."""
 
 def extract(
     html: Union[bytes, str],
     queries: Sequence[Query],
     encoding: Optional[str] = ...,
     *,
+    content_type: Optional[str] = ...,
     url: Optional[str] = ...,
 ) -> List[List[str]]:
     """One streaming pass: one value-column per query, in query order."""
@@ -26,6 +33,7 @@ def extract_grouped(
     groups: Sequence[Tuple[Query, Sequence[Tuple[str, Query]]]],
     encoding: Optional[str] = ...,
     *,
+    content_type: Optional[str] = ...,
     url: Optional[str] = ...,
 ) -> Tuple[List[List[str]], List[List[List[List[str]]]]]:
     """One streaming pass returning ``(flat_columns, grouped)`` — ``grouped[g][row][subfield][value]``."""
@@ -57,13 +65,38 @@ def resolve_label(label: str) -> Optional[str]:
     """Canonical WHATWG encoding name for ``label`` (e.g. ``"UTF-8"``), or ``None`` if neither WHATWG
     nor Python's codec set names a WHATWG encoding by it."""
 
+@overload
 def detect_encoding(
-    html: Union[bytes, str], encoding: Optional[str] = ..., *, url: Optional[str] = ...
+    html: Union[bytes, str],
+    encoding: Optional[str] = ...,
+    *,
+    content_type: Optional[str] = ...,
+    url: Optional[str] = ...,
+    explain: Literal[False] = ...,
 ) -> str:
     """The encoding ``extract`` would scan this document with, as a WHATWG name: BOM → BOM-less UTF-16
-    prefix → ``encoding`` label → 4096-byte ``<meta>``/XML-declaration prescan → UTF-8 if valid, else
-    autodetected, informed by the top-level domain of ``url``. A ``str`` is already-decoded text, so
-    the answer is ``"UTF-8"`` without sniffing."""
+    prefix → ``encoding`` label → ``content_type`` charset → XML declaration or ``<meta>`` → UTF-8 if
+    valid, else autodetected, informed by the top-level domain of ``url``. Raises as ``extract`` does. A
+    ``str`` is already-decoded text, so the answer is ``"UTF-8"`` without sniffing."""
+@overload
+def detect_encoding(
+    html: Union[bytes, str],
+    encoding: Optional[str] = ...,
+    *,
+    content_type: Optional[str] = ...,
+    url: Optional[str] = ...,
+    explain: Literal[True],
+) -> Tuple[str, EncodingSource]:
+    """``(name, source)``: the encoding and the rank that decided it."""
+@overload
+def detect_encoding(
+    html: Union[bytes, str],
+    encoding: Optional[str] = ...,
+    *,
+    content_type: Optional[str] = ...,
+    url: Optional[str] = ...,
+    explain: bool = ...,
+) -> Union[str, Tuple[str, EncodingSource]]: ...
 
 class Plan:
     """A schema compiled once (budget validated at construction) and reused across pages."""
@@ -78,8 +111,18 @@ class Plan:
         every column says so and the schema is eligible, the scan stops as soon as each has one instead
         of running to EOF; the values a single-valued consumer sees are unchanged."""
     def extract(
-        self, html: Union[bytes, str], encoding: Optional[str] = ..., *, url: Optional[str] = ...
+        self,
+        html: Union[bytes, str],
+        encoding: Optional[str] = ...,
+        *,
+        content_type: Optional[str] = ...,
+        url: Optional[str] = ...,
     ) -> List[List[str]]: ...
     def extract_grouped(
-        self, html: Union[bytes, str], encoding: Optional[str] = ..., *, url: Optional[str] = ...
+        self,
+        html: Union[bytes, str],
+        encoding: Optional[str] = ...,
+        *,
+        content_type: Optional[str] = ...,
+        url: Optional[str] = ...,
     ) -> Tuple[List[List[str]], List[List[List[List[str]]]]]: ...

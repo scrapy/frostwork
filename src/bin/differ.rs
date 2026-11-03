@@ -5,9 +5,12 @@
 //!            for sniff; html hex-encoded so arbitrary bytes round-trip; selectors are plain)
 //!            grouped case  = `G2 \t ENC \t HEXHTML \t k \t (CONTAINER \t m \t sub_1 … sub_m)×k`
 //!            (k groups in ONE pass, so cross-group routing gets differential coverage)
+//!            encoding case = `T \t ENC \t CONTENT_TYPE \t HEXHTML \t sel1 \t ...` (CONTENT_TYPE = a
+//!            raw `Content-Type` header value or empty; used by tools/enc_check.py's precedence rows)
 //!   stdout : flat    -> a JSON array of value-columns (arrays of strings)
 //!            grouped -> a JSON array of `k` groups, each an array of rows, each row an array of
 //!                       sub-field value-columns  (`[group][row][sub][value]`)
+//!            encoding -> `{"encoding": NAME, "source": RANK, "values": [value-columns]}`
 //!
 //! One long-running process streams the whole batch, so the Python driver (which owns lxml/Parsel)
 //! can diff millions of (page × selector) pairs without a PyO3 build or a process-per-case.
@@ -93,6 +96,32 @@ fn main() {
                 out.push_str(if support.is_supported() { "true" } else { "false" });
             }
             out.push(']');
+        } else if first == "T" {
+            // encoding: T \t ENC \t CONTENT_TYPE \t HEX \t sel1 ...
+            let non_empty = |s: &'_ str| -> Option<String> { (!s.is_empty()).then(|| s.to_string()) };
+            let enc = non_empty(parts.next().unwrap_or(""));
+            let ctype = non_empty(parts.next().unwrap_or(""));
+            let html = hex_decode(parts.next().unwrap_or(""));
+            let sels: Vec<String> = parts.map(str::to_string).collect();
+            let hints = frostwork::EncodingHints {
+                encoding: enc.as_deref(),
+                content_type: ctype.as_deref(),
+                url: None,
+            };
+            let (name, source) = frostwork::resolve_encoding(&html, hints);
+            let (cols, _) = frostwork::Plan::compile(&sels, &[]).extract_with(&html, hints);
+            out.push_str("{\"encoding\":");
+            json_str(name, &mut out);
+            out.push_str(",\"source\":");
+            json_str(source.as_str(), &mut out);
+            out.push_str(",\"values\":[");
+            for (i, col) in cols.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                json_col(col, &mut out);
+            }
+            out.push_str("]}");
         } else if first == "G2" {
             // grouped: G2 \t ENC \t HEX \t k \t (CONTAINER \t m \t sub_1 … sub_m)×k
             let enc_label = parts.next().unwrap_or("");

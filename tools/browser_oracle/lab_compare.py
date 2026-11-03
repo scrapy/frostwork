@@ -3,12 +3,14 @@
 section 1 and E1).
 
 Each lab case is exact bytes plus a `Content-Type`, and the lab records what a real browser rendered for
-one selector. This runs every case through `frostwork.extract` with three different encoding labels and
-counts the cases whose values differ from the browser's:
+one selector. This runs every case through `frostwork.extract` with three different encoding labels, and
+once through a response adapter, and counts the cases whose values differ from the browser's:
 
-  header     the raw `Content-Type` charset, which is what the engine is meant to receive
-  w3lib      `w3lib.encoding.http_content_type_encoding`, which drops labels Python has no codec for
-  web-poet   `HttpResponse.encoding`, w3lib's whole decision, which is what `FrostPage` passes today
+  header            the raw `Content-Type` charset, which is what the engine is meant to receive
+  w3lib             `w3lib.encoding.http_content_type_encoding`, which drops labels Python has no codec for
+  web-poet          `HttpResponse.encoding`, w3lib's whole decision, passed as the label
+  extract_response  `Page.extract_response` on a web-poet `HttpResponse`, which passes the raw header and
+                    the URL, as `FrostPage` does
 
     .venv/bin/python tools/browser_oracle/lab_compare.py [--lab ~/src/encoding-hacks]
 """
@@ -39,6 +41,17 @@ def labels(case):
     }
 
 
+def via_extract_response(case):
+    from web_poet import HttpResponse
+
+    import frostwork
+
+    ctype = case["ctype"]
+    headers = {"Content-Type": ctype} if ctype else {}
+    response = HttpResponse(url="http://example.com/", body=case["body"], headers=headers)
+    return frostwork.Page().field_all("v", case["sel"]).extract_response(response).value("v")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--lab", type=Path, default=Path("~/src/encoding-hacks").expanduser())
@@ -63,15 +76,20 @@ def main() -> int:
             except ValueError as e:
                 got = [f"ERR: {e}"]
             row[mode] = {"label": label, "values": got, "agrees": got == want}
+        try:
+            got = via_extract_response(case)
+        except ValueError as e:
+            got = [f"ERR: {e}"]
+        row["extract_response"] = {"label": None, "values": got, "agrees": got == want}
         rows.append(row)
 
     if args.json:
         print(json.dumps(rows, indent=1, ensure_ascii=False))
         return 0
-    modes = ("header", "w3lib", "web-poet")
+    modes = ("header", "w3lib", "web-poet", "extract_response")
     for mode in modes:
         bad = [r["case"] for r in rows if not r[mode]["agrees"]]
-        print(f"{mode:9} {len(bad):3} of {len(rows)} differ from the browser: {', '.join(bad)}")
+        print(f"{mode:16} {len(bad):3} of {len(rows)} differ from the browser: {', '.join(bad)}")
     print()
     for r in rows:
         if r["header"]["agrees"] != r["web-poet"]["agrees"]:

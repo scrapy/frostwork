@@ -428,7 +428,7 @@ tree can come back empty here.
 
 | construct | Parsel / w3lib | Frostwork | gate |
 |---|---|---|---|
-| **sniffing a `<meta charset>` at all** | `parsel.Selector(body=…)` never looks: it defaults to UTF-8 and every value carries U+FFFD. Scrapy users get sniffing from w3lib, one layer up | BOM → BOM-less UTF-16 → caller label → a `<meta>` prescan bounded the way a BROWSER bounds it → autodetection, with no caller label needed | `tools/enc_check.py` |
+| **sniffing a `<meta charset>` at all** | `parsel.Selector(body=…)` never looks: it defaults to UTF-8 and every value carries U+FFFD. Scrapy users get sniffing from w3lib, one layer up | BOM → BOM-less UTF-16 → forced label → `Content-Type` charset → a `<meta>` prescan bounded the way a BROWSER bounds it → autodetection, with no label needed | `tools/enc_check.py` |
 | a declaration **after `<body>`**, or **after an unsupported label** | w3lib's regex has a `\|body` alternative and gives up there, and it stops at its first hit rather than continuing past a label it cannot resolve | honoured — browsers do not stop at `<body>`, and WHATWG treats an unsupported label as "failure, continue" | the difference table under [Encoding](#deliberate-differences-from-w3lib), each row asserted in **both** directions so an upstream fix fails as stale |
 | a declaration **deep in the `<head>`** | ignored past 4096 bytes | honoured at any depth — measured in Chrome at 1KB/4KB/16KB/64KB/256KB **and 1MB**. A browser meeting the `<meta>` after its prescan budget runs "change the encoding" and re-decodes, so the budget is not a correctness cap. Legacy pages put `Content-Type` at byte ~1100–1600 behind a producer comment or a block of `og:` metas | `src/encoding.rs`; reasoning under [Encoding](#encoding) |
 | a **UTF-16 response body** | lxml's HTML parser cannot parse UTF-16 bytes at all — `Selector(body=…, encoding="utf-16")` returns `[]`/errors | decoded, matching the decode-first result Scrapy uses | `src/lib.rs::encoding_utf16_bom_transcode`, `src/encoding.rs::bomless_utf16_is_detected_from_the_xml_prefix` |
@@ -583,7 +583,9 @@ answer. The reason is what a scraper is *for*: a price, a title or an address is
 matches what the site shows a person, so a value that differs from the browser is wrong even when
 every Python library agrees with it. There is no divergence budget here and no "acceptable local
 difference" — those exist for tree construction (foster parenting, the adoption agency), not for
-this.
+this. The rule has one named exception, unlabelled valid UTF-8, listed under
+[deliberate differences from browsers](#deliberate-differences-from-browsers) with the one place where
+the browsers themselves disagree.
 
 What that means in practice, for anyone porting a scraper *to* Frostwork: **where Frostwork's text
 differs from Scrapy's, on a page whose encoding is at all unusual, Frostwork is very likely the one
@@ -624,8 +626,14 @@ Resolution order (`src/encoding.rs`):
    encoded as UTF-16 (XML 1.0 Appendix F, and what libxml2's own `xmlDetectEncoding` does). Grouped with
    the BOM checks on the same reasoning WHATWG gives a BOM priority: the bytes are unambiguous, and no
    ASCII-compatible document can begin with a NUL.
-3. **caller / HTTP charset label**.
-4. **prescan, bounded the way a browser bounds it** — an XML declaration's `encoding=` (only at offset
+3. **a label the caller forced** (`encoding=`). A label no codec knows raises in Python; a real encoding
+   WHATWG lacks (`utf-7`) is ignored. It ranks below a BOM, because in a browser a BOM outranks every
+   label. Scrapy and web-poet rank their forced `_encoding` above the BOM, so a forced label on a
+   BOM-marked body is the one input where they and Frostwork disagree.
+4. **the `charset` parameter of the `Content-Type` header** (`content_type=`), case-insensitive, quoted or
+   not, resolved with the WHATWG label table and taken literally, so `x-user-defined` and the
+   `replacement` labels keep their meaning. An unusable value is ignored and never raises.
+5. **prescan, bounded the way a browser bounds it** — an XML declaration's `encoding=` (only at offset
    0) and `<meta charset>` / `<meta http-equiv=content-type>`, in document order. The bound is **the
    first 1024 bytes unconditionally, and past that only while still inside `<head>`**. It is two rules
    because a browser has two, and both were measured rather than read off the standard:
@@ -642,11 +650,12 @@ Resolution order (`src/encoding.rs`):
    head declarations real pages carry, and honoured body declarations no browser honours. Bounding at
    the head is also what makes this free — an unbounded scan measured a flat ~35µs per label-less page,
    one extra pass over the document, and the head bound gives all of it back.
-5. **autodetection** — UTF-8 if the whole document is valid UTF-8 (a sequence cut off at the end
-   still counts), otherwise [chardetng](https://crates.io/crates/chardetng)'s guess, which is what
-   Firefox uses for this step. UTF-8 and ISO-2022-JP are excluded from its guesses, as in Firefox,
-   and the top-level domain of the response URL, when the caller passes one, weighs the guess as it
-   does there (`.jp` favours Shift_JIS, `.ru` windows-1251, …).
+6. **autodetection** — UTF-8 if the whole document is valid UTF-8 (a sequence cut off at the end
+   still counts; see [the exception](#deliberate-differences-from-browsers)), otherwise
+   [chardetng](https://crates.io/crates/chardetng)'s guess, which is what Firefox uses for this step.
+   UTF-8 and ISO-2022-JP are excluded from its guesses, as in Firefox, and the top-level domain of the
+   response URL, when the caller passes one, weighs the guess as it does there (`.jp` favours
+   Shift_JIS, `.ru` windows-1251, …).
 
 Structural tokenization runs on raw bytes for every ASCII-compatible encoding — a byte below 0x80 *is*
 that ASCII character there, so the delimiters are unambiguous — and only the small emitted values are
@@ -656,6 +665,31 @@ which encodings those are is asked of `Encoding::is_ascii_compatible` rather tha
 to decode at all — one U+FFFD for the whole document). ISO-2022-JP is the one that bites: inside its
 `ESC $ B` mode a JIS pair is two bytes below 0x80, so `社` is the pair `<R`, and a crawled Japanese page
 tokenized as raw bytes grew an `<r>` start tag out of the middle of a word.
+
+Each rank that has nothing usable hands over to the next. [PYTHON.md](PYTHON.md#encoding-inputs) has
+the integrator contract: what to pass for each input, and what goes wrong otherwise.
+
+### Deliberate differences from browsers
+
+Two places where Frostwork's encoding decision is not the one a browser makes. Both are decided, and both
+are measured against Chrome 156 in `~/src/encoding-hacks`.
+
+**Unlabelled valid UTF-8 is read as UTF-8.** This is the encoding rule's one named exception. On a page
+with no BOM, no label and no declaration, browsers refuse to detect UTF-8 by policy: Chrome 156 shows
+windows-1252 mojibake on the lab's `no-declaration` case, and chardetng documents
+`Utf8Detection::Deny` as what Firefox passes for `text/html` from the network. Frostwork reads UTF-8,
+because the browser's answer is text nobody intended: a scraper that stores `cafÃ©` has a wrong value by
+any standard. A page cannot exploit this either, since every multi-byte UTF-8 sequence starts with a
+byte from 0xC2 to 0xF4, which windows-1252 shows as `Â` to `ô` followed by junk, so a page relying on the
+browser's reading would look broken to its own users. `tools/enc_check.py` asserts the exception against
+the recorded Chrome answer and fails if Frostwork ever starts agreeing with it.
+
+**Autodetection follows Firefox.** When the bytes are not valid UTF-8 and nothing declares an encoding,
+Frostwork asks chardetng, the detector Firefox runs, with the top-level domain of the response URL as its
+hint. Chrome uses a different detector (Compact Encoding Detection) and the two disagree: on the lab's
+`body-meta-512k` case Chrome 156 guesses windows-874 and Frostwork windows-1252, so the price reads
+`1.299,00 ค` in one and `1.299,00 ¤` in the other. Chrome's guess also moves with the build and with a
+single byte of payload, so Frostwork does not chase it.
 
 ### Extended characters in a SELECTOR
 

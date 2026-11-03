@@ -2,7 +2,9 @@
 
 Python harness (needs `parsel`). `oracle.py` guards the oracle toolchain (libxml2 ≥ 2.15 — a pinned
 lxml does *not* pin its vendored libxml2); `diff_lxml.py` is the gate; `conformant.py`/`families.py`/
-`foreign.py` generate test pages; `enc_check.py` (encoding parity) with `decoder_sweep.py` as its importable half — the two-byte
+`foreign.py` generate test pages; `enc_check.py` (encoding parity) with `enc_cases.py` (every document it
+grades, which `tests/test_encoding_inputs.py` also runs through each Python entry point) and `decoder_sweep.py`
+as its importable halves — the two-byte
 enumeration and the four disagreement classes live there because `enc_check` runs its gate at module
 level, so nothing in it could be exercised by a test, and a sweep that quietly narrows reads exactly
 like a clean run; `sel_fuzz.py`/`diff_fuzz.py`
@@ -84,7 +86,8 @@ over CDP and Firefox over WebDriver BiDi, headless from throwaway profiles, and 
 parser's scripting flag on. Its `equiv` mode compares a page load with `DOMParser`, `parseHTMLUnsafe` and
 `srcdoc` node for node over a seeded generator that refuses to run unless every token is emitted (a float
 LCG silently emitted 28 of its 60), and its `claims` mode evaluates `claims.json` on all three.
-`lab_compare.py` grades the engine against the encoding-hacks browser column with three encoding labels.
+`lab_compare.py` grades the engine against the encoding-hacks browser column with three encoding labels,
+and once through `Page.extract_response` on a web-poet `HttpResponse`.
 `evidence/<date>/` holds the outputs the proposal quotes, each stamped with its browser build. No gate
 calls any of it yet.
 

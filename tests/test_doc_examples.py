@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DOCS = [ROOT / "README.md", ROOT / "docs" / "PYTHON.md", ROOT / "docs" / "MIGRATION.md"]
 
 PAGE_EXAMPLES = {"frost-page", "product-page", "zyte-product-page", "absolute-urls", "grouped-offers"}
-INLINE_EXAMPLES = {"page-quickstart", "primitive", "named-item", "runtime-validation",
+INLINE_EXAMPLES = {"page-quickstart", "primitive", "named-item", "runtime-validation", "encoding-inputs",
                    "migration-schema", "group-context"}
 
 PRODUCT_HTML = (

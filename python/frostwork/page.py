@@ -21,12 +21,13 @@ the number and complexity of fields.
 
 from __future__ import annotations
 
-import codecs
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field as _dc_field
 from functools import lru_cache
-from typing import Any, Callable, Iterable, Iterator, List, Optional, Protocol, Tuple, Union
+from typing import (
+    Any, Callable, Iterable, Iterator, List, Literal, Optional, Protocol, Tuple, Union, overload,
+)
 
 from .validation import FieldProcessingError, ValidationReport, validate_item
 
@@ -71,14 +72,37 @@ def _query_text(query: _Query) -> str:
 Bytesish = Union[bytes, bytearray, memoryview, str]
 
 
+EncodingSource = Literal[
+    "bom", "utf16-prefix", "encoding", "content-type", "xml-declaration", "meta", "utf8", "autodetect",
+    "str",
+]
+"""The rank that decided an encoding, as ``detect_encoding(..., explain=True)`` reports it."""
+
+
 class Response(Protocol):
-    """The byte-response surface used by :meth:`Page.extract_response`; no Scrapy dependency."""
+    """The byte-response surface used by :meth:`Page.extract_response`; no Scrapy dependency.
+
+    Only ``body`` is required. ``headers``, ``url`` and ``_encoding`` are read when present."""
 
     @property
     def body(self) -> bytes: ...
 
-    @property
-    def encoding(self) -> Optional[str]: ...
+
+def _response_encoding_inputs(response: Any) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """``(encoding, content_type, url)`` for a Scrapy or web-poet response, without importing either.
+
+    ``encoding`` is the label the user forced, which both frameworks keep in ``_encoding``;
+    ``content_type`` is the raw ``Content-Type`` header value (web-poet's headers return ``str``,
+    Scrapy's ``bytes``); ``url`` is the response URL. ``response.encoding`` is never read: it is the
+    framework's own decision, and passed as ``encoding=`` it would outrank the document's declarations.
+    """
+    forced = getattr(response, "_encoding", None)
+    headers = getattr(response, "headers", None)
+    content_type = headers.get("Content-Type") if headers is not None else None
+    if isinstance(content_type, (bytes, bytearray)):
+        content_type = bytes(content_type).decode("latin-1")
+    url = getattr(response, "url", None)
+    return forced, content_type, None if url is None else str(url)
 
 
 def _as_scan_input(html: Bytesish) -> Union[bytes, str]:
@@ -109,45 +133,6 @@ def _query_list(queries) -> List[str]:
     return list(queries)
 
 
-def _check_encoding(html: Bytesish, encoding: Optional[str]) -> Optional[str]:
-    """Validate a caller charset label instead of letting the engine silently ignore it.
-
-    The engine accepts WHATWG charset labels; Python codec spellings (``latin-1``, ``utf_8``,
-    ``cp932``) are normalized through :mod:`codecs`. A label that names no encoding at all raises
-    rather than silently falling through to BOM/``<meta>`` sniffing, and a non-UTF-8 label combined with
-    already-decoded ``str`` input raises rather than silently double-transcoding.
-
-    A label that IS a real encoding but not a WHATWG one is a third case, and it must not raise: the
-    documented input here is what Scrapy passes from ``Content-Type``, i.e. whatever
-    ``w3lib.encoding.resolve_encoding`` returned, and that resolves against Python's codec set — which
-    has ``utf-7`` and ``utf-32`` where WHATWG deliberately does not. A crawled page whose HTTP header
-    said ``charset=UTF-7`` (its own ``<meta>`` said UTF-8) therefore made ``extract`` raise on
-    documented usage. WHATWG's rule for such a label is *failure, continue* — ignore it and go on
-    sniffing, which is what browsers do, what the Rust core already did, and what reads this page
-    correctly. Raising on publisher-controlled input is the one thing the no-fallback contract rules
-    out: never an error, never a wrong value.
-    """
-    if encoding is None:
-        return None
-    canonical = _resolve_label(encoding)
-    if canonical is None:
-        try:
-            codecs.lookup(encoding)
-        except LookupError:
-            raise ValueError(
-                f"frostwork: unknown encoding label {encoding!r} — pass a WHATWG charset label "
-                "(e.g. 'utf-8', 'windows-1252', 'shift_jis') or None to sniff from BOM/<meta>"
-            ) from None
-        return None  # real encoding, not a WHATWG one -> failure, continue (sniff)
-    if isinstance(html, str) and canonical != "UTF-8":
-        raise ValueError(
-            f"frostwork: `html` is already-decoded str (tokenized as UTF-8), but "
-            f"encoding={encoding!r} was given — pass the original bytes with the label, "
-            "or drop the label"
-        )
-    return canonical
-
-
 def _group_list(groups) -> list:
     """Normalize group shapes (tuples or lists, e.g. straight from JSON) and fail with a clear
     message on the wrong shape instead of an opaque unhashable/unpack error downstream."""
@@ -173,21 +158,61 @@ def _validate_grouped(
     check(selectors, groups, syntax=syntax).raise_for_status()
 
 
-def detect_encoding(html: Bytesish, encoding: Optional[str] = None, *, url: Optional[str] = None) -> str:
+@overload
+def detect_encoding(
+    html: Bytesish,
+    encoding: Optional[str] = None,
+    *,
+    content_type: Optional[str] = None,
+    url: Optional[str] = None,
+    explain: Literal[False] = False,
+) -> str: ...
+
+
+@overload
+def detect_encoding(
+    html: Bytesish,
+    encoding: Optional[str] = None,
+    *,
+    content_type: Optional[str] = None,
+    url: Optional[str] = None,
+    explain: Literal[True],
+) -> Tuple[str, EncodingSource]: ...
+
+
+@overload
+def detect_encoding(
+    html: Bytesish,
+    encoding: Optional[str] = None,
+    *,
+    content_type: Optional[str] = None,
+    url: Optional[str] = None,
+    explain: bool = False,
+) -> Union[str, Tuple[str, EncodingSource]]: ...
+
+
+def detect_encoding(
+    html: Bytesish,
+    encoding: Optional[str] = None,
+    *,
+    content_type: Optional[str] = None,
+    url: Optional[str] = None,
+    explain: bool = False,
+) -> Union[str, Tuple[str, EncodingSource]]:
     """The encoding :func:`extract` would scan ``html`` with, as a WHATWG name (``"windows-1252"``).
 
-    BOM → BOM-less UTF-16 prefix → ``encoding`` label → 4096-byte ``<meta>``/XML-declaration prescan →
-    UTF-8 if valid, else autodetected, informed by the top-level domain of *url*. Exposed on its own because nothing else in a scraper's stack answers this the way a browser
-    does: ``parsel.Selector(body=…)`` never sniffs (it defaults to UTF-8), and w3lib — what Scrapy
-    uses — stops at ``<body>`` and at the first declaration it cannot resolve. See the Encoding section
-    of docs/COMPATIBILITY.md for the enumerated differences.
+    It takes the same inputs as :func:`extract` and raises the same errors, so a framework can set its own
+    ``.encoding`` (and with it ``.text``) from the decision the scan will use. The precedence is: BOM,
+    BOM-less UTF-16 prefix, ``encoding``, the charset of ``content_type``, the document's XML declaration
+    or ``<meta>``, then UTF-8 if valid, else autodetected with the top-level domain of ``url``.
 
-    Always returns a real encoding. A label naming none is ignored rather than propagated (WHATWG's
-    "failure, continue"), matching what :func:`extract` then does with the document; the stricter
-    validation :func:`extract` applies to a *caller's* label is deliberately not repeated here, since
-    the question this answers is "what will be used", not "is this input acceptable".
+    With ``explain=True`` it returns ``(name, source)``, where ``source`` names the rank that decided:
+    ``"bom"``, ``"utf16-prefix"``, ``"encoding"``, ``"content-type"``, ``"xml-declaration"``, ``"meta"``,
+    ``"utf8"`` or ``"autodetect"``, or ``"str"`` for already-decoded text, which is always UTF-8.
     """
-    return _detect_encoding(_as_scan_input(html), encoding, url=url)
+    return _detect_encoding(
+        _as_scan_input(html), encoding, content_type=content_type, url=url, explain=explain
+    )
 
 
 def resolve_label(label: str) -> Optional[str]:
@@ -204,6 +229,7 @@ def extract(
     queries: Iterable[str],
     encoding: Optional[str] = None,
     *,
+    content_type: Optional[str] = None,
     url: Optional[str] = None,
     strict: bool = True,
     syntax: Optional[str] = None,
@@ -211,19 +237,23 @@ def extract(
     """One streaming pass over ``html``: return one value-column per query, in query order.
 
     ``html`` is bytes (preferred — Frostwork tokenizes raw bytes) or ``str`` (encoded UTF-8).
-    ``queries`` is an iterable of CSS/XPath selectors. ``encoding`` is an optional charset label
-    (as Scrapy passes from ``Content-Type``); ``None`` sniffs (BOM → ``<meta>`` → autodetection).
-    ``url`` is the response URL, if known; the top-level domain of its host informs autodetection.
+    ``queries`` is an iterable of CSS/XPath selectors. ``encoding`` is a label the user forced, ranked
+    below a BOM; a label no codec knows raises ``ValueError``. ``content_type`` is the response's raw
+    ``Content-Type`` header value, whose charset ranks below ``encoding``. ``url`` is the response URL;
+    the top-level domain of its host informs autodetection. With none of them the engine sniffs (BOM →
+    ``<meta>`` → autodetection); :func:`detect_encoding` reports the decision.
     Unsupported queries raise :class:`UnsupportedSelector` before scanning. Pass ``strict=False``
     to use the engine's permissive empty-column behavior. There is never a parser fallback.
     ``syntax`` declares every query ``"css"`` or ``"xpath"``; ``None`` routes each by its prefix
     (``/``, ``./`` and ``normalize-space(`` are XPath).
     """
     query_list = _query_list(queries)
-    encoding = _check_encoding(html, encoding)
     if strict:
         _validate_flat(tuple(query_list), syntax)
-    return _extract(_as_scan_input(html), [_query(q, syntax) for q in query_list], encoding, url=url)
+    return _extract(
+        _as_scan_input(html), [_query(q, syntax) for q in query_list], encoding,
+        content_type=content_type, url=url,
+    )
 
 
 def extract_grouped(
@@ -232,6 +262,7 @@ def extract_grouped(
     groups: Iterable[Tuple[str, _Subfields]],
     encoding: Optional[str] = None,
     *,
+    content_type: Optional[str] = None,
     url: Optional[str] = None,
     strict: bool = True,
     syntax: Optional[str] = None,
@@ -242,10 +273,10 @@ def extract_grouped(
     ``container_selector`` (document order) each sub-field is extracted **scoped to it**
     (descendant-or-self). ``grouped[g]`` is that group's rows, each a list of sub-field value-columns
     (``[group][row][subfield][value]``). Unsupported selectors raise by default; pass
-    ``strict=False`` for permissive empty columns. ``url`` and ``syntax`` apply as in :func:`extract`. Same no-DOM, no-fallback semantics as :func:`extract`."""
+    ``strict=False`` for permissive empty columns. ``encoding``, ``content_type``, ``url`` and ``syntax``
+    apply as in :func:`extract`. Same no-DOM, no-fallback semantics as :func:`extract`."""
     query_list = _query_list(queries)
     group_list = _group_list(groups)
-    encoding = _check_encoding(html, encoding)
     if strict:
         group_key = tuple((container, tuple(subfields)) for container, subfields in group_list)
         _validate_grouped(tuple(query_list), group_key, syntax)
@@ -254,6 +285,7 @@ def extract_grouped(
         [_query(q, syntax) for q in query_list],
         _tag_groups(group_list, syntax),
         encoding,
+        content_type=content_type,
         url=url,
     )
 
@@ -737,24 +769,28 @@ class Page:
         }
 
     def extract_response(self, response: Response, *, strict: Optional[bool] = None) -> "Item":
-        """Extract original response bytes with its encoding (Scrapy or web-poet, without imports).
+        """Extract a Scrapy or web-poet response's original bytes, without importing either framework.
 
-        Never accesses ``response.text`` or its selector. To use Frostwork's own sniffing instead,
-        call ``page.extract(response.body)`` explicitly.
+        Passes the raw ``Content-Type`` header value, the URL and the encoding the user forced (the
+        framework's ``_encoding``), so the engine makes the encoding decision itself.
+        Never accesses ``response.text``, ``response.encoding`` or the response's selector.
         """
-        return self.extract(response.body, encoding=response.encoding, strict=strict)
+        encoding, content_type, url = _response_encoding_inputs(response)
+        return self.extract(
+            response.body, encoding, content_type=content_type, url=url, strict=strict
+        )
 
     def extract(
         self,
         html: Bytesish,
         encoding: Optional[str] = None,
         *,
+        content_type: Optional[str] = None,
         url: Optional[str] = None,
         strict: Optional[bool] = None,
     ) -> "Item":
-        """Fill an :class:`Item` from ``html`` in one streaming pass. ``encoding`` is an optional
-        charset label (as Scrapy passes from ``Content-Type``); ``None`` sniffs, informed by ``url``
-        as in :func:`extract`. Unsupported selectors
+        """Fill an :class:`Item` from ``html`` in one streaming pass. ``encoding``, ``content_type``
+        and ``url`` are the encoding inputs described in :func:`extract`. Unsupported selectors
         raise :class:`UnsupportedSelector` by default. Construct with ``Page(strict=False)`` or pass
         ``strict=False`` here for permissive empty results. A successful default validation is cached
         until the schema changes."""
@@ -762,12 +798,12 @@ class Page:
         if use_strict and not self._validated:
             self.check().raise_for_status()
             self._validated = True
-        encoding = _check_encoding(html, encoding)
         body = _as_scan_input(html)
         plan = self._get_plan()  # compiled once, reused across pages
         if not self._groups:
-            return Item._from_columns(self._fields, plan.extract(body, encoding, url=url))
-        flat_cols, grouped = plan.extract_grouped(body, encoding, url=url)
+            cols = plan.extract(body, encoding, content_type=content_type, url=url)
+            return Item._from_columns(self._fields, cols)
+        flat_cols, grouped = plan.extract_grouped(body, encoding, content_type=content_type, url=url)
         gout: dict = {}
         for (name, g), rows in zip(self._groups.items(), grouped):
             shaped = [{sn: _shape(col, sub.card) for (sn, sub), col in zip(g.subfields.items(), row)}

@@ -156,7 +156,8 @@ faithfully. There is no automatic parser fallback. Re-run the schema audit in CI
 
 ## Monitoring a running spider
 
-`Page.extract_response(response)` passes `response.body` and `response.encoding` through directly.
+`Page.extract_response(response)` passes `response.body` with its `Content-Type` header, URL and any
+forced encoding, and never `response.encoding`; see [encoding inputs](PYTHON.md#encoding-inputs).
 After extraction, `item.validate(required=..., counts=..., group_required=...)` checks your data contract.
 Use `report.record_stats(self.crawler.stats)` for Scrapy counters, then inspect `report.ok` or call
 `report.raise_for_status()`. Yield `report.item` after validation to reuse the already processed values.

@@ -51,12 +51,11 @@ cols = frostwork.extract(html, ["h1::text", ".price::text", "img::attr(src)", "/
 assert cols == [["Widget"], ["$9"], ["/a.png"], ["/a.png"]]  # one column per query
 ```
 
-`extract(html, queries, encoding=None, *, url=None, strict=True, syntax=None)` accepts original `bytes` or an
-already-decoded `str`, whose UTF-8 view is borrowed without copying the document. Pass the response's
-charset label as `encoding` with bytes; use `None` or a UTF-8 label with `str`. `None` checks the BOM and
-declarations, then autodetects the encoding; pass the response URL as `url` so that autodetection can use
-its top-level domain, as browsers do. An unknown label raises, while a known label excluded by WHATWG is
-ignored and sniffing continues.
+`extract(html, queries, encoding=None, *, content_type=None, url=None, strict=True, syntax=None)` accepts
+original `bytes` or an already-decoded `str`, whose UTF-8 view is borrowed without copying the document.
+With bytes from a response, pass its raw `Content-Type` header as `content_type` and its URL as `url`, and
+leave `encoding` for a label the user forced; [encoding inputs](#encoding-inputs) has the contract. With
+none of them, Frostwork checks the BOM and the document's declarations, then autodetects the encoding.
 
 A query starting with `/`, `./` or `normalize-space(` is read as XPath and anything else as CSS. Pass
 `syntax="css"` or `syntax="xpath"` to declare every query instead, when the caller knows: a relative
@@ -66,7 +65,8 @@ where declared as XPath it is refused as unsupported, like every relative path.
 Unsupported queries raise `UnsupportedSelector` before the HTML is scanned. Pass `strict=False` for
 permissive empty columns. [COMPATIBILITY.md](COMPATIBILITY.md) defines selector, value and encoding behavior.
 
-`detect_encoding(html, encoding=None, *, url=None)` answers the sniffing half on its own, as a WHATWG name:
+`detect_encoding(html, encoding=None, *, content_type=None, url=None, explain=False)` answers the sniffing
+half on its own, as a WHATWG name, from the same inputs and with the same errors as `extract`:
 
 ```python
 frostwork.detect_encoding(b"<html><body><meta charset=windows-1252>")   # 'windows-1252'
@@ -83,6 +83,57 @@ frostwork.resolve_label("cp437")   # None
 
 Use it when another part of the pipeline needs the selected label. See
 [encoding compatibility](COMPATIBILITY.md#encoding) for the differences from Parsel and w3lib.
+
+### Encoding inputs
+
+Frostwork makes the encoding decision itself, from the bytes and three facts about the response. An
+integration that hands Frostwork a response passes these and nothing else:
+
+- **`content_type=`**: the raw `Content-Type` header value, exactly as received. Without it, a charset
+  that only the header declares is lost and the page is sniffed instead; extracting the charset through
+  w3lib first drops the labels Python has no codec for, such as `x-user-defined`.
+- **`url=`**: the response URL. Without it, autodetection cannot weigh its guess by the top-level domain,
+  so a short legacy page from a `.jp` site can be read as IBM866 instead of Shift_JIS.
+- **`encoding=`**: only a label the user forced, which Scrapy and web-poet both keep in the response's
+  `_encoding`. Never pass `response.encoding`: it is the framework's own decision, and at this rank it
+  overrides the document's declarations and the autodetection, so the browser rules w3lib lacks never run.
+
+Measured over the 48 cases of the encoding lab (`tools/browser_oracle/lab_compare.py`), the raw header
+gives 9 differences from Chrome, a charset extracted by w3lib gives 10, and web-poet's
+`response.encoding` gives 21. `Page.extract_response`
+and `FrostPage` pass the three inputs for you.
+
+The precedence is the same for every entry point:
+
+| rank | source | `explain=True` reports | an unusable value |
+| --- | --- | --- | --- |
+| 1 | a BOM: UTF-8, UTF-16LE, UTF-16BE | `"bom"` | n/a |
+| 2 | BOM-less UTF-16, from the `<?` prefix | `"utf16-prefix"` | n/a |
+| 3 | `encoding=` | `"encoding"` | a label no codec knows raises `ValueError`; a real encoding WHATWG lacks, such as `utf-7`, is ignored |
+| 4 | the `charset` parameter of `content_type=` | `"content-type"` | ignored, and never raises, because it is server data |
+| 5 | an XML declaration at offset 0, then `<meta>` in document order | `"xml-declaration"`, `"meta"` | skipped, and the scan continues |
+| 6 | UTF-8 if the document is valid UTF-8, else chardetng with the top-level domain of `url=` | `"utf8"`, `"autodetect"` | n/a |
+
+A forced `encoding=` ranks below a BOM, as it does in a browser. Scrapy and web-poet rank their own
+`_encoding` ahead of the BOM, so on a BOM-marked body with a forced label the framework's `.text` and
+Frostwork's values can differ. A framework that wants its own `.encoding` to agree with the values can set
+it from `detect_encoding`, called with the same three inputs.
+
+A `str` has already been decoded, so no rank applies. It is scanned as UTF-8, `encoding=` must be absent
+or a UTF-8 label, and the charset of `content_type=` is ignored. `detect_encoding` reports
+`("UTF-8", "str")` for one.
+
+<!-- doc-test: encoding-inputs -->
+```python
+import frostwork
+
+body = b'<meta charset="koi8-r"><p>caf\xe9</p>'
+header = "text/html; charset=windows-1252"
+assert frostwork.extract(body, ["p::text"], content_type=header) == [["café"]]
+assert frostwork.detect_encoding(body, content_type=header, explain=True) == ("windows-1252", "content-type")
+assert frostwork.detect_encoding(body, explain=True) == ("KOI8-R", "meta")
+assert frostwork.detect_encoding(body, "windows-1252", content_type="text/html; charset=big5") == "windows-1252"
+```
 
 ## 2. Declarative `Page` / `Item`
 
@@ -191,8 +242,9 @@ Reach for `.map()` for a local value tweak and `out=` for an ecosystem processor
 scalar string, so it raises at declaration on an `all=True` field; use `join=` or a list-aware `.map()`
 instead.
 
-The page body is scanned as `response.body` bytes using the response's resolved `response.encoding`, which
-aligns charset selection with Parsel. The legacy decoder differences listed in
+The page body is scanned as `response.body` bytes with the response's `Content-Type` header, its URL and
+any encoding the user forced, following the [encoding inputs](#encoding-inputs) contract.
+`response.encoding` is never read. The decoder differences listed in
 [COMPATIBILITY.md](COMPATIBILITY.md) still apply. For a browser snapshot or another input, see
 [Response types](#response-types--frostpage-frostbrowserpage-frostfields).
 
@@ -277,7 +329,7 @@ Pick the base that matches the input the framework will inject:
 
 | base | input | notes |
 | --- | --- | --- |
-| `FrostPage` | `web_poet.HttpResponse` | scans `.body` bytes with the response's resolved `.encoding` |
+| `FrostPage` | `web_poet.HttpResponse` | scans `.body` bytes with its `Content-Type` header, URL and any forced encoding |
 | `FrostBrowserPage` | `web_poet.BrowserResponse` | scans `.html` as UTF-8, borrowed rather than re-encoded |
 | `FrostFields` | anything — override `frostwork_input()` | a `web_poet.ItemPage`: brings `to_item()` / `Returns[...]`, and is injectable |
 
@@ -285,7 +337,9 @@ A `BrowserResponse` already contains decoded HTML, so Frostwork does not sniff a
 remaining `<meta charset>` is ignored.
 
 Return original bytes when available and pass decoded `str` directly without re-encoding it. The
-[primitive input rules](#1-the-primitive) apply to both.
+[primitive input rules](#1-the-primitive) apply to both. The hook returns `(html, encoding)`, or a
+`FrostInput(html, encoding, content_type, url)` when the dependency is an HTTP response, so that the
+engine sees its header and URL.
 
 For any other dependency, override the hook:
 
@@ -471,8 +525,10 @@ An empty string counts as a match. An empty `many`/`one` group counts as empty. 
 
 ## 5. Response adapters and item validation
 
-`Page.extract_response(response)` reads `response.body` with `response.encoding`. It works with Scrapy
-and web-poet byte responses without importing either framework. It never accesses `response.text`.
+`Page.extract_response(response)` reads `response.body` with the response's `Content-Type` header, its
+URL and any forced encoding (`_encoding`), as the [encoding inputs](#encoding-inputs) contract says. It
+works with Scrapy and web-poet byte responses without importing either framework, and never accesses
+`response.text` or `response.encoding`.
 
 Validate the data contract separately from selector support:
 

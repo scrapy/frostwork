@@ -18,9 +18,10 @@ share a single cached :func:`frostwork.extract` call instead of one lxml parse p
 
 Three contracts worth knowing before reading further, each covered in ``docs/PYTHON.md``:
 
-* **Input.** :class:`FrostPage` scans ``response.body`` with the response's resolved ``.encoding``;
-  :class:`FrostBrowserPage` scans a ``BrowserResponse``'s ``.html``; anything else means overriding
-  :meth:`FrostFields.frostwork_input`. Known decoder differences are listed in ``docs/COMPATIBILITY.md``.
+* **Input.** :class:`FrostPage` scans ``response.body`` with its ``Content-Type`` header, its URL and any
+  encoding the user forced, and makes the encoding decision itself; :class:`FrostBrowserPage` scans a
+  ``BrowserResponse``'s ``.html``; anything else means overriding :meth:`FrostFields.frostwork_input`.
+  Known decoder differences are listed in ``docs/COMPATIBILITY.md``.
 * **Composition.** A field's column is shaped by ``all``/``join``, then ``.map()``/``.re_first()`` run, then
   web-poet's processors — ``out=`` if given, else a nested ``Processors`` entry for that field name.
 * **Processor input.** A processor receives the field's VALUE, as it does in web-poet. Most
@@ -42,6 +43,7 @@ from typing import (
     Generic,
     List,
     Literal,
+    NamedTuple,
     Optional,
     Tuple,
     TypeVar,
@@ -82,10 +84,25 @@ except ImportError as exc:  # pragma: no cover - exercised only without a usable
 from ._frostwork import Plan as _Plan
 from ._frostwork import selector_node_identity as _identity
 from ._frostwork import selector_terminals as _terminals
+from .page import _response_encoding_inputs
 from .page import _shape  # single source of cardinality shaping (first/all/join + transforms)
 from .page import SchemaReport, check  # schema audit / strict validation
 
-__all__ = ["FrostPage", "FrostBrowserPage", "FrostFields", "field", "Many", "One"]
+__all__ = ["FrostPage", "FrostBrowserPage", "FrostFields", "FrostInput", "field", "Many", "One"]
+
+
+class FrostInput(NamedTuple):
+    """What a page object scans: the document and the encoding inputs :func:`frostwork.extract` takes.
+
+    ``html`` is ``bytes`` off the wire, or a ``str`` of already-decoded text. ``encoding`` is a label the
+    user forced, never a framework's resolved ``.encoding``; ``content_type`` is the raw ``Content-Type``
+    header value; ``url`` is the response URL. See the integrator contract in docs/PYTHON.md."""
+
+    html: Union[bytes, str]
+    encoding: Optional[str] = None
+    content_type: Optional[str] = None
+    url: Optional[str] = None
+
 
 # ("first", None) | ("all", None) | ("join", separator)
 _Card = Tuple[str, Optional[str]]
@@ -877,19 +894,21 @@ class FrostFields(ItemPage):
             },
         }
 
-    def frostwork_input(self) -> Tuple[Union[bytes, str], Optional[str]]:
-        """The ``(html, encoding)`` this page object scans — ``bytes`` off the wire, or a ``str`` of
-        already-decoded text (a browser snapshot). Override to source a page object from
-        something other than the two provided bases — that is the whole extension point, and it is public
-        because web-poet's input universe is larger than the shapes shipped here (``Extractor`` subclasses
-        can be given any dependency at all).
+    def frostwork_input(self) -> Union[FrostInput, Tuple[Union[bytes, str], Optional[str]]]:
+        """What this page object scans: a :class:`FrostInput`, or an ``(html, encoding)`` pair. ``html``
+        is ``bytes`` off the wire, or a ``str`` of already-decoded text (a browser snapshot). Override to
+        source a page object from something other than the two provided bases — that is the whole
+        extension point, and it is public because web-poet's input universe is larger than the shapes
+        shipped here (``Extractor`` subclasses can be given any dependency at all).
 
-        ``encoding`` may be ``None``, in which case the engine sniffs (BOM, then a ``<meta>`` prescan)
-        exactly as Parsel would. Return the ORIGINAL bytes where you have them: decoding to ``str`` and
-        re-encoding can only lose information the sniffer would otherwise use. Where only decoded text
-        exists, return the ``str`` itself — never ``str.encode("utf-8")``, which allocates a whole
-        second copy of the document; the engine borrows CPython's UTF-8 view instead. A ``str`` is
-        scanned as UTF-8, so the only ``encoding`` it accepts is ``None`` or a UTF-8 label."""
+        Return a :class:`FrostInput` when the input is an HTTP response, so the engine sees its
+        ``Content-Type`` header and URL. ``encoding`` is only for a label the user forced; with ``None``
+        the engine sniffs (BOM, then a ``<meta>`` prescan, then autodetection). Return the ORIGINAL bytes
+        where you have them: decoding to ``str`` and re-encoding can only lose information the sniffer
+        would otherwise use. Where only decoded text exists, return the ``str`` itself — never
+        ``str.encode("utf-8")``, which allocates a whole second copy of the document; the engine borrows
+        CPython's UTF-8 view instead. A ``str`` is scanned as UTF-8, so the only ``encoding`` it accepts
+        is ``None`` or a UTF-8 label."""
         raise NotImplementedError(
             f"{type(self).__name__} does not define frostwork_input(). Inherit FrostPage (HttpResponse) "
             "or FrostBrowserPage (BrowserResponse), or override frostwork_input() to return "
@@ -900,8 +919,10 @@ class FrostFields(ItemPage):
     def _frostwork_run(self):
         """Run the page object's whole schema — flat fields AND `Many`/`One` groups — in ONE pass
         through the class's pre-compiled `Plan`; cached per instance so every field reads one scan."""
-        body, encoding = self.frostwork_input()
-        flat_cols, grouped = self._frostwork_plan.extract_grouped(body, encoding)
+        given = FrostInput(*self.frostwork_input())
+        flat_cols, grouped = self._frostwork_plan.extract_grouped(
+            given.html, given.encoding, content_type=given.content_type, url=given.url
+        )
         return (
             dict(zip(self._frostwork_flat_names, flat_cols)),
             dict(zip(self._frostwork_group_names, grouped)),
@@ -920,12 +941,14 @@ class FrostPage(FrostFields, WebPage):
     definition by default; declare ``class MyPage(FrostPage, strict=False)`` to allow unsupported
     selectors as empty fields."""
 
-    def frostwork_input(self) -> Tuple[bytes, Optional[str]]:
+    def frostwork_input(self) -> FrostInput:
         resp = self.response
         # web-poet's HttpResponseBody subclasses bytes, which the native fn accepts directly —
         # avoid copying the whole body on the hot path.
         body = resp.body if isinstance(resp.body, bytes) else bytes(resp.body)
-        return body, resp.encoding
+        # Never `resp.encoding`: that is web-poet's own decision, and as `encoding=` it would outrank
+        # the document's declarations and the engine's autodetection.
+        return FrostInput(body, *_response_encoding_inputs(resp))
 
 
 class FrostBrowserPage(FrostFields, BrowserPage):
