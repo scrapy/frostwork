@@ -121,6 +121,12 @@ CORPUS ?= tests/corpus
 gate-corpus: build
 	$(PY) tools/bench_corpus.py $(CORPUS) --gate
 
+# Browser mode against Chrome over the same corpus layout: exact bytes, page-loaded, with the Content-Type
+# from a `<page>.content-type` sidecar (else `text/html`). Per selector, split tree versus value by the
+# page's own fingerprint. REPORT-ONLY until browser mode builds a browser's tree; needs a local Chrome.
+gate-corpus-browser: ext
+	$(PY) tools/corpus_browser.py $(CORPUS)
+
 # Fetch real third-party pages into a GITIGNORED dir and gate over them. Nothing is vendored; this is the
 # one check that sees markup nobody in this repo wrote or imagined. Still not a substitute for a crawl
 # corpus: it is one page per site, so it samples site variety rather than one site's template long tail.

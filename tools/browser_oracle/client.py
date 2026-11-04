@@ -85,6 +85,7 @@ class BrowserOracle:
         self.selfcheck_checked = 0
         self.selfcheck_differ: list[str] = []
         self.selfcheck_css_differ: list[str] = []
+        self.last_charsets: list[Optional[str]] = []
         self._plans: dict[str, tuple[Optional[dict[str, Any]], Optional[str]]] = {}
         self._proc: Optional[subprocess.Popen] = None
         self._browser_pid: Optional[int] = None
@@ -206,7 +207,8 @@ class BrowserOracle:
         plan the selector or the browser rejects it; `answers[i]` is `None` with an oracle error.
 
         `docs` may be `bytes`: they are served exactly, with `content_types[i]` as the Content-Type
-        header (`None` sends none), and always page-loaded. `page=True` page-loads strings too.
+        header (`None` sends none), and always page-loaded. `page=True` page-loads strings too. After the
+        call, `last_charsets[i]` is the `document.characterSet` the browser decoded `docs[i]` with.
         """
         docs = list(docs)
         per_doc = [list(s) for s in selectors] if selectors and isinstance(selectors[0], list) else \
@@ -224,6 +226,7 @@ class BrowserOracle:
                         self._plans[key] = None, str(e)
         trees: list[Any] = []
         answers: list[Optional[list[Any]]] = []
+        self.last_charsets = []
         for start in range(0, len(docs), self.batch):
             chunk = docs[start:start + self.batch]
             sels = per_doc[start:start + self.batch]
@@ -250,6 +253,7 @@ class BrowserOracle:
             reply = self._request(chunk, selfcheck, **extra)
             self._record(chunk, reply, selfcheck)
             trees.extend(reply["trees"])
+            self.last_charsets.extend(reply["charsets"])
             for doc_sels, got in zip(sels, reply["css"]):
                 if got is None:
                     answers.append(None)

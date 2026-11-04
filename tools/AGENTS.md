@@ -101,13 +101,44 @@ batches documents, records the browser build and kills the process (and through 
 the binaries come from `FROSTWORK_CHROME`/`FROSTWORK_FIREFOX`, else the macOS install paths. A null tree
 is an oracle error and is kept in `errors`, never dropped.
 
-`browser_oracle/tree.py` evaluates the gate's XPath columns over the browser's JSON tree itself, with
-lxml's XPath semantics, because rebuilding that tree in lxml would lose the control characters and
-malformed names browsers keep. `document_view` drops HTML template content and shadow roots, which no
+A `serve` request may also carry CSS: `plans` (a table of `css.py` plans) and `queries` (per document,
+indexes into it), answered as `css` on the same document the tree was serialised from. `bodies` (base64)
+with `ctypes` serves exact bytes with that Content-Type and always page-loads, and every reply carries
+`charsets`, the `document.characterSet` each document was decoded with. `BrowserOracle.query(docs,
+selectors)` is the client side: it plans each selector once, sends the table, and returns `(trees,
+answers)`, where an answer is a list of values or a `Refused` naming who could not answer (the planner or
+the browser). A `Refused` is never graded and never reads as an empty column. With `selfcheck`, the CSS
+answers of both paths are compared as well as the trees.
+
+`browser_oracle/css.py` plans parsel's CSS for `querySelectorAll`. The browser decides what matches,
+attribute case folding and quirks-mode class matching included; what the browser has no syntax for is
+parsel's and is mirrored from parsel's own translator: `::text` is the matched element's text-node
+children, `::attr(name)` the attribute named exactly `name`, a pseudo-element after a descendant
+combinator and a bare universal (`p ::text`, `div *::text`) is the subtree form, a comma group is a union
+in document order, and `:contains()` becomes a marker attribute for the duration of one query. Every plan
+is checked against parsel before it is sent: the native CSS with the pseudo-element put back must
+translate to parsel's exact XPath, or the selector is `Unplannable`. `grouped` plans answer parsel's
+`node.css()` relative to each container match.
+
+`browser_oracle/bridge.py` is the lossless XPath bridge: the browser's JSON tree as an lxml tree, so
+browser-mode XPath is lxml's XPath over the browser's tree (`//svg` finds SVG, `//P` finds no `<p>`). What
+lxml refuses (C0 controls, U+FFFE/U+FFFF, surrogates; `"&'/<>`, whitespace or a leading `{` in an element
+name; `--` in a comment) maps one character for one character into a private-use plane the document never
+uses, and XPath queries pass through the same map, so literals still match and `string-length()` stays
+exact. Every answer is decoded back, and an element is answered with the browser's own `outerHTML`
+serialisation of its JSON node, because the lxml tree is the document view and lxml would serialise a
+`<template>` empty. Namespaces, doctypes, template content and shadow roots live beside the lxml tree, so
+`to_json()` rebuilds the browser's tree exactly. What no map can hold (two adjacent text nodes, which lxml
+would merge) raises `Unrepresentable` and is counted, never graded through lxml. `round_trip_failures` is
+the round-trip gate's decision function, seeded in `tests/test_gates.py` with lossy bridges.
+
+`browser_oracle/tree.py` evaluates the fingerprint's XPath columns over the browser's JSON tree itself,
+with lxml's XPath semantics. `document_view` drops HTML template content and shadow roots, which no
 selector reaches. The evaluator implements only the shapes `seq_sweep.fingerprint_selectors` emits and
 raises on any other, and `from_lxml` converts lxml's own tree to the same format so
 `tests/test_gates.py` can prove the evaluator returns parsel's answers on lxml's trees. Widen the
-evaluator and that test together whenever the fingerprint gains a shape.
+evaluator and that test together whenever the fingerprint gains a shape. Every other XPath column goes
+through the bridge, and `diff_browser` checks on every run that the two agree on the fingerprint.
 
 `diff_browser.py` is the browser differential (`make gate-browser`). It grades the engine on
 `seq_sweep`'s fingerprint against Chrome's tree, over `seq_sweep`'s short sequences plus seeded random
@@ -127,6 +158,43 @@ extension accepts it, and the run prints which mode it graded. `seq_sweep.parser
 for that keyword: `seq_sweep` and the engine calls in `tests/test_gates.py` pass `parser="lxml"` through
 it, so lxml mode's gates keep grading libxml2 behaviour whatever the default mode is. When a Phase 2 rule lands, delete its row from `CONSTRUCTS` in
 the same change, so the gate holds that construct at zero from then on.
+
+`diff_browser.py` also grades VALUE columns, over the same documents plus `--values` decorated ones:
+ALPHABET tokens carrying `VALUE_ATTRS` and `VALUE_TEXTS` (case variants of the attributes HTML folds,
+class lists with form feed and Unicode whitespace, NUL, entities, control characters), under the same
+token-coverage refusal. The basket is `conformant.BASKET`, `RULE_SELECTORS` and per-id `::text`/`::attr`/
+descendant-text columns, minus what the engine refuses in the mode under test. CSS is answered natively
+and XPath through the bridge, on the tree the fingerprint was read from. A value column that differs where
+the fingerprint already differs is filed under the TREE, which that gate holds. Where the fingerprint
+agrees, it is reduced with the fingerprint still agreeing at every step and attributed to
+`VALUE_CONSTRUCTS` (case-insensitive attribute values, quirks-mode class matching, raw-source outer HTML),
+which read the oracle's tree rather than the page; never add a value construct to `CONSTRUCTS`. A value
+column about an id-less element no fingerprint column can see (the empty `<p>` a stray `</p>` inserts) is
+attributed through `CONSTRUCTS` as a tree difference only the value column found. Anything else is value
+NOVEL and fails the gate. So do: a bridge round trip that changed a tree, bridge XPath that answers a
+fingerprint column differently from the native evaluator, native CSS that answers differently from
+parsel's `.css()` over the bridged tree where the two semantics coincide (the planner's standing check:
+no-quirks documents, no folded attribute, no form feed in a class), a CSS self-check difference, and a
+value-rule selector the oracle answered nowhere or the engine refuses. Decorations go before the id slot
+and are undone by id for tree attribution (`undecorate`/`redecorate`), so the construct rules see
+ALPHABET tokens and a counterfactual edit keeps its decorations.
+
+`diff_webpoet.py --parser browser` (`make gate-webpoet-browser`, outside `ci`) builds browser-mode page
+objects and takes the expected item from Chrome: the parsel page objects keep their getters, `Processors`
+and `out=`, and their values come from native CSS or the bridge. `.as_node()` must be refused at class
+definition in browser mode, so a schema with a node-taking processor is checked for that refusal and then
+graded without those fields; an accepted one fails the gate, and a refusal no run provoked is a coverage
+failure (`required_refusals`). A field whose engine column already differs from the browser's is ENGINE,
+not DIVERGE: that divergence is gate-browser's, and this gate grades the page-object layer.
+
+`corpus_browser.py` (`make gate-corpus-browser [CORPUS=<dir>]`) is the report-only corpus view of browser
+mode: each page of a `bench_corpus.py`-layout corpus is served as exact bytes with its Content-Type (a
+`<page>.content-type` sidecar, else `text/html`) and page-loaded, and every selector is graded against the
+engine given the same header. A page Chrome and the engine decoded differently is reported as such and
+graded on Chrome's decoding, since encoding has its own gates. A differing column is TREE where the page's
+fingerprint over its own ids differs, VALUE where it agrees over at least one id, and UNSPLIT on a page
+with no ids. Nothing is reduced or attributed: a corpus page is not a token sequence. `column_verdict` is
+its decision function, seeded in `tests/test_gates.py`.
 
 Three tools own the tree-construction rules and share ONE element universe: `gen_tree_rules.py`
 derives the rules from libxml2 and GENERATES the Rust table (`--check` gates on drift, `--report`

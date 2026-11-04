@@ -435,7 +435,8 @@ async function claims(B, base, out) {
 //   errors     [{index, error}] for every null tree
 // A request may also carry CSS: "plans" (a table of css.py plans) and "queries" (per document, indexes
 // into it). The reply then has "css": per document, one __css answer per query, computed on the same
-// document the tree was serialised from, after serialising it.
+// document the tree was serialised from, after serialising it. Every reply has "charsets": the
+// document.characterSet each document was decoded with (UTF-8 for a DOMParser string).
 // "bodies" (base64, one per document, in place of "docs") and "ctypes" (a Content-Type value or null
 // per document) serve exact bytes with that header, and "page": true sends every document down the
 // page-load path; bodies always take it, since only a page load decodes bytes as a browser does.
@@ -474,7 +475,7 @@ async function serve(B, base) {
           await tabs[k].navigate(`${base}/doc/${key}?csp=script`); await B.lib(tabs[k]);
           const qi = queriesOf(i); const q = qi ? qi.map((p) => plans[p]) : null;
           out[i] = await tabs[k].evaluate(`(() => { const t = JSON.stringify(__ser(document));
-            return [t, ${q ? `JSON.stringify(__css(document, ${JSON.stringify(q)}))` : 'null'}]; })()`);
+            return [t, ${q ? `JSON.stringify(__css(document, ${JSON.stringify(q)}))` : 'null'}, document.characterSet]; })()`);
         } catch (e) {
           errors.push({ index: i, error: e.message.slice(0, 200) });
           try { tabs[k] = await B.tab(); } catch { /* keep the old tab */ }
@@ -505,6 +506,8 @@ async function serve(B, base) {
     const parts = [`"id":${JSON.stringify(req.id)}`, `"trees":[${got.map((t) => (t ? t[0] : 'null')).join(',')}]`,
       `"paths":${JSON.stringify(eligible.map((e) => (e ? 'domparser' : 'page')))}`, `"errors":${JSON.stringify(errors)}`];
     if (plans) parts.push(`"css":[${got.map((t) => (t && t[1] ? t[1] : 'null')).join(',')}]`);
+    // the encoding the browser decoded each document with; a DOMParser document is a string, so UTF-8
+    parts.push(`"charsets":${JSON.stringify(got.map((t, i) => (t ? (eligible[i] ? 'UTF-8' : t[2]) : null)))}`);
     if (req.selfcheck) {
       const loaded = fastIdx.filter((i) => paged[i] !== null);
       parts.push(`"selfcheck":${JSON.stringify({ checked: loaded.length,

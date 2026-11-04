@@ -872,6 +872,23 @@ def test_value_documents_keep_their_decorations_through_attribution_edits():
     assert B.redecorate(B.Repro(slashed, "", lambda d: True, []).deslashed(), deco) == ((0, '<p title="t"{}>'),)
 
 
+def test_the_browser_corpus_report_splits_tree_from_value_only_where_the_fingerprint_can():
+    """`make gate-corpus-browser` is report-only, but its split decides what the worklist calls a value
+    bug. A refusal and an oracle that cannot answer are never graded; a differing column is TREE where the
+    page's fingerprint differs, VALUE only where it agrees over at least one id, and UNSPLIT on a page
+    with no ids, whose fingerprint agrees about almost nothing."""
+    import corpus_browser as CB
+    from browser_oracle.client import Refused
+
+    assert CB.column_verdict("p::text", True, ["a"], ["b"], False, 3) == "REFUSED"
+    assert CB.column_verdict("p::text", False, ["a"], Refused("x", "plan"), False, 3) == "ORACLE"
+    assert CB.column_verdict("p::text", False, ["a"], ["a"], True, 3) == "AGREE"
+    assert CB.column_verdict("p", False, ["<p>a"], ["<p>a</p>"], False, 3) == "AGREE", "raw source, same tree"
+    assert CB.column_verdict("p::text", False, ["a"], ["b"], True, 3) == "TREE"
+    assert CB.column_verdict("p::text", False, ["a"], ["b"], False, 3) == "VALUE"
+    assert CB.column_verdict("p::text", False, ["a"], ["b"], False, 0) == "UNSPLIT"
+
+
 def test_the_rule_audit_has_no_bypass_for_a_start_close_divergence():
     """A disagreeing start-close cell must fail the audit outright.
 
