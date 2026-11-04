@@ -158,9 +158,12 @@ window.__srcdoc = (html, f2) => new Promise((res) => { const f = document.create
 `;
 
 // ---------------------------------------------------------------- exact bytes and headers
-const SEQ = [];
-// `serve`'s documents, keyed by a counter and deleted once their page has loaded.
+// The documents the server holds for page loads, by key. A document is a string (sent as UTF-8) or
+// {body: Buffer, ctype}: exact bytes, and the Content-Type header as given (omitted when null), so the
+// browser resolves the encoding itself. `serve` deletes one once its page has loaded.
 const SERVED = new Map();
+let nextKey = 0;
+const hold = (doc) => { const key = nextKey++; SERVED.set(key, doc); return key; };
 const server = http.createServer((req, res) => {
   const u = new URL(req.url, 'http://x');
   const h = { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' };
@@ -171,10 +174,7 @@ const server = http.createServer((req, res) => {
   if (u.pathname === '/fidelity') body = FIDELITY;
   else if (u.pathname.startsWith('/small/')) body = small(+u.pathname.slice(7));
   else if (u.pathname === '/big') body = BIG;
-  else if (u.pathname.startsWith('/seq/')) body = SEQ[+u.pathname.slice(5)];
   else if (u.pathname.startsWith('/doc/')) {
-    // a served document is a string (sent as UTF-8) or {body: Buffer, ctype}: exact bytes, and the
-    // Content-Type header as given (omitted when null), so the browser resolves the encoding itself
     const s = SERVED.get(+u.pathname.slice(5));
     if (s !== undefined && typeof s !== 'string') {
       if (s.ctype === null) delete h['Content-Type']; else h['Content-Type'] = s.ctype;
@@ -386,13 +386,13 @@ async function equiv(B, base, out) {
   if (missing.length) throw new Error(`generator never emitted ${JSON.stringify(missing)}; raise N`);
   docs.push('<p id=p><table id=tb></table>', '<!DOCTYPE html><p id=p><table id=tb></table>');
   out.coverage = { seed: SEED, tokens: TOKENS.length, minUses: Math.min(...used.values()), maxUses: Math.max(...used.values()) };
-  const base0 = SEQ.length; SEQ.push(...docs);
+  const keys = docs.map(hold);
 
   const loaded = Array(docs.length); const TABS = 8;
   await Promise.all([...Array(TABS)].map(async (_, k) => {
     const tb = await B.tab();
     for (let i = k; i < docs.length; i += TABS) {
-      try { await tb.navigate(`${base}/seq/${base0 + i}?csp=script`); await B.lib(tb); loaded[i] = await tb.evaluate(ser('document')); }
+      try { await tb.navigate(`${base}/doc/${keys[i]}?csp=script`); await B.lib(tb); loaded[i] = await tb.evaluate(ser('document')); }
       catch (e) { loaded[i] = null; console.error('page load failed', i, JSON.stringify(docs[i]), e.message.slice(0, 80)); }
     }
   }));
@@ -417,10 +417,10 @@ async function equiv(B, base, out) {
 async function claims(B, base, out) {
   if (!ARG) throw new Error('claims needs a fixture file');
   const list = JSON.parse(fs.readFileSync(ARG, 'utf8'));
-  const base0 = SEQ.length; SEQ.push(...list.map((c) => c.doc));
+  const keys = list.map((c) => hold(c.doc));
   const tb = await B.tab(); out.claims = [];
   for (let i = 0; i < list.length; i++) {
-    await tb.navigate(`${base}/seq/${base0 + i}?csp=script`); await B.lib(tb);
+    await tb.navigate(`${base}/doc/${keys[i]}?csp=script`); await B.lib(tb);
     const fns = `[${list[i].exprs.map((e) => `(d) => (${e})`).join(',')}]`; const src = JSON.stringify(list[i].doc);
     const r = await tb.evaluate(`(() => { const F = ${fns};
       const docs = { pageLoad: document, domparser: new DOMParser().parseFromString(${src}, 'text/html'),
@@ -456,7 +456,6 @@ async function serve(B, base) {
   const TABS = ARG ? +ARG : 8; const CHUNK = 200;
   const h = await B.harness();
   const tabs = await Promise.all([...Array(TABS)].map(() => B.tab()));
-  let served = 0;
 
   // Each path answers [tree JSON, CSS answers JSON or null] per document. `queriesOf(j)` is the j-th
   // document's list of indexes into `plans`; the DOMParser path sends the table once per chunk.
@@ -476,7 +475,7 @@ async function serve(B, base) {
     const out = Array(docs.length).fill(null); const errors = []; let next = 0;
     await Promise.all(tabs.map(async (_, k) => {
       while (next < docs.length) {
-        const i = next++; const key = served++; SERVED.set(key, docs[i]);
+        const i = next++; const key = hold(docs[i]);
         try {
           await tabs[k].navigate(`${base}/doc/${key}?csp=script`); await B.lib(tabs[k]);
           const qi = queriesOf(i); const q = qi ? qi.map((p) => plans[p]) : null;
