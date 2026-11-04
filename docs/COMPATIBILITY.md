@@ -44,7 +44,7 @@ audit does not classify a page's values into the four buckets or prove parity on
 | tree construction | libxml2 2.15's rules, below | HTML5 tree construction as Chrome 156 builds it: the insertion modes, a head that is always built, the scopes and implied end tags, tables with an implied `<tbody>`, `<tr>` and `<colgroup>` and foster parenting, customisable `<select>`, foreign content and its integration points, the active formatting elements and the adoption agency, the form pointer, the document mode from the doctype, declarative shadow roots, and a depth cap of 512 open elements |
 | `/>` on a non-void HTML element | closes it: `<title/>` holds no text, `<div/>` is empty | ignored, so `<div/>x` puts `x` in the div; honoured on an SVG or MathML element |
 | CSS attribute values | compared exactly unless the selector says `i` | the values of HTML's 46 listed attributes (`type`, `lang`, `rel`, `align`...) compare ASCII-case-insensitively on an HTML element, as in a browser; XPath compares exactly in both modes |
-| deferred predicate whose value is inside the selected element (`div:has(a) ::text`, `li:last-child b::text`) | supported, by re-scanning the element's source | unsupported: an HTML5 fragment parse loses the element's context |
+| deferred predicate whose value is inside the selected element (`div:has(a) ::text`, `li:last-child b::text`) | supported, by re-scanning the element's source on its own | supported, by a second pass over the whole document that finds each winner again, so its content keeps the context the page gave it: `li:last-child b::text` is `["two"]` in `<p><b>x</p><ul><li>one<li>two</ul>`, where a browser copies the `<b>` into each `<li>`, and `[]` in lxml mode. The pass runs only on a document where such a winner arose, once for all of a schema's tail columns |
 | outer HTML of a selector that can match an element the page never wrote | supported: the value is the element's content | unsupported: there is no source of its own to return. Besides `<html>`/`<head>`/`<body>`, browser mode builds an implied `<tbody>`, `<tr>` and `<colgroup>` and an empty `<p>` for a stray `</p>`, none with attributes, so `tr`, `p` and `*` are refused and `tr.row`, `p.lead` are not. A formatting element the builder reopens as a copy (`<p><b class=k>1</p>2`) is supported: its raw source is the start tag it was copied from, then its own content (`<b class=k>2`) |
 | `.as_node()` in `frostwork.webpoet` | supported | refused at class definition: the reparse is lxml's |
 
@@ -74,6 +74,10 @@ Each is a rule that changes a decision the one-pass matcher has already made, so
 - **`<selectedcontent>`.** When an `<option>` closes, Chrome copies its content into the
   `<selectedcontent>` of its `<select>`: `<select><selectedcontent id=s></selectedcontent><option>y</option></select>`
   gives `#s::text` `["y"]`, and here `[]`.
+
+A deferred winner's subtree (`li:last-child b::text`) is read by a second pass that builds the same tree,
+so these reach a tail column exactly as they reach any other column, and the second pass adds no
+divergence of its own.
 
 Three more are not tree divergences. Class and id selectors in a quirks-mode document (no doctype) match
 ASCII-case-insensitively in a browser, and exactly here: `.a` misses `<p class=A>` (deferred,

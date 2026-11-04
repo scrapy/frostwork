@@ -161,8 +161,14 @@ constructs becomes streamable, delete its row in the same change, so the gate ho
 `diff_browser.py` also grades VALUE columns, over the same documents plus `--values` decorated ones:
 ALPHABET tokens carrying `VALUE_ATTRS` and `VALUE_TEXTS` (case variants of the attributes HTML folds,
 class lists with form feed and Unicode whitespace, NUL, entities, control characters), under the same
-token-coverage refusal. The basket is `conformant.BASKET`, `RULE_SELECTORS` and per-id `::text`/`::attr`/
-descendant-text columns, minus what the engine refuses in the mode under test. CSS is answered natively
+token-coverage refusal, plus every `TAIL_CONTEXTS` x `TAIL_BODIES` document: a deferred winner
+(`li:last-child b::text`, `tr:has(b) td::attr(id)`) whose content depends on what is open outside it (a
+table, a formatting element reconstruction copies in, an SVG or MathML integration point), which is where
+re-scanning a winner's source alone goes wrong. The basket is `conformant.BASKET`, `RULE_SELECTORS` and
+per-id `::text`/`::attr`/descendant-text columns, minus what the engine refuses in the mode under test.
+`engine_refusals` asks about each selector alone, because one `check` over a whole run is one schema past
+the column ceiling and reports selectors refused that are not; `corpus_browser.py` reads the same helper.
+CSS is answered natively
 and XPath through the bridge, on the tree the fingerprint was read from. A value column that differs where
 the fingerprint already differs is filed under the TREE, which that gate holds. Where the fingerprint
 agrees, it is reduced with the fingerprint still agreeing at every step and attributed to

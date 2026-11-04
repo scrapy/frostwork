@@ -16,7 +16,8 @@ see it:
     section 3 constructs it does not reach. Half carry a doctype. The run refuses to grade unless every
     token is emitted;
   * `--values` decorated sequences: ALPHABET tokens carrying the attributes and text of VALUE_ATTRS and
-    VALUE_TEXTS, for the value columns below, under the same refusal.
+    VALUE_TEXTS, for the value columns below, under the same refusal, plus every TAIL_CONTEXTS x
+    TAIL_BODIES document, where a deferred winner's content depends on what is open outside it.
 
 Until browser mode implements a construct, its divergences are expected. So every differing column is
 REDUCED to the smallest token subsequence that still differs on that column (ids are kept, so the column
@@ -25,9 +26,10 @@ construct from section 3's table. Page-scoped attribution over-credits (AGENTS.m
 lesson); a two-token repro has nowhere to hide. Anything no construct explains is NOVEL.
 
 VALUE COLUMNS grade what a selector returns: conformant.py's basket, RULE_SELECTORS (case folding, class
-lists, NUL, entities, control characters) and per-id `::text`/`::attr`/descendant-text columns. CSS is
-answered natively in the browser (`browser_oracle/css.py`), XPath through the lossless lxml bridge
-(`browser_oracle/bridge.py`), both on the tree the fingerprint was read from. A column that differs where
+lists, NUL, entities, control characters, deferred winners whose value is inside them) and per-id
+`::text`/`::attr`/descendant-text columns. CSS is answered natively in the browser
+(`browser_oracle/css.py`), XPath through the lossless lxml bridge (`browser_oracle/bridge.py`), both on
+the tree the fingerprint was read from. A column that differs where
 the fingerprint already differs is filed under the TREE, which that gate holds. Where the fingerprint
 agrees, it is reduced with the fingerprint still agreeing at every step and attributed to VALUE_CONSTRUCTS;
 if its column names an id-less element the fingerprint has no column for, to the section 3 construct the
@@ -250,6 +252,46 @@ def value_docs(n: int, seed: int) -> tuple[list[Doc], Counter]:
     return docs, used
 
 
+# Deferred-tail documents. A deferred winner's value can come from inside it (`li:last-child b::text`),
+# and what is inside it can take its shape from what is open OUTSIDE it: reconstruction copies a `<b>` into
+# the last `<li>`, a table gives a row its `<tbody>` and makes `<tr>`/`<td>` elements at all, and an SVG
+# `<title>` or `<desc>` is an integration point whose `<b>` is an element. A winner's source parsed on its
+# own loses each of those, so these documents are where a tail read without context differs. Every
+# context is crossed with every body, with and without a doctype (quirks mode keeps a `<p>` open across a
+# `<table>`), and the text tokens cycle through VALUE_TEXTS so `:contains()` has something to find.
+TAIL_CONTEXTS: list[list[str]] = [
+    [], ["<table{}>"], ["<p{}>", "<b{}>", "t", "</p>"], ["<p{}>", "<i{}>", "<b{}>", "t", "</p>"],
+    ["<svg{}>"], ["<svg{}>", "<desc{}>"], ["<math{}>", "<mi{}>"], ["<form{}>"], ["<a{} href=x>", "t"],
+]
+TAIL_BODIES: list[list[str]] = [
+    ["<ul{}>", "<li{}>", "t", "<li{}>", "<b{}>", "t"],
+    ["<tr{}>", "<td{}>", "t", "<td{}>", "<b{}>", "t", "<tr{}>", "<td{}>", "t"],
+    ["<td{}>", "t", "<td{}>", "<i{}>", "t"],
+    ["<div{}>", "t", "</div>", "<div{}>", "<b{}>", "t", "</div>"],
+    ["<title{}>", "<b{}>", "t", "</title>", "<desc{}>", "<b{}>", "t"],
+    ["<p{}>", "t", "<p{}>", "<b{}>", "t", "<span{}>", "t"],
+    ["<dl{}>", "<dt{}>", "t", "<dd{}>", "<b{}>", "t", "<dt{}>", "t"],
+]
+for _t in {t for seq in TAIL_CONTEXTS + TAIL_BODIES for t in seq}:
+    assert _t in ALPHABET or _t == TEXT_TOKEN, f"{_t!r} is not an ALPHABET token, so no construct can read it"
+
+
+def tail_docs() -> list[Doc]:
+    """Every TAIL_CONTEXTS x TAIL_BODIES document, without and with a doctype."""
+    docs, k = [], 0
+    for lead in ([], [DOCTYPE]):
+        for ctx in TAIL_CONTEXTS:
+            for body in TAIL_BODIES:
+                toks = []
+                for t in ctx + body:
+                    if t == TEXT_TOKEN:
+                        t = _decorate(t, "text", VALUE_TEXTS[k % len(VALUE_TEXTS)])
+                        k += 1
+                    toks.append(t)
+                docs.append(tuple(enumerate(lead + toks)))
+    return docs
+
+
 def id_value_selectors(ids: list[str], decorated: bool) -> list[str]:
     """Per-id value columns: own and subtree text, outer HTML, and (on value documents) attributes."""
     out = []
@@ -279,6 +321,14 @@ RULE_SELECTORS: list[str] = [
     '//*/@title', '//*/@class', '//*[@title="a\x01b\x0bc"]/@id', '//*[@data-u]/@data-u',
     # text
     '*::text', '//body//text()',
+    # deferred winners whose value is inside them (TAIL_CONTEXTS is where their context matters)
+    'li:last-child ::text', 'li:last-child b::text', 'li:nth-last-child(2) ::text', 'li:only-child ::text',
+    'tr:last-child td::text', 'tr:last-child ::attr(id)', 'td:last-child ::text', 'td:last-of-type b::text',
+    'tbody:last-child td::attr(id)', 'p:last-of-type ::text', 'dt:last-of-type ::text', ':last-child ::attr(id)',
+    'tr:has(td) ::text', 'tr:has(b) td::attr(id)', 'li:has(b) ::text', 'p:has(b) b::text',
+    'div:has(b) ::attr(id)', 'title:has(b) ::text', 'desc:has(b) b::text', 'dd:has(> b) ::text',
+    'div:contains("a") b::text', 'li:contains("a") ::text', 'td:contains("a") ::attr(id)',
+    '//li[last()]//text()', '//tr[last()]//td/text()', '//*[contains(., "a")]//b/text()',
 ]
 
 
@@ -1048,11 +1098,20 @@ def by_shape(items: list[Divergence], plain: bool = False) -> dict[tuple[str, ..
 
 def engine_refusals(sels: list[str], parser: str) -> dict[str, str]:
     """The value selectors the engine refuses in this mode, with its reason. A refusal is an empty column
-    by contract (no fallback), so it is reported, not graded as a lost value."""
+    by contract (no fallback), so it is reported, not graded as a lost value.
+
+    Each selector is asked ALONE. One `check` over every selector of a run is one schema far past the
+    engine's column ceiling, where a mixed comma group cannot be routed, so it reported conformant's six
+    `p::text, p:contains("alpha")::text` members refused in both modes and the gate never graded them."""
     import frostwork
 
-    report = frostwork.check(sels, **seq_sweep.parser_kwargs(parser))
-    return {f.selector: f.reason or "unsupported" for f in report.fields if not f.supported}
+    kw = seq_sweep.parser_kwargs(parser)
+    out = {}
+    for s in sels:
+        f = frostwork.check([s], **kw).fields[0]
+        if not f.supported:
+            out[s] = f.reason or "unsupported"
+    return out
 
 
 def value_selectors(d: Doc, decorated: bool, basket: list[str]) -> list[str]:
@@ -1085,6 +1144,8 @@ def main() -> int:
     docs = seq_docs(args.seq_depth)
     rdocs, used = random_docs(args.random, args.seed)
     vdocs, vused = value_docs(args.values, args.seed)
+    tdocs = tail_docs() if args.values else []
+    vdocs += tdocs
     docs += rdocs + vdocs
     decorated = {render(d) for d in vdocs}
     report = Report(missing_tokens=[t for t in ALPHABET if args.random and not used[t]],
@@ -1187,7 +1248,8 @@ def main() -> int:
     for o in oracles.values():
         print(f"oracle            : {o.build} ({dict(o.paths)})")
     print(f"documents         : {len(docs)} ({len(docs) - len(rdocs) - len(vdocs)} seq_sweep sequences up to "
-          f"depth {args.seq_depth}, {len(rdocs)} random, {len(vdocs)} value, seed {args.seed}); "
+          f"depth {args.seq_depth}, {len(rdocs)} random, {len(vdocs)} value of which {len(tdocs)} deferred-tail, "
+          f"seed {args.seed}); "
           f"graded {report.graded}")
     if args.random:
         print(f"random alphabet   : {len(ALPHABET)} tokens, each emitted {min(used[t] for t in ALPHABET)} "

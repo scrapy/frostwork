@@ -407,31 +407,48 @@ rule is written.
 
 ### Rescans and node handoffs
 
-Two features reparse raw source outside the pass. Both rest on a libxml2 property that HTML5 does not
-have.
+Two features read raw source again after the pass. In lxml mode both rest on a libxml2 property that
+HTML5 does not have: an element's raw source, parsed on its own, builds the same subtree.
 
-- `Matcher::resolve_tail_spans` recovers the values of deferred winners (`:has()`, reverse positions,
-  text predicates) by re-scanning each winner's raw source span as a standalone document. Its own
-  comment gives the reason this is sound: under libxml2 such a span is self-contained, and the
-  differential proves it. Under HTML5 a span is not self-contained. `<td><b>cell</b></td>` keeps its
-  cell inside a table, but parsed on its own it loses the `<td>`, so `td b` matches there in Frostwork
-  and lxml and in neither browser. Passing browser mode into the rescan does not restore the missing
-  context. A synthetic `<tbody>` or a reconstructed formatting element has no source span of its own
-  to rescan at all.
-- `.as_node()` reparses the raw source through `lxml.html.document_fromstring`. In browser mode a
+- **Deferred tails.** A deferred winner (`:has()`, a reverse position, a text predicate) whose value is
+  inside it (`li:last-child b::text`, `div:has(a) ::text`) has its values read after the pass. Lxml mode
+  re-scans each winner's raw span as a standalone document (`Matcher::resolve_tail_spans`), which is
+  sound because a libxml2 span is self-contained, and the differential proves it. An HTML5 span is not.
+  `<tr><td>c</td></tr>` parsed on its own has neither a row nor a cell. The `<b>` that reconstruction
+  copies into the last `<li>` of `<p><b>x</p><ul><li>one<li>two</ul>` was opened before that `<li>`. An
+  SVG `<title>` holds a `<b>` element only inside its `<svg>`. The form pointer, the adoption agency and
+  foster parenting read state from outside the span too.
+
+  So browser mode parses the whole document a second time, with the same builder
+  (`Matcher::resolve_tail_pass`). The builder's decisions depend on the input alone, never on the schema,
+  so the second pass opens the same elements in the same order. The first pass records each winner by its
+  place in that order (`OpenElem::elem`), which names an implied `<tbody>` or a formatting element's copy
+  as well as an element the page wrote, where a start offset would not. The second pass puts a mark on
+  each winner that no page or selector can spell, and every tail of the schema is compiled into one
+  schema whose selectors are rooted at that mark (`marked_tail`). A tail column is then an ordinary flat
+  column of the second pass: every element has its true context, each node comes once, in the order the
+  pass streams it, and nested winners need no de-duplication. The cost is one more pass over a document
+  on which a winner arose, however many tail columns and winners the schema has, and nothing for a
+  schema with no tail or a document with no winner. `make gate-browser` grades the tails against Chrome
+  over documents built for this (`TAIL_CONTEXTS` in `tools/diff_browser.py`), and fails a build that
+  re-scans each span alone instead.
+
+  Two alternatives were weighed. A re-scan seeded with the builder's state at the winner's start would
+  have to snapshot that state at every provisional winner, since a winner is only known once its subtree
+  or its parent has closed, and it could not stop at the winner's end tag: content after it can land
+  inside the winner (`</form>` leaves a `<div>` open) and content inside the span can be fostered out.
+  Buffering candidate values during the pass would hold every provisional winner's subtree until it
+  resolves, which is the retention a one-pass engine exists to avoid, and it would cost on every
+  document with a candidate, winner or not.
+- **`.as_node()`** reparses the raw source through `lxml.html.document_fromstring`. In browser mode a
   processor would receive libxml2's subtree for a node the browser built differently.
 
-Browser mode does not inherit lxml mode's support contract for these. Until context travels with
-them, it refuses them explicitly. A selector that needs a tail rescan, the outer HTML of a synthetic
-or cloned element, and an `.as_node()` handoff are each `UnsupportedSelector` in browser mode, with a
-reason, and `frostwork.check` reports them per mode. Every shape browser mode does support is proven
-against the browser oracle first.
-
-There are two ways to lift the refusals later. The rescan can carry its context: what the spec's
-fragment-parsing algorithm takes as input, meaning the context element and its namespace, the
-insertion mode, the open elements and the form pointer at the span's start. Or the pass can buffer
-deferred values instead of rescanning. A browser-mode `.as_node()` would hand over a node built from
-the browser-mode engine's own view, never an lxml reparse.
+Browser mode therefore refuses two things lxml mode supports, each as `UnsupportedSelector` with a
+reason that `frostwork.check` reports per mode: an `.as_node()` handoff, and the outer HTML of an element
+the page never wrote (the frame, an implied `<tbody>`, `<tr>` or `<colgroup>`, the `<p>` a stray `</p>`
+inserts), which has no source of its own to return. Every shape browser mode does support is proven
+against the browser oracle first. A browser-mode `.as_node()` would hand over a node built from the
+browser-mode engine's own view, never an lxml reparse.
 
 ## 5. Oracle and gates
 
@@ -633,8 +650,8 @@ modes.
 
 - **Engine: moderate to large.** Phase 1 is small. Phase 2 is a second rule set, closer to a spec than
   the libxml2 one, but it sits behind a stateful builder interface that steers the tokenizer and keeps
-  DOM ancestry apart from the stack. The rules that change decisions already made stay out of it,
-  and so do context-carrying rescans until they are needed.
+  DOM ancestry apart from the stack. The rules that change decisions already made stay out of it, and
+  deferred tails take a second pass over the document rather than a context-carrying re-scan.
 - **Gates: large, though the oracle itself is cheap.** The driver is small and the browsers are fast
   enough. The cost is a second verdict in every gate, two pinned browsers in CI, and roughly double the
   tree-gate wall time. The oracle layer is where this repo's correctness comes from, so this is the
@@ -664,7 +681,8 @@ the lab and a crawl sample. Every shape that cannot meet that is refused, not bu
     failing only on NOVEL (section 5).
   - The stateful builder interface written down, with the tokenizer asking the builder for its next
     state, even though only a few rules use it yet.
-  - The browser-mode refusals for tail rescans, synthetic outer HTML and `.as_node()`.
+  - The browser-mode refusals for synthetic outer HTML and `.as_node()`, and deferred tails read by a
+    second whole-document pass (section 4).
   - `parser="browser"` published as experimental, with the oracle builds recorded in the evidence.
   - Browser rules at this stage: the NUL rules, no strip, `<noscript>` as raw text and HTML template
     content inert. That fixes six of the lab's seven parse-mode differences (all but `foster`),
@@ -686,9 +704,10 @@ and where Chrome and Firefox build different trees, browser mode follows Chrome.
    `querySelectorAll`, so it applies the list by itself. XPath keeps exact matching.
 3. Names: keep `parser="lxml" | "browser"` as the stable public names, with browser builds recorded in
    the evidence rather than in the name? I recommend yes.
-4. Browser mode's first release refuses tail rescans, synthetic outer HTML and `.as_node()` rather
-   than carrying parse context into them. I recommend yes: refusing is honest and cheap, and
-   context-carrying rescans can follow once a schema needs them.
+4. Browser mode refuses synthetic outer HTML and `.as_node()`, and reads a deferred winner's subtree
+   with a second whole-document pass rather than a context-carrying re-scan (section 4). I recommend
+   yes: the refusals are honest and cheap, and the second pass is exact and costs only the documents on
+   which a winner arose.
 5. Browser-mode XPath: the browser's tree with lxml's XPath semantics, so `//svg` still finds SVG?
    I recommend yes; native `document.evaluate` finds no SVG element at all.
 6. Encoding: keep `encoding=` below the BOM, as it is today, and add no BOM-beating override unless

@@ -442,9 +442,9 @@ def check(
 ) -> SchemaReport:
     """Audit a schema without parsing any HTML: report which selectors the engine supports in the
     ``parser`` mode (with an advisory reason for those it does not) and the budget usage. Support is per
-    mode: browser mode refuses a deferred predicate whose value comes from inside the element it selects
-    (``div:has(a) ::text``) and the outer HTML of a selector that can match a synthesized
-    ``<html>``/``<head>``/``<body>``, both of which lxml mode supports.
+    mode: browser mode refuses the outer HTML of a selector that can match an element the page never
+    wrote (a synthesized ``<html>``/``<head>``/``<body>``, an implied ``<tbody>``/``<tr>``/``<colgroup>``,
+    the ``<p>`` a stray ``</p>`` inserts), which lxml mode supports.
 
     ``queries`` is a ``{name: selector}`` mapping, an iterable of flat selectors (labelled ``[i]`` by
     position), or an iterable of ``(name, selector)`` pairs. ``groups`` is a

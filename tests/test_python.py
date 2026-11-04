@@ -3692,18 +3692,24 @@ def test_an_unknown_parser_raises_value_error(call):
 
 
 def test_support_is_per_mode():
-    """Browser mode refuses, with a reason, what would need a context-free re-parse (a deferred winner's
-    subtree) or a synthesized frame element's outer HTML; lxml mode supports both."""
-    sels = ["div:has(a) ::text", "li:last-child b::text", "body", "div:has(a)::attr(id)"]
+    """Browser mode refuses, with a reason, the outer HTML of a selector that can match an element the
+    page never wrote; lxml mode supports it. A deferred winner's subtree is supported in both, and each
+    mode reads it from its own tree."""
+    sels = ["body", "tr", "div:has(a) ::text", "li:last-child b::text", "div:has(a)::attr(id)"]
     browser, lxml_mode = frostwork.check(sels), frostwork.check(sels, parser="lxml")
     assert (browser.parser, lxml_mode.parser) == ("browser", "lxml")
     assert lxml_mode.ok
-    assert [f.supported for f in browser.fields] == [False, False, False, True]
+    assert [f.supported for f in browser.fields] == [False, False, True, True, True]
     assert all("browser mode" in f.reason for f in browser.unsupported)
     assert "parser browser" in str(browser)
+    table = b"<table><tr><td>x</td></tr></table>"
     with pytest.raises(frostwork.UnsupportedSelector, match="browser mode"):
-        frostwork.extract(b"<div><a>x</a></div>", ["div:has(a) ::text"])
-    assert frostwork.extract(b"<div><a>x</a></div>", ["div:has(a) ::text"], parser="lxml") == [["x"]]
+        frostwork.extract(table, ["tr"])
+    assert frostwork.extract(table, ["tr"], parser="lxml") == [["<tr><td>x</td></tr>"]]
+    # a browser reconstructs the <b> inside the last <li>; libxml2 does not
+    html = b"<p><b>x</p><ul><li>one</li><li>two</li></ul>"
+    assert frostwork.extract(html, ["li:last-child b::text"]) == [["two"]]
+    assert frostwork.extract(html, ["li:last-child b::text"], parser="lxml") == [[]]
     assert Page().field("x", "body").check().unsupported[0].name == "x"
     assert Page(parser="lxml").field("x", "body").check().ok
 
@@ -3763,8 +3769,8 @@ def test_the_audit_reports_each_schema_in_its_own_mode(tmp_path, capsys):
     target = _write(
         tmp_path,
         "from frostwork import Page\n"
-        "browser = Page().field('t', 'div:has(a) ::text')\n"
-        "lxml = Page(parser='lxml').field('t', 'div:has(a) ::text')\n",
+        "browser = Page().field('t', 'body')\n"
+        "lxml = Page(parser='lxml').field('t', 'body')\n",
     )
     assert main([target]) == 1
     out = capsys.readouterr().out
@@ -3773,7 +3779,7 @@ def test_the_audit_reports_each_schema_in_its_own_mode(tmp_path, capsys):
     payload = _json.loads(capsys.readouterr().out)
     assert {s["name"]: s["parser"] for s in payload["schemas"]} == {"browser": "browser", "lxml": "lxml"}
     # --scan audits literals in the mode it is told
-    spider = _write_spider(tmp_path, "s.py", "v = response.css('div:has(a) ::text')\n")
+    spider = _write_spider(tmp_path, "s.py", "v = response.css('body')\n")
     assert main(["--scan", spider]) == 1
     capsys.readouterr()
     assert main(["--scan", spider, "--parser", "lxml", "--json"]) == 0

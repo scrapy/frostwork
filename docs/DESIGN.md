@@ -181,6 +181,20 @@ column of its group from whichever entry is live, while a dead column must stay 
 with the number of DISTINCT prefixes, which [BENCHMARKS.md](BENCHMARKS.md) measures against the same count
 of plain fields.
 
+All of that is **lxml mode's**, and the first bullet is why: an HTML5 span is not self-contained. A
+`<tr>` parsed alone is no row, a `<b>` that reconstruction copies into a winner was opened outside it, and
+foreign content, the form pointer and foster parenting all read state from before the span. So browser
+mode keeps the same winners and slots and reads them differently (`Matcher::resolve_tail_pass`): it parses
+the WHOLE document a second time with the same builder, whose decisions depend on the input alone, so
+the second pass opens the same elements in the same order and each winner is found again by that order
+(`OpenElem::elem`, a `u32` in padding `OpenElem` already had). Each winner carries a mark no page or
+selector can spell (an attribute with an empty name), and every slot's tail is compiled into ONE schema
+rooted at that mark, so a tail column is an ordinary flat column of the second pass: true context for
+every element, each node once, nested winners included. The cost is one extra pass for a document on
+which a winner arose, whatever the number of slots, and nothing anywhere else. A child step into the tail
+would be expressible this way (`[mark] > p`); it stays refused in both modes so the two contracts differ
+only where the trees do.
+
 For contrast, the other suspected hot spot in this tier was **rejected by measurement**: `sub_hits` with a
 subtree terminal loops `seg_match` over `floor..=top`, which looks like O(depth² × compounds) per text
 node, but a grouped subtree sub-field measures ~1.0× an attached one from nesting depth 2 to 40. Per the

@@ -135,12 +135,12 @@ pub(crate) fn carries_deferred(sel: &Selector) -> bool {
 /// element's subtree? Exactly `split_deferred`'s `Tail::Streamed` case, asked before the split so the
 /// router can decide without registering a tail.
 ///
-/// A mixed comma group needs this. A tail value comes out of a NESTED run over `input[s..e]`
-/// (`resolve_tail_spans`), which returns plain columns — the values carry no document offset at all, and
-/// the offsets inside that run are span-relative rather than document-relative. There is nothing to
-/// merge or dedupe on, so `h2::text, div:contains("x") ::text` is refused rather than ordered by
-/// arrival. Giving the nested run an offset per value would make it work, and is the change to make if
-/// this shape ever turns up in a real schema.
+/// A mixed comma group needs this. A tail value comes out of a second run (`Matcher::resolve_tails`: a
+/// re-scan of `input[s..e]` in lxml mode, a whole-document pass in browser mode), which returns plain
+/// columns. The values carry no document offset, so there is nothing to merge or dedupe on, and
+/// `h2::text, div:contains("x") ::text` is refused rather than ordered by arrival. Giving the second
+/// run an offset per value would make it work, and is the change to make if this shape ever turns up
+/// in a real schema.
 fn deferred_value_is_own(sel: &Selector, k: usize) -> bool {
     compile::tail_selector(sel, k).is_none()
         && !matches!(
@@ -200,6 +200,11 @@ pub struct OpenElem<'a> {
                    // the segment right of boundary i (its head compound matched AND a preceding sibling
                    // matched the previous segment) — set once at open, read by descendant subjects
     start: usize,  // byte offset of this element's `<` (for raw-source outer-HTML capture)
+    /// Which `open_element` call of the document opened this element, from 0. Browser mode names a
+    /// deferred winner by it, because a start offset does not identify an element there: an implied
+    /// `<tbody>` and `<tr>` open at the `<td>` that implied them, and a formatting element's copy at the
+    /// token that reopened it. A `u32` fills padding the struct already has.
+    elem: u32,
     cap_cols: u128, // output columns wanting this element's raw source (OuterHtml terminal)
     insts: usize,  // number of group instances this element opened (popped when it closes)
     // 1-based sibling positions, set at open from the parent's counters (0 = not tracked). Read by the
@@ -285,7 +290,12 @@ impl<'a> OpenElem<'a> {
     /// schema's compounds require (see [`sig::Wants`]); when they require nothing, every `req` is 0 and
     /// the signature would filter nothing, so it isn't built.
     fn open(
-        tag: &'a [u8], scid: u8, attrs: Vec<(&'a [u8], Cow<'a, str>)>, start: usize, wants: sig::Wants,
+        tag: &'a [u8],
+        scid: u8,
+        attrs: Vec<(&'a [u8], Cow<'a, str>)>,
+        start: usize,
+        elem: u32,
+        wants: sig::Wants,
     ) -> Self {
         let mut e = OpenElem {
             tag,
@@ -299,6 +309,7 @@ impl<'a> OpenElem<'a> {
             prev: 0,
             anchor: 0,
             start,
+            elem,
             cap_cols: 0,
             insts: 0,
             child_index: 0,
@@ -342,7 +353,7 @@ impl<'a> OpenElem<'a> {
     /// `matching` unit tests build elements directly; the scan always goes through `open_element`.
     #[cfg(test)]
     pub(super) fn for_test(tag: &'a [u8]) -> Self {
-        Self::open(tag, 0, Vec::new(), 0, sig::Wants::all())
+        Self::open(tag, 0, Vec::new(), 0, 0, sig::Wants::all())
     }
 
     /// A test element WITH attributes (`&'static str` values, borrowed like the scan's clean-UTF-8
@@ -353,6 +364,7 @@ impl<'a> OpenElem<'a> {
             tag,
             0,
             attrs.iter().map(|&(n, v)| (n, Cow::Borrowed(v))).collect(),
+            0,
             0,
             sig::Wants::all(),
         )
@@ -523,8 +535,8 @@ struct RevEntry {
     single_slot: bool,          // keep only the last candidate per parent (last/only), not all
     dead: bool,                 // over the 64 reverse-entry budget: never matches (empty column)
     // Non-`Streamed` when the value is NOT this element's own — a subtree terminal or a value-bearing
-    // descendant. Nothing streams then; the winner's raw span is re-scanned with its tail schema at
-    // finish. See `split_deferred`.
+    // descendant. Nothing streams then; the winner's subtree is read by a second run at finish. See
+    // `split_deferred`.
     tail: Tail,
 }
 
@@ -535,9 +547,11 @@ struct RevEntry {
 struct RevCand {
     idx: u32,
     vals: Vec<(usize, String)>,
-    /// The subject's raw source span. Unused for an attached terminal (`vals` carries the answer); for a
-    /// SUBTREE terminal it is the whole answer — two integers instead of a buffered subtree.
+    /// The subject's raw source span and its [`OpenElem::elem`]. Unused for an attached terminal (`vals`
+    /// carries the answer); for a tail they are the whole answer, a [`TailWinner`] instead of a buffered
+    /// subtree.
     span: (usize, usize),
+    elem: u32,
 }
 
 struct RevPend {
@@ -611,40 +625,65 @@ enum Dest {
 enum Tail {
     /// The value is the deferred element's own, so it streams during the pass.
     Streamed,
-    /// The value is in the element's subtree: this entry pushes each winner's span, re-scanned at finish
-    /// with `tail_schemas[slot]`.
+    /// The value is in the element's subtree: this entry records each winner in tail slot `slot`, and a
+    /// second run at finish reads the values (see [`Matcher::resolve_tails`]).
     Rescan(usize),
-    /// Same prefix as an earlier `Rescan` entry, so this column rides that entry's sub-schema and span
-    /// pushes. Nothing to do during the pass but stay out of the streaming path.
+    /// Same prefix as an earlier `Rescan` entry, so this column rides that entry's slot and winners.
+    /// Nothing to do during the pass but stay out of the streaming path.
     Merged,
 }
 
-/// A compiled tail: the sub-schema that recovers deferred winners' values from their raw spans, and the
-/// output column each of its columns feeds. Entries that share a prefix share one of these.
+/// A deferred winner whose value lives in its subtree: its tail slot, its raw source span (which lxml
+/// mode re-scans) and its [`OpenElem::elem`] (by which browser mode's second pass finds it again). The
+/// field order is the sort order `resolve_tail_spans` relies on.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct TailWinner {
+    slot: usize,
+    span: (usize, usize),
+    elem: u32,
+}
+
+/// A compiled tail: the sub-schema that recovers deferred winners' values, and the output column each
+/// of its columns feeds. In lxml mode there is one per slot, run over each winner's raw span; in browser
+/// mode there is one for the whole schema, run over the whole document (see [`TailPlan`]).
 struct TailSchema {
     schema: CompiledSchema,
     cols: Vec<usize>,
 }
 
-/// One tail sub-schema under construction: the deferred PREFIX whose winners feed it, and a tail
-/// selector + output column per merged entry.
+/// One tail slot under construction: the deferred PREFIX whose winners feed it, and a tail selector +
+/// output column per merged entry.
 struct TailGroup {
     prefix: Segment,
     members: Vec<Vec<Selector>>,
     cols: Vec<usize>,
     /// The one-member schema compiled to answer "is this tail supported?", kept so a group that never
-    /// grows costs exactly one compile.
-    solo: CompiledSchema,
+    /// grows costs exactly one compile. Browser mode compiles every slot into one schema instead, so it
+    /// keeps nothing here.
+    solo: Option<CompiledSchema>,
     /// False once a DEAD entry took this group. A dead entry's column must stay empty, and sharing a
-    /// sub-schema with a live entry would fill it from the live entry's winners.
+    /// slot with a live entry would fill it from the live entry's winners.
     mergeable: bool,
 }
 
-/// Tail sub-schemas grouped by the deferred prefix their winners come from.
+/// Tail slots, grouped by the deferred prefix their winners come from.
 ///
-/// Entries with an equal prefix win on exactly the same elements, so ONE re-scan of a winner's span can
-/// answer all their tails. Without the merge the cost of a deferred tail grows with FIELD COUNT:
+/// Entries with an equal prefix win on exactly the same elements, so they share a slot and one record
+/// per winner. Without the merge the cost of a deferred tail grows with FIELD COUNT:
 /// `div:has(a) a::attr(href)` and `div:has(a) p::text` re-scanned every matching `<div>` twice.
+///
+/// The two modes read a slot's winners differently, because only one of them can parse a span alone.
+///
+/// * **lxml mode** re-scans each winner's raw source as a standalone document, with the slot's tail
+///   selectors written relative to the span's root (`compile::tail_selector`, or `* ::text` for a
+///   subtree terminal). That is sound because a libxml2 span is self-contained; see
+///   [`Matcher::resolve_tail_spans`].
+/// * **browser mode** cannot: an HTML5 span is not self-contained (`<td><b>cell</b></td>` parsed alone
+///   has no `<td>`), and reconstruction, the adoption agency, the form pointer and foreign content all
+///   read state from outside it. So the whole document is parsed again by the same builder, which opens
+///   the same elements in the same order, and each winner is found by its [`OpenElem::elem`]. Every slot's
+///   tail selectors are compiled into ONE schema, rooted at a compound that matches only the slot's
+///   winners ([`marked_tail`]), so the second pass costs one run however many slots and winners there are.
 ///
 /// The prefix is what a tier defers ON, which is also why tiers cannot collide here: `deferrable_common`
 /// admits one kind of deferred predicate per selector, so a reverse prefix carries `reverse` exactly
@@ -656,68 +695,126 @@ struct TailPlan {
 }
 
 impl TailPlan {
-    /// Register one entry's tail against its `prefix`, returning how the entry gets its values, or `None`
-    /// when the tail is UNSUPPORTED — the caller then marks the entry dead, so the audit keeps reporting
-    /// the whole selector unsupported instead of the column silently coming back empty.
+    /// Register the tail of `sel`, deferred at compound `k`, against its `prefix`, returning how the
+    /// entry gets its values, or `None` when the tail is UNSUPPORTED — the caller then marks the entry
+    /// dead, so the audit keeps reporting the whole selector unsupported instead of the column silently
+    /// coming back empty. `span_tail` is the tail relative to the winner's span, which lxml mode runs.
     fn register(
         &mut self,
         prefix: &Segment,
-        members: Vec<Selector>,
+        sel: &Selector,
+        k: usize,
+        span_tail: Vec<Selector>,
         col: usize,
         mergeable: bool,
     ) -> Option<Tail> {
-        let solo = CompiledSchema::compile(std::slice::from_ref(&members), &[], self.mode);
+        let browser = self.mode == ParseMode::Browser;
+        let probe = if browser { vec![marked_tail(sel, k, 0)] } else { span_tail.clone() };
+        let solo = CompiledSchema::compile(std::slice::from_ref(&probe), &[], self.mode);
         if !solo.flat_col_supported(0) {
             return None;
         }
-        if mergeable {
+        let found = self.groups.iter().position(|g| {
             // The `MAX_MEMBERS` cap is what keeps merging free of side effects: a tail is one member and
             // one single-segment entry, so under the cap no column of a merged schema can compile dead
             // that would have been live alone.
-            if let Some(g) = self.groups.iter_mut().find(|g| {
-                g.mergeable && g.prefix == *prefix && g.members.len() < MAX_MEMBERS
-            }) {
-                g.members.push(members);
-                g.cols.push(col);
-                return Some(Tail::Merged);
-            }
+            mergeable && g.mergeable && g.prefix == *prefix && g.members.len() < MAX_MEMBERS
+        });
+        let slot = found.unwrap_or(self.groups.len());
+        let member = if browser { vec![marked_tail(sel, k, slot)] } else { span_tail };
+        if let Some(g) = found.map(|i| &mut self.groups[i]) {
+            g.members.push(member);
+            g.cols.push(col);
+            return Some(Tail::Merged);
         }
         self.groups.push(TailGroup {
             prefix: prefix.clone(),
-            members: vec![members],
+            members: vec![member],
             cols: vec![col],
-            solo,
+            solo: (!browser).then_some(solo),
             mergeable,
         });
-        Some(Tail::Rescan(self.groups.len() - 1))
+        Some(Tail::Rescan(slot))
     }
 
-    fn finish(self) -> Vec<TailSchema> {
+    /// lxml mode's per-slot span schemas, or browser mode's one whole-document schema (`None` when no
+    /// entry has a tail).
+    fn finish(self) -> (Vec<TailSchema>, Option<Box<TailSchema>>) {
         let mode = self.mode;
-        self.groups
+        if mode == ParseMode::Browser {
+            if self.groups.is_empty() {
+                return (Vec::new(), None);
+            }
+            let (mut members, mut cols) = (Vec::new(), Vec::new());
+            for g in self.groups {
+                members.extend(g.members);
+                cols.extend(g.cols);
+            }
+            let schema = CompiledSchema::compile(&members, &[], mode);
+            return (Vec::new(), Some(Box::new(TailSchema { schema, cols })));
+        }
+        let spans = self
+            .groups
             .into_iter()
             .map(|g| {
-                let schema = if g.members.len() == 1 {
-                    g.solo
-                } else {
-                    CompiledSchema::compile(&g.members, &[], mode)
+                let schema = match g.solo {
+                    Some(solo) if g.members.len() == 1 => solo,
+                    _ => CompiledSchema::compile(&g.members, &[], mode),
                 };
                 TailSchema { schema, cols: g.cols }
             })
-            .collect()
+            .collect();
+        (spans, None)
+    }
+}
+
+/// The name of the attribute browser mode's second pass puts on a deferred winner, the empty name. No
+/// page attribute has it (the tokenizer drops an empty name) and no selector can ask for it (CSS and
+/// XPath attribute names are non-empty), so only the compound [`marked_tail`] builds tests it. Its value
+/// lists the tail slots the element won, as space-separated numbers.
+const WINNER_MARK: &str = "";
+
+/// `sel`'s tail for browser mode's whole-document pass: the deferred compound `k` and everything left
+/// of it replaced by one compound matching exactly the winners of `slot` (an element carrying
+/// [`WINNER_MARK`] with that slot in its value), followed by the original combinator and compounds. With
+/// no compounds after `k` it is that compound alone with the subtree terminal: `li:last-child ::text`
+/// reads every text node at or below a winner.
+///
+/// Unlike lxml mode's span tail this is a selector over the real document, so the compounds after `k`
+/// match with their true ancestors and siblings, and the winner's own relation to them is the original
+/// combinator.
+fn marked_tail(sel: &Selector, k: usize, slot: usize) -> Selector {
+    let mark = Compound {
+        attrs: vec![crate::selector::AttrPred {
+            name: WINNER_MARK.to_string(),
+            op: crate::selector::AttrOp::Includes,
+            value: slot.to_string(),
+            ci: false,
+            html_ci: false,
+        }],
+        ..Default::default()
+    };
+    let mut parts = vec![mark];
+    parts.extend(sel.parts[k + 1..].iter().cloned());
+    Selector {
+        parts,
+        combs: sel.combs[k..].to_vec(),
+        terminal: sel.terminal.clone(),
+        strict_desc: false,
+        context_depth: None,
     }
 }
 
 /// Split a deferred selector at the compound carrying its predicate (`k`).
 ///
 /// Returns the PREFIX segment — compounds `0..=k`, matched in context to find the deferred element — and
-/// how the entry gets its values: streamed, or from the TAIL schema that re-scans that element's span
-/// (its own, or one shared with an earlier entry of the same prefix). Three cases:
+/// how the entry gets its values: streamed, or from a tail slot (its own, or one shared with an earlier
+/// entry of the same prefix). Three cases:
 ///   * value is the element's own (`div:has(a)::attr(id)`) — no tail, the value streams as today;
-///   * value is its whole subtree (`li:last-child ::text`) — tail is `* ::text`, descendant-or-**self**
-///     (not `strict_desc`), so the element's own text counts;
-///   * value is a DESCENDANT's (`div:has(a) a::attr(href)`) — tail is the compounds after `k`, with
-///     `strict_desc` so the span's root is excluded (a *proper* descendant).
+///   * value is its whole subtree (`li:last-child ::text`) — the tail reads every text node at or
+///     below the winner (`* ::text`, descendant-or-**self**, in lxml mode's span);
+///   * value is a DESCENDANT's (`div:has(a) a::attr(href)`) — the tail is the compounds after `k`, which
+///     must bind strictly below the winner.
 ///
 /// `mergeable` is false for an entry already known DEAD, which must neither join a group nor be joined.
 /// The `bool` is "the tail is unsupported" — then the caller marks the entry DEAD, so the audit keeps
@@ -736,7 +833,7 @@ fn split_deferred(
         strict: full.strict,
         context_depth: full.context_depth,
     };
-    let members = match compile::tail_selector(sel, k) {
+    let span_tail = match compile::tail_selector(sel, k) {
         Some(t) => Some(vec![t]),
         None => match &sel.terminal {
             Terminal::Text { subtree: true } => Some(crate::selector::parse_list("* ::text")),
@@ -746,8 +843,8 @@ fn split_deferred(
             _ => None,
         },
     };
-    let Some(members) = members else { return (prefix, Tail::Streamed, false) };
-    match tails.register(&prefix, members, col, mergeable) {
+    let Some(span_tail) = span_tail else { return (prefix, Tail::Streamed, false) };
+    match tails.register(&prefix, sel, k, span_tail, col, mergeable) {
         Some(tail) => (prefix, tail, false),
         None => (prefix, Tail::Streamed, true),
     }
@@ -873,10 +970,12 @@ pub struct CompiledSchema {
     text_entries: Vec<TextEntry>, // deferred text-content-predicate flat selectors (held out of `entries`)
     // TAIL schemas for deferred entries whose value is NOT the deferred element's own: a subtree terminal
     // (`li:last-child ::text`) or a value-bearing DESCENDANT (`div:has(a) a::attr(href)`). Nothing is
-    // buffered for these during the pass — the winner's raw span is re-scanned with its tail schema at
-    // finish (`Matcher::resolve_tail_spans`). Entries hold a slot index; a tail is itself deferral-free,
-    // so this nests exactly one level.
+    // buffered for these during the pass; each winner is recorded and a second run reads its subtree at
+    // finish (`Matcher::resolve_tails`). Entries hold a slot index; a tail is itself deferral-free, so this
+    // nests exactly one level. lxml mode keeps one span schema per slot (`tail_schemas`), browser mode
+    // one whole-document schema for every slot (`tail_pass`); see `TailPlan`.
     tail_schemas: Vec<TailSchema>,
+    tail_pass: Option<Box<TailSchema>>,
     // `!` of the Case-B deferred-boundary bitset: `eval`'s open-time trigger set is ANDed with this so a
     // deferred (preceding-sibling-predicate) boundary fires only at its `C`'s close, not at open. All
     // ones when no Case-B selector is compiled — the hot sibling path is then unchanged.
@@ -952,9 +1051,15 @@ pub struct Matcher<'a> {
     // Count of currently-open text-content-predicate subjects, so `text_event`'s ancestor walk runs only
     // while at least one subject is open (0 elsewhere, even when the schema has text-pred entries).
     txt_open: usize,
-    // `(tail slot, span_start, span_end)` for each deferred winner whose value lives in its subtree.
-    // Two integers per winner is the whole retention cost — values are recovered by re-scanning at finish.
-    tail_spans: Vec<(usize, usize, usize)>,
+    // Each deferred winner whose value lives in its subtree. A few integers per winner is the whole
+    // retention cost — values are recovered by a second run at finish (`resolve_tails`).
+    tail_winners: Vec<TailWinner>,
+    // The `elem` the next opened element gets (see `OpenElem::elem`).
+    next_elem: u32,
+    // Browser mode's second pass only (`resolve_tail_pass`): the winners to mark, as `(elem, slots)`
+    // sorted by `elem`, and how many have been opened. Empty in every other run.
+    marks: Vec<(u32, String)>,
+    mark_at: usize,
     // The text run not yet delivered to the consumers, held back by one event so that a run split by
     // DROPPED end tags can be re-joined first (libxml2 makes it ONE text node; see `buffer_text`). Flushed by
     // the next start tag / matched end tag / EOF, so ordering vs. tag events is unchanged.
@@ -1293,15 +1398,6 @@ impl CompiledSchema {
         // reads its subject tag's per-parent count via that slot). Deferred subject masks are `u128`,
         // sharing the advertised 128-member ceiling instead of imposing a hidden 64-entry limit.
         let mut tails = TailPlan { groups: Vec::new(), mode };
-        // Browser mode cannot re-scan a winner's span (see `Refusal::TailRescan`), so a deferred entry
-        // whose value lives in the winner's subtree is refused before it reserves anything.
-        let mut refuse_tail = |col: usize, sel: &Selector, k: usize| {
-            let refused = browser && !deferred_value_is_own(sel, k);
-            if refused {
-                refusals.push((Slot::Flat(col), Refusal::TailRescan));
-            }
-            refused
-        };
         // ONE shared member allocation across every tier. `entries` (normal), reverse, `:has` and
         // text-predicate each used their OWN counter, so a 129-member schema of 100 normal members plus
         // 29 reverse selectors left all tiers live even though `budget_usage` reported it over budget and
@@ -1319,9 +1415,6 @@ impl CompiledSchema {
         let mut reverse_entries: Vec<RevEntry> = Vec::new();
         for (col, sel) in rev_pending_sels {
             let k = compile::deferrable_reverse_at(sel).expect("routed as deferrable_reverse");
-            if refuse_tail(col, sel, k) {
-                continue;
-            }
             let over = over_budget();
             let (seg, tail, tail_dead) = split_deferred(sel, k, col, &mut tails, !over);
             // the reverse position belongs to compound `k`, which need NOT be the subject
@@ -1355,9 +1448,6 @@ impl CompiledSchema {
         let mut has_entries: Vec<HasEntry> = Vec::new();
         for (col, sel) in has_pending_sels {
             let k = compile::deferrable_has_at(sel).expect("routed as deferrable_has");
-            if refuse_tail(col, sel, k) {
-                continue;
-            }
             let over = over_budget();
             let (seg, tail, tail_dead) = split_deferred(sel, k, col, &mut tails, !over);
             let has = sel.parts[k].has.clone().expect("deferrable_has => compound k has `:has`");
@@ -1378,9 +1468,6 @@ impl CompiledSchema {
         let mut text_entries: Vec<TextEntry> = Vec::new();
         for (col, sel) in text_pending_sels {
             let k = compile::deferrable_text_pred_at(sel).expect("routed as deferrable_text_pred");
-            if refuse_tail(col, sel, k) {
-                continue;
-            }
             let over = over_budget();
             let (seg, tail, tail_dead) = split_deferred(sel, k, col, &mut tails, !over);
             let pred =
@@ -1397,7 +1484,7 @@ impl CompiledSchema {
             });
         }
         // Every tail is registered by now (Case-B triggers emit no value), so the groups are final.
-        let tail_schemas = tails.finish();
+        let (tail_schemas, tail_pass) = tails.finish();
 
         // Case-B preceding-sibling TRIGGER entries: each carries `C`'s deferred predicate and, at `C`'s
         // close, fires its sibling boundary bit on the parent (instead of emitting) so the later value
@@ -1519,6 +1606,7 @@ impl CompiledSchema {
             has_text_pred,
             text_entries,
             tail_schemas,
+            tail_pass,
             trig_immediate_mask,
             stop_mask: 0,
             first_mask: 0,
@@ -1605,19 +1693,22 @@ impl CompiledSchema {
     /// `(flat_columns, grouped)` — see [`Matcher::finish_grouped`].
     pub fn run(&self, input: EncodedInput) -> (FlatColumns, Vec<GroupRows>) {
         match self.mode {
-            ParseMode::Lxml => self.run_with(input, libxml2::Libxml2::default()),
-            ParseMode::Browser => self.run_with(input, browser::Browser::default()),
+            ParseMode::Lxml => self.run_with(input, libxml2::Libxml2::default(), Vec::new()),
+            ParseMode::Browser => self.run_with(input, browser::Browser::default(), Vec::new()),
         }
     }
 
     /// One document under one tree builder. Generic so each mode's per-token path is its own code, with
-    /// the mode decided once per document above.
+    /// the mode decided once per document above. `marks` is empty except in browser mode's tail pass.
     fn run_with<'a, B: tree::TreeBuilder<'a>>(
         &'a self,
         input: EncodedInput<'a>,
         builder: B,
+        marks: Vec<(u32, String)>,
     ) -> (FlatColumns, Vec<GroupRows>) {
-        let mut scan = tree::Scan { m: Matcher::new(self, input), builder };
+        let mut m = Matcher::new(self, input);
+        m.marks = marks;
+        let mut scan = tree::Scan { m, builder };
         crate::tokenizer::tokenize(input.bytes(), &mut scan);
         scan.builder.finish(&mut scan.m);
         scan.m.finish_grouped()
@@ -1703,14 +1794,28 @@ impl<'a> Matcher<'a> {
             pending: Vec::new(),
             doc_rev_pending: Vec::new(),
             txt_open: 0,
-            tail_spans: Vec::new(),
+            tail_winners: Vec::new(),
+            next_elem: 0,
+            marks: Vec::new(),
+            mark_at: 0,
             pending_text: None,
         }
     }
 
-    /// Recover the values of every deferred winner whose value is NOT its own element's, by re-scanning
-    /// that element's raw span. Shared by all three deferred tiers (reverse, `:has`, text-predicate) —
-    /// they differ only in WHEN a winner is known, not in how its subtree is read.
+    /// Recover the values of every deferred winner whose value is NOT its own element's. Shared by all
+    /// three deferred tiers (reverse, `:has`, text-predicate) — they differ only in WHEN a winner is
+    /// known, not in how its subtree is read. How it is read is the mode's: see [`TailPlan`].
+    fn resolve_tails(&mut self) {
+        if self.tail_winners.is_empty() {
+            return;
+        }
+        match self.schema.mode {
+            ParseMode::Lxml => self.resolve_tail_spans(),
+            ParseMode::Browser => self.resolve_tail_pass(),
+        }
+    }
+
+    /// lxml mode: re-scan each winner's raw span as a standalone document.
     ///
     /// Nothing was buffered for these during the pass — only `(start, end)`. That is sound because the
     /// span is SELF-CONTAINED: an end tag inside it that matched an ancestor would have ended the span,
@@ -1727,16 +1832,16 @@ impl<'a> Matcher<'a> {
     /// a subset of its container's and would double-count: element spans only nest or are disjoint, so
     /// keeping the MAXIMAL ones de-duplicates exactly — which also bounds the work to one extra pass.
     fn resolve_tail_spans(&mut self) {
-        let mut spans = std::mem::take(&mut self.tail_spans);
+        let mut winners = std::mem::take(&mut self.tail_winners);
         // Sorting by `(slot, start, end)` groups each entry's winners in document order. Within a slot
         // the starts are DISTINCT (one per element), so a container always sorts before what it contains
         // — which means "contained in some kept winner" is just "ends at or before the furthest end kept
         // so far". A running max is therefore enough; scanning all spans per span made this quadratic in
         // winner count, and disjoint winners (a page of sibling cards — the normal shape) never
         // short-circuit, so `div:has(a) ::text` over thousands of cards paid it in full.
-        spans.sort_unstable();
+        winners.sort_unstable();
         let (mut cur_slot, mut max_end) = (usize::MAX, 0usize);
-        for (slot, s, e) in spans {
+        for TailWinner { slot, span: (s, e), .. } in winners {
             if slot != cur_slot {
                 (cur_slot, max_end) = (slot, 0);
             }
@@ -1750,6 +1855,44 @@ impl<'a> Matcher<'a> {
                 self.results[col].extend(vals);
             }
         }
+    }
+
+    /// Browser mode: parse the WHOLE document again with the same tree builder, marking each winner, and
+    /// run every slot's tail selectors over it (`schema.tail_pass`, rooted at [`marked_tail`]'s compound).
+    ///
+    /// The builder's decisions depend on the input alone, never on the schema, so the second pass opens
+    /// the same elements in the same order and `elem` names the same element in both. Every element
+    /// therefore has its true context: a `<td>`'s table, the formatting elements reconstruction copies,
+    /// the form pointer, the namespace. A tail column is a flat column of that pass, so it returns each
+    /// node once, in the order the pass streams it, and nested winners need no de-duplication.
+    ///
+    /// The cost is one more pass over the document, however many slots and winners there are, paid only
+    /// by a document on which at least one winner arose.
+    fn resolve_tail_pass(&mut self) {
+        let Some(pass) = self.schema.tail_pass.as_deref() else { return };
+        let mut winners: Vec<(u32, usize)> =
+            std::mem::take(&mut self.tail_winners).into_iter().map(|w| (w.elem, w.slot)).collect();
+        winners.sort_unstable();
+        winners.dedup();
+        let mut marks: Vec<(u32, String)> = Vec::new();
+        for (elem, slot) in winners {
+            match marks.last_mut() {
+                Some((e, slots)) if *e == elem => {
+                    slots.push(' ');
+                    slots.push_str(&slot.to_string());
+                }
+                _ => marks.push((elem, slot.to_string())),
+            }
+        }
+        let (cols, _) = pass.schema.run_with(self.input, browser::Browser::default(), marks);
+        for (vals, &col) in cols.into_iter().zip(&pass.cols) {
+            self.results[col].extend(vals);
+        }
+    }
+
+    /// Record a deferred winner of tail `slot`, by its raw source span and its `elem`.
+    fn tail_winner(&mut self, slot: usize, span: (usize, usize), elem: u32) {
+        self.tail_winners.push(TailWinner { slot, span, elem });
     }
 
     /// Finalize a just-popped element `e` whose raw source runs `[e.start, end)`: record its flat and
@@ -1800,7 +1943,7 @@ impl<'a> Matcher<'a> {
                     match re.tail {
                         // value lives in the winner's subtree: remember the span; re-scanned at finish,
                         // once nested winners can be de-duplicated against each other
-                        Tail::Rescan(slot) => self.tail_spans.push((slot, cand.span.0, cand.span.1)),
+                        Tail::Rescan(slot) => self.tail_winner(slot, cand.span, cand.elem),
                         // an entry of the same prefix already pushed that span, and the sub-schema they
                         // share carries this column too
                         Tail::Merged => {}
@@ -1843,7 +1986,7 @@ impl<'a> Matcher<'a> {
                         .collect(),
                     None => Vec::new(),
                 };
-                let cand = RevCand { idx, vals, span: (e.start, end) };
+                let cand = RevCand { idx, vals, span: (e.start, end), elem: e.elem };
                 let target = match self.stack.last_mut() {
                     Some(parent) => &mut parent.cold_mut().rev_pending,
                     None => &mut self.doc_rev_pending,
@@ -1880,7 +2023,7 @@ impl<'a> Matcher<'a> {
                 }
                 match he.tail {
                     // value lives in this element's subtree (`div:has(a) ::text`, `div:has(a) a::attr(..)`)
-                    Tail::Rescan(slot) => self.tail_spans.push((slot, e.start, end)),
+                    Tail::Rescan(slot) => self.tail_winner(slot, (e.start, end), e.elem),
                     // an entry of the same prefix already pushed that span, and the sub-schema they
                     // share carries this column too
                     Tail::Merged => {}
@@ -1924,7 +2067,7 @@ impl<'a> Matcher<'a> {
                 }
                 match te.tail {
                     // value lives in this element's subtree (`//div[contains(.,"x")]/a/@href`)
-                    Tail::Rescan(slot) => self.tail_spans.push((slot, e.start, end)),
+                    Tail::Rescan(slot) => self.tail_winner(slot, (e.start, end), e.elem),
                     // an entry of the same prefix already pushed that span, and the sub-schema they
                     // share carries this column too
                     Tail::Merged => {}
@@ -1961,6 +2104,8 @@ impl<'a> Matcher<'a> {
     /// `(flat_columns, grouped)` where `grouped[g]` is group `g`'s rows in document order, each row a
     /// `Vec` of sub-field value-columns (`[group][row][sub][value]`).
     pub fn finish_grouped(mut self) -> (FlatColumns, Vec<GroupRows>) {
+        // A tail pass that left a winner unmarked opened different elements from the pass that found it.
+        debug_assert_eq!(self.mark_at, self.marks.len(), "the tail pass never opened a recorded winner");
         // deliver the trailing text run before the stack unwinds out from under it
         self.flush_text();
         // close any elements still open at EOF (raw source runs to end of input)
@@ -1988,9 +2133,7 @@ impl<'a> Matcher<'a> {
                             continue;
                         }
                         match re.tail {
-                            Tail::Rescan(slot) => {
-                                self.tail_spans.push((slot, cand.span.0, cand.span.1))
-                            }
+                            Tail::Rescan(slot) => self.tail_winner(slot, cand.span, cand.elem),
                             Tail::Merged => {}
                             Tail::Streamed => {
                                 for (off, v) in &cand.vals {
@@ -2001,7 +2144,7 @@ impl<'a> Matcher<'a> {
                     }
                 }
             }
-            self.resolve_tail_spans();
+            self.resolve_tails();
             if !self.pending.is_empty() {
                 let mut pend = std::mem::take(&mut self.pending);
                 pend.sort_by_key(|&(col, off, _)| (col, off));
@@ -2600,16 +2743,25 @@ impl<'a> Matcher<'a> {
         raw_attrs: &[(&'a [u8], Option<&'a [u8]>)],
         span_start: usize,
     ) {
-        let attrs = if self.decode_names {
+        let mut attrs = if self.decode_names {
             self.materialize_attrs::<true>(raw_attrs)
         } else {
             self.materialize_attrs::<false>(raw_attrs)
         };
+        let elem = self.next_elem;
+        self.next_elem = elem.wrapping_add(1);
+        // Browser mode's tail pass: a deferred winner of the first pass carries the mark its tail
+        // selectors are rooted at (see `marked_tail`). Elements open in `elem` order, so one cursor does.
+        if self.mark_at < self.marks.len() && self.marks[self.mark_at].0 == elem {
+            let slots = std::mem::take(&mut self.marks[self.mark_at].1);
+            attrs.push((WINNER_MARK.as_bytes(), Cow::Owned(slots)));
+            self.mark_at += 1;
+        }
         // The element's signature is built from the MATERIALIZED attributes only. That is sound because
         // `collect_interesting` adds `class`/`id` to the interesting set whenever any compiled compound
         // references them, so a `req` carrying class/id bits implies this element's `sig` saw the same
         // attributes; a schema referencing neither leaves both at 0 and the filter idle.
-        self.stack.push(OpenElem::open(name, scid, attrs, span_start, self.schema.wants));
+        self.stack.push(OpenElem::open(name, scid, attrs, span_start, elem, self.schema.wants));
         let top = self.stack.len() - 1;
         // Assign this element's 1-based sibling positions from its parent's running counts, BEFORE
         // `eval` (positional compounds read them). Only when the schema uses positions.
@@ -3095,11 +3247,21 @@ mod sig_wants_tests {
 mod tail_merge_tests {
     use super::*;
 
+    const MODES: [ParseMode; 2] = [ParseMode::Lxml, ParseMode::Browser];
+
     /// Lowered through the crate's own front door, so an XPath query routes exactly as `extract` routes
     /// it — the CSS parser alone yields no entries at all for one, which reads as "no tail".
-    fn schema(queries: &[String]) -> CompiledSchema {
+    fn schema(queries: &[String], mode: ParseMode) -> CompiledSchema {
         let (flat, grouped) = crate::compile_schema(queries, &[]);
-        CompiledSchema::compile(&flat, &grouped, ParseMode::Lxml)
+        CompiledSchema::compile(&flat, &grouped, mode)
+    }
+
+    /// How many tail slots the schema holds: one per entry that records its own winners.
+    fn slots(sch: &CompiledSchema) -> usize {
+        let own = |t: &Tail| matches!(t, Tail::Rescan(_));
+        sch.reverse_entries.iter().filter(|e| own(&e.tail)).count()
+            + sch.has_entries.iter().filter(|e| own(&e.tail)).count()
+            + sch.text_entries.iter().filter(|e| own(&e.tail)).count()
     }
 
     const TAIL_PAGE: &[u8] = br#"<body>
@@ -3109,19 +3271,21 @@ mod tail_merge_tests {
 <ul><li><a href="/a">A</a></li><li><a href="/last">Last</a></li></ul>
 </body>"#;
 
-    /// Tails exist in lxml mode only (browser mode refuses them), so every extraction here is lxml's.
-    fn extract(html: &[u8], qs: &[String]) -> crate::FlatColumns {
-        let lxml = crate::CompileOptions { mode: ParseMode::Lxml, first_only: &[] };
-        crate::Plan::compile_with(qs, &[], lxml).extract(html, None, None).0
+    /// Each mode reads a slot's winners its own way (`TailPlan`), so every test here runs in both.
+    fn extract(html: &[u8], qs: &[String], mode: ParseMode) -> crate::FlatColumns {
+        let opts = crate::CompileOptions { mode, first_only: &[] };
+        crate::Plan::compile_with(qs, &[], opts).extract(html, None, None).0
     }
 
     /// Every column, against the same selector compiled ALONE — which is the unmerged answer.
     fn agrees_with_each_selector_alone(qs: &[String]) {
-        let merged = extract(TAIL_PAGE, qs);
-        for (col, q) in qs.iter().enumerate() {
-            assert!(!merged[col].is_empty(), "{q} must have something to compare");
-            let alone = extract(TAIL_PAGE, std::slice::from_ref(q));
-            assert_eq!(merged[col], alone[0], "{q}");
+        for mode in MODES {
+            let merged = extract(TAIL_PAGE, qs, mode);
+            for (col, q) in qs.iter().enumerate() {
+                assert!(!merged[col].is_empty(), "{q} must have something to compare ({mode:?})");
+                let alone = extract(TAIL_PAGE, std::slice::from_ref(q), mode);
+                assert_eq!(merged[col], alone[0], "{q} ({mode:?})");
+            }
         }
     }
 
@@ -3140,11 +3304,13 @@ mod tail_merge_tests {
             "li:last-child a::attr(href)",
         ]
         .map(String::from);
-        assert_eq!(
-            schema(&qs).tail_schemas.len(),
-            4,
-            "the three `div:has(a)` tails share one sub-schema"
-        );
+        for mode in MODES {
+            assert_eq!(slots(&schema(&qs, mode)), 4, "the three `div:has(a)` tails share one slot ({mode:?})");
+        }
+        assert_eq!(schema(&qs, ParseMode::Lxml).tail_schemas.len(), 4, "one span schema per slot");
+        let browser = schema(&qs, ParseMode::Browser);
+        assert!(browser.tail_schemas.is_empty());
+        assert_eq!(browser.tail_pass.as_ref().map(|p| p.cols.len()), Some(qs.len()), "ONE pass for every tail");
         agrees_with_each_selector_alone(&qs);
     }
 
@@ -3160,8 +3326,36 @@ mod tail_merge_tests {
             "li:last-child ::text",
         ]
         .map(String::from);
-        assert_eq!(schema(&qs).tail_schemas.len(), 3, "one group per distinct prefix");
+        for mode in MODES {
+            assert_eq!(slots(&schema(&qs, mode)), 3, "one slot per distinct prefix ({mode:?})");
+        }
         agrees_with_each_selector_alone(&qs);
+    }
+
+    /// Browser mode's tail selectors are rooted at an attribute with an empty name. Only a recorded winner
+    /// may carry it: no selector spells one, and no page attribute has one, however the markup mangles
+    /// its attribute list.
+    #[test]
+    fn only_a_recorded_winner_carries_the_mark() {
+        let spellings = [r#"[""]"#, r"[\ ]", r"p[\0]", r#"p::attr("")"#, "p::attr()", "p ::attr( )", "//p/@*"];
+        for q in spellings {
+            let (flat, _) = crate::compile_schema(&[q.to_string()], &[]);
+            for sel in flat.iter().flatten() {
+                let named = |p: &crate::selector::AttrPred| !p.name.is_empty();
+                assert!(sel.parts.iter().all(|c| c.attrs.iter().all(named)), "{q}");
+                assert!(!matches!(&sel.terminal, Terminal::Attr { name, .. } if name.is_empty()), "{q}");
+            }
+        }
+        let tail = marked_tail(&crate::selector::parse_list("li:last-child ::text")[0], 0, 0);
+        let sch = CompiledSchema::compile(&[vec![tail]], &[], ParseMode::Browser);
+        let page = br#"<ul><li ="x" = a="b" "c" '' =>t</li><li = / =>u</li></ul>"#;
+        let input = EncodedInput::new(page, encoding_rs::UTF_8, true);
+        assert_eq!(sch.run(input).0, [Vec::<String>::new()], "an unmarked page matches nothing");
+        // `elem` counts html, head, body, ul, then the two <li>s
+        let marked = sch.run_with(input, browser::Browser::default(), vec![(5, "0".to_string())]).0;
+        assert_eq!(marked, [["u"]], "the second <li> is the one marked");
+        let other = sch.run_with(input, browser::Browser::default(), vec![(5, "1".to_string())]).0;
+        assert_eq!(other, [Vec::<String>::new()], "a mark for another slot is not this slot's");
     }
 
     /// A tail entry past the member ceiling compiles DEAD, and a dead column is empty by contract. So it
@@ -3173,11 +3367,13 @@ mod tail_merge_tests {
         qs.push("div:has(a) a::attr(href)".to_string());
         qs.push("div:has(a) a::attr(href)".to_string());
         let (live, dead) = (MAX_MEMBERS - 1, MAX_MEMBERS);
-        let sch = schema(&qs);
-        assert!(sch.flat_col_supported(live) && !sch.flat_col_supported(dead));
-        let cols = extract(TAIL_PAGE, &qs);
-        assert_eq!(cols[live], ["/one", "/two"]);
-        assert!(cols[dead].is_empty(), "an over-budget column stays empty");
+        for mode in MODES {
+            let sch = schema(&qs, mode);
+            assert!(sch.flat_col_supported(live) && !sch.flat_col_supported(dead));
+            let cols = extract(TAIL_PAGE, &qs, mode);
+            assert_eq!(cols[live], ["/one", "/two"], "{mode:?}");
+            assert!(cols[dead].is_empty(), "an over-budget column stays empty ({mode:?})");
+        }
     }
 }
 

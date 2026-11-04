@@ -37,7 +37,7 @@ from browser_oracle import bridge as Br  # noqa: E402
 from browser_oracle import css as C  # noqa: E402
 from browser_oracle import tree as T  # noqa: E402
 from browser_oracle.client import BrowserOracle, Refused  # noqa: E402
-from diff_browser import MAX_SELECTORS_PER_PASS, same_values  # noqa: E402
+from diff_browser import MAX_SELECTORS_PER_PASS, engine_refusals, same_values  # noqa: E402
 
 RESULTS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results", "corpus_browser.json")
 DEFAULT_CTYPE = "text/html"
@@ -108,8 +108,7 @@ def main() -> int:
 
     pages = load(args.corpus, args.limit)
     every = sorted({s for _o, _p, fields, _b, _c in pages for _f, s in fields})
-    report = frostwork.check(every, **seq_sweep.parser_kwargs("browser"))
-    refused = {f.selector: f.reason or "" for f in report.fields if not f.supported}
+    refused = engine_refusals(every, "browser")
 
     verdicts: Counter = Counter()
     by_selector: dict[tuple[str, str], Counter] = defaultdict(Counter)

@@ -556,11 +556,10 @@ pub fn audit_schema<Q: AsQuery>(queries: &[Q], groups: &[GroupQuery<Q>]) -> Sche
     audit_schema_with(queries, groups, ParseMode::default())
 }
 
-/// [`audit_schema`] in `mode`. Support is per mode: browser mode refuses, with a reason, two shapes the
-/// lxml contract supports. One is a deferred predicate whose value is read from inside the element it
-/// selects (`div:has(a) ::text`, `li:last-child b::text`), which would need a context-free re-parse of
-/// that element's source; the other is outer HTML of a selector that can match a synthesized
-/// `<html>`/`<head>`/`<body>`.
+/// [`audit_schema`] in `mode`. Support is per mode: browser mode refuses, with a reason, one shape the
+/// lxml contract supports, the outer HTML of a selector that can match an element the page never wrote
+/// (a synthesized `<html>`/`<head>`/`<body>`, an implied `<tbody>`/`<tr>`/`<colgroup>`, the `<p>` a stray
+/// `</p>` inserts), which has no source of its own.
 pub fn audit_schema_with<Q: AsQuery>(
     queries: &[Q],
     groups: &[GroupQuery<Q>],
@@ -3193,15 +3192,13 @@ mod browser_mode_tests {
         assert_eq!(ex(ws, "head > title::text"), v(&["T"]));
     }
 
-    /// The two lxml-mode shapes browser mode refuses, each with a reason, and the neighbours it keeps.
+    /// The lxml-mode shape browser mode refuses, with its reason, and the neighbours it keeps. A
+    /// deferred winner's subtree is among the neighbours: it is read by a second whole-document pass.
     #[test]
-    fn browser_mode_refuses_context_free_reparses_and_synthesized_outer_html() {
+    fn browser_mode_refuses_synthesized_outer_html() {
         let refused = [
-            "div:has(a) ::text",
-            "div:has(a) a::attr(href)",
-            "li:last-child b::text",
-            "li:last-child ::text",
-            "//div[contains(., 'x')]//p/text()",
+            "div:has(a) tbody",
+            "li:last-child *",
             "body",
             "html",
             "*",
@@ -3213,6 +3210,12 @@ mod browser_mode_tests {
             "p",
         ];
         let kept = [
+            "div:has(a) ::text",
+            "div:has(a) a::attr(href)",
+            "li:last-child b::text",
+            "li:last-child ::text",
+            "//div[contains(., 'x')]//p/text()",
+            "li:last-child a",
             "div:has(a)::attr(id)",
             "li:last-child::text",
             "body.page",
@@ -3272,6 +3275,69 @@ mod browser_mode_tests {
         );
         let refused: Vec<bool> = b.groups.iter().map(|g| !g.subfields[0].is_supported()).collect();
         assert_eq!(refused, [false, true, false, true, false]);
+    }
+
+    /// A deferred winner's subtree is read from the whole document, so every element in it has the
+    /// context the page gave it. Each expected value is Chrome 156's (native `querySelectorAll`, XPath
+    /// through the lossless bridge); lxml mode's span re-scan differs from it wherever the context comes
+    /// from outside the winner.
+    #[test]
+    fn a_deferred_tail_reads_the_winner_in_its_context() {
+        let rows = b"<table><tr><td>a</td><td>b</td></tr><tr><td>c</td><td><i>d</i></td></tr></table>";
+        assert_eq!(ex(rows, "tr:last-child td::text"), v(&["c"]));
+        assert_eq!(ex(rows, "tr:last-child td i::text"), v(&["d"]));
+        assert_eq!(ex(rows, "tr:has(i) td::text"), v(&["c"]));
+        assert_eq!(ex(rows, "//tr[last()]//td/text()"), v(&["c"]));
+        // an implied <tbody> and <tr> are winners like any other element
+        assert_eq!(ex(b"<table><tr><td>a</td></tr></table>", "tbody:last-child td::text"), v(&["a"]));
+        assert_eq!(ex(b"<table><td>a<td>b</table>", "tr:only-child ::text"), v(&["a", "b"]));
+        // reconstruction copies a <b> the winner never wrote into it
+        let fmt = b"<p><b>x</p><ul><li>one</li><li>two</li></ul>";
+        assert_eq!(ex(fmt, "li:last-child b::text"), v(&["two"]));
+        assert_eq!(ex(fmt, "li:has(b) ::text"), v(&["one", "two"]));
+        assert_eq!(ex(fmt, "li:nth-last-child(2) b::text"), v(&["one"]));
+        assert_eq!(lxml(fmt, "li:last-child b::text"), NONE);
+        let fmt = b"<p><i>x</p><div>y<span>z</span></div>";
+        assert_eq!(ex(fmt, "div:last-child i span::text"), v(&["z"]));
+        assert_eq!(ex(fmt, r#"div:contains("y") i::text"#), v(&["y"]));
+        // an SVG <title> is an HTML integration point, so its <b> is an element and not RCDATA text
+        let svg = b"<svg><desc><b>x</b></desc><title><b>y</b></title></svg>";
+        assert_eq!(ex(svg, "title:last-child b::text"), v(&["y"]));
+        assert_eq!(ex(svg, "desc:has(b) ::text"), v(&["x"]));
+        assert_eq!(lxml(svg, "title:last-child b::text"), NONE);
+        // the form pointer: the inner <form> was never inserted
+        let form = b"<form id=f><div><form id=g><input id=i></div></form>";
+        assert_eq!(ex(form, "div:has(input) ::attr(id)"), v(&["i"]));
+        // nested winners return each node once, in document order
+        let nest = b"<ul><li>a<span>1</span></li><li>b<span>2</span><ul><li>c<span>3</span></li></ul></li></ul>";
+        assert_eq!(ex(nest, "li:last-child span::text"), v(&["2", "3"]));
+        assert_eq!(ex(nest, "li:last-child ::text"), v(&["b", "2", "c", "3"]));
+        let nest = b"<div><a href=/1>x</a><div><a href=/2>y</a></div></div>";
+        assert_eq!(ex(nest, "div:has(a) a::attr(href)"), v(&["/1", "/2"]));
+        // a formatting element's copy wins as itself
+        assert_eq!(ex(b"<p><b class=k>1</p><b>2</b>", "b:last-child ::text"), v(&["1", "2"]));
+        // no winner, no second pass, and an empty column
+        assert_eq!(ex(b"<ul><li>a</li></ul>", "div:has(a) ::text"), NONE);
+    }
+
+    /// Several tails in one schema share ONE second pass, each column with its own winners, and a column
+    /// that shares a slot gets exactly what it gets alone.
+    #[test]
+    fn tails_share_one_pass_and_keep_their_own_winners() {
+        let h = b"<table><tr><td>a</td></tr><tr><td><b>b</b></td></tr></table><ul><li>x</li><li><a href=/y>y</a></li></ul>";
+        let qs = [
+            "tr:last-child td::text",
+            "tr:last-child b::text",
+            "li:last-child a::attr(href)",
+            "li:has(a) ::text",
+            "tr:has(b) ::text",
+            "td:only-child b::text",
+        ];
+        let together = cols(h, &qs);
+        for (q, got) in qs.iter().zip(&together) {
+            assert_eq!(got, &ex(h, q), "{q}");
+        }
+        assert_eq!(together, [v(&[]), v(&["b"]), v(&["/y"]), v(&["y"]), v(&["b"]), v(&["b"])]);
     }
 
     // ---- HTML5 tree construction (Phase 2). Each comment gives Chrome's tree for the document.

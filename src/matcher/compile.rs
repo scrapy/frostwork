@@ -224,13 +224,10 @@ pub(crate) fn may_hold_synthesized_frame(sel: &Selector) -> bool {
         }
 }
 
-/// Why browser mode refuses a selector the lxml contract supports. Both rest on a property of libxml2's
-/// tree that HTML5's does not have, so lxml mode keeps them (docs/BROWSER_MODE.md, section 4).
+/// Why browser mode refuses a selector the lxml contract supports. It rests on a property of libxml2's
+/// tree that HTML5's does not have, so lxml mode keeps it (docs/BROWSER_MODE.md, section 4).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Refusal {
-    /// The value is read from a deferred winner's subtree by re-scanning its raw source as a standalone
-    /// document (`Matcher::resolve_tail_spans`). A libxml2 span is self-contained; an HTML5 one is not.
-    TailRescan,
     /// The value is outer HTML, and a match can be an element the page never wrote, which has no source
     /// of its own (see [`admits_synthesized_frame`] and [`admits_browser_synthesized`]).
     SynthesizedOuterHtml,
@@ -239,13 +236,6 @@ pub(crate) enum Refusal {
 impl Refusal {
     pub(crate) fn reason(self) -> &'static str {
         match self {
-            Refusal::TailRescan => {
-                "unsupported in browser mode: the value comes from inside the element the deferred \
-                 predicate (:has(), a reverse position or a text predicate) selects, which is recovered by \
-                 re-parsing that element's source on its own, and an HTML5 parse of a fragment loses the \
-                 context it sits in (a <td> outside its table). Select the element's own text or attribute, \
-                 or use parser=\"lxml\""
-            }
             Refusal::SynthesizedOuterHtml => {
                 "unsupported in browser mode: the selector can match an element the page never wrote (an \
                  <html>, <head> or <body>, an implied <tbody>, <tr> or <colgroup>, or the <p> a stray </p> \

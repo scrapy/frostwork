@@ -14,6 +14,7 @@ Run: .venv/bin/python -m pytest tests/test_gates.py
 
 import json
 import os
+import re
 import sys
 
 import pytest
@@ -683,6 +684,23 @@ def test_the_browser_gate_fails_on_novel_and_on_coverage():
     }
     for why, report in seeded.items():
         assert B.gate_failures(report), f"{why} must fail the gate"
+
+
+def test_the_browser_gates_ask_about_each_selector_alone():
+    """A selector the engine refuses is never graded, so the refusal list decides what the browser gates
+    can see. Asked as ONE schema, every selector of a run sat past the engine's column ceiling, where a
+    mixed comma group cannot be routed, and conformant's `p::text, p:contains("alpha")::text` family went
+    ungraded in both modes. Both browser gates read the one helper. The deferred tails the value basket
+    holds are graded in browser mode, which is the point of their rows."""
+    import corpus_browser as CB
+    import diff_browser as B
+
+    group = 'p::text, p:contains("alpha")::text'
+    padding = [f'[id="{i}"]::text' for i in range(130)]
+    assert B.engine_refusals(padding + [group, "p"], "browser") == {"p": B.engine_refusals(["p"], "browser")["p"]}
+    assert CB.engine_refusals is B.engine_refusals
+    tails = [s for s in B.RULE_SELECTORS if re.search(r":last-|:nth-last-|:only-|:has\(|:contains\(|last\(\)|contains\(", s)]
+    assert len(tails) >= 20 and not B.engine_refusals(tails, "browser")
 
 
 def test_browser_attribution_is_by_the_smallest_repro_and_leaves_the_rest_novel():
