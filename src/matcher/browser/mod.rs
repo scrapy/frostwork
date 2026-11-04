@@ -551,40 +551,44 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
             Vis::Live => {}
         }
         let (uid, d) = (self.stack[i].uid, self.stack[i].depth as usize);
-        loop {
-            if self.path.get(d) == Some(&uid) {
-                while self.path.len() > d + 1 {
-                    self.drop_top(m, at);
-                }
-                return;
-            }
-            let Some(base) = self.parked.last().map(|s| s.base) else {
+        while self.path.get(d) != Some(&uid) {
+            if self.parked.is_empty() {
                 debug_assert!(false, "a live element is neither open nor parked");
                 return;
-            };
-            while self.path.len() > base {
-                self.drop_top(m, at);
             }
             self.unpark_last(m, at);
+        }
+        self.drop_to(m, d + 1, at);
+    }
+
+    /// Close the matcher's current element, which ends at `at`.
+    fn close_current(&mut self, m: &mut Matcher<'a>, at: usize) {
+        m.flush_text();
+        m.close_top(at);
+        self.path.pop();
+        self.touched = true;
+    }
+
+    /// Drop the matcher's elements above the first `len` (see [`Self::drop_top`]).
+    fn drop_to(&mut self, m: &mut Matcher<'a>, len: usize, at: usize) {
+        while self.path.len() > len {
+            self.drop_top(m, at);
         }
     }
 
     /// The matcher's current element has no builder entry: close it, or park the head while "after
     /// head" may still insert into it.
     fn drop_top(&mut self, m: &mut Matcher<'a>, at: usize) {
-        m.flush_text();
-        self.touched = true;
         let top = *self.path.last().expect("dropping with nothing open");
         if self.head_live && self.head.is_some_and(|h| h.uid == top) {
-            self.park_from(m, self.path.len() - 1);
-            return;
+            m.flush_text();
+            return self.park_from(m, self.path.len() - 1);
         }
         debug_assert!(
             self.index_of(top).is_none_or(|k| self.stack[k].vis != Vis::Live),
             "closing an element the builder still has open"
         );
-        m.close_top(at);
-        self.path.pop();
+        self.close_current(m, at);
     }
 
     fn park_from(&mut self, m: &mut Matcher<'a>, base: usize) {
@@ -595,8 +599,11 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
         self.parked.push(Seg { base, uids, parked, held });
     }
 
-    /// Put the last parked run back; its held text node continues to `at`.
+    /// Put the last parked run back, dropping what was opened since it was parked; its held text node
+    /// continues to `at`.
     fn unpark_last(&mut self, m: &mut Matcher<'a>, at: usize) {
+        let base = self.parked.last().expect("unparking with nothing parked").base;
+        self.drop_to(m, base, at);
         m.flush_text();
         self.touched = true;
         let seg = self.parked.pop().expect("unparking with nothing parked");
@@ -613,10 +620,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
     fn foster_place(&mut self, m: &mut Matcher<'a>, t: usize, at: usize) {
         let (tuid, base) = (self.stack[t].uid, self.stack[t].depth as usize);
         if self.parked.last().is_some_and(|s| s.base == base && s.uids.first() == Some(&tuid)) {
-            while self.path.len() > base {
-                self.drop_top(m, at);
-            }
-            return;
+            return self.drop_to(m, base, at);
         }
         let cur = self.stack.len() - 1;
         self.place(m, cur, at);
@@ -665,17 +669,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
             return;
         }
         let d = n.depth as usize;
-        loop {
-            if self.path.get(d) == Some(&n.uid) {
-                while self.path.len() > d + 1 {
-                    self.drop_top(m, ghost_end);
-                }
-                m.flush_text();
-                m.close_top(end);
-                self.path.pop();
-                self.touched = true;
-                return;
-            }
+        while self.path.get(d) != Some(&n.uid) {
             // Parked: what was opened after it closes first, segment by segment, as ghosts. Past the
             // depth cap the adoption agency can leave an element open in a later segment, which streaming
             // cannot close before it; only a census pass streams that far, since the cap is a replay.
@@ -686,12 +680,10 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
             if later.any(|&u| self.index_of(u).is_some_and(|i| self.stack[i].vis == Vis::Live)) {
                 return;
             }
-            let base = self.parked.last().expect("a segment holds it").base;
-            while self.path.len() > base {
-                self.drop_top(m, ghost_end);
-            }
             self.unpark_last(m, ghost_end);
         }
+        self.drop_to(m, d + 1, ghost_end);
+        self.close_current(m, end);
     }
 
     // ------------------------------------------------------------------ inserting
@@ -1417,24 +1409,17 @@ impl<'a, const REPLAY: bool> TreeBuilder<'a> for Browser<'a, REPLAY> {
             self.eof(m, end);
         }
         if REPLAY {
-            // End of input pops everything, the current node first.
-            for k in (0..self.stack.len()).rev() {
-                let n = self.stack[k];
-                if n.vis == Vis::Live {
-                    self.dom.set_end(n.depth, end);
-                    if n.tag == Tag::Option {
-                        self.option_closed(n.depth);
-                    }
-                }
+            // End of input pops everything, the current node first; then the finished tree is walked.
+            while self.stack.len() > 0 {
+                self.pop(m, end);
             }
             return self.dom.walk(m);
         }
-        m.flush_text();
+        // Streaming, the matcher closes what is open when it finishes, and what is parked is put back
+        // for it first.
         while let Some(base) = self.parked.last().map(|s| s.base) {
             while self.path.len() > base {
-                m.flush_text();
-                m.close_top(end);
-                self.path.pop();
+                self.close_current(m, end);
             }
             self.unpark_last(m, end);
         }
