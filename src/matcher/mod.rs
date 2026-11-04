@@ -175,6 +175,12 @@ pub(super) const HTML_ELEMENT: u8 = u8::MAX;
 pub(super) const SVG_ELEMENT: u8 = u8::MAX - 1;
 pub(super) const MATHML_ELEMENT: u8 = u8::MAX - 2;
 
+/// Does `raw` ASCII-lowercase to exactly `name`? The same answer as an ASCII-case-insensitive comparison
+/// with a `name` that has no ASCII capital, in one pass.
+fn lowercases_to(raw: &[u8], name: &[u8]) -> bool {
+    raw.len() == name.len() && raw.iter().zip(name).all(|(r, n)| r.to_ascii_lowercase() == *n)
+}
+
 /// Is `want` the name the browser's DOM gives raw attribute `raw` of an element of class `scid`? That
 /// name is the lowercased one, except on an SVG element whose attribute HTML5 camel-cases (`viewBox`)
 /// and on MathML's `definitionURL`. Exact, as `::attr()` and XPath's `@` compare it.
@@ -453,11 +459,12 @@ impl<'a> OpenElem<'a> {
     /// ([`dom_name_is`]); an XPath name with an ASCII capital is refused, so `@name` compares exactly
     /// too. Lxml mode compares with libxml2's name, which is the lowercased one, exactly, as parsel's
     /// `::attr()` and `@name` do.
+    #[inline]
     pub(super) fn names(&self, raw: &[u8], name: &str) -> bool {
         match self.scid {
             HTML_ELEMENT => raw.eq_ignore_ascii_case(name.as_bytes()),
             SVG_ELEMENT | MATHML_ELEMENT => dom_name_is(self.scid, raw, name),
-            _ => raw.eq_ignore_ascii_case(name.as_bytes()) && !name.bytes().any(|c| c.is_ascii_uppercase()),
+            _ => lowercases_to(raw, name.as_bytes()),
         }
     }
 
