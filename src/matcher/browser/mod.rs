@@ -74,13 +74,13 @@ mod rules;
 mod tags;
 
 use super::tree::{Scan, TreeBuilder};
-use super::{CompiledSchema, EncodedInput, HeldText, Matcher, Parked, SourcePrefix};
+use super::{CompiledSchema, EncodedInput, HeldText, Matcher, Parked};
 use crate::{FlatColumns, GroupRows};
 use crate::implied_close::{
     html5_cat, html5_data_mode, BUTTON_SCOPE, IMPLIED_END, IMPLIED_END_THOROUGH, LIST_ITEM_SCOPE, SCOPE,
     SPECIAL,
 };
-use lists::{Bound, Formatting, OpenStack};
+use lists::{Afe, Bound, Formatting, OpenStack};
 use crate::tokenizer::DataMode;
 use tags::{tag_of, tag_of_lower, Tag};
 pub(super) use tags::{lower, namespaced_foreign_attr, svg_attr_name, svg_local_name, MAX_NAME};
@@ -137,7 +137,8 @@ enum Vis {
     Live,
     /// Template content or a declarative shadow root: never matched.
     Inert,
-    /// An adoption-agency clone with no matcher element yet; the index is its token in `toks`.
+    /// An adoption-agency clone with no matcher element yet, made for the start tag at this index of
+    /// [`Formatting::toks`].
     Pending(u32),
 }
 
@@ -184,23 +185,6 @@ const CENSUS_MERGE_ANY: u8 = 1 << 5;
 const RETRO_DEPTH: u8 = 1 << 6;
 const RETRO_RULES: u8 =
     RETRO_MERGE | RETRO_FOSTER | RETRO_FRAMESET | RETRO_ADOPTION | RETRO_SELECTEDCONTENT | RETRO_DEPTH;
-
-/// The start tag a formatting element was created for, kept so a clone can be made from it. `span` is
-/// the tag's source, which a clone's outer HTML begins with; `ark` is what Noah's Ark compares it by
-/// ([`lists::ark_key`]).
-struct FmtTok<'a> {
-    name: &'a [u8],
-    tag: Tag,
-    attrs: Vec<(&'a [u8], Option<&'a [u8]>)>,
-    span: SourcePrefix,
-    ark: u64,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Afe {
-    Marker,
-    El { uid: u32, tok: u32 },
-}
 
 /// A parked run of matcher elements: the uids that were `path[base..]`, and the text node the last of
 /// them was buffering. Nothing is inserted into a parked element, so when it is put back that node is
@@ -250,8 +234,7 @@ pub(super) struct Browser<'a, const REPLAY: bool> {
     original: Mode,
     templates: Vec<Mode>,
     stack: OpenStack<'a>,
-    afe: Formatting,
-    toks: Vec<FmtTok<'a>>,
+    afe: Formatting<'a>,
     /// The head element pointer, as the entry it had on the stack.
     head: Option<Node<'a>>,
     /// The head's matcher element is still open for "after head" to insert into.
@@ -299,7 +282,6 @@ impl<const REPLAY: bool> Default for Browser<'_, REPLAY> {
             templates: Vec::new(),
             stack: OpenStack::default(),
             afe: Formatting::default(),
-            toks: Vec::new(),
             head: None,
             head_live: false,
             html_text: None,
@@ -521,10 +503,6 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
         self.stack.last().is_some_and(|n| n.tag == tag)
     }
 
-    fn index_of(&self, uid: u32) -> Option<usize> {
-        self.stack.index_of(uid)
-    }
-
     fn has_template(&self) -> bool {
         self.stack.topmost(Tag::Template).is_some()
     }
@@ -592,7 +570,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
             return self.park_from(m, self.path.len() - 1);
         }
         debug_assert!(
-            self.index_of(top).is_none_or(|k| self.stack[k].vis != Vis::Live),
+            self.stack.index_of(top).is_none_or(|k| self.stack[k].vis != Vis::Live),
             "closing an element the builder still has open"
         );
         self.close_current(m, at);
@@ -643,12 +621,12 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
             return;
         }
         self.place(m, i - 1, at);
-        let attrs = std::mem::take(&mut self.toks[tok as usize].attrs);
+        let attrs = std::mem::take(&mut self.afe.toks[tok as usize].attrs);
         let mut node = self.stack[i];
         self.open(m, &mut node, &attrs, at);
-        m.set_source_prefix(self.toks[tok as usize].span);
+        m.set_source_prefix(self.afe.toks[tok as usize].span);
         self.stack.replace(i, node);
-        self.toks[tok as usize].attrs = attrs;
+        self.afe.toks[tok as usize].attrs = attrs;
     }
 
     /// Open `node` as the matcher's next element, at the current insertion point.
@@ -684,7 +662,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
             let seg = &self.parked[k];
             let above = seg.uids.iter().skip_while(|&&u| u != n.uid).skip(1);
             let mut later = self.path[seg.base..].iter().chain(above).chain(self.parked[k + 1..].iter().flat_map(|s| &s.uids));
-            if later.any(|&u| self.index_of(u).is_some_and(|i| self.stack[i].vis == Vis::Live)) {
+            if later.any(|&u| self.stack.index_of(u).is_some_and(|i| self.stack[i].vis == Vis::Live)) {
                 return;
             }
             self.unpark_last(m, ghost_end);
@@ -933,83 +911,12 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
 
     // ------------------------------------------------------------------ active formatting elements
 
-    fn afe_last_marker(&self) -> usize {
-        self.afe.after_last_marker()
-    }
-
-    fn afe_index_of(&self, uid: u32) -> Option<usize> {
-        self.afe.index_of(uid)
-    }
-
-    fn clear_afe_to_marker(&mut self) {
-        self.afe.clear_to_marker(&self.toks);
-    }
-
-    fn afe_push(&mut self, e: Afe) {
-        self.afe.push(e, &self.toks);
-    }
-
-    fn afe_remove(&mut self, k: usize) {
-        self.afe.remove(k, &self.toks);
-    }
-
-    /// Do two formatting tokens carry the same attributes, as Noah's Ark compares them: by name, the
-    /// first of a repeated name, in any order, with equal values.
-    fn same_attrs(&self, m: &Matcher<'a>, a: &FmtTok<'a>, b: &FmtTok<'a>) -> bool {
-        let first = |attrs: &[(&'a [u8], Option<&'a [u8]>)], j: usize| {
-            !attrs[..j].iter().any(|(n, _)| n.eq_ignore_ascii_case(attrs[j].0))
-        };
-        let names = |attrs: &[(&'a [u8], Option<&'a [u8]>)]| (0..attrs.len()).filter(|&j| first(attrs, j)).count();
-        names(&a.attrs) == names(&b.attrs) && (0..a.attrs.len()).filter(|&j| first(&a.attrs, j)).all(|j| {
-            let (n, v) = a.attrs[j];
-            b.attrs.iter().find(|(n2, _)| n.eq_ignore_ascii_case(n2)).is_some_and(|&(_, v2)| {
-                let (v, v2) = (v.unwrap_or(b""), v2.unwrap_or(b""));
-                v == v2 || m.input.attr_value(v) == m.input.attr_value(v2)
-            })
-        })
-    }
-
-    /// Push the element `uid`, made for token `tok`, onto the list of active formatting elements. Noah's
-    /// Ark: with three alike after the last marker already, the earliest of them leaves. The list counts
-    /// entries by key, so only then is it searched, from the end, for as many as have the key.
-    fn push_afe(&mut self, m: &Matcher<'a>, uid: u32, tok: u32) {
-        let t = &self.toks[tok as usize];
-        let mut keyed = self.afe.alike(t.ark);
-        if keyed >= 3 {
-            let (mut same, mut earliest) = (0, None);
-            let mut k = self.afe.len();
-            while keyed > 0 && k > self.afe_last_marker() {
-                k -= 1;
-                if let Afe::El { tok: o, .. } = self.afe[k] {
-                    let other = &self.toks[o as usize];
-                    if other.ark == t.ark {
-                        keyed -= 1;
-                        if other.tag == t.tag && self.same_attrs(m, other, t) {
-                            same += 1;
-                            earliest = Some(k);
-                        }
-                    }
-                }
-            }
-            if same >= 3 {
-                self.afe_remove(earliest.expect("three of a kind"));
-            }
-        }
-        self.afe_push(Afe::El { uid, tok });
-    }
-
     /// Insert a formatting element for a start tag and push it onto the list.
     fn insert_formatting(&mut self, m: &mut Matcher<'a>, t: &StartTok<'a, '_>) {
-        let tok = self.toks.len() as u32;
-        let attrs = t.attrs.to_vec();
-        let firsts = (0..attrs.len()).filter(|&j| !attrs[..j].iter().any(|(n, _)| n.eq_ignore_ascii_case(attrs[j].0)));
-        let values: Vec<(&[u8], std::borrow::Cow<'_, str>)> =
-            firsts.map(|j| (attrs[j].0, m.input.attr_value(attrs[j].1.unwrap_or(b"")))).collect();
-        let ark = lists::ark_key(t.tag, values.iter().map(|(n, v)| (*n, v.as_ref())));
-        self.toks.push(FmtTok { name: t.name, tag: t.tag, attrs, span: SourcePrefix::new(t.start, t.end), ark });
+        let tok = self.afe.add_token(m.input, t);
         self.insert_html(m, t);
         let uid = self.cur().uid;
-        self.push_afe(m, uid, tok);
+        self.afe.push_element(m.input, uid, tok);
     }
 
     /// Reconstruct the active formatting elements: reopen, as clones carrying the original's
@@ -1018,7 +925,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
     fn reconstruct(&mut self, m: &mut Matcher<'a>, at: usize) {
         let open = |b: &Self, e: &Afe| match *e {
             Afe::Marker => true,
-            Afe::El { uid, .. } => b.index_of(uid).is_some(),
+            Afe::El { uid, .. } => b.stack.index_of(uid).is_some(),
         };
         let Some(last) = self.afe.last() else { return };
         if open(self, last) {
@@ -1030,13 +937,13 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
         }
         for j in k..self.afe.len() {
             let Afe::El { tok, .. } = self.afe[j] else { unreachable!("a marker is open") };
-            let (name, tag) = (self.toks[tok as usize].name, self.toks[tok as usize].tag);
-            let attrs = std::mem::take(&mut self.toks[tok as usize].attrs);
+            let (name, tag) = (self.afe.toks[tok as usize].name, self.afe.toks[tok as usize].tag);
+            let attrs = std::mem::take(&mut self.afe.toks[tok as usize].attrs);
             let mut buf = [0; MAX_NAME];
             let node = self.new_node(name, lower(name, &mut buf), tag, Ns::Html, &attrs);
             let uid = node.uid;
             self.insert_node(m, node, &attrs, at);
-            let span = self.toks[tok as usize].span;
+            let span = self.afe.toks[tok as usize].span;
             if REPLAY {
                 let n = *self.cur();
                 if n.vis == Vis::Live {
@@ -1045,7 +952,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
             } else if self.path.last() == Some(&uid) {
                 m.set_source_prefix(span);
             }
-            self.toks[tok as usize].attrs = attrs;
+            self.afe.toks[tok as usize].attrs = attrs;
             self.afe.set(j, Afe::El { uid, tok });
         }
     }
@@ -1183,7 +1090,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
         }
         // A special element open inside a formatting element can still be its furthest block, moved
         // out of it with its content.
-        let formatting = self.stack.iter().position(|n| n.vis != Vis::Inert && self.afe_index_of(n.uid).is_some());
+        let formatting = self.stack.iter().position(|n| n.vis != Vis::Inert && self.afe.index_of(n.uid).is_some());
         if formatting.is_some_and(|k| self.stack.iter().skip(k + 1).any(|n| n.vis != Vis::Inert && n.cat & SPECIAL != 0)) {
             return false;
         }
@@ -1446,7 +1353,7 @@ impl<'a, const REPLAY: bool> TreeBuilder<'a> for Browser<'a, REPLAY> {
         }
         if REPLAY {
             // End of input pops everything, the current node first; then the finished tree is walked.
-            while self.stack.len() > 0 {
+            while !self.stack.is_empty() {
                 self.pop(m, end);
             }
             return self.dom.walk(m);
