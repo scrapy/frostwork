@@ -637,12 +637,11 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
             return;
         }
         self.place(m, i - 1, at);
-        let attrs = std::mem::take(&mut self.afe.toks[tok as usize].attrs);
+        let attrs = self.afe.attrs_of(tok).to_vec();
         let mut node = self.stack[i];
         self.open(m, &mut node, &attrs, at);
         m.set_source_prefix(self.afe.toks[tok as usize].span);
         self.stack.replace(i, node);
-        self.afe.toks[tok as usize].attrs = attrs;
     }
 
     /// Open `node` as the matcher's next element, at the current insertion point.
@@ -949,7 +948,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
         for j in k..self.afe.len() {
             let Afe::El { tok, .. } = self.afe[j] else { unreachable!("a marker is open") };
             let (name, tag) = (self.afe.toks[tok as usize].name, self.afe.toks[tok as usize].tag);
-            let attrs = std::mem::take(&mut self.afe.toks[tok as usize].attrs);
+            let attrs = self.afe.attrs_of(tok).to_vec();
             let mut buf = [0; MAX_NAME];
             let node = self.new_node(name, lower(name, &mut buf), tag, Ns::Html, &attrs);
             let uid = node.uid;
@@ -963,7 +962,6 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
             } else if self.path.last() == Some(&uid) {
                 m.set_source_prefix(span);
             }
-            self.afe.toks[tok as usize].attrs = attrs;
             self.afe.set(j, Afe::El { uid, tok });
         }
     }

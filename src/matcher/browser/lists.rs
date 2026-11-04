@@ -315,13 +315,15 @@ impl<'a> std::ops::IndexMut<usize> for OpenStack<'a> {
     }
 }
 
-/// The start tag a formatting element was created for, kept so a clone can be made from it. `span` is
-/// the tag's source, which a clone's outer HTML begins with; `ark` is what Noah's Ark compares it by
-/// ([`ark_key`]).
+type RawAttr<'a> = (&'a [u8], Option<&'a [u8]>);
+
+/// The start tag a formatting element was created for, kept so a clone can be made from it. Its
+/// attributes are `attrs` of [`Formatting::attrs`]; `span` is the tag's source, which a clone's outer
+/// HTML begins with; `ark` is what Noah's Ark compares it by ([`ark_key`]).
 pub(super) struct FmtTok<'a> {
     pub(super) name: &'a [u8],
     pub(super) tag: Tag,
-    pub(super) attrs: Vec<(&'a [u8], Option<&'a [u8]>)>,
+    attrs: std::ops::Range<usize>,
     pub(super) span: SourcePrefix,
     ark: u64,
 }
@@ -382,14 +384,12 @@ fn ark_key<'x>(tag: Tag, attrs: impl Iterator<Item = (&'x [u8], ArkValue<'x>)>) 
 
 /// Do two formatting tokens carry the same attributes, as Noah's Ark compares them: by name, the first
 /// of a repeated name, in any order, with equal values.
-fn same_attrs<'a>(input: EncodedInput<'a>, a: &FmtTok<'a>, b: &FmtTok<'a>) -> bool {
-    let first = |attrs: &[(&'a [u8], Option<&'a [u8]>)], j: usize| {
-        !attrs[..j].iter().any(|(n, _)| n.eq_ignore_ascii_case(attrs[j].0))
-    };
-    let names = |attrs: &[(&'a [u8], Option<&'a [u8]>)]| (0..attrs.len()).filter(|&j| first(attrs, j)).count();
-    names(&a.attrs) == names(&b.attrs) && (0..a.attrs.len()).filter(|&j| first(&a.attrs, j)).all(|j| {
-        let (n, v) = a.attrs[j];
-        b.attrs.iter().find(|(n2, _)| n.eq_ignore_ascii_case(n2)).is_some_and(|&(_, v2)| {
+fn same_attrs<'a>(input: EncodedInput<'a>, a: &[RawAttr<'a>], b: &[RawAttr<'a>]) -> bool {
+    let first = |attrs: &[RawAttr<'a>], j: usize| !attrs[..j].iter().any(|(n, _)| n.eq_ignore_ascii_case(attrs[j].0));
+    let names = |attrs: &[RawAttr<'a>]| (0..attrs.len()).filter(|&j| first(attrs, j)).count();
+    names(a) == names(b) && (0..a.len()).filter(|&j| first(a, j)).all(|j| {
+        let (n, v) = a[j];
+        b.iter().find(|(n2, _)| n.eq_ignore_ascii_case(n2)).is_some_and(|&(_, v2)| {
             let (v, v2) = (v.unwrap_or(b""), v2.unwrap_or(b""));
             v == v2 || input.attr_value(v) == input.attr_value(v2)
         })
@@ -410,6 +410,8 @@ pub(super) struct Formatting<'a> {
     arks: HashMap<(u32, u64), u32, Keyed>,
     /// Every formatting element's start tag, in document order; an element and its copies share one.
     pub(super) toks: Vec<FmtTok<'a>>,
+    /// The attributes of every start tag in `toks`, one after another.
+    attrs: Vec<RawAttr<'a>>,
 }
 
 impl<'a> Formatting<'a> {
@@ -472,11 +474,19 @@ impl<'a> Formatting<'a> {
     /// Keep the start tag `t` of a formatting element, and return its index in [`Self::toks`].
     pub(super) fn add_token(&mut self, input: EncodedInput<'a>, t: &StartTok<'a, '_>) -> u32 {
         let tok = self.toks.len() as u32;
-        let attrs = t.attrs.to_vec();
+        let attrs = t.attrs;
         let firsts = (0..attrs.len()).filter(|&j| !attrs[..j].iter().any(|(n, _)| n.eq_ignore_ascii_case(attrs[j].0)));
         let ark = ark_key(t.tag, firsts.map(|j| (attrs[j].0, ArkValue::of(input, attrs[j].1.unwrap_or(b"")))));
-        self.toks.push(FmtTok { name: t.name, tag: t.tag, attrs, span: SourcePrefix::new(t.start, t.end), ark });
+        let from = self.attrs.len();
+        self.attrs.extend_from_slice(attrs);
+        let span = SourcePrefix::new(t.start, t.end);
+        self.toks.push(FmtTok { name: t.name, tag: t.tag, attrs: from..self.attrs.len(), span, ark });
         tok
+    }
+
+    /// The attributes of the start tag `tok`.
+    pub(super) fn attrs_of(&self, tok: u32) -> &[RawAttr<'a>] {
+        &self.attrs[self.toks[tok as usize].attrs.clone()]
     }
 
     /// Push the element `uid`, made for token `tok`. Noah's Ark: with three alike after the last marker
@@ -495,7 +505,7 @@ impl<'a> Formatting<'a> {
                     let other = &self.toks[o as usize];
                     if other.ark == t.ark {
                         keyed -= 1;
-                        if other.tag == t.tag && same_attrs(input, other, t) {
+                        if other.tag == t.tag && same_attrs(input, self.attrs_of(o), self.attrs_of(tok)) {
                             same += 1;
                             earliest = Some(k);
                         }
