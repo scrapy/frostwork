@@ -13,8 +13,11 @@
 #   make gate-corpus [CORPUS=<dir>]  value-parity gate over a page corpus (defaults to tests/corpus)
 #   make gate-seq    every tag SEQUENCE up to depth 4, compared on the whole tree
 #   make gate-browser  the same whole-tree fingerprint against real Chrome (BROWSERS=chrome,firefox for
-#                    both), each divergence reduced and filed under a docs/BROWSER_MODE.md construct;
+#                    both), each divergence reduced and filed under a docs/BROWSER_MODE.md construct,
+#                    plus value columns (native CSS, XPath through the lxml bridge);
 #                    fails on NOVEL or on coverage. Needs Node 22+ and the browsers (FROSTWORK_CHROME=…)
+#   make gate-corpus-browser [CORPUS=<dir>]  browser mode vs Chrome page loads over a page corpus,
+#                    per selector, split tree vs value (report-only)
 #   make corpus-real fetch REAL pages into fixtures/realweb (gitignored), then gate over them
 #   make corpus-fresh  fail unless corpus-real passed at the engine sources in this tree
 #   make gate-mutate flip rule-table cells one at a time and check a gate notices (sampled)
@@ -25,6 +28,7 @@
 #   make release-check  build the sdist and validate the exact metadata/README PyPI will render
 #   make gate-webpoet  web-poet integration differential vs parsel, compared on the WHOLE item,
 #                    plus the upstream surface snapshot (docs/WEBPOET_SURFACE.md) vs the real libraries
+#   make gate-webpoet-browser  the same with browser-mode page objects, the expected item from Chrome
 #   make gate-webpoet-mutate  break one webpoet.py line at a time; does any gate notice?
 #   make bench       full throughput matrix vs Parsel (minutes; for release notes)
 #   make bench-smoke quick article/deep-nesting performance check
@@ -50,7 +54,8 @@ WHEELHOUSE ?= .oracle-wheels/libxml2-$(LIBXML2)
 FUZZ_ITERS ?= 6000
 
 .DEFAULT_GOAL := help
-.PHONY: help bootstrap oracle bootstrap-bench test build ext gate gate-corpus gate-seq gate-browser corpus-real gate-mutate \
+.PHONY: help bootstrap oracle bootstrap-bench test build ext gate gate-corpus gate-seq gate-browser gate-webpoet-browser \
+	gate-corpus-browser corpus-real gate-mutate \
 	gate-mutate-full fuzz-smoke soak py gate-webpoet gate-webpoet-mutate bench bench-smoke bench-webpoet \
 	bench-engines bench-engines-mem verify-migration bench-migration release-check ci
 
@@ -221,6 +226,13 @@ WEBPOET_SCHEMAS ?= 120
 gate-webpoet: ext
 	$(PY) tools/diff_webpoet.py --schemas $(WEBPOET_SCHEMAS)
 	$(PY) tools/webpoet_surface.py --check
+
+# The same differential with browser-mode page objects, the expected item taken from Chrome: CSS fields
+# natively, XPath fields through the lossless lxml bridge. `.as_node()` must be refused at class definition,
+# and a field whose engine column already differs from the browser's is ENGINE (gate-browser's), not
+# DIVERGE. Not part of `ci`: it needs a local Chrome (FROSTWORK_CHROME=…) and Node 22+.
+gate-webpoet-browser: ext
+	$(PY) tools/diff_webpoet.py --schemas $(WEBPOET_SCHEMAS) --parser browser
 
 # "Would a gate notice if one of these lines were WRONG?" — the same question `gate-mutate` asks of the
 # engine's rule tables, for the layer that until recently had no gate at all. Its first run found two

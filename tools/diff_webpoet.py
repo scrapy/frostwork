@@ -430,6 +430,10 @@ def _group_ns(schema, frost: bool):
         return {g["name"]: maker(g["container"], **{n: field(s) for n, s in g["subs"]})}
 
     def getter(self, g=g):
+        if ORACLE is not None:
+            got = ORACLE.rows(_page_text(self), g["container"], [s for _n, s in g["subs"]])
+            rows = [{n: (col[0] if col else None) for (n, _s), col in zip(g["subs"], row)} for row in got]
+            return (rows[0] if rows else None) if g["one"] else rows
         rows = []
         for node in self.css(g["container"]):
             rows.append({n: node.css(s).get() for n, s in g["subs"]})
@@ -453,6 +457,15 @@ def _parsel_ns(fields, schema):
         off = name in schema.get("out_off", ())
 
         def getter(self, name=name, sel=sel, card=card, sep=sep, proc=proc, fn=fn, off=off):
+            if ORACLE is not None:
+                # browser mode: the values come from the browser, the shape from this getter as before. No
+                # node-taking processor reaches here: `.as_node()` is refused in browser mode and its
+                # fields are graded as refusals (`_browser_schema`). A strings processor takes the list.
+                col = ORACLE.column(_page_text(self), sel)
+                if proc is not None and not off and proc in LIST_INPUT_PROCESSORS:
+                    return col
+                value = col if card == "all" else sep.join(col) if card == "join" else (col[0] if col else None)
+                return fn(value) if fn is not None else value
             sub = self.xpath(sel) if sel.startswith(("/", "(")) else self.css(sel)
             if proc is not None and not off and proc not in VALUE_INPUT_PROCESSORS:
                 # A node/strings processor: hand over what a real page object hands it, keyed on the
@@ -524,13 +537,14 @@ def build_page(schema, shape, *, frost: bool, kind: str = "http"):
     # The response type picks the BASE on both sides, so the browser column compares like with like:
     # FrostBrowserPage against web-poet's own BrowserPage, not against a WebPage that happens to work.
     #
-    # The Frostwork side is lxml mode, because the oracle is parsel. It is declared on the class nearest
-    # the root, so the inheriting and rebuilding shapes also prove the class keyword survives them.
+    # The Frostwork side is in PARSER's mode: lxml against parsel, browser against the browser. It is
+    # declared on the class nearest the root, so the inheriting and rebuilding shapes also prove the class
+    # keyword survives them.
     if frost:
         root = FrostBrowserPage if kind == "browser" else FrostPage
     else:
         root = BrowserPage if kind == "browser" else WebPage
-    mode = {"parser": "lxml"} if frost else {}
+    mode = {"parser": PARSER} if frost else {}
     fields = schema["fields"]
     procs = _processors_cls(schema)
     if shape in ("inherit_plain", "inherit_attrs"):
@@ -602,7 +616,7 @@ def build_zyte_pages():
     # A Frostwork base has to be present (either order works): the markers are converted by its
     # `__init_subclass__`, and a `field()` on a class without one raises at class definition.
     return (
-        type("FrostProductPage", (FrostPage, ProductPage), frost_ns, parser="lxml"),
+        type("FrostProductPage", (FrostPage, ProductPage), frost_ns, parser=PARSER),
         type("ParselProductPage", (ProductPage,), oracle_ns),
     )
 
@@ -636,6 +650,136 @@ def _zyte_schema() -> dict:
         "out_off": (),
         "group": None,
     }
+
+
+# --------------------------------------------------------------------------- browser mode
+# `--parser browser`: the Frostwork side is a browser-mode page object, and the expected item comes from the
+# browser. CSS fields are answered natively (`querySelectorAll`, tools/browser_oracle/css.py) and XPath
+# fields through the lossless lxml bridge (tools/browser_oracle/bridge.py), both on the tree one load of the
+# page built. The parsel page objects stay the oracle's SHAPE (getters, `Processors`, `out=`, `.get()` vs
+# `.getall()`); only their values come from the browser.
+#
+# Two things change in the verdict. `.as_node()` is refused at class definition in browser mode, so a
+# schema with a node-taking processor is checked for that refusal and then graded without those fields
+# (`_browser_schema`). And until browser mode builds a browser's tree, many pages differ at the ENGINE
+# level, which `make gate-browser` and `make gate-corpus-browser` grade: a field whose own column already
+# differs between `frostwork.extract` and the browser is ENGINE, not DIVERGE, because this gate is about
+# the page-object layer. A DIVERGE here is a field whose column agrees and whose item value does not.
+PARSER = "lxml"
+ORACLE = None  # a BrowserAnswers in browser mode
+
+
+def _page_text(page) -> str:
+    """The text the oracle answered for: an HttpResponse's decoded text, a BrowserResponse's html."""
+    response = page.response
+    return str(response.html) if isinstance(response, BrowserResponse) else response.text
+
+
+class BrowserAnswers:
+    """Per page, every column the generated schemas can ask for, from one browser load of that page."""
+
+    GROUP = (".card", ["h3 a::text", "h3 a::attr(href)", ".price::text"])
+
+    def __init__(self, oracle):
+        self.oracle = oracle
+        self.flat = sorted({sel for _n, sel, _p in PROCESSOR_FIELDS + VALUE_FIELDS} | {s for _n, s in ZYTE_FIELDS})
+        self._pages: dict = {}
+
+    def _page(self, text: str, groups=()):
+        from browser_oracle import bridge as Br
+        from browser_oracle import css as C
+
+        page = self._pages.get(text)
+        want = [g for g in ((self.GROUP,) + tuple(groups)) if page is None or ("group", g[0], tuple(g[1])) not in page[1]]
+        if page is not None and not want:
+            return page
+        sels = ([s for s in self.flat if C.is_css(s)] if page is None else []) + [(c, list(s)) for c, s in want]
+        trees, answers = self.oracle.query([text], [sels])
+        if trees[0] is None or answers[0] is None:
+            raise RuntimeError(f"the browser could not load the page: {self.oracle.errors[-1:]}")
+        got = {(("group", s[0], tuple(s[1])) if isinstance(s, tuple) else s): a for s, a in zip(sels, answers[0])}
+        if page is None:
+            page = self._pages[text] = (Br.Bridge(trees[0]), got)
+        else:
+            page[1].update(got)
+        return page
+
+    def _answer(self, a, what):
+        from browser_oracle.client import Refused
+
+        if isinstance(a, Refused):
+            raise RuntimeError(f"the browser oracle cannot answer {what!r}: {a.reason}")
+        return a
+
+    def column(self, text: str, sel: str) -> list:
+        from browser_oracle import css as C
+
+        bridge, css = self._page(text)
+        return self._answer(css[sel], sel) if C.is_css(sel) else bridge.xpath(sel)
+
+    def rows(self, text: str, container: str, subs: list) -> list:
+        """`[row][sub][value]`, parsel's `node.css(sub)` relative to each container match."""
+        _bridge, css = self._page(text, [(container, list(subs))])
+        return self._answer(css[("group", container, tuple(subs))], container)
+
+
+def _same_column(mine: list, theirs: list, sel: str) -> bool:
+    if mine == theirs:
+        return True
+    if not is_node_query(sel) or len(mine) != len(theirs):
+        return False
+    try:
+        return all(_structure(a) == _structure(b) for a, b in zip(mine, theirs))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def engine_differs(html: bytes, name: str, schema) -> bool:
+    """Browser mode: does the ENGINE's own column for this field differ from the browser's?"""
+    g = schema.get("group")
+    if g and g["name"] == name:
+        _flat, grouped = frostwork.extract_grouped(
+            html, [], [(g["container"], [(n, s) for n, s in g["subs"]])], parser=PARSER, strict=False)
+        return grouped[0] != ORACLE.rows(html.decode(), g["container"], [s for _n, s in g["subs"]])
+    sel = next((s for n, s, _p in schema["fields"] if n == name), None)
+    if sel is None:
+        return False
+    mine = frostwork.extract(html, [sel], parser=PARSER, strict=False)[0]
+    return not _same_column(mine, ORACLE.column(html.decode(), sel), sel)
+
+
+def _as_node_fields(schema) -> set:
+    """The fields `_frost_ns` declares `.as_node()`: a node-taking processor over a bare element, not declined."""
+    return {name for name, sel, proc in schema["fields"]
+            if proc is not None and name not in schema.get("out_off", ()) and is_node_query(sel)
+            and PROCESSORS[proc][1]}
+
+
+def _browser_schema(schema, shape, kind, stat, refused, examples, key):
+    """Browser mode: a schema with `.as_node()` fields must be REFUSED at class definition, naming browser
+    mode; then the same schema without them is what gets graded, so the rest of the item still is."""
+    nodes = _as_node_fields(schema)
+    if not nodes:
+        return schema
+    procs = {n: p for n, _s, p in schema["fields"]}
+    try:
+        build_page(schema, shape, frost=True, kind=kind)
+    except TypeError as exc:
+        if "browser mode" not in str(exc):
+            raise
+        stat["REFUSED"] += 1
+        for n in nodes:
+            refused[procs[n]] += 1
+    else:
+        stat["ACCEPTED"] += 1
+        examples.append((key, "<.as_node() accepted in browser mode>", sorted(nodes), "", ""))
+    return {**schema, "fields": [f for f in schema["fields"] if f[0] not in nodes]}
+
+
+def _browser_verdict(v: str, html: bytes, name: str, schema) -> str:
+    if v == "DIVERGE" and ORACLE is not None and engine_differs(html, name, schema):
+        return "ENGINE"
+    return v
 
 
 # --------------------------------------------------------------------------- running a pair
@@ -788,34 +932,48 @@ def expected_cells(shapes=SHAPES, browser: bool = True, zyte: bool = True) -> li
     return cells + (["zyte_productpage/http"] if zyte else [])
 
 
-def required_columns() -> list:
+def required_columns(parser: str = "lxml") -> list:
     """The discrimination columns a run must contain, as ``(name, why, exact)`` — DERIVED, not listed.
 
     Two kinds, and the difference matters. Every non-declined `ProcessorCase` must appear as an EXACT
     bucket: a substring test would be satisfied by `breadcrumbs (out=[])` alone, i.e. by the variant while
     the plain column went missing. The feature COMBINATIONS are substring markers, since they are suffixes
-    attached to whichever processor drew them that run."""
+    attached to whichever processor drew them that run.
+
+    In browser mode a node-taking processor and the zyte composition are REFUSED rather than graded, so
+    their columns are replaced by `required_refusals`."""
+    browser = parser == "browser"
     exact = [(f"{c.field_name}", f"the {c.processor} column", True)
-             for c in webpoet_cases.cases_for("generated")]
-    exact += [(f"zyte:{c.field_name}", f"{c.processor} through zyte's real ProductPage wiring", True)
-              for c in webpoet_cases.cases_for("productpage")]
+             for c in webpoet_cases.cases_for("generated") if not (browser and c.takes_node)]
+    if not browser:
+        exact += [(f"zyte:{c.field_name}", f"{c.processor} through zyte's real ProductPage wiring", True)
+                  for c in webpoet_cases.cases_for("productpage")]
     exact += [(name, f"a generic `out=` processor over the field's own value ({name})", True)
               for name in sorted(GENERIC_PROCESSORS)]
     exact += [
         ("(no processor)", "plain value fields, where the terminal contract answers", True),
         ("Many", "a grouped field's row list", True),
         ("One", "a grouped field's first row", True),
-        ("zyte:(other fields)", "every undeclared field of the real Product item", True),
     ]
+    if not browser:
+        exact.append(("zyte:(other fields)", "every undeclared field of the real Product item", True))
     markers = [
         ("(out=[])", "an explicit out=[] cancelling an inherited Processors entry", False),
         ("+map", "a .map() on a value-processor field — the shape -> map -> processor order", False),
-        ("(all=True)", "a node-taking processor on an all=True field — the SelectorList branch", False),
     ]
+    if not browser:
+        markers.append(("(all=True)", "a node-taking processor on an all=True field — the SelectorList branch",
+                        False))
     return exact + markers
 
 
-def coverage_failures(by_shape, by_proc, meaningful, witnessed=None, cells=None, kinds=INPUT_KINDS) -> list:
+def required_refusals() -> list:
+    """Browser mode: what must be seen REFUSED at class definition, because `.as_node()` re-parses with lxml."""
+    return [c.field_name for c in webpoet_cases.cases_for("generated") if c.takes_node] + ["zyte_productpage"]
+
+
+def coverage_failures(by_shape, by_proc, meaningful, witnessed=None, cells=None, kinds=INPUT_KINDS,
+                      parser: str = "lxml", refused=None) -> list:
     """Reasons this run proves less than its PASS suggests. Pure and importable so `tests/test_gates.py`
     can seed each one.
 
@@ -830,7 +988,7 @@ def coverage_failures(by_shape, by_proc, meaningful, witnessed=None, cells=None,
     for key, d in by_shape.items():
         # `.get`, not `[...]`: a pure function a test seeds with plain dicts, not only the sweep's defaultdict
         cell = "/".join(key.split("/")[:2])  # drop the "/(build)" suffix the build-skip bucket carries
-        graded[cell] += sum(d.get(v, 0) for v in ("AGREE", "WS", "DIVERGE", "CRASH"))
+        graded[cell] += sum(d.get(v, 0) for v in ("AGREE", "WS", "DIVERGE", "CRASH", "ENGINE"))
         skipped[cell] += d.get("ORACLE-SKIP", 0)
     for cell in expected_cells() if cells is None else cells:
         if graded.get(cell, 0) == 0:
@@ -878,7 +1036,7 @@ def coverage_failures(by_shape, by_proc, meaningful, witnessed=None, cells=None,
                 f"column {bucket!r} never carried a non-empty expected value, so it cannot go red — the "
                 f"generated markup does not feed it. Fix `gen_page`, do not delete the column."
             )
-    for marker, why, exact in required_columns():
+    for marker, why, exact in required_columns(parser):
         present = marker in by_proc if exact else any(marker in bucket for bucket in by_proc)
         if not present:
             failures.append(
@@ -886,6 +1044,13 @@ def coverage_failures(by_shape, by_proc, meaningful, witnessed=None, cells=None,
                 f"survived the differential once because nothing generated it, or is a processor the "
                 f"registry (tools/webpoet_cases.py) says is covered."
             )
+    if parser == "browser":
+        for name in required_refusals():
+            if not (refused or {}).get(name, 0):
+                failures.append(
+                    f"{name!r} was never seen refused at class definition: browser mode refuses `.as_node()`, "
+                    f"and a refusal no run provokes is one nothing checks."
+                )
     return failures
 
 
@@ -902,9 +1067,10 @@ def unprocessed_values(html: bytes, schema) -> dict:
     for name, query, proc in schema["fields"]:
         if proc is None:
             continue
-        sub = sel.xpath(query) if query.startswith(("/", "(")) else sel.css(query)
+        col = ORACLE.column(html.decode(), query) if ORACLE is not None else (
+            sel.xpath(query) if query.startswith(("/", "(")) else sel.css(query)).getall()
         card, sep = schema["cards"][name]
-        out[name] = sub.getall() if card == "all" else (sep or "").join(sub.getall()) if card == "join" else sub.get()
+        out[name] = col if card == "all" else (sep or "").join(col) if card == "join" else (col[0] if col else None)
     return out
 
 
@@ -926,7 +1092,23 @@ def sweep(
     shapes=SHAPES,
     zyte: bool = True,
     contract_only: bool = False,
+    parser: str = "lxml",
+    oracle=None,
 ):
+    """`_sweep` in `parser`'s mode. Browser mode needs `oracle`, a running `BrowserOracle`: the expected
+    values come from it, and `stat` gains ENGINE, REFUSED, ACCEPTED and one `refused:<name>` per refusal."""
+    global PARSER, ORACLE
+    if parser == "browser" and oracle is None:
+        raise ValueError("browser mode needs a BrowserOracle")
+    saved = PARSER, ORACLE
+    PARSER, ORACLE = parser, (BrowserAnswers(oracle) if parser == "browser" else None)
+    try:
+        return _sweep(seed, schemas, browser, show, shapes, zyte, contract_only)
+    finally:
+        PARSER, ORACLE = saved
+
+
+def _sweep(seed, schemas, browser, show, shapes, zyte, contract_only):
     """Run the differential and return `(stat, by_shape, by_proc, meaningful, examples)`.
 
     Split out of `main` so it can be used as a DETECTOR: `tools/mutate_webpoet.py` breaks one load-bearing
@@ -943,6 +1125,7 @@ def sweep(
     meaningful = defaultdict(int)
     witnessed = defaultdict(int)
     examples = []
+    refused = defaultdict(int)
 
     inputs = [("http", _http)] + ([("browser", _browser)] if browser else [])
     args = argparse.Namespace(show=show)
@@ -957,6 +1140,8 @@ def sweep(
     ]
     for contract, (kind, make_response) in contract_cases:
         key = f"contract/{kind}"
+        if ORACLE is not None:
+            contract = _browser_schema(contract, "plain", kind, stat, refused, examples, key)
         oracle_cls = build_page(contract, "plain", frost=False, kind=kind)
         frost_cls = build_page(contract, "plain", frost=True, kind=kind)
         mine, mine_err = _to_item(frost_cls, make_response(contract_html))
@@ -971,6 +1156,7 @@ def sweep(
         else:
             raw_values = unprocessed_values(contract_html, contract)
             for name, v, got, want in item_verdicts(dict(mine), dict(theirs), contract):
+                v = _browser_verdict(v, contract_html, name, contract)
                 stat[v] += 1
                 stat["pairs"] += 1
                 by_shape[key][v] += 1
@@ -986,9 +1172,10 @@ def sweep(
     for shape in () if contract_only else shapes:
         for _ in range(schemas):
             html = gen_page(rng)
-            schema = gen_schema(rng)
+            drawn = gen_schema(rng)
             for kind, make_response in inputs:
                 key = f"{shape}/{kind}"
+                schema = drawn if ORACLE is None else _browser_schema(drawn, shape, kind, stat, refused, examples, key)
                 try:
                     oracle_cls = build_page(schema, shape, frost=False, kind=kind)
                 except Exception:  # noqa: BLE001 - oracle unbuildable in this shape; not our verdict
@@ -1022,6 +1209,7 @@ def sweep(
                     continue
                 raw_values = unprocessed_values(html, schema)
                 for name, v, got, want in item_verdicts(dict(mine), dict(theirs), schema):
+                    v = _browser_verdict(v, html, name, schema)
                     stat[v] += 1
                     stat["pairs"] += 1
                     by_shape[key][v] += 1
@@ -1036,7 +1224,20 @@ def sweep(
                     if v == "DIVERGE" and len(examples) < args.show:
                         examples.append((key, name, repr(got)[:150], repr(want)[:150], html.decode()[:120]))
 
-    if zyte:
+    if zyte and ORACLE is not None:
+        # `.as_node()` is refused in browser mode, and zyte's node processors need it, so the real
+        # composition must refuse at class definition rather than build.
+        try:
+            build_zyte_pages()
+        except TypeError as exc:
+            if "browser mode" not in str(exc):
+                raise
+            stat["REFUSED"] += 1
+            refused["zyte_productpage"] += 1
+        else:
+            stat["ACCEPTED"] += 1
+            examples.append(("zyte_productpage/http", "<.as_node() accepted in browser mode>", "", "", ""))
+    elif zyte:
         # The real composition, over the same generated pages. One pair per page rather than one per class
         # shape: the shape axis is about decorators and is covered above, while what this adds is zyte's own
         # MRO doing the processor wiring — the thing a synthesized `Processors` class cannot prove.
@@ -1088,6 +1289,8 @@ def sweep(
                 if v == "DIVERGE" and len(examples) < args.show:
                     examples.append((key, name, repr(got)[:150], repr(want)[:150], html.decode()[:120]))
 
+    for name, n in refused.items():
+        stat[f"refused:{name}"] = n
     return stat, by_shape, by_proc, meaningful, witnessed, examples
 
 
@@ -1100,23 +1303,47 @@ def main() -> None:
                     help="per-processor count of pairs whose expected value was non-empty")
     ap.add_argument("--no-browser", action="store_false", dest="browser",
                     help="skip the BrowserResponse input (it is fed by default)")
+    ap.add_argument("--parser", choices=("lxml", "browser"), default="lxml",
+                    help="the Frostwork side's parse mode; browser takes the expected item from Chrome")
     oracle.add_argument(ap)
     args = ap.parse_args()
     oracle.require(args.allow_old_libxml2)
     print(f"frostwork {frostwork.__version__ if hasattr(frostwork, '__version__') else ''} "
-          f"web-poet differential")
+          f"web-poet differential, parser={args.parser!r}")
     print(oracle.banner())
 
-    stat, by_shape, by_proc, meaningful, witnessed, examples = sweep(
-        seed=args.seed, schemas=args.schemas, browser=args.browser, show=args.show
-    )
+    if args.parser == "browser":
+        from browser_oracle.client import BrowserOracle
+
+        with BrowserOracle("chrome") as chrome:
+            print(f"expected item  : parsel's page objects, values from {chrome.build} "
+                  f"(CSS natively, XPath through the lxml bridge)")
+            stat, by_shape, by_proc, meaningful, witnessed, examples = sweep(
+                seed=args.seed, schemas=args.schemas, browser=args.browser, show=args.show,
+                parser="browser", oracle=chrome,
+            )
+            oracle_errors = list(chrome.errors)
+    else:
+        stat, by_shape, by_proc, meaningful, witnessed, examples = sweep(
+            seed=args.seed, schemas=args.schemas, browser=args.browser, show=args.show
+        )
+        oracle_errors = []
+    refused = {k[len("refused:"):]: v for k, v in stat.items() if k.startswith("refused:")}
 
     print(f"\n  pairs (field comparisons) {stat['pairs']:>8}")
     print(f"  AGREE                     {stat['AGREE']:>8}")
     print(f"  WS (whitespace only)      {stat['WS']:>8}")
     print(f"  ORACLE-SKIP               {stat['ORACLE-SKIP']:>8}   (parsel cannot take this input)")
     print(f"  DIVERGE                   {stat['DIVERGE']:>8}   <-- gate: must be 0")
-    print(f"  CRASH (to_item raised)    {stat['CRASH']:>8}   <-- gate: must be 0\n")
+    print(f"  CRASH (to_item raised)    {stat['CRASH']:>8}   <-- gate: must be 0")
+    if args.parser == "browser":
+        print(f"  ENGINE                    {stat['ENGINE']:>8}   (the field's own column differs from the "
+              f"browser's: graded by gate-browser, not here)")
+        print(f"  REFUSED (.as_node())      {stat['REFUSED']:>8}   (expected at class definition: {refused})")
+        print(f"  ACCEPTED (.as_node())     {stat['ACCEPTED']:>8}   <-- gate: must be 0")
+        if oracle_errors:
+            print(f"  oracle errors             {len(oracle_errors):>8}   <-- gate: must be 0")
+    print()
 
     print("  by class shape / input:    pairs   AGREE   WS  DIVERGE  CRASH  ORACLE-SKIP")
     for key in sorted(by_shape):
@@ -1125,12 +1352,12 @@ def main() -> None:
         print(f"    {key:<24}{p:>6}{d['AGREE']:>8}{d['WS']:>5}{d['DIVERGE']:>9}{d['CRASH']:>7}"
               f"{d['ORACLE-SKIP']:>13}")
 
-    print("\n  by processor:             pairs   AGREE   WS  DIVERGE   non-empty   processor ran")
+    print("\n  by processor:             pairs   AGREE   WS  DIVERGE   non-empty   processor ran   ENGINE")
     for key in sorted(by_proc):
         d = by_proc[key]
         p = sum(d.values())
         print(f"    {key:<24}{p:>6}{d['AGREE']:>8}{d['WS']:>5}{d['DIVERGE']:>9}{meaningful[key]:>12}"
-              f"{witnessed[key]:>15}")
+              f"{witnessed[key]:>15}{d['ENGINE']:>9}")
     total_meaningful = sum(meaningful.values())
     print(f"\n  DISCRIMINATION: {total_meaningful} of {stat['pairs']} pairs had a non-empty expected value."
           f" A processor row with 0 here cannot go red.")
@@ -1148,16 +1375,18 @@ def main() -> None:
     kinds = INPUT_KINDS if args.browser else ("http",)
     coverage = coverage_failures(
         by_shape, by_proc, meaningful, witnessed,
-        cells=expected_cells(browser=args.browser), kinds=kinds,
+        cells=expected_cells(browser=args.browser, zyte=args.parser == "lxml"), kinds=kinds,
+        parser=args.parser, refused=refused,
     )
     if coverage:
         print("\n  COVERAGE FAILURES (the run proves less than a PASS suggests):")
         for line in coverage:
             print(f"    - {line}")
 
-    gate = stat["DIVERGE"] + stat["CRASH"]
+    gate = stat["DIVERGE"] + stat["CRASH"] + stat["ACCEPTED"] + len(oracle_errors)
     ok = gate == 0 and not coverage
-    print(f"\n  GATE: DIVERGE+CRASH = {gate}, coverage failures = {len(coverage)}  ->  "
+    label = "DIVERGE+CRASH" if args.parser == "lxml" else "DIVERGE+CRASH+ACCEPTED+oracle errors"
+    print(f"\n  GATE: {label} = {gate}, coverage failures = {len(coverage)}  ->  "
           f"{'PASS' if ok else 'FAIL'}")
     sys.exit(0 if ok else 1)
 

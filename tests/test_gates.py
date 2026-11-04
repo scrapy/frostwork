@@ -1137,6 +1137,51 @@ def test_every_required_column_comes_from_the_fixed_schemas_not_from_a_lucky_see
         )
 
 
+def test_the_browser_mode_webpoet_gate_refuses_as_node_and_files_engine_divergences():
+    """`make gate-webpoet-browser` grades browser-mode page objects against values from the browser. Three of
+    its decisions are seeded here with no browser: `.as_node()` must be REFUSED at class definition, and a
+    build that accepts it is counted (and fails the gate); a field whose engine column already differs from
+    the browser's is ENGINE, which gate-browser owns, while one whose column agrees stays DIVERGE; and a run
+    that never provoked a refusal is a coverage failure, not a quiet pass."""
+    from collections import defaultdict
+
+    import diff_webpoet as W
+
+    schema = W.contract_schemas()[0][1]
+    nodes = W._as_node_fields(schema)
+    assert nodes, "the contract schema declares node-taking processors"
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(W, "PARSER", "browser")
+        stat, refused, examples = defaultdict(int), defaultdict(int), []
+        graded = W._browser_schema(schema, "plain", "http", stat, refused, examples, "contract/http")
+        assert stat["REFUSED"] == 1 and stat["ACCEPTED"] == 0
+        assert not nodes & {n for n, _s, _p in graded["fields"]}, "a refused field is not graded as a value"
+        mp.setattr(W, "build_page", lambda *a, **k: None)  # a page object that accepts .as_node()
+        W._browser_schema(schema, "plain", "http", stat, refused, examples, "contract/http")
+        assert stat["ACCEPTED"] == 1
+
+    class Oracle:
+        def __init__(self, col):
+            self.col = col
+
+        def column(self, text, sel):
+            return self.col
+
+    html, one = b"<h1>Roomy Bag</h1>", {"fields": [("name", "h1::text", None)], "group": None}
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(W, "PARSER", "browser")
+        mp.setattr(W, "ORACLE", Oracle(["Roomy Bag"]))
+        assert W._browser_verdict("DIVERGE", html, "name", one) == "DIVERGE", "the column agrees"
+        mp.setattr(W, "ORACLE", Oracle(["Another Bag"]))
+        assert W._browser_verdict("DIVERGE", html, "name", one) == "ENGINE"
+        assert W._browser_verdict("AGREE", html, "name", one) == "AGREE"
+
+    assert "breadcrumbs" in {m for m, _w, _e in W.required_columns()}
+    assert "breadcrumbs" not in {m for m, _w, _e in W.required_columns("browser")}
+    failures = W.coverage_failures({}, {}, {}, {}, cells=[], kinds=(), parser="browser", refused={})
+    assert any("never seen refused" in f for f in failures)
+
+
 def webpoet_cases_module():
     import webpoet_cases
 
