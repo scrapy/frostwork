@@ -2620,7 +2620,7 @@ impl<'a> TokenSink<'a> for Matcher<'a> {
         };
         if let Some(nav) = self.nav.as_mut() {
             if nav.wants(name) {
-                nav.start_tag(name, raw_attrs, self.stack.iter().map(|e| e.tag), self.input.encoding());
+                nav.start_tag(name, raw_attrs, &self.stack, span_start, self.input.encoding());
             }
         }
         // The element's signature is built from the MATERIALIZED attributes only. That is sound because
@@ -2753,6 +2753,9 @@ impl<'a> TokenSink<'a> for Matcher<'a> {
     }
 
     fn end_tag(&mut self, name: &[u8], close_start: usize, close_end: usize) {
+        if let Some(nav) = self.nav.as_mut() {
+            nav.end_tag(name, &self.stack);
+        }
         // A frame end tag matching an earlier IGNORED frame start tag pops that phantom, not the
         // document: `<div><body>x</body>tail</div>` keeps `xtail` inside the div (verified against
         // libxml2, which keeps a stack entry for the start tag it merged away). Checked before the

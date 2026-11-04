@@ -7,12 +7,16 @@
 //! document is read, as browsers do: a `<base>` or a refresh after the first few kilobytes counts.
 //!
 //! The collector is fed from the matcher's start-tag handling, after implied closes have run, so the
-//! open-element stack it is shown is exactly the element's ancestors.
+//! open-element stack it is shown is exactly the element's ancestors. That stack is libxml2's, which
+//! knows nothing of SVG or MathML, so the collector tracks where a browser would be in foreign content
+//! on its own (see [`Scope`]).
 
 use std::borrow::Cow;
 
 use encoding_rs::Encoding;
 use url::Url;
+
+use super::OpenElem;
 
 /// What [`crate::navigation`] and [`crate::Plan::extract_with_navigation`] collect.
 #[derive(Clone, Copy, Debug)]
@@ -50,18 +54,139 @@ pub(crate) struct NavCollector {
     base: Option<Url>,
     /// The refresh to follow, with `None` for the document itself.
     refresh: Option<(u64, Option<Url>)>,
+    /// The open elements that start or end foreign content for a browser, outermost first, tracked
+    /// until the base URL is settled.
+    scopes: Vec<OpenScope>,
+}
+
+/// What a browser parses the content of an element as. Inside SVG or MathML, a `<base>` is a foreign
+/// element that sets no base URL.
+#[derive(Clone, Copy, PartialEq)]
+enum Scope {
+    Svg,
+    Math,
+    /// An integration point, whose content is HTML again: `<foreignObject>` in SVG, `<mi>` in MathML…
+    Html,
+}
+
+struct OpenScope {
+    /// The element's index on the open-element stack and the offset of its `<`, which together tell
+    /// whether it is still open.
+    depth: usize,
+    start: usize,
+    scope: Scope,
+    /// Whether a browser has already closed it, because a tag such as `<p>` broke out of the foreign
+    /// content it starts, while libxml2 keeps it open.
+    broken: bool,
 }
 
 impl NavCollector {
     pub(crate) fn new(doc_url: Option<Url>, doc_encoding: &'static Encoding, opts: NavOptions) -> Self {
-        NavCollector { opts, doc_url, doc_encoding, base_seen: false, base: None, refresh: None }
+        NavCollector {
+            opts,
+            doc_url,
+            doc_encoding,
+            base_seen: false,
+            base: None,
+            refresh: None,
+            scopes: Vec::new(),
+        }
     }
 
-    /// Whether a start tag named `name` can change the answer. Checked before anything else, so every
-    /// other element costs one comparison of its name length.
+    /// Whether a start tag named `name` can change the answer. Checked before anything else, so outside
+    /// foreign content every other element costs a few comparisons of its name length.
     pub(crate) fn wants(&self, name: &[u8]) -> bool {
-        (!self.base_seen && name.eq_ignore_ascii_case(b"base"))
+        (!self.base_seen && (!self.scopes.is_empty() || is_any(name, &[b"base", b"svg", b"math"])))
             || (self.opts.meta_refresh && name.eq_ignore_ascii_case(b"meta"))
+    }
+
+    /// An end tag, which in foreign content breaks out of it if it is `</p>` or `</br>`.
+    pub(crate) fn end_tag(&mut self, name: &[u8], stack: &[OpenElem]) {
+        if self.base_seen || self.scopes.is_empty() || !is_any(name, &[b"p", b"br"]) {
+            return;
+        }
+        self.prune(stack);
+        if self.in_foreign_content() {
+            self.break_out();
+        }
+    }
+
+    /// Drop the scopes whose element the engine has closed. Run before any scope is pushed, so the open
+    /// ones are always a prefix of `scopes`.
+    fn prune(&mut self, stack: &[OpenElem]) {
+        while let Some(scope) = self.scopes.last() {
+            if stack.get(scope.depth).is_some_and(|e| e.start == scope.start) {
+                break;
+            }
+            self.scopes.pop();
+        }
+    }
+
+    /// The scope a browser is in, `None` meaning HTML outside any SVG or MathML.
+    fn current_scope(&self) -> Option<Scope> {
+        self.scopes.iter().rev().find(|s| !s.broken).map(|s| s.scope)
+    }
+
+    fn in_foreign_content(&self) -> bool {
+        matches!(self.current_scope(), Some(Scope::Svg | Scope::Math))
+    }
+
+    /// Close every foreign element up to the nearest integration point, as a browser does.
+    fn break_out(&mut self) {
+        for scope in self.scopes.iter_mut().rev().filter(|s| !s.broken) {
+            if scope.scope == Scope::Html {
+                break;
+            }
+            scope.broken = true;
+        }
+    }
+
+    /// Track the foreign content that the start tag `name`, about to open at `depth` from offset
+    /// `start`, breaks out of or starts.
+    fn track_scope<'v>(
+        &mut self,
+        name: &[u8],
+        attr: impl Fn(&[u8]) -> Option<Cow<'v, str>>,
+        depth: usize,
+        start: usize,
+    ) {
+        // https://html.spec.whatwg.org/multipage/parsing.html#parsing-main-inforeign
+        const BREAKOUT: &[&[u8]] = &[
+            b"b", b"big", b"blockquote", b"body", b"br", b"center", b"code", b"dd", b"div", b"dl", b"dt",
+            b"em", b"embed", b"h1", b"h2", b"h3", b"h4", b"h5", b"h6", b"head", b"hr", b"i", b"img", b"li",
+            b"listing", b"menu", b"meta", b"nobr", b"ol", b"p", b"pre", b"ruby", b"s", b"small", b"span",
+            b"strong", b"strike", b"sub", b"sup", b"table", b"tt", b"u", b"ul", b"var",
+        ];
+        if self.in_foreign_content()
+            && (is_any(name, BREAKOUT)
+                || (name.eq_ignore_ascii_case(b"font")
+                    && [b"color".as_slice(), b"face", b"size"].iter().any(|a| attr(a).is_some())))
+        {
+            self.break_out();
+        }
+        let scope = if name.eq_ignore_ascii_case(b"svg") {
+            Scope::Svg
+        } else if name.eq_ignore_ascii_case(b"math") {
+            Scope::Math
+        } else {
+            let integration_point = match self.current_scope() {
+                Some(Scope::Svg) => is_any(name, &[b"foreignobject", b"desc", b"title"]),
+                Some(Scope::Math) => {
+                    is_any(name, &[b"mi", b"mo", b"mn", b"ms", b"mtext"])
+                        || (name.eq_ignore_ascii_case(b"annotation-xml")
+                            && attr(b"encoding").is_some_and(|e| {
+                                e.eq_ignore_ascii_case("text/html")
+                                    || e.eq_ignore_ascii_case("application/xhtml+xml")
+                            }))
+                }
+                _ => false,
+            };
+            if !integration_point {
+                return;
+            }
+            Scope::Html
+        };
+        self.scopes.push(OpenScope { depth, start, scope, broken: false });
     }
 
     /// Whether the rest of the document can no longer change the answer.
@@ -69,25 +194,15 @@ impl NavCollector {
         !self.opts.meta_refresh && self.base_seen
     }
 
-    pub(crate) fn start_tag<'t>(
+    /// A start tag `name` opening at offset `start`, below the open elements `stack`.
+    pub(crate) fn start_tag<'v>(
         &mut self,
         name: &[u8],
-        attrs: &[(&[u8], Option<&[u8]>)],
-        mut ancestors: impl Iterator<Item = &'t [u8]>,
+        attrs: &[(&'v [u8], Option<&'v [u8]>)],
+        stack: &[OpenElem],
+        start: usize,
         value_encoding: &'static Encoding,
     ) {
-        let is_base = name.eq_ignore_ascii_case(b"base");
-        // `<template>` content is not part of the document. A `<noscript>` is text to a browser running
-        // scripts. A `<base>` inside `<svg>` or `<math>` is a foreign element, while a `<meta>` breaks out
-        // of foreign content and stays an HTML element.
-        let ignored = |tag: &[u8]| {
-            tag.eq_ignore_ascii_case(b"template")
-                || (self.opts.scripting && tag.eq_ignore_ascii_case(b"noscript"))
-                || (is_base && (tag.eq_ignore_ascii_case(b"svg") || tag.eq_ignore_ascii_case(b"math")))
-        };
-        if ancestors.any(ignored) {
-            return;
-        }
         // The tokenizer reports duplicate attributes, and browsers keep the first one.
         let attr = |wanted: &[u8]| {
             attrs
@@ -95,6 +210,23 @@ impl NavCollector {
                 .find(|(n, _)| n.eq_ignore_ascii_case(wanted))
                 .map(|&(_, v)| v.map_or(Cow::Borrowed(""), |v| super::decode::decode_attr(v, value_encoding)))
         };
+        if !self.base_seen {
+            self.prune(stack);
+            self.track_scope(name, attr, stack.len(), start);
+        }
+        let is_base = name.eq_ignore_ascii_case(b"base");
+        if !is_base && !name.eq_ignore_ascii_case(b"meta") {
+            return;
+        }
+        // `<template>` content is not part of the document, and a `<noscript>` is text to a browser
+        // running scripts. A `<meta>` breaks out of foreign content and stays an HTML element.
+        let ignored = |e: &OpenElem| {
+            e.tag.eq_ignore_ascii_case(b"template")
+                || (self.opts.scripting && e.tag.eq_ignore_ascii_case(b"noscript"))
+        };
+        if stack.iter().any(ignored) || (is_base && self.in_foreign_content()) {
+            return;
+        }
         if is_base {
             if let Some(href) = attr(b"href") {
                 self.base = self.parse_base(&href);
@@ -148,6 +280,11 @@ impl NavCollector {
             },
         }
     }
+}
+
+/// Whether `name` is one of `names`, ASCII-case-insensitively.
+fn is_any(name: &[u8], names: &[&[u8]]) -> bool {
+    names.iter().any(|n| name.eq_ignore_ascii_case(n))
 }
 
 /// The document URL as reported: serialized when the caller's `given` URL parsed as `doc_url`, and as
@@ -292,6 +429,44 @@ mod tests {
         }
         let noscript = page(r#"<noscript><base href="/ns/"></noscript>"#, "");
         assert_eq!(nav(noscript.as_bytes(), None, false).base_url.as_deref(), Some("http://h/ns/"));
+    }
+
+    /// Whether Chromium 156 and Firefox 155 read a `<base>` in or after SVG and MathML content as the
+    /// base URL (2026-11-04). They agree on every case.
+    #[test]
+    fn navigation_browser_table_foreign_content() {
+        const B: &str = "<base href='/s/'>";
+        let cases: &[(&str, &str, bool)] = &[
+            ("svg", "<svg>{B}</svg>", false),
+            ("svg, closed", "<svg></svg>{B}", true),
+            ("svg, self-closed", "<svg/>{B}", true),
+            ("breakout by <p>", "<svg><p>x</p>{B}", true),
+            ("breakout by <div>, inside <path>", "<svg><path d=''><div>x</div>{B}", true),
+            ("breakout by <meta>", "<svg><meta name=x>{B}", true),
+            ("breakout by <font color>", "<svg><font color=red>x</font>{B}", true),
+            ("plain <font>", "<svg><font>x</font>{B}", false),
+            ("breakout by </p>", "<svg></p>{B}", true),
+            ("breakout by </br>", "<svg></br>{B}", true),
+            ("nested svg, breakout", "<svg><g><svg><p>x</p>{B}", true),
+            ("svg after a breakout", "<svg><p>x</p><svg>{B}", false),
+            ("foreignObject", "<svg><foreignObject>{B}</foreignObject></svg>", true),
+            ("FOREIGNOBJECT", "<svg><FOREIGNOBJECT>{B}</FOREIGNOBJECT></svg>", true),
+            ("desc", "<svg><desc>{B}</desc></svg>", true),
+            ("after foreignObject", "<svg><foreignObject><div>x</div></foreignObject>{B}</svg>", false),
+            ("breakout up to foreignObject", "<svg><foreignObject><svg><p>x</p>{B}</svg></foreignObject></svg>", true),
+            ("mi in svg", "<svg><mi>{B}</mi></svg>", false),
+            ("math", "<math>{B}</math>", false),
+            ("mi", "<math><mi>{B}</mi></math>", true),
+            ("mtext", "<math><mtext>{B}</mtext></math>", true),
+            ("annotation-xml text/html", "<math><annotation-xml encoding='TEXT/HTML'>{B}</annotation-xml></math>", true),
+            ("annotation-xml", "<math><annotation-xml>{B}</annotation-xml></math>", false),
+            ("foreignObject in math", "<math><foreignObject>{B}</foreignObject></math>", false),
+        ];
+        for (name, body, counts) in cases {
+            let html = page("", &body.replace("{B}", B));
+            let expected = if *counts { "http://h/s/" } else { DOC };
+            assert_eq!(nav(html.as_bytes(), None, true).base_url.as_deref(), Some(expected), "{name}");
+        }
     }
 
     /// The query of a `<base href>` is encoded in the document encoding, as is that of every link
