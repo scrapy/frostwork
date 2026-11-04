@@ -128,6 +128,24 @@ for that keyword: `seq_sweep` and the engine calls in `tests/test_gates.py` pass
 it, so lxml mode's gates keep grading libxml2 behaviour whatever the default mode is. When a Phase 2 rule lands, delete its row from `CONSTRUCTS` in
 the same change, so the gate holds that construct at zero from then on.
 
+`gen_html5_rules.py` is browser mode's counterpart of `gen_tree_rules.py`. It derives the HTML5 element
+categories (special, formatting, the five scope lists, the two implied-end sets, void, data mode) from
+Chrome over the same `ELEMENTS` universe and generates `src/implied_close/generated_html5.rs` whole. Each
+category is read off one tree difference. A cell no tree can show is not guessed: a void element is never
+on the stack, a table part exists only inside a `<table>` that is itself special and a scope boundary, and
+a raw-text element has no end tag token. Those cells come from the WHATWG list, and the generated header
+names each one with its reason. `</b>` and `<rb>` reach an element only through a scope check, so the scope
+answers are read first and a default-scope boundary is reported unreadable for them. Three categories also
+carry a witness, a second probe over a different algorithm (the adoption agency, `<button>` and `<p>`
+start tags), and the two must agree wherever both read a name. Every category must read both ways on its
+controls. `tests/test_gates.py` runs the same probes against libxml2, which has none of these rules, to
+show the answers move with the parser. Firefox runs the same documents. Chrome is what gets generated, and
+`--report` prints every difference from the spec and from Firefox. `--check` is offline: it compares the
+Rust file with `browser_oracle/html5_derivation.json` (the stored per-cell answers) and checks a hash of
+the probe documents, so `make py` needs no browser. `--check --live` re-measures in Chrome and runs in
+`make gate-browser`. `--write` re-measures both browsers with the DOMParser fast path self-checked, and
+refuses to write on a failed control or a fast-path difference.
+
 Three tools own the tree-construction rules and share ONE element universe: `gen_tree_rules.py`
 derives the rules from libxml2 and GENERATES the Rust table (`--check` gates on drift, `--report`
 prints the derivation); `audit_tree_rules.py` asks lxml whether every rule cell is RIGHT, by value,
