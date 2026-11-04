@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import codecs
 import json
+import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass, field as _dc_field
 from functools import lru_cache
@@ -36,9 +37,10 @@ from ._frostwork import detect_encoding as _detect_encoding
 from ._frostwork import extract as _extract
 from ._frostwork import extract_grouped as _extract_grouped
 from ._frostwork import resolve_label as _resolve_label
+from ._navigation import Navigation, _from_native
 
 __all__ = [
-    "extract", "extract_grouped", "check", "detect_encoding", "Page", "Item",
+    "extract", "extract_grouped", "check", "Page", "Item",
     "SchemaReport", "FieldReport", "GroupReport", "UnsupportedSelector",
 ]
 
@@ -174,28 +176,20 @@ def _validate_grouped(
 
 
 def detect_encoding(html: Bytesish, encoding: Optional[str] = None, *, url: Optional[str] = None) -> str:
-    """The encoding :func:`extract` would scan ``html`` with, as a WHATWG name (``"windows-1252"``).
-
-    BOM → BOM-less UTF-16 prefix → ``encoding`` label → 4096-byte ``<meta>``/XML-declaration prescan →
-    UTF-8 if valid, else autodetected, informed by the top-level domain of *url*. Exposed on its own because nothing else in a scraper's stack answers this the way a browser
-    does: ``parsel.Selector(body=…)`` never sniffs (it defaults to UTF-8), and w3lib — what Scrapy
-    uses — stops at ``<body>`` and at the first declaration it cannot resolve. See the Encoding section
-    of docs/COMPATIBILITY.md for the enumerated differences.
-
-    Always returns a real encoding. A label naming none is ignored rather than propagated (WHATWG's
-    "failure, continue"), matching what :func:`extract` then does with the document; the stricter
-    validation :func:`extract` applies to a *caller's* label is deliberately not repeated here, since
-    the question this answers is "what will be used", not "is this input acceptable".
-    """
+    warnings.warn(
+        "frostwork.page.detect_encoding() is deprecated, use frostwork.detect_encoding() instead",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     return _detect_encoding(_as_scan_input(html), encoding, url=url)
 
 
 def resolve_label(label: str) -> Optional[str]:
-    """The WHATWG name of the encoding charset *label* names (``"cp874"`` → ``"windows-874"``), or
-    ``None`` if it names none (``"cp437"``).
-
-    *label* can be a WHATWG label or a Python codec name, e.g. Scrapy's ``response.encoding``.
-    """
+    warnings.warn(
+        "frostwork.page.resolve_label() is deprecated, use frostwork.resolve_label() instead",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     return _resolve_label(label)
 
 
@@ -758,16 +752,43 @@ class Page:
         raise :class:`UnsupportedSelector` by default. Construct with ``Page(strict=False)`` or pass
         ``strict=False`` here for permissive empty results. A successful default validation is cached
         until the schema changes."""
-        use_strict = self._strict if strict is None else strict
-        if use_strict and not self._validated:
-            self.check().raise_for_status()
-            self._validated = True
+        self._validate(strict)
         encoding = _check_encoding(html, encoding)
         body = _as_scan_input(html)
         plan = self._get_plan()  # compiled once, reused across pages
         if not self._groups:
             return Item._from_columns(self._fields, plan.extract(body, encoding, url=url))
-        flat_cols, grouped = plan.extract_grouped(body, encoding, url=url)
+        return self._item(*plan.extract_grouped(body, encoding, url=url))
+
+    def extract_with_navigation(
+        self,
+        html: Bytesish,
+        url: str,
+        encoding: Optional[str] = None,
+        *,
+        base_url: bool = True,
+        meta_refresh: bool = True,
+        scripting: bool = True,
+        strict: Optional[bool] = None,
+    ) -> Tuple["Item", Navigation]:
+        """Like :meth:`extract`, also reading the base URL and meta refresh of *html*, the document at
+        *url*, in the same pass. *base_url*, *meta_refresh* and *scripting* work as in
+        :func:`~frostwork.navigation`."""
+        self._validate(strict)
+        encoding = _check_encoding(html, encoding)
+        flat_cols, grouped, nav = self._get_plan().extract_with_navigation(
+            _as_scan_input(html), url, encoding,
+            base_url=base_url, meta_refresh=meta_refresh, scripting=scripting,
+        )
+        return self._item(flat_cols, grouped), _from_native(nav)
+
+    def _validate(self, strict: Optional[bool]) -> None:
+        use_strict = self._strict if strict is None else strict
+        if use_strict and not self._validated:
+            self.check().raise_for_status()
+            self._validated = True
+
+    def _item(self, flat_cols: List[List[str]], grouped: List[List[List[List[str]]]]) -> "Item":
         gout: dict = {}
         for (name, g), rows in zip(self._groups.items(), grouped):
             shaped = [{sn: _shape(col, sub.card) for (sn, sub), col in zip(g.subfields.items(), row)}

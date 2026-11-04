@@ -31,7 +31,9 @@ def _run_mypy(target: Path):
     warm cache would answer for the previous copy."""
     from mypy import api
 
-    stdout, _stderr, code = api.run([str(target), "--no-incremental", "--no-error-summary"])
+    # `--no-implicit-reexport` is how strict user configurations read the package's lazy exports.
+    args = [str(target), "--no-incremental", "--no-error-summary", "--no-implicit-reexport"]
+    stdout, _stderr, code = api.run(args)
     return stdout, code
 
 

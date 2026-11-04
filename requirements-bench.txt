@@ -1,6 +1,7 @@
-# Competitor parsers for tools/bench_engines.py. Deliberately NOT in requirements-test.txt: that file
-# is the correctness ORACLE toolchain, where a bump moves a verdict and has to be re-soaked. Nothing
-# here oracles anything — these are the engines Frostwork is measured against.
+# Competitors for tools/bench_engines.py and tools/bench_encoding.py. Deliberately NOT in
+# requirements-test.txt: that file is the correctness ORACLE toolchain, where a bump moves a verdict and
+# has to be re-soaked. Nothing here oracles anything — these are the engines Frostwork is measured
+# against.
 #
 # Pinned anyway, because a competitor bump moves two numbers this repo publishes: its speed row AND its
 # value-parity-vs-lxml row. lexbor is an HTML5 parser and libxml2 is not, so the disagreement rate is a
@@ -10,3 +11,5 @@ beautifulsoup4==4.15.0
 # bs4's CSS engine, and the reason a bs4 row is a CSS-selector row at all. A transitive bs4 dep, pinned
 # explicitly because it decides which of the corpus's production selectors that row can even express.
 soupsieve==2.9.1
+# What Scrapy autodetects undeclared pages with, the baseline of `tools/bench_encoding.py`.
+charset-normalizer==3.5.1
