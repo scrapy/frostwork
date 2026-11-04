@@ -3046,7 +3046,7 @@ mod browser_mode_tests {
 
         // raw source keeps the content, as `innerHTML` serializes it
         let k = b"<!DOCTYPE html><body><div id=d><template id=t class=k><b>x</b></template></div>";
-        assert_eq!(ex(k, ".k"), v(&["<template id=t class=k><b>x</b></template>"]));
+        assert_eq!(ex(k, "template.k"), v(&["<template id=t class=k><b>x</b></template>"]));
         // a template is head content
         let head = b"<!DOCTYPE html><html><head><template id=t><p id=y>z</p></template><title>T</title></head><body>";
         assert_eq!(ex(head, "head > template::attr(id)"), v(&["t"]));
@@ -3160,9 +3160,9 @@ mod browser_mode_tests {
     /// head, so `\0<title>` keeps the title in the head.
     #[test]
     fn nul_before_the_body_is_ignored() {
-        let lead = b"\0<title>T</title><p>x</p>";
+        let lead = b"\0<title>T</title><p id=x>x</p>";
         assert_eq!(ex(lead, "head > title::text"), v(&["T"]));
-        assert_eq!(ex(lead, "body > p"), v(&["<p>x</p>"])); // body: 1 child, head: 1 child
+        assert_eq!(ex(lead, "body > p#x"), v(&["<p id=x>x</p>"])); // body: 1 child, head: 1 child
         let head = b"<!DOCTYPE html><html><head>\n\0<title>T</title></head><body><p>x</p>";
         assert_eq!(ex(head, "head::text"), v(&["\n"])); // ["\n", "title"]
         assert_eq!(ex(head, "head > title::text"), v(&["T"]));
@@ -3208,8 +3208,25 @@ mod browser_mode_tests {
             "//body",
             "body:has(p)",
             "p, body",
+            "tbody",
+            "tr",
+            "p",
+            "b.k",
+            "a[href]",
+            ".x",
         ];
-        let kept = ["div:has(a)::attr(id)", "li:last-child::text", "body.page", "div", "body::text", "p:has(b)"];
+        let kept = [
+            "div:has(a)::attr(id)",
+            "li:last-child::text",
+            "body.page",
+            "div",
+            "body::text",
+            "div:has(b)",
+            "tbody.x",
+            "p.lead",
+            "span",
+            "a::attr(href)",
+        ];
         let all: Vec<&str> = refused.iter().chain(&kept).copied().collect();
         let browser = audit_schema_with(&all, &[], ParseMode::Browser);
         let lxml_mode = audit_schema_with(&all, &[], ParseMode::Lxml);
@@ -3230,7 +3247,7 @@ mod browser_mode_tests {
         // element (a synthesized one only ever sits inside another)
         let group = |container: &str| GroupQuery {
             container: container.to_string(),
-            subfields: vec![("self".to_string(), ".".to_string()), ("a".to_string(), "a".to_string())],
+            subfields: vec![("self".to_string(), ".".to_string()), ("span".to_string(), "span".to_string())],
         };
         let a = audit_schema_with(
             &[] as &[String],
@@ -3243,5 +3260,198 @@ mod browser_mode_tests {
         }
         assert!(a.groups[2].subfields.iter().all(Support::is_supported), "a <div> holds no frame element");
         assert!(audit_schema_with(&[] as &[String], &[group("html")], ParseMode::Lxml).ok());
+        // any container can hold a formatting clone or an implied <tbody>, and `.` is the container
+        let synth = |container: &str, sub: &str| GroupQuery {
+            container: container.to_string(),
+            subfields: vec![("x".to_string(), sub.to_string())],
+        };
+        let b = audit_schema_with(
+            &[] as &[String],
+            &[synth("div", "b"), synth("div", "tbody"), synth("div", "tbody.x"), synth("b", "."), synth("div", ".")],
+            ParseMode::Browser,
+        );
+        let refused: Vec<bool> = b.groups.iter().map(|g| !g.subfields[0].is_supported()).collect();
+        assert_eq!(refused, [true, true, false, true, false]);
+    }
+
+    // ---- HTML5 tree construction (Phase 2). Each comment gives Chrome's tree for the document.
+
+    /// The frame: a head is always built, head content written after `</head>` goes back into it,
+    /// content after `</html>` lands in the body, and `</br>` and `<image>` are renamed.
+    #[test]
+    fn the_frame_is_html5s() {
+        // html > [head, body > p#x > "x"]
+        let p = b"<p id=x>x";
+        assert_eq!(ex(p, "html > head + body > #x::text"), v(&["x"]));
+        // head > [title, script#s > "1"], "\n\n", body > p > "a"
+        let late = b"<title>T</title></head>\n<script id=s>1</script>\n<body><p>a";
+        assert_eq!(ex(late, "head > title + #s::text"), v(&["1"]));
+        assert_eq!(ex(late, "body > p::text"), v(&["a"]));
+        // body > [p > "a", div#a > "late"]
+        let after = b"<p>a</p></body></html><div id=a>late</div>";
+        assert_eq!(ex(after, "body > p + #a::text"), v(&["late"]));
+        // body > ["a", br, "b", img#i]
+        let renames = b"a</br>b<image id=i src=x>";
+        assert_eq!(ex(renames, "body::text"), v(&["a", "b"]));
+        assert_eq!(ex(renames, "body > br + img::attr(id)"), v(&["i"]));
+    }
+
+    /// In-body rules: HTML5's `<p>` closers, the button-scope walk, a stray `</p>`, repeated
+    /// `<dt>`/headings/`<button>`/`<nobr>` and the leading newline in all three spellings.
+    #[test]
+    fn in_body_rules_are_html5s() {
+        // p#p > "a"; section#s > "b"; "c"
+        let closers = b"<p id=p>a<section id=s>b</section>c";
+        assert_eq!(ex(closers, "#p::text"), v(&["a"]));
+        assert_eq!(ex(closers, "body > #p + #s::text"), v(&["b"]));
+        // p#p > b#b; div#d > b#b > "x" (the <div> closes the <p> through the <b>)
+        let deep = b"<p id=p><b id=b><div id=d>x";
+        assert_eq!(ex(deep, "#p #d"), NONE);
+        assert_eq!(ex(deep, "body > #d > b::text"), v(&["x"]));
+        // div#d > ["A", p, "B"]
+        let stray = b"<div id=d>A</p>B</div>";
+        assert_eq!(ex(stray, "#d::text"), v(&["A", "B"]));
+        // dl > [dt#a, dt#b, dd#c]
+        let dl = b"<dl><dt id=a>a<dt id=b>b<dd id=c>c</dl>";
+        assert_eq!(ex(dl, "dl > *::attr(id)"), v(&["a", "b", "c"]));
+        for h in [&b"<h1 id=a>a<h2 id=b>b"[..], b"<button id=a>x<button id=b>y", b"<nobr id=a>x<nobr id=b>y"] {
+            assert_eq!(ex(h, "body > *::attr(id)"), v(&["a", "b"]), "{}", String::from_utf8_lossy(h));
+        }
+        // pre > "x", textarea > "y", listing > "z": the newline after each start tag is dropped
+        let lf = b"<pre id=p>\nx</pre><textarea id=t>\ny</textarea><listing id=l>&#10;z</listing>";
+        assert_eq!(ex(lf, "#p::text, #t::text, #l::text"), v(&["x", "y", "z"]));
+    }
+
+    /// The form pointer, and an element that leaves the stack of open elements while it is still a DOM
+    /// ancestor of what is open.
+    #[test]
+    fn the_form_pointer_is_html5s() {
+        // form#a > input#i (the second <form> is ignored)
+        let second = b"<form id=a><form id=b><input id=i>";
+        assert_eq!(ex(second, "#a > #i::attr(id)"), v(&["i"]));
+        assert_eq!(ex(second, "#b::attr(id)"), NONE);
+        // table > [form#f, tbody > tr > td > input#i]
+        let t = b"<table><form id=f><tr><td><input id=i></table>";
+        assert_eq!(ex(t, "table > #f + tbody #i::attr(id)"), v(&["i"]));
+        assert_eq!(ex(t, "#f #i"), NONE);
+        // form#f > div#d > ["a", p#after > "x"]
+        let ghost = b"<form id=f><div id=d>a</form><p id=after>x</p>";
+        assert_eq!(ex(ghost, "#f #after::text"), v(&["x"]));
+        assert_eq!(ex(ghost, "#d::text"), v(&["a"]));
+    }
+
+    /// Tables: implied `<tbody>`, `<tr>` and `<colgroup>`, table parts and `<frame>` outside their
+    /// context ignored, hidden inputs kept, and fostered content outside the table.
+    #[test]
+    fn tables_are_html5s() {
+        // table#t > tbody > tr > td > "c"
+        assert_eq!(ex(b"<table id=t><tr><td>c</table>", "#t > tbody > tr > td::text"), v(&["c"]));
+        // table#t > [colgroup > col#c, caption > "x", tbody > tr > th > "h"]
+        let parts = b"<table id=t><col id=c><caption>x</caption><tr><th>h</table>";
+        assert_eq!(ex(parts, "#t > colgroup > #c::attr(id)"), v(&["c"]));
+        assert_eq!(ex(parts, "#t > colgroup + caption::text"), v(&["x"]));
+        // body > "xyz": the cell, the row and the frame are ignored, and the text is one node
+        let stray = b"<td id=a>x<tr id=b>y<frame id=f>z";
+        assert_eq!(ex(stray, "body::text"), v(&["xyz"]));
+        assert_eq!(ex(stray, "td, tr, frame"), NONE);
+        // body > [input#v, table#t > input#h]
+        let input = b"<table id=t><input id=h type=hidden><input id=v>";
+        assert_eq!(ex(input, "#t > input::attr(id)"), v(&["h"]));
+        assert_eq!(ex(input, "body > #v::attr(id)"), v(&["v"]));
+        // body > [p#m > "moved", table#t]
+        let foster = b"<table id=t><p id=m>moved</table>";
+        assert_eq!(ex(foster, "body > #m::text"), v(&["moved"]));
+        assert_eq!(ex(foster, "#t #m"), NONE);
+    }
+
+    /// `<select>` as Chrome parses it since customisable select: a second one closes the first, and
+    /// the content model is otherwise open.
+    #[test]
+    fn select_is_chromes() {
+        // select#a > option#o > "1"; "x"
+        let nested = b"<select id=a><option id=o>1<select id=b>x";
+        assert_eq!(ex(nested, "body::text"), v(&["x"]));
+        assert_eq!(ex(nested, "#a > #o::text"), v(&["1"]));
+        assert_eq!(ex(nested, "#b"), NONE);
+        // select > div > "d"; input#i; "z"
+        let open = b"<select><div>d</div><input id=i>z";
+        assert_eq!(ex(open, "select > div::text"), v(&["d"]));
+        assert_eq!(ex(open, "body > select + #i::attr(id)"), v(&["i"]));
+    }
+
+    /// Foreign content: integration points, the start tags that break out of it, CDATA as text, and
+    /// `/>` honoured.
+    #[test]
+    fn foreign_content_is_html5s() {
+        // svg#s > title#t > b#b > "x"
+        assert_eq!(ex(b"<svg id=s><title id=t><b id=b>x</b></title></svg>", "#t > #b::text"), v(&["x"]));
+        // svg#s > g#g; p#p > "x"
+        let out = b"<svg id=s><g id=g><p id=p>x";
+        assert_eq!(ex(out, "body > #s + #p::text"), v(&["x"]));
+        // svg > text#t > "ab<cc"
+        assert_eq!(ex(b"<svg id=s><text id=t>a<![CDATA[b<c]]>c</text></svg>", "#t::text"), v(&["ab<cc"]));
+        // svg > font#f > "a"; font#g (color) > "b" in the body
+        let font = b"<svg id=s><font id=f>a</font><font id=g color=red>b";
+        assert_eq!(ex(font, "#s > #f::text"), v(&["a"]));
+        assert_eq!(ex(font, "body > #g::text"), v(&["b"]));
+        // math > [mi > b > "x", annotation-xml (text/html) > div > "y"]
+        let math = b"<math id=m><mi id=i><b id=b>x</b></mi><annotation-xml id=a encoding=text/html><div id=d>y";
+        assert_eq!(ex(math, "#i > #b::text"), v(&["x"]));
+        assert_eq!(ex(math, "#a > #d::text"), v(&["y"]));
+        // svg > [path, rect]
+        assert_eq!(ex(b"<svg id=s><path id=\"p\"/><rect id=r></svg>", "#s > *::attr(id)"), v(&["p", "r"]));
+    }
+
+    /// Active formatting elements: reconstruction (a clone carries the original's attributes), Noah's
+    /// Ark, and the adoption agency's forward state.
+    #[test]
+    fn formatting_elements_are_html5s() {
+        // p > b#b.k > "1"; b#b.k > "2"
+        let clone = b"<p><b id=b class=k>1</p>2";
+        assert_eq!(ex(clone, "b.k::text"), v(&["1", "2"]));
+        assert_eq!(ex(clone, "body > b::text"), v(&["2"]));
+        // after </p>, three of the four identical <b>s reopen, nested, around "x"
+        assert_eq!(ex(b"<p><b>1<b>2<b>3<b>4</p>x", "body > b > b > b::text"), v(&["x"]));
+        assert_eq!(ex(b"<p><b>1<b>2<b>3<b>4</p>x", "body > b > b > b > b"), NONE);
+        // b#b > ["1", i#i > "2"]; i#i > "3"
+        assert_eq!(ex(b"<b id=b>1<i id=i>2</b>3", "body > i::text"), v(&["3"]));
+        // b#b > "1"; p#p > [b#b > "2", "3", i#x > "y"]: after </b> the paragraph takes the content
+        let aa = b"<b id=b>1<p id=p>2</b>3<i id=x>y</i>";
+        assert_eq!(ex(aa, "p > #x::text"), v(&["y"]));
+        // a#a > "1"; div#d > [a#a > "2", "3", i#x > "y"]
+        let a = b"<a id=a href=x>1<div id=d>2</a>3<i id=x>y</i></div>";
+        assert_eq!(ex(a, "#d > #x::text"), v(&["y"]));
+    }
+
+    /// The document mode, `<frameset>`, and a second `<body>` tag's attributes.
+    #[test]
+    fn document_mode_frameset_and_merged_attributes() {
+        // quirks: p#p > table#t; with a doctype: p#p, table#t
+        assert_eq!(ex(b"<p id=p><table id=t>", "#p > #t::attr(id)"), v(&["t"]));
+        assert_eq!(ex(b"<!DOCTYPE html><p id=p><table id=t>", "#p + #t::attr(id)"), v(&["t"]));
+        // html > [head, frameset#f > [frame#a, frame#b]]
+        let fs = b"<frameset id=f><frame id=a><frame id=b></frameset>";
+        assert_eq!(ex(fs, "html > head + frameset > frame::attr(id)"), v(&["a", "b"]));
+        // body.late > [p > "x", div#d > "y"]: the merged class reaches what follows the tag
+        let merged = b"<body><p>x</p><body class=late><div id=d>y";
+        assert_eq!(ex(merged, "body.late #d::text"), v(&["y"]));
+    }
+
+    /// A declarative shadow root takes the `<template>` and its content out of the document, on a host
+    /// that can have one.
+    #[test]
+    fn declarative_shadow_roots_follow_the_host_conditions() {
+        // div#h > "ab" (shadow root holds p#s)
+        let div = b"<div id=h>a<template id=t shadowrootmode=open><p id=s>x</p></template>b</div>";
+        assert_eq!(ex(div, "#h::text"), v(&["ab"]));
+        assert_eq!(ex(div, "#t, #s"), NONE);
+        // a <table> or a <b> cannot host one: the template stays, as an ordinary template
+        let table = b"<table id=h><template id=t shadowrootmode=open><p id=s>x</p></template></table>";
+        assert_eq!(ex(table, "#h > #t::attr(id)"), v(&["t"]));
+        let b = b"<b id=h><template id=t shadowrootmode=open>x</template></b>";
+        assert_eq!(ex(b, "#h > #t::attr(id)"), v(&["t"]));
+        // a custom element can; a second template on the same host stays
+        let two = b"<x-y id=h><template id=t shadowrootmode=OPEN>x</template><template id=u shadowrootmode=open>y</template></x-y>";
+        assert_eq!(ex(two, "#h > template::attr(id)"), v(&["u"]));
     }
 }

@@ -2931,9 +2931,9 @@ def test_single_valued_page_stops_scanning_without_changing_the_item():
     assert missing.extract(doc).to_dict() == {"t": "T", "n": None}
 
     # shapes that are not armed still answer correctly (deferred, outer-HTML, grouped)
-    d = b"<div>x<p>a</p><p>b</p></div><div>y<p>c</p></div>"
+    d = b"<div>x<p class=v>a</p><p class=v>b</p></div><div>y<p class=v>c</p></div>"
     assert frostwork.Page().field("x", "p:last-child::text").extract(d).to_dict() == {"x": "b"}
-    assert frostwork.Page().field("x", "p").extract(d).to_dict() == {"x": "<p>a</p>"}
+    assert frostwork.Page().field("x", "p.v").extract(d).to_dict() == {"x": "<p class=v>a</p>"}
     grouped = frostwork.Page().field("x", "div::text").many("rows", "div", {"p": "p::text"})
     assert grouped.extract(d).to_dict() == {"x": "x", "rows": [{"p": "a"}, {"p": "c"}]}
 
@@ -3195,7 +3195,7 @@ def test_scan_finds_inline_selectors_without_importing(tmp_path, capsys):
     from frostwork.audit import main
 
     target = _write_spider(tmp_path)
-    code = main(["--scan", target, "-v"])
+    code = main(["--scan", target, "-v", "--parser", "lxml"])
     out = capsys.readouterr().out
     assert code == 1  # unsupported selectors present
     assert "spider.py:10" in out and UNSUPPORTED_REASON in out  # LinkExtractor restrict_css
@@ -3204,6 +3204,11 @@ def test_scan_finds_inline_selectors_without_importing(tmp_path, capsys):
     assert "Many/One" in out  # relative `td/text()` names the rewrite
     assert "not a literal" in out  # the f-string is skipped, not silently dropped
     assert "5/7 literal selector(s) supported" in out
+    # browser mode refuses the outer HTML of an element with no name or a formatting one: a match can be
+    # a formatting element the tree builder reopened as a copy, with no source of its own
+    assert main(["--scan", target, "-v"]) == 1
+    out = capsys.readouterr().out
+    assert "3/7 literal selector(s) supported" in out and "reopened as a copy" in out
 
 
 def test_scan_json_and_directory_walk(tmp_path, capsys):

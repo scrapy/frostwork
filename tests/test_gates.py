@@ -666,32 +666,29 @@ def test_the_browser_gate_fails_on_novel_and_on_coverage():
 
 
 def test_browser_attribution_is_by_the_smallest_repro_and_leaves_the_rest_novel():
-    """A divergence is filed under a section 3 construct only when its REDUCED document exhibits it.
-
-    A stray `<td>` outside any table is not in section 3's table, so it must reach NOVEL rather than be
-    absorbed by the `<tbody>` rule, which needs a table. The counterfactual rules must consult the
-    oracle: `<p><table>` is the quirks-mode row only if a doctype makes it agree. And the formatting
-    row is decided by the browser's tree (a repeated id), not by the tokens.
+    """A divergence is filed under a construct only when its REDUCED document exhibits it, and only the
+    constructs browser mode cannot stream have one. Everything else is implemented, so a divergence there
+    must reach NOVEL and fail the gate: a stray `<td>`, an implied `<tbody>`, a `<p>` closed by a table.
+    The adoption-agency row needs a furthest block, because without one the algorithm only pops.
     """
     import diff_browser as B
 
-    def repro(tokens, differs=lambda doc: True, ids=()):
-        return B.Repro(tuple(enumerate(tokens)), "//*/@id", differs, list(ids))
+    def repro(tokens):
+        return B.Repro(tuple(enumerate(tokens)), "//*/@id", lambda doc: True, [])
 
-    assert B.attribute(repro(["<td{}>"])) is None
-    assert B.attribute(repro(["<table{}>", "<tr{}>"])) == "implied <tbody>"
-
-    no_doctype_needed = repro(["<p{}>", "<table{}>"], differs=lambda doc: not any("DOCTYPE" in t for _, t in doc))
-    assert B.attribute(no_doctype_needed) == "quirks-mode tree"
-    assert B.attribute(repro(["<p{}>", "<table{}>"])) == "<p> closers"
-
-    head = repro(["<div{}>"], differs=lambda doc: not any(t == "<head></head>" for _, t in doc))
-    assert B.attribute(head) == "<head>"
-    assert B.attribute(repro(["<div{}>"])) is None
-
-    tokens = ["<p{}>", "<b{}>", "t", "</p>", "t"]
-    assert B.attribute(repro(tokens, ids=["0", "1", "1"])) == "formatting reconstruction"
-    assert B.attribute(repro(tokens, ids=["0", "1"])) is None
+    for implemented in (["<td{}>"], ["<table{}>", "<tr{}>"], ["<p{}>", "<table{}>"], ["<div{}>"],
+                        ["<p{}>", "<b{}>", "t", "</p>", "t"], ["<b{}>", "<i{}>", "</b>"], ["<a{} href=x>", "<a{} href=x>"]):
+        assert B.attribute(repro(implemented)) is None, implemented
+    assert B.attribute(repro(["<table{}>", "<div{}>"])) == "foster parenting"
+    assert B.attribute(repro(["<div{}>", "<body{}>"])) == "second <html>/<body> tag"
+    assert B.attribute(repro(["<b{}>", "<p{}>", "</b>"])) == "adoption agency"
+    assert B.attribute(repro(["<nobr{}>", "<div{}>", "<nobr{}>"])) == "adoption agency"
+    assert B.attribute(repro(["<div{}>", "<frameset{}>"])) == "frameset replacing the body"
+    selected = ["<select{}>", "<selectedcontent{}>", "</selectedcontent>", "<option{}>", "t", "</option>"]
+    assert B.attribute(repro(selected)) == "<selectedcontent> clone"
+    assert B.attribute(repro(["<select{}>", "<option{}>", "t", "</option>"])) is None
+    assert [c.name for c in B.CONSTRUCTS] == ["frameset replacing the body", "second <html>/<body> tag",
+                                              "adoption agency", "foster parenting", "<selectedcontent> clone"]
 
 
 def test_the_rule_audit_has_no_bypass_for_a_start_close_divergence():

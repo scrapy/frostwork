@@ -12,6 +12,11 @@
 //! The oracle wins here.
 
 mod generated;
+mod html5;
+
+// Browser mode's categories. Hand-written from the spec; a table derived from the browser replaces the
+// module behind the same names.
+pub(crate) use html5::*;
 
 // The derived tables live in `generated.rs` — a whole file, written by `tools/gen_tree_rules.py` from
 // libxml2 itself. They are re-exported here so callers see one `implied_close` module: the split is about

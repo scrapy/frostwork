@@ -23,37 +23,24 @@ use crate::tokenizer::DataMode;
 /// whitespace nor NUL. Browsers ignore a NUL character before the body as if it were not there
 /// (measured: `\0<title>` keeps the title in the head), and lxml mode deletes every NUL before
 /// tokenizing, so skipping it here is the same rule in both modes.
-pub(super) fn first_content_byte(text: &[u8]) -> Option<usize> {
+fn first_content_byte(text: &[u8]) -> Option<usize> {
     text.iter().position(|c| !matches!(c, b' ' | b'\t' | b'\n' | b'\r' | 0x0c | 0))
 }
 
 /// libxml2's tree construction, as lxml mode runs it.
+#[derive(Default)]
 pub(super) struct Libxml2 {
     /// Everything the document-frame rules know that the stack cannot tell them, plus the questions they
     /// ask about it — see `frame.rs`, which explains why this is one owner of NAMED questions rather than
     /// the insertion-mode enum it looks like it should be.
     frame: DocumentFrame,
-    /// Which part of an omitted frame a start tag opens. [`frame_content_of`] for libxml2; browser mode
-    /// moves the two HTML5 head elements it implements (see `super::browser`).
-    frame_part: fn(&[u8]) -> FrameContent,
-}
-
-impl Default for Libxml2 {
-    fn default() -> Self {
-        Libxml2 { frame: DocumentFrame::default(), frame_part: frame_content_of }
-    }
 }
 
 impl Libxml2 {
-    /// These rules with a different answer to "which part of an omitted frame does this tag open".
-    pub(super) fn with_frame_part(frame_part: fn(&[u8]) -> FrameContent) -> Self {
-        Libxml2 { frame_part, ..Libxml2::default() }
-    }
-
     /// Insert a start tag under libxml2's rules: build whatever of the document frame it needs, run the
     /// implied closes, and open the element (or ignore a redundant frame tag). A void element and a
     /// self-closed one close again at once.
-    pub(super) fn insert<'a>(
+    fn insert<'a>(
         &mut self,
         m: &mut Matcher<'a>,
         name: &'a [u8],
@@ -108,7 +95,7 @@ impl Libxml2 {
         if popped_head
             && frame.is_none()
             && !self.frame.body_established()
-            && (self.frame_part)(name) == FrameContent::Body
+            && frame_content_of(name) == FrameContent::Body
         {
             self.insert(m, b"body", &[], false, span_start, span_start);
         }
@@ -175,7 +162,7 @@ impl Libxml2 {
         // Inside a frameset there is no head for head content to go in, so libxml2 opens a BODY for it —
         // the same one it opens for ordinary content there. Only the six `Head` names are affected; the
         // rest already matched.
-        let part = match (self.frame_part)(name) {
+        let part = match frame_content_of(name) {
             FrameContent::Head if frameset_is_open(&m.stack) => FrameContent::Body,
             other => other,
         };
