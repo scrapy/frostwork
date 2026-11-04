@@ -1392,9 +1392,6 @@ impl<'a, const REPLAY: bool> TreeBuilder<'a> for Browser<'a, REPLAY> {
         if b.is_empty() {
             return;
         }
-        if self.mode == Mode::Text && mode != DataMode::Normal {
-            return self.insert_text(m, b, mode, s);
-        }
         if self.text_in_html() {
             self.html_text(m, b, mode, s)
         } else {

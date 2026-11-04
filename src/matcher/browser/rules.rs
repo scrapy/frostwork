@@ -251,8 +251,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
             && host > 0
             && h.ns == Ns::Html
             && h.flags & SHADOW_HOST == 0
-            && valid_shadow_host(h.name)
-            && !matches!(self.location(), super::Loc::Foster(_));
+            && valid_shadow_host(h.name);
         if attaches {
             self.stack[host].flags |= SHADOW_HOST;
             let mut node = self.new_node(t.name, t.low, t.tag, Ns::Html, t.attrs);
