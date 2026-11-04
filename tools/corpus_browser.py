@@ -32,12 +32,13 @@ from typing import Any, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import diff_lxml  # noqa: E402
 import seq_sweep  # noqa: E402
 from browser_oracle import bridge as Br  # noqa: E402
 from browser_oracle import css as C  # noqa: E402
 from browser_oracle import tree as T  # noqa: E402
 from browser_oracle.client import BrowserOracle, Refused  # noqa: E402
-from diff_browser import MAX_SELECTORS_PER_PASS, engine_refusals, same_values  # noqa: E402
+from diff_browser import engine_refusals, same_values  # noqa: E402
 
 RESULTS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results", "corpus_browser.json")
 DEFAULT_CTYPE = "text/html"
@@ -91,8 +92,8 @@ def engine(body: bytes, sels: list[str], ctype: str, encoding: Optional[str]) ->
     import frostwork
 
     out: list[list[str]] = []
-    for start in range(0, len(sels), MAX_SELECTORS_PER_PASS):
-        out += frostwork.extract(body, sels[start:start + MAX_SELECTORS_PER_PASS], encoding, content_type=ctype,
+    for start in range(0, len(sels), diff_lxml.MAX_SELECTORS_PER_PASS):
+        out += frostwork.extract(body, sels[start:start + diff_lxml.MAX_SELECTORS_PER_PASS], encoding, content_type=ctype,
                                  strict=False, **seq_sweep.parser_kwargs("browser"))
     return out
 

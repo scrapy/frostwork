@@ -724,7 +724,7 @@ def test_the_browser_gate_emits_what_the_first_review_found():
     import seq_sweep
 
     generated = {D.render(d) for d in D.structured_docs()}
-    run = B.engine_runner("browser")[0]
+    run = B.Engine("browser")
     no_quirks = ["#d", [["#dt", "html", "", ""]]]
     wrong = []
     for tokens, sel, chrome in REVIEW_FINDINGS:
@@ -801,12 +801,13 @@ def test_the_browser_gate_reads_the_document_mode_from_the_doctype():
     A doctype is not enough: an HTML 4.01 Transitional one without a system identifier is quirks, and with
     one it is limited quirks, where they do not fold."""
     import diff_browser as B
+    from browser_oracle import tree as T
 
-    assert not B.quirks_doctype("html", "", "")
-    assert B.quirks_doctype("html", "-//W3C//DTD HTML 4.01 Transitional//EN", "")
-    assert not B.quirks_doctype("html", "-//W3C//DTD HTML 4.01 Transitional//EN", "http://www.w3.org/TR/html4/loose.dtd")
-    assert not B.quirks_doctype("html", "-//W3C//DTD XHTML 1.0 Transitional//EN", "x")
-    assert B.quirks_doctype("html", "-//IETF//DTD HTML 2.0//EN", "") and B.quirks_doctype("svg", "", "")
+    assert not T.quirks_doctype("html", "", "")
+    assert T.quirks_doctype("html", "-//W3C//DTD HTML 4.01 Transitional//EN", "")
+    assert not T.quirks_doctype("html", "-//W3C//DTD HTML 4.01 Transitional//EN", "http://www.w3.org/TR/html4/loose.dtd")
+    assert not T.quirks_doctype("html", "-//W3C//DTD XHTML 1.0 Transitional//EN", "x")
+    assert T.quirks_doctype("html", "-//IETF//DTD HTML 2.0//EN", "") and T.quirks_doctype("svg", "", "")
     tree = ["#d", [["#dt", "html", "-//W3C//DTD HTML 4.01 Transitional//EN", ""], ["html", 0, [], []]]]
     assert B.ValueRepro((), ".a", [], [], tree).quirks()
     assert not B.ValueRepro((), ".a", [], [], ["#d", [["#dt", "html", "", ""], ["html", 0, [], []]]]).quirks()

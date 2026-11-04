@@ -38,6 +38,7 @@ from typing import Any, Optional
 
 from lxml import etree
 
+from .client import Refused
 from .tree import is_element
 
 PLANES = (0xF0000, 0x100000)
@@ -275,6 +276,27 @@ class Bridge:
         for idx, dt in self._doctypes:
             top.insert(idx, dt)
         return ["#d", top]
+
+
+def open_bridge(tree: Any) -> "Bridge | Refused":
+    """The bridge over a page load's tree, or the `Refused` saying why there is none: the load failed
+    (`tree` is `None`), or the tree has a shape lxml cannot hold."""
+    if tree is None:
+        return Refused("page load failed", "load")
+    try:
+        return Bridge(tree)
+    except Unrepresentable as e:
+        return Refused(str(e), "bridge")
+
+
+def xpath_answer(bridge: "Bridge | Refused", query: str) -> "list[str] | Refused":
+    """`bridge.xpath(query)`, or a `Refused` naming why there is no answer: no bridge, or lxml rejects the query."""
+    if isinstance(bridge, Refused):
+        return bridge
+    try:
+        return bridge.xpath(query)
+    except Exception as e:  # noqa: BLE001 - lxml's refusal is the reason
+        return Refused(f"{type(e).__name__}: {e}", "xpath")
 
 
 # ---------------------------------------------------------------- the browser's serialisation

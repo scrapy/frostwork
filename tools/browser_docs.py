@@ -17,6 +17,7 @@ reduced document's columns still name the same elements. Four families:
 """
 from __future__ import annotations
 
+import functools
 import itertools
 import os
 import random
@@ -102,6 +103,7 @@ MAX_TOKENS = 7
 LONG_TOKENS = 20
 
 Doc = tuple[tuple[int, str], ...]
+Decorations = dict[int, tuple[str, str]]   # a decorated document's attrs and text by token id: (kind, decoration)
 
 
 def _start_tag(token: str) -> bool:
@@ -182,7 +184,7 @@ def _decorate(token: str, kind: str, deco: str) -> str:
     return out
 
 
-def undecorate(doc: Doc) -> tuple[Doc, dict[int, tuple[str, str]]]:
+def undecorate(doc: Doc) -> tuple[Doc, Decorations]:
     """`doc` with every decorated token back to its ALPHABET token, and the decorations by id."""
     plain, decos = [], {}
     for i, t in doc:
@@ -195,7 +197,7 @@ def undecorate(doc: Doc) -> tuple[Doc, dict[int, tuple[str, str]]]:
     return tuple(plain), decos
 
 
-def redecorate(doc: Doc, decos: dict[int, tuple[str, str]]) -> Doc:
+def redecorate(doc: Doc, decos: Decorations) -> Doc:
     """Put `decos` back on an (edited) undecorated document, by id; an edited token keeps its edit."""
     out = []
     for i, t in doc:
@@ -459,11 +461,11 @@ class Documents:
     missing_tokens: list[str]
     missing_value_tokens: list[str]
 
-    @property
+    @functools.cached_property
     def all(self) -> list[Doc]:
         return self.seq + self.random + self.value
 
-    @property
+    @functools.cached_property
     def decorated(self) -> set[str]:
         return {render(d) for d in self.value}
 
