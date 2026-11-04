@@ -909,12 +909,18 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
         self.in_scope_of(tag, Bound::Table)
     }
 
-    /// Close a `<p>` element: implied end tags except `p`, then pop through the `<p>`.
-    fn close_p(&mut self, m: &mut Matcher<'a>, ghost_end: usize, end: usize) {
-        self.implied_end(m, Some(Tag::P), ghost_end);
-        if let Some(k) = self.stack.topmost(Tag::P) {
+    /// Generate implied end tags except for `except`, then pop through the topmost element with one of
+    /// `tags`. Entries above it end at `ghost_end`, it at `end`.
+    fn close_element(&mut self, m: &mut Matcher<'a>, tags: &[Tag], except: Option<Tag>, ghost_end: usize, end: usize) {
+        self.implied_end(m, except, ghost_end);
+        if let Some(k) = self.stack.topmost_of(tags) {
             self.pop_to(m, k, ghost_end, end);
         }
+    }
+
+    /// Close a `<p>` element: implied end tags except `p`, then pop through the `<p>`.
+    fn close_p(&mut self, m: &mut Matcher<'a>, ghost_end: usize, end: usize) {
+        self.close_element(m, &[Tag::P], Some(Tag::P), ghost_end, end);
     }
 
     fn close_p_if_in_button_scope(&mut self, m: &mut Matcher<'a>, at: usize) {
@@ -1042,6 +1048,33 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
     }
 
     // ------------------------------------------------------------------ the frame
+
+    /// A token before any doctype: the document is in quirks mode.
+    fn no_doctype(&mut self) {
+        self.quirks = true;
+        self.mode = Mode::BeforeHtml;
+    }
+
+    /// Insert the `<html>` the page never wrote, at `at`.
+    fn imply_html(&mut self, m: &mut Matcher<'a>, at: usize) {
+        self.insert_synth(m, b"html", Tag::Html, at);
+        self.mode = Mode::BeforeHead;
+    }
+
+    /// Insert the `<head>` the page never wrote, at `at`: the head element pointer.
+    fn imply_head(&mut self, m: &mut Matcher<'a>, at: usize) {
+        self.insert_synth(m, b"head", Tag::Head, at);
+        self.head = self.stack.last().copied();
+        self.mode = Mode::InHead;
+    }
+
+    /// Leave "after head" for a `<body>` the page never wrote, inserted at `at`.
+    fn imply_body(&mut self, m: &mut Matcher<'a>, at: usize) {
+        self.finish_head(m, at);
+        self.insert_synth(m, b"body", Tag::Body, at);
+        self.frameset_ok = true;
+        self.mode = Mode::InBody;
+    }
 
     /// Leave "in head": pop the head off the stack, keeping its matcher element for "after head".
     fn leave_head(&mut self) {
