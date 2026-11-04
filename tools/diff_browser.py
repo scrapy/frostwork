@@ -763,14 +763,35 @@ class ValueConstruct:
 
 
 def _outer_root(html: str) -> Optional[tuple]:
-    """The tag and attributes of the element an outer-HTML value starts with, as lxml parses it alone."""
-    from lxml.html import fragments_fromstring
+    """The element an outer-HTML value's start tag names: its tag, its attribute names (the first of a
+    repeated one, as a browser keeps) and its id. Read by a tokenizer rather than by parsing the value
+    as a fragment, which loses an `<html>` (a fragment parse has nowhere to put it), and without the
+    other values, whose raw spelling (`&noti=c`) Python's unescaping does not read as a browser does.
+    `<image>` is the `<img>` a browser makes of it: raw source keeps the name the page wrote."""
+    from html.parser import HTMLParser
 
+    class First(HTMLParser):
+        root: Optional[tuple] = None
+
+        def handle_starttag(self, tag, attrs):
+            if self.root is not None:
+                return
+            names: list[str] = []
+            ident = None
+            for k, v in attrs:
+                if k not in names:
+                    names.append(k)
+                    ident = v if k == "id" else ident
+            self.root = ("img" if tag == "image" else tag, tuple(sorted(names)), ident)
+
+    if not html.startswith("<"):
+        return None  # a value that begins with content is not one element's source
+    p = First(convert_charrefs=False)
     try:
-        els = [e for e in fragments_fromstring(html) if isinstance(e.tag, str)]
-    except Exception:  # noqa: BLE001 - a value lxml cannot parse has no root to compare
+        p.feed(html)
+    except Exception:  # noqa: BLE001 - a value the tokenizer cannot read has no root to compare
         return None
-    return (els[0].tag, tuple(sorted(els[0].attrib.items()))) if els else None
+    return p.root
 
 
 def _raw_source(r: ValueRepro) -> bool:

@@ -845,6 +845,11 @@ def test_value_columns_split_by_the_tree_and_attribute_by_the_oracle_tree():
     serial = ['<table id="0"><tbody><tr><td>x</td></tr></tbody></table>']
     assert B.attribute_value(r("table", page([]), raw, serial)) == "raw-source outer HTML"
     assert B.attribute_value(r("table", page([]), ['<table id="1"><tr></table>'], serial)) is None
+    # an <html> is compared by its start tag too, and <image> is the <img> a browser makes of it
+    full = ['<html id="0"><head></head><body></body></html>']
+    assert B.attribute_value(r('[id="0"]', page([]), ['<html id="0">'], full)) == "raw-source outer HTML"
+    assert B.attribute_value(r('[id="0"]', page([]), ['<image id="0">'], ['<img id="0">'])) == "raw-source outer HTML"
+    assert B.attribute_value(r('[id="0"]', page([]), ['x<b id="0">'], ['<b id="0">x</b>'])) is None
 
     # an empty id-less element answers every fingerprint column like no element at all, so only a value
     # column that names it can show it

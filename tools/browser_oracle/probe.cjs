@@ -73,9 +73,11 @@ const SEED = 12345;
 
 // Which documents DOMParser may stand in for a page load on: derived from the equiv measurement, not
 // assumed. The scripting flag (noscript) and declarative shadow roots are two known splits. The third is
-// a document with no markup at all: Chrome's DOMParser keeps a leading `&#10;` that a page load drops
-// as whitespace before the body (`&#10;x` is "\nx" in one and "x" in the other).
-const FAST_PATH_ELIGIBLE = (doc) => doc.includes('<') && !/noscript|shadowrootmode/i.test(doc);
+// a character reference before the first tag: Chrome's DOMParser keeps a leading `&#10;` or `&#9;` that a
+// page load drops as whitespace before the body (`&#10;x` is "\nx" in one and "x" in the other, and so
+// is `&#10;<br>`), so a document with a `&` before its first `<`, or with no `<`, is page-loaded.
+const FAST_PATH_ELIGIBLE = (doc) => doc.includes('<') && !doc.slice(0, doc.indexOf('<')).includes('&')
+  && !/noscript|shadowrootmode/i.test(doc);
 
 // Page-side helpers. `__ser` serialises a node losslessly: HTML template content and open shadow roots
 // included, namespaces kept. Only an HTML-namespace <template> has `.content`.
