@@ -3668,6 +3668,23 @@ mod browser_mode_tests {
         assert_eq!(ex(b"<p>a</p><body lang=en>", "body p::text"), v(&["a"]));
     }
 
+    /// A later `<html>` or `<body>` tag replays the document only when its attributes change an answer:
+    /// a compound that can match the element matches it differently, or a terminal reads one of them.
+    #[test]
+    fn a_later_frame_tag_replays_only_when_it_changes_an_answer() {
+        let merge = |q: &str| {
+            let h = b"<!DOCTYPE html><p class=price id=p>a</p><body class=late title=t>";
+            Plan::compile(&[q], &[]).retro_census(h, EncodingHints::default()) & 1 != 0
+        };
+        // `.price` can match the body, but `late` is not `price`; `p.late` cannot match it at all
+        for q in [".price::text", "p.late::text", "div::attr(title)", "[id=p]::text", "#p::attr(class)"] {
+            assert!(!merge(q), "{q}");
+        }
+        for q in ["body.late p::text", ".late::attr(id)", "body::attr(title)", ":not(.late) > p::text", "* ::attr(title)"] {
+            assert!(merge(q), "{q}");
+        }
+    }
+
     /// Fostered content goes before its table: in document order, in the table's sibling positions, and
     /// into the text node before the table.
     #[test]

@@ -467,6 +467,36 @@ impl<'a> OpenElem<'a> {
             && browser::svg_local_name(self.tag) == Some(self.tag)
     }
 
+    /// A copy of the element with `extra` attributes after its own, holding only what compound matching
+    /// reads.
+    fn with_attrs(&self, extra: &[(&'a [u8], Cow<'a, str>)]) -> OpenElem<'a> {
+        let mut attrs = self.attrs.clone();
+        attrs.extend_from_slice(extra);
+        OpenElem {
+            tag: self.tag,
+            scid: self.scid,
+            attrs,
+            sig: 0,
+            matched: 0,
+            matched_tree: 0,
+            text_cols: 0,
+            seen: 0,
+            prev: 0,
+            anchor: 0,
+            start: self.start,
+            elem: self.elem,
+            cap_cols: 0,
+            insts: 0,
+            child_index: self.child_index,
+            of_type_index: self.of_type_index,
+            rev_subj: 0,
+            has_subj: 0,
+            has_done: 0,
+            txt_subj: 0,
+            cold: None,
+        }
+    }
+
     /// The attribute a value terminal or an XPath `@name` names (see [`Self::names`]).
     pub(super) fn named_attr(&self, name: &str) -> Option<&str> {
         self.attrs.iter().find(|(n, _)| self.names(n, name)).map(|(_, v)| v.as_ref())
@@ -532,6 +562,33 @@ fn collect_interesting(c: &Compound, out: &mut Vec<Box<str>>) {
         for alt in group {
             collect_interesting(alt, out); // `:is(...)` alternatives' attrs must be materialized too
         }
+    }
+}
+
+/// What a later `<html>` or `<body>` tag's attributes can change about `sel` (see
+/// [`Matcher::merge_adds`]): each of its compounds that can match either element, a `:has()` argument
+/// included, and the attribute its terminal reads, with the subject compound it is read from (`None` for
+/// a subtree terminal, which reads it from any element in the subtree).
+fn collect_frame_reads(sel: &Selector, probes: &mut Vec<Compound>, reads: &mut Vec<(Option<Compound>, Box<str>)>) {
+    fn walk(c: &Compound, probes: &mut Vec<Compound>) {
+        let frame = c.tag.as_deref().is_none_or(|t| t == "*" || t.eq_ignore_ascii_case("html") || t.eq_ignore_ascii_case("body"));
+        if frame && !probes.contains(c) {
+            probes.push(c.clone());
+        }
+        if let Some(h) = &c.has {
+            walk(&h.inner, probes);
+        }
+    }
+    for c in &sel.parts {
+        walk(c, probes);
+    }
+    let read = match &sel.terminal {
+        Terminal::NormalizeSpace(inner) => &**inner,
+        t => t,
+    };
+    if let Terminal::Attr { name, subtree } = read {
+        let subject = if *subtree { None } else { sel.parts.last().cloned() };
+        reads.push((subject, name.to_ascii_lowercase().into_boxed_str()));
     }
 }
 
@@ -1048,6 +1105,10 @@ pub struct CompiledSchema {
     // One-sided reject so an attribute no selector references costs one bit test instead of a scan.
     // `None` when the schema names too few attributes for that to pay (see `AttrGate::MIN_NAMES`).
     attr_gate: Option<AttrGate>,
+    /// Browser mode: the compounds that can match an `<html>` or `<body>`, and the attributes terminals
+    /// read, which decide whether a later frame tag's attributes change an answer ([`collect_frame_reads`]).
+    frame_probes: Vec<Compound>,
+    frame_reads: Vec<(Option<Compound>, Box<str>)>,
     has_outer: bool,            // any OuterHtml selector (flat OR grouped)? (skips capture bookkeeping otherwise)
     has_sibling: bool,          // any multi-segment (sibling `+`/`~`) entry? (skips the per-element anchor pass otherwise)
     groups: Vec<GroupSpec>,     // Many/One sub-field schemas
@@ -1671,9 +1732,18 @@ impl CompiledSchema {
             seg_reqs(&mut te.seg, opts, &mut wants);
         }
 
+        let (mut frame_probes, mut frame_reads) = (Vec::new(), Vec::new());
+        if browser {
+            for sel in queries.iter().flatten().chain(groups.iter().flat_map(|(c, subs)| c.iter().chain(subs.iter().flatten()))) {
+                collect_frame_reads(sel, &mut frame_probes, &mut frame_reads);
+            }
+        }
+
         CompiledSchema {
             mode,
             refusals,
+            frame_probes,
+            frame_reads,
             n_flat_cols: queries.len(),
             attr_gate: AttrGate::build(&interesting),
             n_groups: group_specs.len(),
@@ -3031,19 +3101,34 @@ impl<'a> Matcher<'a> {
         }
     }
 
-    /// Would a second `<html>` or `<body>` start tag with `raw_attrs` give the open element at `depth`
-    /// an attribute a selector asks about that it does not have yet? A browser adds those to it.
+    /// Does a second `<html>` or `<body>` start tag with `raw_attrs` change an answer about the open
+    /// element at `depth`? A browser adds the attributes it does not have yet, which matters only where
+    /// one of the schema's compounds matches the element differently with them, or a terminal reads one.
     pub(super) fn merge_adds(&self, depth: usize, raw_attrs: &[(&'a [u8], Option<&'a [u8]>)]) -> bool {
-        let attrs = self.interesting_attrs(raw_attrs);
         let el = &self.stack[depth];
-        attrs.iter().any(|(name, _)| !el.attrs.iter().any(|(n, _)| n.eq_ignore_ascii_case(name)))
+        let added: Vec<_> = self
+            .interesting_attrs(raw_attrs)
+            .into_iter()
+            .filter(|(name, _)| !el.attrs.iter().any(|(n, _)| n.eq_ignore_ascii_case(name)))
+            .collect();
+        if added.is_empty() {
+            return false;
+        }
+        let merged = el.with_attrs(&added);
+        let schema = self.schema;
+        schema.frame_probes.iter().any(|c| matching::compound_matches_unfiltered(c, el) != matching::compound_matches_unfiltered(c, &merged))
+            || schema.frame_reads.iter().any(|(subject, name)| {
+                added.iter().any(|(n, _)| n.eq_ignore_ascii_case(name.as_bytes()))
+                    && subject.as_ref().is_none_or(|c| matching::compound_matches_unfiltered(c, &merged))
+            })
     }
 
     /// The scan is a browser-mode replay: every position the builder passes from here on is a node's
     /// document-order rank, and an element's raw source is registered against its rank
-    /// ([`Self::register_span`]).
-    pub(super) fn begin_replay(&mut self) {
+    /// ([`Self::register_span`]), for a tree of `nodes` nodes.
+    pub(super) fn begin_replay(&mut self, nodes: usize) {
         self.replay = true;
+        self.replay_spans.reserve(nodes);
     }
 
     /// In a replay, the raw source of the element at rank `rank`.

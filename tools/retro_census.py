@@ -7,8 +7,8 @@ pass. This counts, per rule, the fraction of pages where it fires, over corpora 
 `bench_corpus.py` layout (`<dir>/<page-object>/selectors.json` and `pages/*.html`). It reads the pages
 where they are and writes nothing next to them.
 
-A second `<html>` or `<body>` tag is counted twice: with any attribute at all, and when it adds an
-attribute the page object's own selectors ask about, which is the only case that costs a replay.
+A second `<html>` or `<body>` tag is counted twice: with any attribute at all, and when its attributes
+change an answer to the page object's own selectors, which is the only case that costs a replay.
 
 Usage:
   .venv/bin/python tools/retro_census.py fixtures/realweb ~/src/frostwork-crawl-lab/corpora/<sample> ...
@@ -29,7 +29,7 @@ DIFFER = os.path.join(HERE, "..", "target", "release", "differ")
 
 # The bits of `Plan::retro_census`, in `src/matcher/browser/mod.rs`'s order.
 RULES = [
-    ("second <html>/<body> adds a selected attribute", 1 << 0),
+    ("second <html>/<body> changes an answer", 1 << 0),
     ("foster parenting", 1 << 1),
     ("frameset replacing the body", 1 << 2),
     ("adoption agency with a furthest block", 1 << 3),

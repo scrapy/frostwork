@@ -86,9 +86,8 @@ pub(super) fn compound_matches(c: &Compound, el: &OpenElem) -> bool {
 }
 
 /// [`compound_matches`] with the signature filter off at every level — the reference the filtered path is
-/// proven equal to (`filter_never_rejects_a_match`). A const generic rather than a second body, so the
-/// two cannot drift.
-#[cfg(test)]
+/// proven equal to (`filter_never_rejects_a_match`), and the test for an element whose signature was
+/// never built. A const generic rather than a second body, so the two cannot drift.
 pub(super) fn compound_matches_unfiltered(c: &Compound, el: &OpenElem) -> bool {
     compound_matches_impl::<false>(c, el)
 }
