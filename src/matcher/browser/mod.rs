@@ -785,7 +785,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
             Loc::Inert | Loc::Document => self.absorb(m, s, s + b.len()),
             Loc::Into(i) => {
                 if REPLAY {
-                    if !Self::no_node(m, b, dm) {
+                    if !m.input.is_dropped_nul(b, dm) {
                         self.dom.append_text(self.stack[i].depth, (b, dm, s));
                     }
                 } else {
@@ -797,7 +797,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
             Loc::Foster(t) => {
                 self.retro |= RETRO_FOSTER;
                 if REPLAY {
-                    if !Self::no_node(m, b, dm) {
+                    if !m.input.is_dropped_nul(b, dm) {
                         let table = self.stack[t].depth;
                         if self.dom.parent(table) != dom::NIL {
                             self.dom.text_before(table, (b, dm, s));
@@ -811,11 +811,6 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
                 }
             }
         }
-    }
-
-    /// A run that is no text node: markup-mode NUL, which a browser drops (see [`Matcher::buffer_text`]).
-    fn no_node(m: &Matcher<'a>, b: &[u8], dm: DataMode) -> bool {
-        m.input.keeps_nul() && dm == DataMode::Normal && b.iter().all(|&c| c == 0)
     }
 
     /// Markup over `[from, to)` that leaves no node. Streaming, the text node around it continues

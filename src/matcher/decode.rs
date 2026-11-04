@@ -48,8 +48,10 @@ impl<'a> EncodedInput<'a> {
         Self { bytes, encoding, keeps_nul }
     }
 
-    pub(super) fn keeps_nul(self) -> bool {
-        self.keeps_nul
+    /// Is a run read in `mode` no text node at all? Markup-mode text that is nothing but NUL is dropped
+    /// by a browser (`<p>\0` has no text node), and only browser mode keeps NUL in the buffer.
+    pub(super) fn is_dropped_nul(self, text: &[u8], mode: DataMode) -> bool {
+        self.keeps_nul && mode == DataMode::Normal && text.iter().all(|&b| b == 0)
     }
 
     /// The whole buffer — for the tokenizer, which reads bytes and never decodes.

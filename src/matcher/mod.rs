@@ -2361,6 +2361,16 @@ impl<'a> Matcher<'a> {
             .then_some(name)
     }
 
+    /// [`Self::materialize_attrs`] under this page's `decode_names`.
+    #[inline]
+    fn interesting_attrs(&self, raw_attrs: &[(&'a [u8], Option<&'a [u8]>)]) -> Vec<(&'a [u8], Cow<'a, str>)> {
+        if self.decode_names {
+            self.materialize_attrs::<true>(raw_attrs)
+        } else {
+            self.materialize_attrs::<false>(raw_attrs)
+        }
+    }
+
     /// Materialize the attributes some selector references, decoding values lazily (borrowed `Cow` when
     /// the value is clean valid UTF-8 — the common case, so usually zero allocation).
     ///
@@ -2832,11 +2842,7 @@ impl<'a> Matcher<'a> {
         raw_attrs: &[(&'a [u8], Option<&'a [u8]>)],
         span_start: usize,
     ) {
-        let mut attrs = if self.decode_names {
-            self.materialize_attrs::<true>(raw_attrs)
-        } else {
-            self.materialize_attrs::<false>(raw_attrs)
-        };
+        let mut attrs = self.interesting_attrs(raw_attrs);
         let elem = self.next_elem;
         self.next_elem = elem.wrapping_add(1);
         // Browser mode's tail pass: a deferred winner of the first pass carries the mark its tail
@@ -3026,11 +3032,7 @@ impl<'a> Matcher<'a> {
     /// Would a second `<html>` or `<body>` start tag with `raw_attrs` give the open element at `depth`
     /// an attribute a selector asks about that it does not have yet? A browser adds those to it.
     pub(super) fn merge_adds(&self, depth: usize, raw_attrs: &[(&'a [u8], Option<&'a [u8]>)]) -> bool {
-        let attrs = if self.decode_names {
-            self.materialize_attrs::<true>(raw_attrs)
-        } else {
-            self.materialize_attrs::<false>(raw_attrs)
-        };
+        let attrs = self.interesting_attrs(raw_attrs);
         let el = &self.stack[depth];
         attrs.iter().any(|(name, _)| !el.attrs.iter().any(|(n, _)| n.eq_ignore_ascii_case(name)))
     }
@@ -3103,11 +3105,10 @@ impl<'a> Matcher<'a> {
     /// they all see the same single node lxml does. Comments/CDATA/PIs also split a run, but they split
     /// it in lxml too, so only source-ADJACENCY across the dropped tag may be re-joined.
     ///
-    /// A markup-mode run of nothing but NUL is no node at all: browsers drop NUL from body text (`<p>\0`
-    /// has no text node), so it is absorbed like markup that leaves none. Only browser mode keeps NUL in
-    /// the buffer; lxml mode deleted it before tokenizing.
+    /// A markup-mode run of nothing but NUL is no node at all ([`EncodedInput::is_dropped_nul`]), so it
+    /// is absorbed like markup that leaves none.
     pub(super) fn buffer_text(&mut self, text: &'a [u8], mode: DataMode, start: usize) {
-        if self.input.keeps_nul() && mode == DataMode::Normal && text.iter().all(|&b| b == 0) {
+        if self.input.is_dropped_nul(text, mode) {
             return self.absorb_into_text_gap(start, start + text.len());
         }
         // A run starting exactly at the buffered node's gap end continues it: everything between the two
