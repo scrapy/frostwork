@@ -14,8 +14,8 @@ first public release.
   favours Shift_JIS, `.ru` windows-1251, …), as it does in browsers.
 
 - In Rust, `extract`, `extract_grouped`, `detect_encoding`, `Plan::extract`,
-  `Page::extract_with_encoding` and `CompiledPage::extract_with_encoding` take that URL as a new
-  `url: Option<&str>` argument after the encoding. Pass `None` for the previous behavior.
+  `Page::extract_with_encoding` and `CompiledPage::extract_with_encoding` take the response URL as a new
+  `url: Option<&str>` argument after the encoding. Pass `None` when there is no URL.
 
 - `bgsound`, `embed`, `keygen`, `source`, `track` and `wbr` are now void elements, matching libxml2
   2.15, the oracle Frostwork now targets. Markup after one of them is no longer its child, e.g.
