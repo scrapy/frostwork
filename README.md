@@ -1,6 +1,6 @@
 # Frostwork
 
-Fast HTML extraction for Python and Rust, without a DOM.
+Fast HTML extraction for Python and Rust that builds a minimal tree only when needed.
 
 Frostwork compiles a set of CSS or XPath selectors and extracts their values in one scan of an HTML
 response. Reuse the schema across Scrapy callbacks, web-poet pages or standalone code. Working memory

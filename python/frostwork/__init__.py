@@ -1,7 +1,7 @@
-"""Frostwork — treeless, one-pass HTML extraction.
+"""Frostwork — streaming HTML extraction that builds a minimal tree only when needed.
 
 `extract(html, queries, encoding=None)` is the primitive: one streaming scan answers every
-CSS/XPath query, returning one value-column per query (no DOM, no fallback). ``parser="browser"`` (the
+CSS/XPath query, returning one value-column per query (no fallback). ``parser="browser"`` (the
 default) answers against the tree a browser builds, ``parser="lxml"`` against lxml's. On the few pages
 where an HTML5 rule rewrites elements already parsed, browser mode answers from a compact tree of the
 finished page instead, and a deferred predicate whose value is inside its element can take a second

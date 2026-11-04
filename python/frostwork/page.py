@@ -293,7 +293,7 @@ def extract_grouped(
     (descendant-or-self). ``grouped[g]`` is that group's rows, each a list of sub-field value-columns
     (``[group][row][subfield][value]``). Unsupported selectors raise by default; pass
     ``strict=False`` for permissive empty columns. ``encoding``, ``content_type``, ``url``, ``syntax``
-    and ``parser`` apply as in :func:`extract`. Same no-DOM, no-fallback semantics as :func:`extract`."""
+    and ``parser`` apply as in :func:`extract`. Same tree and no-fallback semantics as :func:`extract`."""
     query_list = _query_list(queries)
     group_list = _group_list(groups)
     _check_parser(parser)

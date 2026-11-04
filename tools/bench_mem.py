@@ -1,14 +1,14 @@
 """
-Peak-memory + parse-time benchmark for the Frostwork engine: one streaming pass, no DOM, schema
+Peak-memory + parse-time benchmark for the Frostwork engine: one streaming pass, schema
 compiled once (what `Page`/`FrostPage` do) vs Parsel (parse once into an lxml tree, then one query
 per field). Both sides are measured in their real reuse pattern.
 
 Why this exists: the throughput matrix (bench_matrix.py) proves Frostwork is *fast*, but its
-defining property — **no DOM** — is invisible without measuring memory. On a large page from which
+defining property — **no tree on a page it streams** — is invisible without measuring memory. On a large page from which
 you pull a few fields, Parsel must build the entire lxml tree (memory scales with page size) while
 Frostwork streams past the filler and stays bounded. This bench makes that concrete.
 
-`--engines` runs the same measurement over every adapter in `bench_engines.py`, because "no DOM" is
+`--engines` runs the same measurement over every adapter in `bench_engines.py`, because bounded memory is
 a claim against the whole field and not just against Parsel: lexbor's tree is markedly leaner than
 libxml2's, which is exactly the kind of thing a throughput-only comparison hides.
 

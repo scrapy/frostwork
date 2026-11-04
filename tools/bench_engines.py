@@ -9,7 +9,7 @@ because Parsel is not the fast end of the field. selectolax/lexbor is.
 Engines (each parses once per page, then answers one query per field — every one's real reuse
 pattern):
 
-  frostwork            ONE streaming pass, no DOM, schema compiled once — what `frostwork.Page` /
+  frostwork            ONE streaming pass, schema compiled once — what `frostwork.Page` /
                        `FrostPage` do, and the only way a scraper runs (a page object is a class; its
                        selectors are compiled at class-definition time, not per response).
   parsel               the incumbent, and this file's PARITY ORACLE.
@@ -223,7 +223,7 @@ class Engine:
 
 
 class Frostwork(Engine):
-    """One streaming pass, no DOM, with the schema compiled ONCE.
+    """One streaming pass, with the schema compiled ONCE.
 
     There is no second "selectors re-parsed per call" row, and that is deliberate rather than
     flattering. A Scrapy/web-poet page object is a class: its selectors are declared at class-definition
@@ -233,7 +233,7 @@ class Frostwork(Engine):
     """
 
     key, label = "frostwork", "frostwork"
-    note = "one streaming pass, no DOM; schema compiled once (what Page/FrostPage do)"
+    note = "one streaming pass; schema compiled once (what Page/FrostPage do)"
     full_coverage = True
 
     def __init__(self):

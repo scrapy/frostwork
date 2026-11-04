@@ -1,6 +1,6 @@
 # Frostwork compatibility contract
 
-Frostwork executes supported selectors itself, without a DOM or parser fallback. This reference describes
+Frostwork executes supported selectors itself, without parser fallback, building a minimal tree only when needed. This reference describes
 four kinds of behavior:
 
 | bucket | meaning |

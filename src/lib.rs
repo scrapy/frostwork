@@ -1,7 +1,7 @@
-//! Frostwork: a treeless, one-pass HTML extraction engine — a bespoke tokenizer + corrected-stack
-//! matcher, no fallback. Lxml mode always streams in one pass; browser mode answers a page where an HTML5
-//! rule rewrites elements already parsed from a compact tree of the finished page (the replay), and reads
-//! a deferred predicate's inner value in a second pass. See docs/DESIGN.md and docs/COMPATIBILITY.md.
+//! Frostwork: a streaming HTML extraction engine that builds a minimal tree only when needed — a
+//! bespoke tokenizer + corrected-stack matcher, no fallback. Lxml mode always streams in one pass;
+//! browser mode answers a page where an HTML5 rule rewrites elements already parsed from a compact tree
+//! of the finished page (the replay), and reads a deferred predicate's inner value in a second pass. See docs/DESIGN.md and docs/COMPATIBILITY.md.
 //!
 //! Pipeline:  bytes ─▶ tokenizer (TokenSink events) ─▶ corrected-stack matcher ─▶ per-selector cols.
 //! The tokenizer is deliberately swappable behind `TokenSink`; the matcher is where implied-close

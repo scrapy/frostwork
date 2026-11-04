@@ -267,7 +267,7 @@ def main():
     med_speed = statistics.median(speedups) if speedups else 0
     mean_speed = statistics.mean(speedups) if speedups else 0
     print("\n" + "=" * 60)
-    print("CORPUS PERFORMANCE — Frostwork (1 pass, no DOM) vs Parsel")
+    print("CORPUS PERFORMANCE — Frostwork (streaming) vs Parsel")
     print("=" * 60)
     print(f"pages measured   : {n_pages}  across {len(n_pageobjs)} page objects")
     print(f"total bytes      : {total_bytes/1048576:.1f} MB   "

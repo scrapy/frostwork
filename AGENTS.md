@@ -1,8 +1,10 @@
 # AGENTS.md — working in Frostwork
 
-Frostwork is a **treeless, one-pass HTML extraction engine**: a Rust core that answers a scraper's
-CSS/XPath selectors in a single streaming scan, **without building a DOM**, staying value-identical to
-lxml/libxml2 on the common web. No parse tree, **no fallback**. Tagline: *"Frost never takes root."*
+Frostwork is a **streaming HTML extraction engine that builds a minimal tree only when needed**: a Rust
+core that answers a scraper's CSS/XPath selectors in a single streaming scan, staying value-identical to
+lxml/libxml2 on the common web in lxml mode and to Chrome in browser mode, the default. Browser mode builds
+a compact tree of the page only where an HTML5 rule rewrites elements already parsed (the replay); lxml
+mode never does. **No fallback.** Tagline: *"Frost never takes root."*
 
 Start with [README.md](README.md) for the pitch + API, [docs/DESIGN.md](docs/DESIGN.md) for how/why
 it's built, and [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) for the exact supported/divergent/

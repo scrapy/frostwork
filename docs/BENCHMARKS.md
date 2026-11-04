@@ -1,6 +1,6 @@
 # Frostwork benchmarks
 
-Frostwork answers a fixed set of CSS/XPath selectors in **one streaming pass, with no DOM**. These are
+Frostwork answers a fixed set of CSS/XPath selectors in **one streaming pass, building a minimal tree only when needed**. These are
 its measured numbers against the parsers scraping actually uses.
 
 | on a real production corpus | Frostwork |
@@ -107,7 +107,7 @@ swapping in.
 
 | engine | what it is |
 | --- | --- |
-| **Frostwork** | one streaming pass, no DOM |
+| **Frostwork** | one streaming pass, a minimal tree only when needed |
 | **Parsel** | what Scrapy uses; also this run's parity oracle |
 | **lxml + cssselect** | Parsel's tree and translation without Parsel's Python wrapper |
 | **selectolax (lexbor)** | the fastest CSS-selector HTML parser in Python scraping |
@@ -245,10 +245,11 @@ selectolax's row pays for value parity: its C-level `node.text()` returns one co
 element where Parsel's `::text` is one value per text node, and producing the latter costs a
 Python-level walk.
 
-## Memory profile — what "no DOM" buys
+## Memory profile — what streaming buys
 
-Frostwork's defining property is invisible to a throughput chart. It builds no tree, so peak memory
-tracks open-element state and extracted output, not a materialized page. Measured as
+Frostwork's defining property is invisible to a throughput chart. On a page it streams, which is every
+page in lxml mode and about 98% in browser mode, it builds no tree, so peak memory tracks open-element
+state and extracted output, not a materialized page. Measured as
 subprocess-isolated peak RSS, reported as work − baseline so interpreter, imports and document bytes
 cancel out (`.venv/bin/python tools/bench_mem.py`).
 
