@@ -26,7 +26,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field as _dc_field
 from functools import lru_cache
 from typing import (
-    Any, Callable, Iterable, Iterator, List, Literal, Optional, Protocol, Tuple, Union, overload,
+    Any, Callable, Iterable, Iterator, List, Literal, Optional, Protocol, Tuple, Union, cast, overload,
 )
 
 from .validation import FieldProcessingError, ValidationReport, validate_item
@@ -40,7 +40,7 @@ from ._frostwork import resolve_label as _resolve_label
 
 __all__ = [
     "extract", "extract_grouped", "check", "detect_encoding", "Page", "Item",
-    "SchemaReport", "FieldReport", "GroupReport", "UnsupportedSelector",
+    "SchemaReport", "FieldReport", "GroupReport", "UnsupportedSelector", "Parser",
 ]
 
 # A field's cardinality: ("first", None) | ("all", None) | ("join", separator).
@@ -51,11 +51,24 @@ _Query = Union[str, Tuple[str, Optional[str]]]
 
 _SYNTAXES = (None, "css", "xpath")
 
+Parser = Literal["browser", "lxml"]
+"""The parse mode a schema is answered in. ``"browser"`` (the default) is graded against real browsers;
+``"lxml"`` is value parity with lxml/Parsel. See docs/BROWSER_MODE.md."""
+
+_PARSERS = ("browser", "lxml")
+
 
 def _check_syntax(syntax: Optional[str]) -> Optional[str]:
     if syntax not in _SYNTAXES:
         raise ValueError(f"frostwork: syntax must be 'css', 'xpath' or None, got {syntax!r}")
     return syntax
+
+
+def _check_parser(parser: str) -> Parser:
+    """``parser`` if it names a mode, else ``ValueError`` (the native layer raises the same)."""
+    if parser not in _PARSERS:
+        raise ValueError(f"frostwork: parser must be 'browser' or 'lxml', got {parser!r}")
+    return cast(Parser, parser)
 
 
 def _query(selector: str, syntax: Optional[str]) -> _Query:
@@ -144,9 +157,9 @@ def _group_list(groups) -> list:
 
 
 @lru_cache(maxsize=256)
-def _validate_flat(selectors: Tuple[str, ...], syntax: Optional[str]) -> None:
+def _validate_flat(selectors: Tuple[str, ...], syntax: Optional[str], parser: Parser) -> None:
     """Cache successful primitive-schema validation; selectors are commonly reused per response."""
-    check(selectors, syntax=syntax).raise_for_status()
+    check(selectors, syntax=syntax, parser=parser).raise_for_status()
 
 
 @lru_cache(maxsize=128)
@@ -154,8 +167,9 @@ def _validate_grouped(
     selectors: Tuple[str, ...],
     groups: Tuple[Tuple[str, Tuple[Tuple[str, str], ...]], ...],
     syntax: Optional[str],
+    parser: Parser,
 ) -> None:
-    check(selectors, groups, syntax=syntax).raise_for_status()
+    check(selectors, groups, syntax=syntax, parser=parser).raise_for_status()
 
 
 @overload
@@ -233,6 +247,7 @@ def extract(
     url: Optional[str] = None,
     strict: bool = True,
     syntax: Optional[str] = None,
+    parser: Parser = "browser",
 ) -> List[List[str]]:
     """One streaming pass over ``html``: return one value-column per query, in query order.
 
@@ -245,14 +260,17 @@ def extract(
     Unsupported queries raise :class:`UnsupportedSelector` before scanning. Pass ``strict=False``
     to use the engine's permissive empty-column behavior. There is never a parser fallback.
     ``syntax`` declares every query ``"css"`` or ``"xpath"``; ``None`` routes each by its prefix
-    (``/``, ``./`` and ``normalize-space(`` are XPath).
+    (``/``, ``./`` and ``normalize-space(`` are XPath). ``parser`` is the parse mode: ``"browser"``
+    builds the tree a browser builds, ``"lxml"`` the one lxml does; which selectors are supported can
+    differ between the two (see :func:`check`).
     """
     query_list = _query_list(queries)
+    _check_parser(parser)
     if strict:
-        _validate_flat(tuple(query_list), syntax)
+        _validate_flat(tuple(query_list), syntax, parser)
     return _extract(
         _as_scan_input(html), [_query(q, syntax) for q in query_list], encoding,
-        content_type=content_type, url=url,
+        content_type=content_type, url=url, parser=parser,
     )
 
 
@@ -266,6 +284,7 @@ def extract_grouped(
     url: Optional[str] = None,
     strict: bool = True,
     syntax: Optional[str] = None,
+    parser: Parser = "browser",
 ) -> Tuple[List[List[str]], list]:
     """One streaming pass returning ``(flat_columns, grouped)``. ``groups`` is a list of
     ``(container_selector, [(subfield_name, subfield_selector), ...])`` (a subfield mapping is also
@@ -273,13 +292,14 @@ def extract_grouped(
     ``container_selector`` (document order) each sub-field is extracted **scoped to it**
     (descendant-or-self). ``grouped[g]`` is that group's rows, each a list of sub-field value-columns
     (``[group][row][subfield][value]``). Unsupported selectors raise by default; pass
-    ``strict=False`` for permissive empty columns. ``encoding``, ``content_type``, ``url`` and ``syntax``
-    apply as in :func:`extract`. Same no-DOM, no-fallback semantics as :func:`extract`."""
+    ``strict=False`` for permissive empty columns. ``encoding``, ``content_type``, ``url``, ``syntax``
+    and ``parser`` apply as in :func:`extract`. Same no-DOM, no-fallback semantics as :func:`extract`."""
     query_list = _query_list(queries)
     group_list = _group_list(groups)
+    _check_parser(parser)
     if strict:
         group_key = tuple((container, tuple(subfields)) for container, subfields in group_list)
-        _validate_grouped(tuple(query_list), group_key, syntax)
+        _validate_grouped(tuple(query_list), group_key, syntax, parser)
     return _extract_grouped(
         _as_scan_input(html),
         [_query(q, syntax) for q in query_list],
@@ -287,6 +307,7 @@ def extract_grouped(
         encoding,
         content_type=content_type,
         url=url,
+        parser=parser,
     )
 
 
@@ -345,8 +366,9 @@ class GroupReport:
 
 @dataclass(frozen=True)
 class SchemaReport:
-    """The result of auditing a whole schema: per-selector support plus budget usage. Use
-    :attr:`ok`, :attr:`unsupported`, and :meth:`raise_for_status`."""
+    """The result of auditing a whole schema: per-selector support plus budget usage, in the parse mode
+    named by :attr:`parser` (support is per mode). Use :attr:`ok`, :attr:`unsupported`, and
+    :meth:`raise_for_status`."""
 
     fields: List[FieldReport]
     groups: List[GroupReport]
@@ -354,6 +376,7 @@ class SchemaReport:
     max_members: int
     sib_bits: int
     max_sib_bits: int
+    parser: Parser = "browser"
 
     @property
     def over_budget(self) -> bool:
@@ -397,8 +420,8 @@ class SchemaReport:
 
     def __str__(self) -> str:
         head = (
-            f"SchemaReport: {'OK' if self.ok else 'PROBLEMS'} "
-            f"(members {self.members}/{self.max_members}, sib-bits {self.sib_bits}/{self.max_sib_bits})"
+            f"SchemaReport: {'OK' if self.ok else 'PROBLEMS'} (parser {self.parser}, "
+            f"members {self.members}/{self.max_members}, sib-bits {self.sib_bits}/{self.max_sib_bits})"
         )
         rows = [str(f) for f in self.fields]
         for g in self.groups:
@@ -414,9 +437,14 @@ def _field_reports(fields, tuples) -> List[FieldReport]:
     ]
 
 
-def check(queries=None, groups=None, *, syntax: Optional[str] = None) -> SchemaReport:
-    """Audit a schema without parsing any HTML: report which selectors the engine supports (with an
-    advisory reason for those it does not) and the budget usage.
+def check(
+    queries=None, groups=None, *, syntax: Optional[str] = None, parser: Parser = "browser"
+) -> SchemaReport:
+    """Audit a schema without parsing any HTML: report which selectors the engine supports in the
+    ``parser`` mode (with an advisory reason for those it does not) and the budget usage. Support is per
+    mode: browser mode refuses a deferred predicate whose value comes from inside the element it selects
+    (``div:has(a) ::text``) and the outer HTML of a selector that can match a synthesized
+    ``<html>``/``<head>``/``<body>``, both of which lxml mode supports.
 
     ``queries`` is a ``{name: selector}`` mapping, an iterable of flat selectors (labelled ``[i]`` by
     position), or an iterable of ``(name, selector)`` pairs. ``groups`` is a
@@ -438,14 +466,16 @@ def check(queries=None, groups=None, *, syntax: Optional[str] = None) -> SchemaR
         (name, _query(container, syntax), [(sub, _query(sel, syntax)) for sub, sel in subs])
         for name, container, subs in _named_groups(groups or [])
     ]
-    return _audit(named_fields, named_groups)
+    return _audit(named_fields, named_groups, _check_parser(parser))
 
 
-def _audit(named_fields, named_groups) -> SchemaReport:
+def _audit(named_fields, named_groups, parser: Parser) -> SchemaReport:
     """:func:`check` over ``(name, query)`` fields and ``(name, container, [(sub, query)])`` groups
     whose queries are already in the native shape, so each may carry its own syntax."""
     flat_t, groups_t, (members, max_members, sib_bits, max_sib_bits) = _audit_schema(
-        [sel for _name, sel in named_fields], [(c, subs) for _name, c, subs in named_groups]
+        [sel for _name, sel in named_fields],
+        [(c, subs) for _name, c, subs in named_groups],
+        parser=parser,
     )
     fields = _field_reports(named_fields, flat_t)
     group_reports = []
@@ -453,7 +483,7 @@ def _audit(named_fields, named_groups) -> SchemaReport:
         container = FieldReport(f"{gn}<container>", _query_text(gc), ctuple[0], ctuple[1])
         subfields = _field_reports(subs, subtuples)
         group_reports.append(GroupReport(gn, container, subfields))
-    return SchemaReport(fields, group_reports, members, max_members, sib_bits, max_sib_bits)
+    return SchemaReport(fields, group_reports, members, max_members, sib_bits, max_sib_bits, parser)
 
 
 # The shapes `check` accepts, quoted verbatim in the TypeError so a wrong one names its way out. A
@@ -625,16 +655,23 @@ def _sub_spec(spec) -> Tuple[str, _Card]:
 
 class Page:
     """An ordered ``{name -> (selector, cardinality)}`` schema. Build it once with the ``field*``
-    methods (chainable), then call :meth:`extract` per page; reuse one ``Page`` across responses."""
+    methods (chainable), then call :meth:`extract` per page; reuse one ``Page`` across responses.
+    ``parser`` fixes the parse mode the schema is compiled for, as in :func:`extract`."""
 
-    __slots__ = ("_fields", "_groups", "_plan", "_strict", "_validated")
+    __slots__ = ("_fields", "_groups", "_plan", "_strict", "_validated", "_parser")
 
-    def __init__(self, *, strict: bool = True) -> None:
+    def __init__(self, *, strict: bool = True, parser: Parser = "browser") -> None:
         self._fields: dict[str, _Field] = {}
         self._groups: dict[str, _Group] = {}
         self._plan = None  # native compiled Plan, built lazily on first extract, reused after
         self._strict = strict
         self._validated = False
+        self._parser: Parser = _check_parser(parser)
+
+    @property
+    def parser(self) -> Parser:
+        """The parse mode this schema is compiled for."""
+        return self._parser
 
     def _add(
         self, name: str, selector: str, card: _Card, transforms: _Transforms, syntax: Optional[str]
@@ -675,7 +712,9 @@ class Page:
                 for g in self._groups.values()
             ]
             first_only = [f.card[0] == "first" for f in self._fields.values()]
-            self._plan = _Plan([f.query for f in self._fields.values()], garg, first_only)
+            self._plan = _Plan(
+                [f.query for f in self._fields.values()], garg, first_only, parser=self._parser
+            )
         return self._plan
 
     def field(
@@ -758,6 +797,7 @@ class Page:
                 (name, g.query, [(sn, sub.query) for sn, sub in g.subfields.items()])
                 for name, g in self._groups.items()
             ],
+            self._parser,
         )
 
     def frost_schema(self) -> dict:

@@ -144,8 +144,8 @@ def _plan_for(queries):
     this — an unsupported selector would become a silently empty column the gate reads as a value bug, or
     as a legitimate empty answer.
     """
-    frostwork.check(list(queries)).raise_for_status()
-    return Plan(list(queries), [])
+    frostwork.check(list(queries), parser="lxml").raise_for_status()
+    return Plan(list(queries), [], parser="lxml")  # graded against Parsel, so lxml mode
 
 
 def parsel_extract(body, queries):

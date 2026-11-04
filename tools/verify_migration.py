@@ -2,9 +2,11 @@
 """Verify complete Page schemas on saved response bytes, then optionally time equal whole items.
 
 Usage: python tools/verify_migration.py pages.py:REGISTRY responses/manifest.json --json report.json
-The registry is a Page or a mapping of names to Pages. Import-safe modules only: importing executes
-Python code, including the transforms used by both implementations. This is an offline comparison
-against Parsel, never a runtime fallback. See docs/MIGRATION.md for the manifest and exact gate.
+The registry is a Page or a mapping of names to Pages, each in lxml mode (`Page(parser="lxml")`): the
+reference is Parsel, which is lxml mode's oracle, so a browser-mode Page is refused rather than graded
+against a parser it does not follow. Import-safe modules only: importing executes Python code, including
+the transforms used by both implementations. This is an offline comparison against Parsel, never a
+runtime fallback. See docs/MIGRATION.md for the manifest and exact gate.
 """
 from __future__ import annotations
 
@@ -138,6 +140,10 @@ def verify(registry, manifest_path, *, benchmark=False, rounds=7, iterations=100
     manifest = json.loads(manifest_bytes)
     if manifest.get('version') != 1 or not manifest.get('responses'):
         raise ValueError('manifest needs version: 1 and a nonempty responses list')
+    browser = sorted(name for name, page in registry.items() if page.parser != 'lxml')
+    if browser:
+        raise ValueError(f'schemas {browser} are not in lxml mode: the reference is Parsel, which is lxml '
+                         'mode\'s oracle, so declare them Page(parser="lxml")')
     audits = {name: _report_dict(name, page.check()) for name, page in registry.items()}
     result = {'manifest_sha256': hashlib.sha256(manifest_bytes).hexdigest(), 'schemas': audits,
               'responses': [], 'environment': {

@@ -1,5 +1,6 @@
-//! The corrected-stack matcher. It consumes `TokenSink` events, maintains an open-element stack
-//! reshaped by HTML implied-end-tag rules (so combinators match the tree lxml *would* build), and
+//! The corrected-stack matcher. It consumes `TokenSink` events through the tree builder of the schema's
+//! parse mode (`tree`, `libxml2`, `browser`), which reshapes an open-element stack by that parser's
+//! implied-end-tag rules (so combinators match the tree lxml or the browser *would* build); the matcher
 //! evaluates the supported selectors off that stack.
 //!
 //! Model: each open element carries a `matched` bitset — bit k set iff the element is a *subject
@@ -15,36 +16,30 @@
 
 use std::borrow::Cow;
 
-use encoding_rs::Encoding;
-
-use frame::{
-    frame_slot, frameset_is_open, head_is_current, head_is_open, nothing_open, only_html_open,
-    tag_is_redundant, DocumentFrame,
-};
-use crate::implied_close::{
-    blocks_end_tag, classify, end_tag_discardable, frame_content_of, start_closes,
-    FrameContent,
-};
 use crate::selector::{
     Comb, Compound, Has, ReversePos, Selector, Terminal, TextPred,
 };
 #[cfg(test)]
 use crate::selector::{TextAxis, TextOp};
-use crate::tokenizer::TokenSink;
-use crate::{FlatColumns, GroupRows};
+use crate::tokenizer::DataMode;
+use crate::{FlatColumns, GroupRows, ParseMode};
 
+mod browser;
 mod decode;
 mod compile;
 mod frame;
 mod deferred;
+mod libxml2;
 mod matching;
 mod sig;
+mod tree;
 
 use compile::{
     any_has, any_reverse, any_text_pred, deferrable_has, deferrable_reverse,
     deferrable_text_pred, sibling_pred_boundary,
 };
-use decode::{decode_attr, decode_bytes, finalize};
+pub(crate) use compile::{admits_synthesized_frame, Refusal};
+use decode::decode_bytes;
 pub(crate) use decode::EncodedInput;
 use deferred::TextMatchState;
 #[cfg(test)]
@@ -335,7 +330,7 @@ impl<'a> OpenElem<'a> {
     }
 
     /// A bare element for matching-kernel tests: a tag, no attributes, no bookkeeping. Only the
-    /// `matching` unit tests build elements directly; the scan always goes through `start_tag`.
+    /// `matching` unit tests build elements directly; the scan always goes through `open_element`.
     #[cfg(test)]
     pub(super) fn for_test(tag: &'a [u8]) -> Self {
         Self::open(tag, 0, Vec::new(), 0, sig::Wants::all())
@@ -645,9 +640,10 @@ struct TailGroup {
 /// The prefix is what a tier defers ON, which is also why tiers cannot collide here: `deferrable_common`
 /// admits one kind of deferred predicate per selector, so a reverse prefix carries `reverse` exactly
 /// where a `:has` prefix carries `has`, and the two are never equal.
-#[derive(Default)]
 struct TailPlan {
     groups: Vec<TailGroup>,
+    /// The mode the tails are compiled in: their parent schema's.
+    mode: ParseMode,
 }
 
 impl TailPlan {
@@ -661,7 +657,7 @@ impl TailPlan {
         col: usize,
         mergeable: bool,
     ) -> Option<Tail> {
-        let solo = CompiledSchema::compile(std::slice::from_ref(&members), &[]);
+        let solo = CompiledSchema::compile(std::slice::from_ref(&members), &[], self.mode);
         if !solo.flat_col_supported(0) {
             return None;
         }
@@ -688,13 +684,14 @@ impl TailPlan {
     }
 
     fn finish(self) -> Vec<TailSchema> {
+        let mode = self.mode;
         self.groups
             .into_iter()
             .map(|g| {
                 let schema = if g.members.len() == 1 {
                     g.solo
                 } else {
-                    CompiledSchema::compile(&g.members, &[])
+                    CompiledSchema::compile(&g.members, &[], mode)
                 };
                 TailSchema { schema, cols: g.cols }
             })
@@ -832,6 +829,11 @@ impl AttrGate {
 /// model) pays the parse + lowering cost a single time. A [`Matcher`] borrows it per page and adds the
 /// mutable scan state. See [`crate::Plan`] for the string-level, encoding-resolving wrapper.
 pub struct CompiledSchema {
+    /// The parse mode this schema answers in, which picks the tree builder per document (see `tree`).
+    mode: ParseMode,
+    /// Flat columns and grouped sub-fields that this mode refuses although they compile, with why.
+    /// Their entries are never built, so they read as unsupported everywhere; this keeps the reason.
+    refusals: Vec<(Slot, Refusal)>,
     entries: Vec<CSel>,
     interesting: Vec<Box<str>>, // attr names any selector references (lowercased)
     // Is any interesting name non-ASCII (`[data-año]`, `::attr(año)`)? Attribute names arrive as RAW
@@ -881,6 +883,13 @@ pub struct CompiledSchema {
     // for letting the scan build LESS than a full signature: a kind of bit no `req` asks for can be
     // left out, but one that is asked for must always be present.
     wants: sig::Wants,
+}
+
+/// A selector's place in a schema, for the refusals a mode records against it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Slot {
+    Flat(usize),
+    Sub { group: usize, sub: usize },
 }
 
 /// Per-page scan state, borrowing a compiled [`CompiledSchema`] and the document bytes. One is built,
@@ -936,19 +945,9 @@ pub struct Matcher<'a> {
     // Two integers per winner is the whole retention cost — values are recovered by re-scanning at finish.
     tail_spans: Vec<(usize, usize, usize)>,
     // The text run not yet delivered to the consumers, held back by one event so that a run split by
-    // DROPPED end tags can be re-joined first (libxml2 makes it ONE text node; see `text`). Flushed by
+    // DROPPED end tags can be re-joined first (libxml2 makes it ONE text node; see `buffer_text`). Flushed by
     // the next start tag / matched end tag / EOF, so ordering vs. tag events is unchanged.
     pending_text: Option<PendingText<'a>>,
-    // Everything the document-frame rules know that the stack cannot tell them, plus the questions they
-    // ask about it — see `frame.rs`, which explains why this is one owner of NAMED questions rather than
-    // the insertion-mode enum it looks like it should be.
-    frame: DocumentFrame,
-}
-
-/// The offset of the first byte that is not HTML whitespace, if any — where character data becomes
-/// CONTENT for the document-frame rules.
-fn first_non_ws(text: &[u8]) -> Option<usize> {
-    text.iter().position(|c| !matches!(c, b' ' | b'\t' | b'\n' | b'\r' | 0x0c))
 }
 
 /// A buffered text node. In the common case it is ONE borrowed run (`joined` empty, no allocation).
@@ -964,14 +963,14 @@ fn first_non_ws(text: &[u8]) -> Option<usize> {
 /// it. `finalize` is called only where a consumer actually wants the value.
 #[derive(Clone, Copy)]
 enum TextVal<'t> {
-    Raw { bytes: &'t [u8], entities: bool },
+    Raw { bytes: &'t [u8], mode: DataMode },
     Decoded(&'t str),
 }
 
 impl TextVal<'_> {
-    fn finalize(&self, enc: &'static Encoding) -> String {
+    fn finalize(&self, input: EncodedInput<'_>) -> String {
         match *self {
-            TextVal::Raw { bytes, entities } => finalize(bytes, entities, enc),
+            TextVal::Raw { bytes, mode } => input.text_value(bytes, mode),
             TextVal::Decoded(s) => s.to_string(),
         }
     }
@@ -983,7 +982,8 @@ struct PendingText<'a> {
     bytes: &'a [u8],
     /// Decoded text of runs 1..n once a join has happened; empty while the node is a single run.
     joined: String,
-    allows_entities: bool,
+    /// The tokenizer state the run was read in, which decides how its value is decoded.
+    mode: DataMode,
     /// Document offset of the run's first byte — ranks the value in document order.
     start: usize,
     /// End of the buffered node's GAP: the run's own end, advanced over each dropped end tag that abuts
@@ -1015,7 +1015,10 @@ impl CompiledSchema {
     /// element matching `container` opens an instance whose single-segment `subs` are matched **scoped**
     /// to it. `subs` share the flat 128-member budget only through their container (subs are evaluated
     /// on demand, not as members), so grouping is cheap on the bit budget.
-    pub fn compile(queries: &[Vec<Selector>], groups: &[GroupInput]) -> CompiledSchema {
+    /// `mode` fixes the tree builder the schema runs under, and with it which selectors it refuses.
+    pub fn compile(queries: &[Vec<Selector>], groups: &[GroupInput], mode: ParseMode) -> CompiledSchema {
+        let browser = mode == ParseMode::Browser;
+        let mut refusals: Vec<(Slot, Refusal)> = Vec::new();
         let mut entries = Vec::new();
         let mut n_sib = 0usize;
         let mut interesting: Vec<Box<str>> = Vec::new();
@@ -1082,6 +1085,14 @@ impl CompiledSchema {
         // sibling combinator whose LEFT compound (`parts[k]`) carries the deferred predicate.
         let mut sibling_pending: Vec<(usize, &Selector, usize)> = Vec::new();
         for (i, members) in queries.iter().enumerate() {
+            if browser
+                && members
+                    .iter()
+                    .any(|m| matches!(m.terminal, Terminal::OuterHtml) && admits_synthesized_frame(m))
+            {
+                refusals.push((Slot::Flat(i), Refusal::SynthesizedOuterHtml));
+                continue;
+            }
             // A reverse query must be a single member in the deferrable shape (see `deferrable_reverse`).
             // A subject `reverse` in ANY other shape (multi-member, subtree/outer terminal, sibling
             // combinator, reverse-in-`:not`) is UNSUPPORTED — skip the whole query so its column stays
@@ -1204,11 +1215,23 @@ impl CompiledSchema {
                 container_entries.push((entries.len(), g));
                 push_entry(container, usize::MAX, false, &mut entries, &mut n_sib);
             }
+            // A sub-field is scoped to its container, self included, so it can match a synthesized frame
+            // element only where the container can be or hold one.
+            let frame_scope = container.as_ref().is_some_and(compile::may_hold_synthesized_frame);
             let mut subsels = Vec::with_capacity(subs.len());
             for sub in subs {
                 // MVP: sub-selectors are single-segment (no sibling `+`/`~`). Unsupported or
                 // multi-segment subs -> `seg = None`, which never matches (empty column, no fallback).
                 let (seg, terminal) = match sub {
+                    Some(s)
+                        if browser
+                            && frame_scope
+                            && matches!(s.terminal, Terminal::OuterHtml)
+                            && admits_synthesized_frame(s) =>
+                    {
+                        refusals.push((Slot::Sub { group: g, sub: subsels.len() }, Refusal::SynthesizedOuterHtml));
+                        (None, Terminal::Text { subtree: false })
+                    }
                     Some(s) if !any_reverse(s) && !any_has(s) && !any_text_pred(s) => {
                         for c in &s.parts {
                             collect_interesting(c, &mut interesting);
@@ -1247,7 +1270,16 @@ impl CompiledSchema {
         // Build the deferred reverse entries now that `positional_tags` is final (an of-type reverse
         // reads its subject tag's per-parent count via that slot). Deferred subject masks are `u128`,
         // sharing the advertised 128-member ceiling instead of imposing a hidden 64-entry limit.
-        let mut tails = TailPlan::default();
+        let mut tails = TailPlan { groups: Vec::new(), mode };
+        // Browser mode cannot re-scan a winner's span (see `Refusal::TailRescan`), so a deferred entry
+        // whose value lives in the winner's subtree is refused before it reserves anything.
+        let mut refuse_tail = |col: usize, sel: &Selector, k: usize| {
+            let refused = browser && !deferred_value_is_own(sel, k);
+            if refused {
+                refusals.push((Slot::Flat(col), Refusal::TailRescan));
+            }
+            refused
+        };
         // ONE shared member allocation across every tier. `entries` (normal), reverse, `:has` and
         // text-predicate each used their OWN counter, so a 129-member schema of 100 normal members plus
         // 29 reverse selectors left all tiers live even though `budget_usage` reported it over budget and
@@ -1265,6 +1297,9 @@ impl CompiledSchema {
         let mut reverse_entries: Vec<RevEntry> = Vec::new();
         for (col, sel) in rev_pending_sels {
             let k = compile::deferrable_reverse_at(sel).expect("routed as deferrable_reverse");
+            if refuse_tail(col, sel, k) {
+                continue;
+            }
             let over = over_budget();
             let (seg, tail, tail_dead) = split_deferred(sel, k, col, &mut tails, !over);
             // the reverse position belongs to compound `k`, which need NOT be the subject
@@ -1298,6 +1333,9 @@ impl CompiledSchema {
         let mut has_entries: Vec<HasEntry> = Vec::new();
         for (col, sel) in has_pending_sels {
             let k = compile::deferrable_has_at(sel).expect("routed as deferrable_has");
+            if refuse_tail(col, sel, k) {
+                continue;
+            }
             let over = over_budget();
             let (seg, tail, tail_dead) = split_deferred(sel, k, col, &mut tails, !over);
             let has = sel.parts[k].has.clone().expect("deferrable_has => compound k has `:has`");
@@ -1318,6 +1356,9 @@ impl CompiledSchema {
         let mut text_entries: Vec<TextEntry> = Vec::new();
         for (col, sel) in text_pending_sels {
             let k = compile::deferrable_text_pred_at(sel).expect("routed as deferrable_text_pred");
+            if refuse_tail(col, sel, k) {
+                continue;
+            }
             let over = over_budget();
             let (seg, tail, tail_dead) = split_deferred(sel, k, col, &mut tails, !over);
             let pred =
@@ -1432,6 +1473,8 @@ impl CompiledSchema {
         }
 
         CompiledSchema {
+            mode,
+            refusals,
             n_flat_cols: queries.len(),
             attr_gate: AttrGate::build(&interesting),
             n_groups: group_specs.len(),
@@ -1539,9 +1582,41 @@ impl CompiledSchema {
     /// transcoded). One streaming pass; the schema is untouched and reusable. Returns
     /// `(flat_columns, grouped)` — see [`Matcher::finish_grouped`].
     pub fn run(&self, input: EncodedInput) -> (FlatColumns, Vec<GroupRows>) {
-        let mut m = Matcher::new(self, input);
-        crate::tokenizer::tokenize(input.bytes(), &mut m);
-        m.finish_grouped()
+        match self.mode {
+            ParseMode::Lxml => self.run_with(input, libxml2::Libxml2::default()),
+            ParseMode::Browser => self.run_with(input, browser::Browser::default()),
+        }
+    }
+
+    /// One document under one tree builder. Generic so each mode's per-token path is its own code, with
+    /// the mode decided once per document above.
+    fn run_with<'a, B: tree::TreeBuilder<'a>>(
+        &'a self,
+        input: EncodedInput<'a>,
+        builder: B,
+    ) -> (FlatColumns, Vec<GroupRows>) {
+        let mut scan = tree::Scan { m: Matcher::new(self, input), builder };
+        crate::tokenizer::tokenize(input.bytes(), &mut scan);
+        scan.m.finish_grouped()
+    }
+
+    /// The mode this schema was compiled for.
+    pub(crate) fn mode(&self) -> ParseMode {
+        self.mode
+    }
+
+    /// Why this mode refuses flat column `col`, if it does.
+    pub(crate) fn flat_refusal(&self, col: usize) -> Option<Refusal> {
+        self.refusal(Slot::Flat(col))
+    }
+
+    /// Why this mode refuses sub-field `sub` of group `group`, if it does.
+    pub(crate) fn sub_refusal(&self, group: usize, sub: usize) -> Option<Refusal> {
+        self.refusal(Slot::Sub { group, sub })
+    }
+
+    fn refusal(&self, slot: Slot) -> Option<Refusal> {
+        self.refusals.iter().find(|(s, _)| *s == slot).map(|&(_, r)| r)
     }
 
     /// Does flat column `col` have a LIVE (matchable) entry — a normal member or a deferred reverse
@@ -1607,7 +1682,6 @@ impl<'a> Matcher<'a> {
             txt_open: 0,
             tail_spans: Vec::new(),
             pending_text: None,
-            frame: DocumentFrame::default(),
         }
     }
 
@@ -2050,7 +2124,7 @@ impl<'a> Matcher<'a> {
         for &(an, av) in raw_attrs {
             if let Some(name) = self.interesting_name::<DECODE_NAMES>(an) {
                 let value = match av {
-                    Some(value) => decode_attr(value, self.input.encoding()),
+                    Some(value) => self.input.attr_value(value),
                     None if is_minimized_boolean_attr(name) => {
                         Cow::Owned(String::from_utf8_lossy(name).to_ascii_lowercase())
                     }
@@ -2261,7 +2335,7 @@ impl<'a> Matcher<'a> {
         if want == 0 {
             return;
         }
-        let out = val.finalize(self.input.encoding());
+        let out = val.finalize(self.input);
         fan_out_value(&mut self.stack[top].cold_mut().rev_buf, want, off, out);
     }
 
@@ -2336,7 +2410,7 @@ impl<'a> Matcher<'a> {
         if want == 0 {
             return;
         }
-        let out = val.finalize(self.input.encoding());
+        let out = val.finalize(self.input);
         fan_out_value(&mut self.stack[top].cold_mut().has_buf, want, off, out);
     }
 
@@ -2377,7 +2451,7 @@ impl<'a> Matcher<'a> {
     /// Stream this text node through every open predicate state it belongs to. Only direct text values
     /// that may become terminal output are retained; descendant predicate input stays bounded.
     fn text_event(&mut self, top: usize, val: TextVal<'_>, off: usize) {
-        let out = val.finalize(self.input.encoding());
+        let out = val.finalize(self.input);
         for e in 0..=top {
             if self.stack[e].txt_subj == 0 {
                 continue;
@@ -2407,7 +2481,7 @@ impl<'a> Matcher<'a> {
     /// Feed this text node into the `normalize-space(...)` accumulators: append to any open element
     /// string-value (`//el`), and capture the first matched text node for a `text()` inner.
     fn ns_text(&mut self, top: usize, val: TextVal<'_>) {
-        let enc = self.input.encoding();
+        let input = self.input;
         for k in 0..self.schema.entries.len().min(128) {
             let inner = match &self.schema.entries[k].terminal {
                 Terminal::NormalizeSpace(inner) => &**inner,
@@ -2417,7 +2491,7 @@ impl<'a> Matcher<'a> {
                 // element string-value: all text while the first matched element is open is its subtree
                 Terminal::OuterHtml => {
                     if let Some((_d, buf)) = &mut self.ns[k].pending {
-                        buf.push_str(&val.finalize(enc));
+                        buf.push_str(&val.finalize(input));
                     }
                 }
                 // first matched text node (self or descendant, per the inner subtree flag)
@@ -2429,7 +2503,7 @@ impl<'a> Matcher<'a> {
                     };
                     if hit {
                         self.ns[k].value =
-                            Some(decode::normalize_space(&val.finalize(enc)));
+                            Some(decode::normalize_space(&val.finalize(input)));
                     }
                 }
                 _ => {}
@@ -2455,33 +2529,16 @@ impl<'a> Matcher<'a> {
             }
         }
     }
-    /// `<html/>`, `<head/>` and `<body/>` written where the frame already exists: the tag INSERTS
-    /// nothing, but the `/>` still fires a close — and it lands on the enclosing element.
-    ///
-    /// libxml2's `endElement` pops the CURRENT node by position, not by name. A redundant frame tag
-    /// pushes no element of its own, so the pop takes whatever the tag was written inside: one level,
-    /// after any implied closes this tag already ran. `<div><b>x<html/>y` is `<div><b>x</b>y</div>`,
-    /// and a second `<html/>` then takes the `<div>`. The phantom is NOT consumed — a later `</body>`
-    /// is still absorbed by it — which is what separates this from `<html></html>`, where the written
-    /// end tag pops the phantom and the enclosing element survives.
-    ///
-    /// For a stray `<strong>` before the doctype followed by `<html xmlns=… />`, libxml2 ends the
-    /// `<strong>` at the self-close. Leaving it open would parent the whole body inside it, making every
-    /// `body > *` empty while leaving `body *` intact. The frame would be wrong, not the values.
-    fn self_close_with_no_element_of_its_own(&mut self, span_start: usize) {
-        self.flush_text();
-        if let Some(e) = self.stack.pop() {
-            self.close_elem(e, span_start);
-        }
-    }
 }
 
-impl<'a> TokenSink<'a> for Matcher<'a> {
+/// The primitives a tree builder drives the matcher with (see `tree`). Each is the work every parse
+/// mode shares; WHEN to call it, and with what, is the builder's decision.
+impl<'a> Matcher<'a> {
     /// Every column the caller declared `first_only` now holds a value, so no remaining token can change
     /// what the caller sees. `stop_mask == 0` for an unarmed schema and `satisfied` starts at 0, so this
     /// is `0 == 0`... which would be `true`, hence the explicit disarm: an unarmed schema must never
     /// stop, least of all before it starts.
-    fn done(&self) -> bool {
+    pub(super) fn done(&self) -> bool {
         self.schema.stop_mask != 0
             && self.satisfied == self.schema.stop_mask
             // ...and no capturing element is still open, or closing the stack at finish would give its
@@ -2489,9 +2546,11 @@ impl<'a> TokenSink<'a> for Matcher<'a> {
             && self.open_captures == 0
     }
 
-    /// A doctype leaves no node AND does not end the surrounding text node, so it is absorbed into the
-    /// pending node's gap the way a dropped end tag is: the runs either side of it are ONE node.
-    fn invisible_markup(&mut self, from: usize, to: usize) {
+    /// Markup over `[from, to)` that leaves no node and does not end the text node around it: a
+    /// doctype, a dropped end tag, an ignored frame tag. The pending node's gap is extended over it, so a
+    /// run that starts right after still joins: consecutive drops (`<div>A</p></p>B</div>`) chain,
+    /// since each abuts the previous gap end.
+    pub(super) fn absorb_into_text_gap(&mut self, from: usize, to: usize) {
         if let Some(p) = &mut self.pending_text {
             if p.gap_end == from {
                 p.gap_end = to;
@@ -2499,89 +2558,23 @@ impl<'a> TokenSink<'a> for Matcher<'a> {
         }
     }
 
-    fn start_tag(
+    /// Open an element as the current one: push it and do everything a newly opened element needs
+    /// (sibling positions and anchors, selector evaluation, text routing, the deferred tiers'
+    /// registrations, group instances, raw-source captures, sibling history and attribute values).
+    ///
+    /// `scid` is the builder's class id for the element (libxml2's start-close class), kept on it for the
+    /// builder to read back. `span_start` is where the element's raw source begins. An element the page
+    /// never wrote (a synthesized `<html>`/`<head>`/`<body>`) passes no attributes and a `span_start` at
+    /// the token that caused it, so it has no source of its own; its outer HTML is its content.
+    ///
+    /// The caller has flushed any text that belongs to the element open before this one.
+    pub(super) fn open_element(
         &mut self,
         name: &'a [u8],
+        scid: u8,
         raw_attrs: &[(&'a [u8], Option<&'a [u8]>)],
-        self_closing: bool,
         span_start: usize,
-        open_end: usize,
     ) {
-        let (void, scid) = classify(name);
-        let frame = frame_slot(name);
-        // Build whatever of the document frame this tag needs and the byte stream did not write.
-        self.ensure_frame(name, frame, span_start);
-        // A document-frame tag that is BOTH out of place and closes nothing is completely invisible to
-        // libxml2, so it must not split the text node either: absorb it into the pending node's gap the
-        // way a dropped end tag is absorbed. Decided before `flush_text`, which would end the node.
-        if frame.is_some() && tag_is_redundant(name, &self.stack) && !self.closes_top(name, scid) {
-            self.frame.note_ignored();
-            if self_closing {
-                self.self_close_with_no_element_of_its_own(span_start);
-                return;
-            }
-            if let Some(p) = &mut self.pending_text {
-                if p.gap_end == span_start {
-                    p.gap_end = open_end;
-                }
-            }
-            return;
-        }
-        // Any buffered text belongs to the element open BEFORE this tag reshapes the stack.
-        self.flush_text();
-        // inline implied-close reshape: a popped element's raw source ends where this tag begins
-        let mut popped_head = false;
-        while let Some(top) = self.stack.last() {
-            let closes = start_closes(scid, top.scid);
-            if crate::mutate::closes(name, top.tag, closes) {
-                let e = self.stack.pop().unwrap();
-                popped_head |= self.frame.head_seen() && e.tag.eq_ignore_ascii_case(b"head");
-                self.close_elem(e, span_start);
-            } else {
-                break;
-            }
-        }
-        // A start tag that ENDED the head also STARTS the body, and everything from here on — including
-        // the remaining `<meta>`/`<link>`/`<title>` — belongs to it. libxml2 and html5lib agree on this
-        // exactly. Closing the head correctly but leaving the content under `<html>` is the near miss
-        // here, and it is what makes `head + body`, `html > body` and `:first-child` disagree.
-        //
-        // Only for an IMPLICIT end. After an explicit `</head>` the two oracles part company (libxml2
-        // leaves a following `<meta>` at `<html>` level, html5lib puts it back in the head), so that path
-        // keeps libxml2's shape, which is what the engine already produces.
-        //
-        // A real `<body>`/`<html>`/`<head>` is excluded because it opens the frame itself — and `<body>`
-        // in particular reaches here having just popped the head through the same relation. So is a tag
-        // that opens NEITHER part: a frameset document has no `<body>` at all, and `<frameset>` ends the
-        // head like any other non-head content. Wrapping that in an invented body would put the whole
-        // frameset inside one, where libxml2 makes it a child of `<html>`. `frame_content` is the question
-        // to ask here, not "is this a frame tag".
-        if popped_head
-            && frame.is_none()
-            && !self.frame.body_established()
-            && frame_content_of(name) == FrameContent::Body
-        {
-            self.start_tag(b"body", &[], false, span_start, span_start);
-        }
-        // ... and once the implied closes have run, a redundant frame tag inserts NOTHING. libxml2
-        // merges its attributes onto the element that already exists; there is nowhere to merge them
-        // here, and inventing a second `<body>` inside the first is the observable error (it gave
-        // `<div>d<html>y</div>` a spurious `html` child, and `<p>x<body>y` two text nodes).
-        // Re-evaluated HERE, not before the reshape: `<body>` closes an open `<head>`, and until that
-        // pop has happened the head still makes the tag look redundant — which swallowed the `<body>` of
-        // every document that omits `</head>`.
-        if let Some(slot) = frame {
-            if tag_is_redundant(name, &self.stack) {
-                self.frame.note_ignored();
-                if self_closing {
-                    self.self_close_with_no_element_of_its_own(span_start);
-                }
-                return;
-            }
-            // this frame element is being INSERTED, so the window an implied `<body>` can open in either
-            // begins (`<head>`) or ends (`<body>`, real or the one synthesized just above)
-            self.frame.note_inserted(slot);
-        }
         let attrs = if self.decode_names {
             self.materialize_attrs::<true>(raw_attrs)
         } else {
@@ -2710,60 +2703,17 @@ impl<'a> TokenSink<'a> for Matcher<'a> {
             *prev = applied;
         }
         self.emit_attrs();
-        if self_closing || void {
-            let e = self.stack.pop().unwrap(); // no children; raw source = input[start..open_end]
-            self.close_elem(e, open_end);
-        }
     }
 
-    fn end_tag(&mut self, name: &[u8], close_start: usize, close_end: usize) {
-        // A frame end tag matching an earlier IGNORED frame start tag pops that phantom, not the
-        // document: `<div><body>x</body>tail</div>` keeps `xtail` inside the div (verified against
-        // libxml2, which keeps a stack entry for the start tag it merged away). Checked before the
-        // stack, because a real `<body>` IS open in that shape and would otherwise close.
-        if self.frame.absorbs_end_tag(name) {
-            if let Some(p) = &mut self.pending_text {
-                if p.gap_end == close_start {
-                    p.gap_end = close_end;
-                }
-            }
-            return;
-        }
-        // Is this tag DISCARDED rather than honored? Either it matches no open element, or something
-        // still open above the match OUT-RANKS it — libxml2 refuses to unwind that (END-TAG SCOPE), so
-        // `<td>A</div>B` keeps `AB` in the cell. Both cases leave the stack alone and extend the
-        // buffered text node's gap.
-        let matched = self.stack.iter().rposition(|e| e.tag.eq_ignore_ascii_case(name));
-        let discarded = match matched {
-            None => true,
-            Some(k) => {
-                self.stack[k + 1..].iter().any(|e| blocks_end_tag(e.tag, name))
-                    && end_tag_discardable(name)
-            }
-        };
-        if discarded {
-            // Absorb the tag into the pending node's gap so a following run still joins across it —
-            // consecutive drops (`<div>A</p></p>B</div>`) chain, since each abuts the previous gap end.
-            if let Some(p) = &mut self.pending_text {
-                if p.gap_end == close_start {
-                    p.gap_end = close_end;
-                }
-            }
-            return;
-        }
-        let k = matched.expect("not discarded => matched");
-        // Buffered text belongs inside the element about to close, so deliver it first.
-        self.flush_text();
-        // elements ABOVE the match are implicitly closed — their raw source ends at the end
-        // tag's `<` (close_start); the matching element itself ends after its `>` (close_end).
-        while self.stack.len() > k + 1 {
-            let e = self.stack.pop().unwrap();
-            self.close_elem(e, close_start);
-        }
-        let e = self.stack.pop().unwrap();
-        self.close_elem(e, close_end);
+    /// Close the current element, whose raw source ends at `end`: finalize its captures, resolve the
+    /// deferred predicates waiting on it and pop the group instances it opened.
+    pub(super) fn close_top(&mut self, end: usize) {
+        let e = self.stack.pop().expect("close_top with nothing open");
+        self.close_elem(e, end);
     }
+}
 
+impl<'a> Matcher<'a> {
     /// Buffer one text RUN, delivering the PREVIOUS one — a run is not a text node until we know no
     /// dropped end tag follows it.
     ///
@@ -2773,149 +2723,24 @@ impl<'a> TokenSink<'a> for Matcher<'a> {
     /// `::text` columns, `/text()`, `normalize-space(...)` and the text-content predicates consistent:
     /// they all see the same single node lxml does. Comments/CDATA/PIs also split a run, but they split
     /// it in lxml too, so only source-ADJACENCY across the dropped tag may be re-joined.
-    fn text(&mut self, text: &'a [u8], allows_entities: bool, start: usize) {
-        // Character data can START THE BODY, and it does so MID-RUN: the leading whitespace stays where
-        // it was (the head's, or dropped if no frame exists yet) and the first non-space character opens
-        // the body. Both oracles split it exactly there. The tokenizer hands us one run, so split it
-        // here and let each half take the ordinary path.
-        if let Some(k) = self.body_text_split(text) {
-            if k > 0 {
-                self.buffer_text(&text[..k], allows_entities, start);
-            }
-            // `<body>` closes an open `<head>` through the start-close relation, so opening one here
-            // pops the head as well — no separate unwind — and `ensure_frame` supplies the `<html>`
-            // above it when the document never wrote one.
-            self.ensure_frame(b"body", None, start + k);
-            self.start_tag(b"body", &[], false, start + k, start + k);
-            self.buffer_text(&text[k..], allows_entities, start + k);
-            return;
-        }
-        // ...and with a body already established the head still ends here, it just has nowhere to move
-        // the text to. Popped directly rather than through `end_tag`, which would spend a `</head>`
-        // phantom left by an ignored duplicate instead of closing the real element.
-        if let Some(k) = self.late_head_text_split(text) {
-            if k > 0 {
-                self.buffer_text(&text[..k], allows_entities, start);
-            }
-            self.flush_text();
-            let head = self.stack.pop().expect("late_head_text_split checked the top");
-            self.close_elem(head, start + k);
-            self.buffer_text(&text[k..], allows_entities, start + k);
-            return;
-        }
-        // Character data after `</html>` needs the same second root a START TAG gets there, or it is
-        // lost outright: with the stack empty `emit_text` has nothing to attach it to and returns. The
-        // start-tag path builds that root in `ensure_frame`; the text path reaches neither split above
-        // once a body exists, so it has to ask for itself.
-        if nothing_open(&self.stack) && self.frame.body_established() && first_non_ws(text).is_some() {
-            self.start_tag(b"html", &[], false, start, start);
-        }
-        self.buffer_text(text, allows_entities, start);
-    }
-}
-
-impl<'a> Matcher<'a> {
-    /// Where a text run starts the body, if it does: the offset of its first non-whitespace byte.
     ///
-    /// Two shapes, one answer. Either a `<head>` is open and this is the character data that ends it
-    /// (the run splits there — the leading whitespace is still the head's), or no body exists yet and
-    /// this is the first content in the document, which opens `<html>`/`<body>` around it.
-    ///
-    /// Whitespace ALONE is not content in either shape: it leaves an open head open, and before the
-    /// frame exists libxml2 drops it entirely (`   <div>` has no text node before the div).
-    /// Text inside a head element (`<title>T</title>`) belongs to that element, hence "head is the
-    /// CURRENT open element" rather than "a head is open somewhere".
-    fn body_text_split(&self, text: &[u8]) -> Option<usize> {
-        if self.frame.body_established() {
-            return None; // the common path, once a body exists: one bool test and out
+    /// A markup-mode run of nothing but NUL is no node at all: browsers drop NUL from body text (`<p>\0`
+    /// has no text node), so it is absorbed like markup that leaves none. Only browser mode keeps NUL in
+    /// the buffer; lxml mode deleted it before tokenizing.
+    pub(super) fn buffer_text(&mut self, text: &'a [u8], mode: DataMode, start: usize) {
+        if self.input.keeps_nul() && mode == DataMode::Normal && text.iter().all(|&b| b == 0) {
+            return self.absorb_into_text_gap(start, start + text.len());
         }
-        // outside a head, only text that is not yet inside ANY element can start the frame
-        if !head_is_current(&self.stack) && !only_html_open(&self.stack) {
-            return None;
-        }
-        first_non_ws(text)
-    }
-
-    /// Where character data ends an open `<head>` that CANNOT start a body, if it does.
-    ///
-    /// The same rule as above minus its second half: character data always ends an open head, but once a
-    /// body exists there is no body to move it into, so libxml2 pops the head and leaves the text at
-    /// `<html>` level. Only a `<head>` written after `</body>` reaches here, which is why this is its own
-    /// function: if folded into the half above and gated on `body_established()`, the head would keep the
-    /// text.
-    fn late_head_text_split(&self, text: &[u8]) -> Option<usize> {
-        if !self.frame.body_established() || !head_is_current(&self.stack) {
-            return None;
-        }
-        first_non_ws(text)
-    }
-
-    /// Open whatever part of the document frame this token needs and the page did not write.
-    ///
-    /// `<html>`, `<head>` and `<body>` all have optional start AND end tags, so a conformant document
-    /// may contain none of them — and libxml2 builds the frame regardless, so this does too. Without it
-    /// there is nothing to anchor `body h1` on, no shared parent to make `h1 + p` siblings, and nowhere
-    /// to put root-level text.
-    ///
-    /// Which part a given start tag opens is [`frame_content_of`], derived from the oracle over the whole
-    /// element universe. The frame tags themselves open no PART — but they still need the element they
-    /// belong in: a page whose first tag is `<head>` or `<body>` writes no `<html>`, and libxml2 (and
-    /// html5lib, and every browser) still wraps it in one. Leaving that out puts the `<head>` at the root
-    /// with no parent and builds a SECOND, later `<html>` around whatever follows `</head>`, so
-    /// `html > head`, `html > body` and `head + script` all come back empty against lxml while the values
-    /// underneath them look right. Real pages do this — a crawled page can open with a bare `<head>`.
-    fn ensure_frame(&mut self, name: &[u8], frame: Option<usize>, at: usize) {
-        // The `<html>` comes FIRST, before the body check: content after `</html>` still needs an element
-        // to sit in, and libxml2 gives it one, a SECOND ROOT `<html>`, the same shape it builds for a
-        // second `<html>` start tag. If ordered after the `body_established` return instead, the tail
-        // would be parentless and `//html/script` would miss a trailing script lxml finds. The values
-        // would still be there; only the frame around them would be missing.
-        if nothing_open(&self.stack) && !name.eq_ignore_ascii_case(b"html") {
-            self.start_tag(b"html", &[], false, at, at);
-        }
-        if self.frame.body_established() {
-            return; // past the body no PART of the frame is synthesized any more
-        }
-        if frame.is_some() {
-            return; // a frame tag builds its own part, now that it has an `<html>` to sit in
-        }
-        // A head that is already OPEN takes everything it accepts; what it does not accept closes it
-        // through the start-close relation, and the body is opened on that pop instead (see `start_tag`)
-        // — which is why this is not the same question as `frame_content`.
-        if head_is_open(&self.stack) {
-            return;
-        }
-        // Inside a frameset there is no head for head content to go in, so libxml2 opens a BODY for it —
-        // the same one it opens for ordinary content there. Only the six `Head` names are affected; the
-        // rest already matched.
-        let part = frame_content_of(name);
-        let part = match part {
-            FrameContent::Head if frameset_is_open(&self.stack) => FrameContent::Body,
-            other => other,
-        };
-        match part {
-            // ...and once a `</head>` has been seen, libxml2 does NOT reopen the head for a later
-            // head-only tag: it leaves it at `<html>` level. (html5lib puts it back in the head; the
-            // tree oracle here is libxml2. See docs/COMPATIBILITY.md.)
-            FrameContent::Head if !self.frame.head_seen() => {
-                self.start_tag(b"head", &[], false, at, at)
-            }
-            FrameContent::Body => self.start_tag(b"body", &[], false, at, at),
-            _ => {}
-        }
-    }
-
-    fn buffer_text(&mut self, text: &'a [u8], allows_entities: bool, start: usize) {
         // A run starting exactly at the buffered node's gap end continues it: everything between the two
         // is dropped end tags, which libxml2 discards. Any real node in the gap shifts `start` past
         // `gap_end` and so breaks the join.
         if let Some(p) = &mut self.pending_text {
-            if p.gap_end == start && p.allows_entities == allows_entities {
+            if p.gap_end == start && p.mode == mode {
                 // decode this run on its own and append the STRING — see `PendingText`
                 if p.joined.is_empty() {
-                    p.joined = finalize(p.bytes, allows_entities, self.input.encoding());
+                    p.joined = self.input.text_value(p.bytes, p.mode);
                 }
-                p.joined.push_str(&finalize(text, allows_entities, self.input.encoding()));
+                p.joined.push_str(&self.input.text_value(text, mode));
                 p.gap_end = start + text.len();
                 return;
             }
@@ -2924,7 +2749,7 @@ impl<'a> Matcher<'a> {
         self.pending_text = Some(PendingText {
             bytes: text,
             joined: String::new(),
-            allows_entities,
+            mode,
             start,
             gap_end: start + text.len(),
         });
@@ -2932,27 +2757,14 @@ impl<'a> Matcher<'a> {
 }
 
 impl<'a> Matcher<'a> {
-    /// Would this start tag close the CURRENT open element? A read-only peek, so the caller can decide
-    /// whether an ignored tag is going to reshape the stack before committing the pending text node.
-    fn closes_top(&self, name: &[u8], scid: u8) -> bool {
-        match self.stack.last() {
-            None => false,
-            Some(top) => {
-                let closes = start_closes(scid, top.scid);
-                crate::mutate::closes(name, top.tag, closes)
-            }
-        }
-    }
-
-
     /// Deliver the buffered text node (if any) to every consumer. Called before any event that could
     /// observe it out of order, and at EOF.
-    fn flush_text(&mut self) {
+    pub(super) fn flush_text(&mut self) {
         let Some(p) = self.pending_text.take() else {
             return;
         };
         let val = if p.joined.is_empty() {
-            TextVal::Raw { bytes: p.bytes, entities: p.allows_entities }
+            TextVal::Raw { bytes: p.bytes, mode: p.mode }
         } else {
             TextVal::Decoded(&p.joined)
         };
@@ -2995,7 +2807,7 @@ impl<'a> Matcher<'a> {
         if colmask == 0 && gtargets.is_empty() {
             return;
         }
-        let out = val.finalize(self.input.encoding());
+        let out = val.finalize(self.input);
         for (ii, sub_idx) in gtargets {
             self.open_instances[ii].buckets[sub_idx].push(out.clone());
         }
@@ -3059,7 +2871,7 @@ mod sig_wants_tests {
     fn schema(queries: &[&str]) -> CompiledSchema {
         let members: Vec<Vec<Selector>> =
             queries.iter().map(|q| crate::selector::parse_list(q)).collect();
-        CompiledSchema::compile(&members, &[])
+        CompiledSchema::compile(&members, &[], ParseMode::Lxml)
     }
 
     fn wants(queries: &[&str]) -> sig::Wants {
@@ -3125,7 +2937,7 @@ mod sig_wants_tests {
     fn grouped_tier_is_walked() {
         let subs = vec![Some(crate::selector::parse_list(".price::text").remove(0))];
         let container = Some(crate::selector::parse_list("div.card").remove(0));
-        let sch = CompiledSchema::compile(&[], &[(container, subs)]);
+        let sch = CompiledSchema::compile(&[], &[(container, subs)], ParseMode::Lxml);
         assert!(sch.wants.any());
         assert!(sch.wants.class, "a grouped sub-field's class token was not accounted for");
         let sub_seg = sch.groups[0].subs[0].seg.as_ref().expect("single-segment sub");
@@ -3142,7 +2954,7 @@ mod tail_merge_tests {
     /// it — the CSS parser alone yields no entries at all for one, which reads as "no tail".
     fn schema(queries: &[String]) -> CompiledSchema {
         let (flat, grouped) = crate::compile_schema(queries, &[]);
-        CompiledSchema::compile(&flat, &grouped)
+        CompiledSchema::compile(&flat, &grouped, ParseMode::Lxml)
     }
 
     const TAIL_PAGE: &[u8] = br#"<body>
@@ -3152,12 +2964,18 @@ mod tail_merge_tests {
 <ul><li><a href="/a">A</a></li><li><a href="/last">Last</a></li></ul>
 </body>"#;
 
+    /// Tails exist in lxml mode only (browser mode refuses them), so every extraction here is lxml's.
+    fn extract(html: &[u8], qs: &[String]) -> crate::FlatColumns {
+        let lxml = crate::CompileOptions { mode: ParseMode::Lxml, first_only: &[] };
+        crate::Plan::compile_with(qs, &[], lxml).extract(html, None, None).0
+    }
+
     /// Every column, against the same selector compiled ALONE — which is the unmerged answer.
     fn agrees_with_each_selector_alone(qs: &[String]) {
-        let merged = crate::extract(TAIL_PAGE, qs, None, None);
+        let merged = extract(TAIL_PAGE, qs);
         for (col, q) in qs.iter().enumerate() {
             assert!(!merged[col].is_empty(), "{q} must have something to compare");
-            let alone = crate::extract(TAIL_PAGE, std::slice::from_ref(q), None, None);
+            let alone = extract(TAIL_PAGE, std::slice::from_ref(q));
             assert_eq!(merged[col], alone[0], "{q}");
         }
     }
@@ -3212,7 +3030,7 @@ mod tail_merge_tests {
         let (live, dead) = (MAX_MEMBERS - 1, MAX_MEMBERS);
         let sch = schema(&qs);
         assert!(sch.flat_col_supported(live) && !sch.flat_col_supported(dead));
-        let cols = crate::extract(TAIL_PAGE, &qs, None, None);
+        let cols = extract(TAIL_PAGE, &qs);
         assert_eq!(cols[live], ["/one", "/two"]);
         assert!(cols[dead].is_empty(), "an over-budget column stays empty");
     }

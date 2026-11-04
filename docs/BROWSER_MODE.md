@@ -4,8 +4,8 @@ Status: proposal, with six open decisions in section 8. Drafted by Claude for Sh
 Gemini (`gemini-4-argon`), Astra and Claude Fable, with every accepted finding re-measured before it
 went in. Measured against `main` at `68927e9` on 2026-11-03; sources and versions are at the end.
 
-Scope: lxml mode stays the default, and browser mode is an explicit option graded against real
-browsers. Adrian owns the Scrapy and w3lib integration. This proposal covers the core engine and the
+Scope: browser mode is the default and is graded against real browsers; lxml mode stays available as
+`parser="lxml"` for libxml2 parity. Adrian owns the Scrapy and w3lib integration. This proposal covers the core engine and the
 API he builds against.
 
 ## Answers first
@@ -250,9 +250,9 @@ Browser mode drops it (see section 3). The encoding decision is the same in both
 
 ### API
 
-- Rust: `ParseMode::Lxml` (default) and `ParseMode::Browser`, fixed when a `Plan` is compiled,
+- Rust: `ParseMode::Browser` (default) and `ParseMode::Lxml`, fixed when a `Plan` is compiled,
   because the rules are monomorphised into the matcher. One schema runs in one mode.
-- Python: `extract(..., parser="lxml" | "browser")`, `Page(parser=...)`, and a `parser=` class keyword
+- Python: `extract(..., parser="browser" | "lxml")`, `Page(parser=...)`, and a `parser=` class keyword
   on `FrostPage`. That keyword must be carried on the class, because `@attrs.define` recreates the
   class and drops class keywords, the same trap `strict=False` hit.
 - `frostwork.check` reports per mode, because a selector's support can differ between modes (a
@@ -275,7 +275,8 @@ browser's CSS semantics, which fold the case of some attribute values (below).
 ### What browser mode changes
 
 Rows marked "browser" were measured in Chrome 156 and Firefox 159 with CSP-served page loads, and both
-agreed. Rows marked "lab" come from the lab's Chrome 148 column. The rest compare Frostwork with
+agreed. Rows marked "gate" were found by `tools/diff_browser.py` against both browsers, as divergences
+no other row explained. Rows marked "lab" come from the lab's Chrome 148 column. The rest compare Frostwork with
 html5lib (lxml tree builder, HTML elements un-namespaced, parsel over the result) on the minimal input
 shown, and the browser gate in section 5 is what would confirm them. "Streams" means the browser's
 answer is known when the token arrives, so the one-pass matcher can produce it.
@@ -299,6 +300,12 @@ answer is known when the token arrives, so the one-pass matcher can produce it.
 | declarative shadow root | `<div><template shadowrootmode=open><p id=s>` | the `<template>` and `#s` match | the `<template>` leaves the document tree and its content becomes a shadow root, so neither matches a document selector (browser) | yes, with the spec's host conditions | 2 |
 | frameset replacing the body | `<div id=x></div><frameset>` | `#x` stays | the body and `#x` are removed and the `<frameset>` replaces them (browser). Text first makes the `<frameset>` ignored instead | only by buffering every match since the body opened until frameset-ok clears. Text clears it, and so do some start tags (`li`, `table`, `img`, `input`...), but `div`, `p`, `span`, `a` and `form` do not, so the buffer is unbounded in principle though short on real pages. Otherwise a divergence | 2 or divergence |
 | `dt`/`dd` repeat | `<dl><dt>a<dt>b` | nested | siblings | yes | 2 |
+| table parts outside a table | `<td>x`, `<tr><input>` | the element is built | the start tag is ignored and its content joins the current node (gate) | yes | 2 |
+| `<frame>` outside a frameset | `<div><frame>` | the element is built | ignored (gate) | yes | 2 |
+| foreign-content breakout | `<svg><pre>`, `<math><p>` | nested inside the `<svg>` | an HTML start tag such as `<p>` or `<pre>` closes the foreign elements first (gate) | yes | 2 |
+| closes HTML5 does not do | `<pre><dd>`, `<dt><dl>` | libxml2 closes the first element | both stay open, so the second nests inside the first (gate) | yes | 2 |
+| head content after the head | `<style>s</style><button>` and similar | stays where written | head-only elements arriving in "after head" go back into the head (gate) | yes | 2 |
+| `<select>` rules | a `<select>` inside a `<select>` | nested | the second closes the first (gate) | yes | 2 |
 | nested `button`/`h1`/`nobr` | `<button>x<button>y` | nested | the outer one closes | yes | 2 |
 | `<head>` | `<p>x` | no head | an empty head is always built | yes | 2 |
 | after `</html>` | `…</html><div id=a>late` | outside `body` | inside `body`: HTML5 never pops `body` or `html` before EOF | yes | 2 |

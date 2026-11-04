@@ -195,10 +195,12 @@ fn css_reason(qt: &str, syntax: Syntax) -> String {
 /// reasons (`tools/bench_engines.py`) keys on it, so a selector in front of the first `;` would give every
 /// column its own bucket.
 fn comma_group_reason(members: &[&str], syntax: Syntax) -> String {
-    if let Some(m) = members
-        .iter()
-        .find(|m| !crate::flat_query_support(&Query::new(**m, syntax)).is_supported())
-    {
+    // Asked of the lxml contract, which every mode's syntax support starts from; a mode's own refusals
+    // carry their own reasons and never reach here.
+    let supported = |m: &str| {
+        crate::flat_query_support_in(&Query::new(m, syntax), crate::ParseMode::Lxml).is_supported()
+    };
+    if let Some(m) = members.iter().find(|m| !supported(m)) {
         return format!(
             "a comma-group member is itself unsupported — {}; the member is `{}`",
             reason(m.trim(), syntax),

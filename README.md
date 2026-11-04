@@ -6,7 +6,8 @@ Frostwork compiles a set of CSS or XPath selectors and extracts their values in 
 response. Reuse the schema across Scrapy callbacks, web-poet pages or standalone code. Working memory
 tracks parser state, pending matches and returned values, without storing a document tree.
 
-Frostwork supports a focused selector subset, continuously checked against Parsel/lxml. Python rejects
+Frostwork supports a focused selector subset. By default it answers against the tree a browser builds;
+`parser="lxml"` answers against lxml's, continuously checked for value parity with Parsel. Python rejects
 unsupported selectors before scanning; `strict=False` requests empty columns. There is no parser fallback.
 Check the [compatibility contract](https://github.com/scrapy/frostwork/blob/main/docs/COMPATIBILITY.md)
 before migrating code that needs arbitrary tree traversal.
@@ -106,6 +107,8 @@ before switching a callback.
 
 The main compatibility boundaries are:
 
+- **Parse mode:** the default browser mode and `parser="lxml"` can build different trees from the same
+  markup. A port that must reproduce Parsel's items exactly uses `parser="lxml"`.
 - **Selector context:** grouped fields support fewer shapes than flat fields. Audit the actual schema.
 - **HTML values:** bare-element selectors return source HTML, which can differ from lxml serialization.
 - **Encoding:** decoding follows browser behavior, including documented differences from Parsel/w3lib.

@@ -173,7 +173,7 @@ def derive_selectors(pages: list[bytes], want: int = 24) -> dict[str, str]:
         if q in seen:
             continue
         seen.add(q)
-        if not frostwork.check([q]).fields[0].supported:
+        if not frostwork.check([q], parser="lxml").fields[0].supported:
             continue
         try:
             sel = parsel.Selector(text="<html></html>")

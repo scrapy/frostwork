@@ -86,7 +86,7 @@ from ._frostwork import selector_node_identity as _identity
 from ._frostwork import selector_terminals as _terminals
 from .page import _response_encoding_inputs
 from .page import _shape  # single source of cardinality shaping (first/all/join + transforms)
-from .page import SchemaReport, check  # schema audit / strict validation
+from .page import Parser, SchemaReport, _check_parser, check  # schema audit / strict validation
 
 __all__ = ["FrostPage", "FrostBrowserPage", "FrostFields", "FrostInput", "field", "Many", "One"]
 
@@ -732,6 +732,9 @@ class FrostFields(ItemPage):
     # Resolved `strict=` for THIS class, carried on the class so a rebuild cannot lose it (see
     # `__init_subclass__`). Read from `cls.__dict__` there, never inherited.
     _frostwork_strict: bool = True
+    # Resolved `parser=`, carried on the class for the same reason. Unlike `strict`, a subclass inherits
+    # it: the base's selectors were written against that parser's tree, and the subclass's plan runs them.
+    _frostwork_parser: Parser = "browser"
 
     def __init_subclass__(cls, **kwargs) -> None:
         own: Dict[str, _Spec] = {}
@@ -781,6 +784,11 @@ class FrostFields(ItemPage):
         # an override of any shape (manual field, flat-over-group, mixin, constant) drops out — see
         # `_resolved_schema`, which asks the MRO instead of trusting the merge.
         cls._frostwork_specs, cls._frostwork_groups = _resolved_schema(cls)
+        # A class keyword exists only in the `class` statement, and a rebuild (`@attrs.define`) throws that
+        # statement away while copying the dict, so the resolved parser is carried on the class: a rebuild
+        # finds it in its own dict, a subclass through the MRO.
+        parser = _check_parser(kwargs.pop("parser", cls._frostwork_parser))
+        cls._frostwork_parser = parser
         # Compile the whole schema to ONE native Plan, ONCE, here at class creation — reused for every
         # response (an over-budget schema raises `ValueError` here, at import, not per page).
         cls._frostwork_flat_names = list(cls._frostwork_specs)
@@ -795,7 +803,7 @@ class FrostFields(ItemPage):
         # tokenizing to EOF. One `all=True`/`join=` field, one group, one deferred selector disarms it,
         # and the values are unchanged either way (see `Plan::compile_first_only`).
         first_only = [cls._frostwork_specs[n][1][0] == "first" for n in cls._frostwork_flat_names]
-        cls._frostwork_plan = _Plan(flat_queries, garg, first_only)
+        cls._frostwork_plan = _Plan(flat_queries, garg, first_only, parser=parser)
         # Validate at class-definition time, so an unsupported selector fails loudly at import rather than
         # becoming a silently empty field in production. `strict=False` explicitly opts out.
         #
@@ -823,7 +831,9 @@ class FrostFields(ItemPage):
            element SOURCE — transform the processor's output in `out=` instead;
         5. `.as_node()` on a selector that can match a synthesized frame without naming it (`field("*")`):
            such an element has no source of its own, so its value is its content. A selector that PINS the
-           name (`field("body")`) carries the identity and is fine."""
+           name (`field("body")`) carries the identity and is fine;
+        6. `.as_node()` in browser mode: the handoff re-parses the element's source with lxml, so a
+           processor would receive libxml2's subtree for a node the browser built differently."""
         names = list(cls._frostwork_specs)
         if not names:
             return
@@ -832,6 +842,13 @@ class FrostFields(ItemPage):
             selector, card, transforms, node_input = cls._frostwork_specs[name]
             is_element = terminals[name] == "outer"
             where = f"field {name!r} = {selector!r}"
+            if node_input and cls._frostwork_parser == "browser":
+                raise TypeError(
+                    f"{where} is declared .as_node(), which browser mode does not support: the node is "
+                    f"re-parsed from the element's source by lxml, which builds libxml2's tree, not the "
+                    f"browser's. Declare the class with parser=\"lxml\" (`class P(FrostPage, "
+                    f"parser=\"lxml\")`), or hand the processor the value with .as_value()."
+                )
             if node_input and not is_element:
                 raise TypeError(
                     f"{where} is declared .as_node(), but its value is not an element "
@@ -878,7 +895,7 @@ class FrostFields(ItemPage):
         # `frost_schema()` already returns the two named-mapping shapes `check` accepts, so the schema
         # is described in exactly one place — audit and introspection cannot report different selectors.
         schema = cls.frost_schema()
-        return check(schema["fields"], schema["groups"])
+        return check(schema["fields"], schema["groups"], parser=cls._frostwork_parser)
 
     @classmethod
     def frost_schema(cls) -> dict:
@@ -939,7 +956,8 @@ class FrostPage(FrostFields, WebPage):
     scan of ``self.response.body``. Subclass it exactly like a ``web_poet.WebPage`` (it *is* one),
     optionally with ``Returns[YourItem]`` and ``@handle_urls(...)``. Schemas are validated at class
     definition by default; declare ``class MyPage(FrostPage, strict=False)`` to allow unsupported
-    selectors as empty fields."""
+    selectors as empty fields. ``class MyPage(FrostPage, parser="lxml")`` answers against lxml's tree
+    instead of a browser's (the default, ``"browser"``); a subclass inherits its base's parser."""
 
     def frostwork_input(self) -> FrostInput:
         resp = self.response

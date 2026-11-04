@@ -11,6 +11,10 @@ Query = Union[str, Tuple[str, Optional[str]]]
 """A selector string, routed as CSS or XPath by its prefix, or ``(selector, syntax)`` with ``syntax``
 one of ``"css"``, ``"xpath"`` or ``None`` (auto)."""
 
+Parser = Literal["browser", "lxml"]
+"""The parse mode: ``"browser"`` (the default) builds the tree a browser builds, ``"lxml"`` lxml's. Any other
+string raises ``ValueError``."""
+
 EncodingSource = Literal[
     "bom", "utf16-prefix", "encoding", "content-type", "xml-declaration", "meta", "utf8", "autodetect",
     "str",
@@ -24,6 +28,7 @@ def extract(
     *,
     content_type: Optional[str] = ...,
     url: Optional[str] = ...,
+    parser: Parser = ...,
 ) -> List[List[str]]:
     """One streaming pass: one value-column per query, in query order."""
 
@@ -35,18 +40,22 @@ def extract_grouped(
     *,
     content_type: Optional[str] = ...,
     url: Optional[str] = ...,
+    parser: Parser = ...,
 ) -> Tuple[List[List[str]], List[List[List[List[str]]]]]:
     """One streaming pass returning ``(flat_columns, grouped)`` — ``grouped[g][row][subfield][value]``."""
 
 def audit_schema(
     flat_queries: Sequence[Query],
     groups: Sequence[Tuple[Query, Sequence[Tuple[str, Query]]]],
+    *,
+    parser: Parser = ...,
 ) -> Tuple[
     List[Tuple[bool, Optional[str]]],
     List[Tuple[Tuple[bool, Optional[str]], List[Tuple[bool, Optional[str]]]]],
     Tuple[int, int, int, int],
 ]:
-    """Support/reason per selector plus ``(members, max_members, sib_bits, max_sib_bits)`` — no HTML parsed."""
+    """Support/reason per selector in the ``parser`` mode, plus ``(members, max_members, sib_bits,
+    max_sib_bits)`` — no HTML parsed."""
 
 def selector_terminals(queries: Sequence[Query]) -> List[Optional[str]]:
     """The value terminal each query produces: ``"text"``, ``"attr"``, ``"outer"``, ``"normalize-space"``,
@@ -106,10 +115,16 @@ class Plan:
         flat_queries: Sequence[Query],
         groups: Sequence[Tuple[Query, Sequence[Tuple[str, Query]]]],
         first_only: Optional[List[bool]] = ...,
+        *,
+        parser: Parser = ...,
     ) -> None:
         """``first_only[c]`` declares that flat column ``c``'s consumer keeps only the FIRST value. When
         every column says so and the schema is eligible, the scan stops as soon as each has one instead
-        of running to EOF; the values a single-valued consumer sees are unchanged."""
+        of running to EOF; the values a single-valued consumer sees are unchanged. ``parser`` fixes the
+        parse mode, once."""
+    @property
+    def parser(self) -> Parser:
+        """The parse mode this plan was compiled for."""
     def extract(
         self,
         html: Union[bytes, str],

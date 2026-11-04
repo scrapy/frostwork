@@ -41,6 +41,8 @@ except Exception:
     gen_grammar, GENERIC = None, []
 
 BIN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "target", "release", "differ")
+# The bridge in lxml mode: this gate, and every tool that drives the bridge through it, grades lxml parity.
+ENGINE = [BIN, "--parser", "lxml"]
 
 
 def _parse_lines(out):
@@ -123,7 +125,7 @@ def run_engine(cases, strict_budget=True, enc=""):
         env["FROSTWORK_DIFFER_BUDGET_STRICT"] = "1"
     else:
         env.pop("FROSTWORK_DIFFER_BUDGET_STRICT", None)
-    proc = subprocess.Popen([BIN], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+    proc = subprocess.Popen(ENGINE, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, env=env)
     # protocol: ENC \t HEXHTML \t sels...   (empty ENC = sniff)
     payload = "".join(
@@ -141,7 +143,7 @@ def run_support(selectors):
     One audit probe per line keeps arbitrary selector text isolated and returns a bool per selector.
     A bridge crash is treated as unsupported here and will be caught separately by engine runs.
     """
-    proc = subprocess.Popen([BIN], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    proc = subprocess.Popen(ENGINE, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     payload = "".join("A\t" + sel + "\n" for sel in selectors).encode()
     out, _err = proc.communicate(payload)
     rows = _parse_lines(out)
@@ -283,7 +285,7 @@ def run_grouped(cases):
     """cases: list of (html, groups) where groups=[(container, subs), ...] -> (out, crashed, diag).
 
     out[i] is [group][row][sub][values] for cases[i] (truncated on a mid-batch engine crash)."""
-    proc = subprocess.Popen([BIN], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    proc = subprocess.Popen(ENGINE, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     lines = []
     for html, groups in cases:
         parts = ["G2", "", html.hex(), str(len(groups))]

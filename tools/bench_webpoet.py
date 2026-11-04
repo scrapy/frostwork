@@ -39,6 +39,9 @@ from web_poet import field as wp_field
 from frostwork.webpoet import FrostPage, field
 
 URL = "http://example.com/p/1"
+# Both items are checked identical before either is timed, against parsel, so the page objects run in
+# lxml mode; `.as_node()`, which the boundary sweeps time, exists only there.
+PARSER = "lxml"
 
 # A realistic product/listing selector mix. Field counts below are PREFIXES of this pool, so every row of
 # the sweep is a superset of the row above it — the curve is one schema growing, not five unrelated ones.
@@ -106,7 +109,7 @@ def build_pair(n: int):
         parsel_ns[name] = wp_field(getter)
 
     return (
-        type("FrostBench", (FrostPage,), frost_ns),
+        type("FrostBench", (FrostPage,), frost_ns, parser=PARSER),
         type("ParselBench", (WebPage,), parsel_ns),
     )
 
@@ -221,8 +224,8 @@ def boundary_cardinality(reps: int, sizes=(220, 2000, 6000)):
     for cards in sizes:
         html = gen_page(cards)
         resp = _resp(html)
-        First = type("FirstCard", (FrostPage,), {"card": field("div.card")})
-        All = type("AllCards", (FrostPage,), {"card": field("div.card", all=True)})
+        First = type("FirstCard", (FrostPage,), {"card": field("div.card")}, parser=PARSER)
+        All = type("AllCards", (FrostPage,), {"card": field("div.card", all=True)}, parser=PARSER)
 
         def parsel_first(html=html):
             return parsel.Selector(body=html, encoding="utf-8").css("div.card").get()
@@ -265,7 +268,7 @@ def boundary_node_processors(reps: int, sizes=(1, 3, 10, 50, 220)):
 
     procs = type("Processors", (), {"cards": [count_links]})
     Frost = type("FrostNodes", (FrostPage,),
-                 {"Processors": procs, "cards": field("div.card", all=True).as_node()})
+                 {"Processors": procs, "cards": field("div.card", all=True).as_node()}, parser=PARSER)
 
     def parsel_getter(self):
         return self.css("div.card")
@@ -311,7 +314,8 @@ def boundary_subtree_size(reps: int, sizes=(1, 30, 250)):
         return n
 
     procs = type("Processors", (), {"deep": [depth_of]})
-    Frost = type("FrostDeep", (FrostPage,), {"Processors": procs, "deep": field("div.deep").as_node()})
+    Frost = type("FrostDeep", (FrostPage,), {"Processors": procs, "deep": field("div.deep").as_node()},
+                 parser=PARSER)
 
     def parsel_getter(self):
         return self.css("div.deep")

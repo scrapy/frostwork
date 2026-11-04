@@ -3,7 +3,7 @@
 //! A *page object* is a `{field: selector}` schema. You declare the fields once, then fill an entire
 //! [`Item`] from a page in a **single** streaming scan: [`Page::extract`] makes exactly one `extract`
 //! call regardless of field count, sharing the document scan while matching work grows with the schema.
-//! Values are the same Parsel-identical strings the engine emits (one
+//! Values are the strings the engine emits in the page's [`ParseMode`](crate::ParseMode) (one
 //! per text node / entity-decoded attribute); this layer only *names* those columns, picks a
 //! cardinality, and assembles the item — it adds no matching logic and no new divergence.
 //!
@@ -50,12 +50,19 @@ pub struct Page {
     names: Vec<String>,
     queries: Vec<String>,
     cards: Vec<Card>,
+    mode: crate::ParseMode,
     plan: OnceLock<crate::Plan>,
 }
 
 impl Default for Page {
     fn default() -> Self {
-        Self { names: Vec::new(), queries: Vec::new(), cards: Vec::new(), plan: OnceLock::new() }
+        Self {
+            names: Vec::new(),
+            queries: Vec::new(),
+            cards: Vec::new(),
+            mode: crate::ParseMode::default(),
+            plan: OnceLock::new(),
+        }
     }
 }
 
@@ -67,6 +74,7 @@ impl Clone for Page {
             names: self.names.clone(),
             queries: self.queries.clone(),
             cards: self.cards.clone(),
+            mode: self.mode,
             plan: OnceLock::new(),
         }
     }
@@ -78,6 +86,7 @@ impl core::fmt::Debug for Page {
             .field("names", &self.names)
             .field("queries", &self.queries)
             .field("cards", &self.cards)
+            .field("mode", &self.mode)
             .field("compiled", &self.plan.get().is_some())
             .finish()
     }
@@ -121,6 +130,18 @@ impl Page {
         self.push(name, selector, Card::Join(separator.into()))
     }
 
+    /// Answer this schema in `mode` rather than the default; see [`crate::ParseMode`].
+    pub fn parse_mode(mut self, mode: crate::ParseMode) -> Self {
+        self.plan = OnceLock::new();
+        self.mode = mode;
+        self
+    }
+
+    /// The parse mode this schema compiles for.
+    pub fn mode(&self) -> crate::ParseMode {
+        self.mode
+    }
+
     /// Number of declared fields.
     pub fn len(&self) -> usize {
         self.names.len()
@@ -155,7 +176,8 @@ impl Page {
     /// column.
     fn compile_plan(&self) -> crate::Plan {
         let first_only: Vec<bool> = self.cards.iter().map(|c| matches!(c, Card::First)).collect();
-        crate::Plan::compile_first_only(&self.queries, &[], &first_only)
+        let options = crate::CompileOptions { mode: self.mode, first_only: &first_only };
+        crate::Plan::compile_with(&self.queries, &[], options)
     }
 
     /// Fill an [`Item`] from `html` in one streaming pass, sniffing the encoding
@@ -344,6 +366,20 @@ mod tests {
           <a href=/p/1>buy</a>\
           <img src=/a.png><img src=/b.png>\
           <div class=desc>Warm <b>and</b> dry.</div></div>"
+    }
+
+    /// The mode is part of the schema: it reaches the compiled plan, survives a clone, and a change
+    /// recompiles. `<noscript>` is raw text to a browser (measured in Chrome 156) and markup to libxml2.
+    #[test]
+    fn a_page_compiles_in_its_own_parse_mode() {
+        let html = b"<noscript><p>x</p></noscript>";
+        let page = Page::new().field("p", "p::text");
+        assert_eq!(page.mode(), crate::ParseMode::Browser);
+        assert_eq!(page.extract(html).get("p"), None);
+        let lxml = page.clone().parse_mode(crate::ParseMode::Lxml);
+        assert_eq!(lxml.extract(html).get("p"), Some("x"));
+        assert_eq!(lxml.clone().compile().extract(html).get("p"), Some("x"));
+        assert_eq!(lxml.parse_mode(crate::ParseMode::Browser).extract(html).get("p"), None);
     }
 
     #[test]

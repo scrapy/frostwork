@@ -7,7 +7,15 @@
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 
-use crate::{EncodingHints, EncodingSource, GroupQuery, Query, Syntax};
+use crate::{CompileOptions, EncodingHints, EncodingSource, GroupQuery, ParseMode, Query, Syntax};
+
+/// The `parser=` keyword: `"browser"` (the default) or `"lxml"`, as [`ParseMode`] names them. Anything
+/// else is the caller's mistake and raises `ValueError` rather than quietly picking a mode.
+fn parse_mode(parser: &str) -> PyResult<ParseMode> {
+    ParseMode::from_name(parser).ok_or_else(|| {
+        PyValueError::new_err(format!("frostwork: parser must be 'browser' or 'lxml', got {parser:?}"))
+    })
+}
 
 /// A schema over the fixed-width bitset budgets is a *caller* bug (too many selectors), distinct from
 /// an unsupported *query* (which is contract-defined to yield an empty column). Silence would be the
@@ -248,14 +256,28 @@ impl Plan {
     /// the item is identical; see `crate::Plan::compile_first_only` for what disarms it. Omitted (the
     /// default) means "keep everything", which is what a caller that has not thought about cardinality
     /// must get.
+    ///
+    /// `parser` fixes the parse mode the plan answers in, once, here.
     #[new]
-    #[pyo3(signature = (flat_queries, groups, first_only=None))]
-    fn new(flat_queries: Vec<Query>, groups: PyGroups, first_only: Option<Vec<bool>>) -> PyResult<Self> {
+    #[pyo3(signature = (flat_queries, groups, first_only=None, *, parser="browser"))]
+    fn new(
+        flat_queries: Vec<Query>,
+        groups: PyGroups,
+        first_only: Option<Vec<bool>>,
+        parser: &str,
+    ) -> PyResult<Self> {
+        let mode = parse_mode(parser)?;
         let first_only = first_only.unwrap_or_default();
-        let inner =
-            crate::Plan::compile_first_only(&flat_queries, &group_queries(groups), &first_only);
+        let options = CompileOptions { mode, first_only: &first_only };
+        let inner = crate::Plan::compile_with(&flat_queries, &group_queries(groups), options);
         budget_error(inner.budget_usage())?;
         Ok(Plan { inner })
+    }
+
+    /// The parse mode this plan was compiled for: `"browser"` or `"lxml"`.
+    #[getter]
+    fn parser(&self) -> &'static str {
+        self.inner.mode().as_str()
     }
 
     /// One streaming pass over `html`, returning one value-column per flat query (query order).
@@ -298,11 +320,12 @@ impl Plan {
 /// `HttpResponseBody`) or an already-decoded `str` — see [`Html`]; the pure-Python `frostwork.extract`
 /// wrapper converts the remaining bytes-likes.
 /// `encoding` is an optional label for an encoding the user forced, `content_type` the response's raw
-/// `Content-Type` header value and `url` its URL; see [`Html::hints`] for how they rank. Unsupported
-/// queries yield an empty column — there is no fallback.
+/// `Content-Type` header value and `url` its URL; see [`Html::hints`] for how they rank. `parser` is the
+/// parse mode, `"browser"` or `"lxml"`. Unsupported queries yield an empty column — there is no
+/// fallback.
 /// Raises `ValueError` if the schema exceeds the member/sibling-bit budget (a caller bug).
 #[pyfunction]
-#[pyo3(signature = (html, queries, encoding=None, *, content_type=None, url=None))]
+#[pyo3(signature = (html, queries, encoding=None, *, content_type=None, url=None, parser="browser"))]
 fn extract(
     py: Python<'_>,
     html: Html<'_>,
@@ -310,11 +333,13 @@ fn extract(
     encoding: Option<&str>,
     content_type: Option<&str>,
     url: Option<&str>,
+    parser: &str,
 ) -> PyResult<Vec<Vec<String>>> {
+    let options = CompileOptions { mode: parse_mode(parser)?, first_only: &[] };
     check_budget(&queries, &[])?;
     let hints = html.hints(py, encoding, content_type, url)?;
     let bytes = html.as_bytes();
-    Ok(py.detach(|| crate::Plan::compile(&queries, &[]).extract_with(bytes, hints).0))
+    Ok(py.detach(|| crate::Plan::compile_with(&queries, &[], options).extract_with(bytes, hints).0))
 }
 
 /// One streaming pass returning `(flat_columns, grouped)`. `groups` is a list of
@@ -323,8 +348,8 @@ fn extract(
 /// Sub-field names are carried by the caller (the pure-Python `Page`/`webpoet` layer); the engine keys
 /// sub-columns positionally. Same one-pass, no-DOM, no-fallback semantics as `extract`.
 #[pyfunction]
-#[pyo3(signature = (html, flat_queries, groups, encoding=None, *, content_type=None, url=None))]
-#[allow(clippy::type_complexity)]
+#[pyo3(signature = (html, flat_queries, groups, encoding=None, *, content_type=None, url=None, parser="browser"))]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn extract_grouped(
     py: Python<'_>,
     html: Html<'_>,
@@ -333,12 +358,14 @@ fn extract_grouped(
     encoding: Option<&str>,
     content_type: Option<&str>,
     url: Option<&str>,
+    parser: &str,
 ) -> PyResult<(Vec<Vec<String>>, Vec<Vec<Vec<Vec<String>>>>)> {
+    let options = CompileOptions { mode: parse_mode(parser)?, first_only: &[] };
     let gq = group_queries(groups);
     check_budget(&flat_queries, &gq)?;
     let hints = html.hints(py, encoding, content_type, url)?;
     let bytes = html.as_bytes();
-    Ok(py.detach(|| crate::Plan::compile(&flat_queries, &gq).extract_with(bytes, hints)))
+    Ok(py.detach(|| crate::Plan::compile_with(&flat_queries, &gq, options).extract_with(bytes, hints)))
 }
 
 /// Resolve `label` the way every Python entry point does — WHATWG labels first, then Python's codec
@@ -413,26 +440,28 @@ fn selector_node_identity(queries: Vec<Query>) -> Vec<(Option<String>, bool)> {
 /// indistinguishable from a legitimately-empty field at runtime; this lets a caller check a schema up
 /// front. Returns `(flat, groups, budget)` where `flat` is `[(supported, reason)]`, `groups` is
 /// `[((c_supported, c_reason), [(supported, reason), ...])]`, and `budget` is
-/// `(members, max_members, sib_bits, max_sib_bits)`. The pure-Python `frostwork.check` wraps this into
-/// a named report; see `frostwork.page`.
+/// `(members, max_members, sib_bits, max_sib_bits)`. Support is per parse mode (`parser`). The
+/// pure-Python `frostwork.check` wraps this into a named report; see `frostwork.page`.
 #[pyfunction]
+#[pyo3(signature = (flat_queries, groups, *, parser="browser"))]
 #[allow(clippy::type_complexity)]
 fn audit_schema(
     flat_queries: Vec<Query>,
     groups: PyGroups,
-) -> (
+    parser: &str,
+) -> PyResult<(
     Vec<(bool, Option<String>)>,
     Vec<((bool, Option<String>), Vec<(bool, Option<String>)>)>,
     (usize, usize, usize, usize),
-) {
-    let a = crate::audit_schema(&flat_queries, &group_queries(groups));
+)> {
+    let a = crate::audit_schema_with(&flat_queries, &group_queries(groups), parse_mode(parser)?);
     let flat = a.flat.iter().map(support_tuple).collect();
     let grouped = a
         .groups
         .iter()
         .map(|g| (support_tuple(&g.container), g.subfields.iter().map(support_tuple).collect()))
         .collect();
-    (flat, grouped, (a.members, a.max_members, a.sib_bits, a.max_sib_bits))
+    Ok((flat, grouped, (a.members, a.max_members, a.sib_bits, a.max_sib_bits)))
 }
 
 #[pymodule]

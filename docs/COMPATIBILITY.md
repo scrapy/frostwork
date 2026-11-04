@@ -10,6 +10,11 @@ four kinds of behavior:
 | ➕ **beyond** | runs, and answers where lxml/Parsel refuses or loses the value — collected in [Beyond lxml](#beyond-lxml) |
 | ∅ **unsupported** | the engine produces an **empty result**; public Python APIs raise by default and expose this behavior with `strict=False` |
 
+This contract is **lxml mode**'s (`parser="lxml"`), the one every gate here proves. The default mode,
+`parser="browser"`, is graded against real browsers instead. At this stage it differs from lxml mode in
+what [Parse modes](#parse-modes) lists and otherwise uses libxml2's tree rules; its full design is
+[BROWSER_MODE.md](BROWSER_MODE.md).
+
 The promise is *close to lxml, always one streaming pass, never a DOM*. Unless a row marks an exception,
 the correctness bar is non-whitespace value parity with lxml (libxml2 2.15), not the HTML5 spec. A ✅ row
 that can return a bare element covers selector matching and ordering; that value still inherits the
@@ -27,6 +32,23 @@ level, public Python APIs validate schemas and raise `UnsupportedSelector` by de
 `frostwork.check` report selector support (with an advisory refusal reason) and budget usage. A green
 audit does not classify a page's values into the four buckets or prove parity on that page; use the
 [saved-response workflow](MIGRATION.md) for that. See the [Python audit API](PYTHON.md#4-auditing-a-schema--check--strict-validation).
+
+### Parse modes
+
+| | lxml mode | browser mode (default) |
+|---|---|---|
+| input | Parsel's `text.strip().replace("\x00", "")` | the bytes as served; only a BOM at offset 0 is consumed, so a leading vertical tab or an indented U+FEFF is a character and opens the body |
+| NUL | deleted before tokenizing, so `<di\0v>` is a `div` | kept: a NUL in a tag or attribute name never matches an ASCII selector, body text drops it, every other value reads it as U+FFFD; before the body it is ignored |
+| `<noscript>` | markup (libxml2 parses with scripting off) | raw text, as a browser with scripting on reads it; head content |
+| HTML `<template>` | an ordinary element | the element matches; its content is not in the document, and is no element's child, sibling or text. An SVG `<template>` stays ordinary |
+| `/>` on a raw-text element or `<template>` | closes it: `<title/>` holds no text | ignored, so `<title/>`, `<script/>`, `<textarea/>`, `<style/>` still read their text |
+| deferred predicate whose value is inside the selected element (`div:has(a) ::text`, `li:last-child b::text`) | supported, by re-scanning the element's source | unsupported: an HTML5 fragment parse loses the element's context |
+| outer HTML of a selector that can match an `<html>`/`<head>`/`<body>` the page never wrote (`body`, `*`) | supported: the value is the element's content | unsupported: there is no source of its own to return |
+| `.as_node()` in `frostwork.webpoet` | supported | refused at class definition: the reparse is lxml's |
+
+Everything else, including encoding resolution, value decoding and the rest of tree construction, is the
+same in both modes until browser mode's HTML5 tree builder lands. `frostwork.check(..., parser=...)`
+reports support per mode.
 
 ---
 

@@ -523,10 +523,14 @@ def build_page(schema, shape, *, frost: bool, kind: str = "http"):
     ns_maker = _frost_ns if frost else _parsel_ns
     # The response type picks the BASE on both sides, so the browser column compares like with like:
     # FrostBrowserPage against web-poet's own BrowserPage, not against a WebPage that happens to work.
+    #
+    # The Frostwork side is lxml mode, because the oracle is parsel. It is declared on the class nearest
+    # the root, so the inheriting and rebuilding shapes also prove the class keyword survives them.
     if frost:
         root = FrostBrowserPage if kind == "browser" else FrostPage
     else:
         root = BrowserPage if kind == "browser" else WebPage
+    mode = {"parser": "lxml"} if frost else {}
     fields = schema["fields"]
     procs = _processors_cls(schema)
     if shape in ("inherit_plain", "inherit_attrs"):
@@ -534,7 +538,7 @@ def build_page(schema, shape, *, frost: bool, kind: str = "http"):
         base_ns = ns_maker(fields[:split], schema)
         if procs is not None:
             base_ns["Processors"] = procs
-        base = type("GenBase", (root,), base_ns)
+        base = type("GenBase", (root,), base_ns, **mode)
         ns = ns_maker(fields[split:], schema)
         ns.update(_group_ns(schema, frost=frost))
         return _apply_shape(type("GenPage", (base,), ns), shape)
@@ -542,7 +546,7 @@ def build_page(schema, shape, *, frost: bool, kind: str = "http"):
     ns.update(_group_ns(schema, frost=frost))
     if procs is not None:
         ns["Processors"] = procs
-    return _apply_shape(type("GenPage", (root,), ns), shape)
+    return _apply_shape(type("GenPage", (root,), ns, **mode), shape)
 
 
 # ------------------------------------------------- the REAL zyte-common-items composition
@@ -598,7 +602,7 @@ def build_zyte_pages():
     # A Frostwork base has to be present (either order works): the markers are converted by its
     # `__init_subclass__`, and a `field()` on a class without one raises at class definition.
     return (
-        type("FrostProductPage", (FrostPage, ProductPage), frost_ns),
+        type("FrostProductPage", (FrostPage, ProductPage), frost_ns, parser="lxml"),
         type("ParselProductPage", (ProductPage,), oracle_ns),
     )
 

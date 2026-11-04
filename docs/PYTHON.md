@@ -51,7 +51,8 @@ cols = frostwork.extract(html, ["h1::text", ".price::text", "img::attr(src)", "/
 assert cols == [["Widget"], ["$9"], ["/a.png"], ["/a.png"]]  # one column per query
 ```
 
-`extract(html, queries, encoding=None, *, content_type=None, url=None, strict=True, syntax=None)` accepts
+`extract(html, queries, encoding=None, *, content_type=None, url=None, strict=True, syntax=None,
+parser="browser")` accepts
 original `bytes` or an already-decoded `str`, whose UTF-8 view is borrowed without copying the document.
 With bytes from a response, pass its raw `Content-Type` header as `content_type` and its URL as `url`, and
 leave `encoding` for a label the user forced; [encoding inputs](#encoding-inputs) has the contract. With
@@ -64,6 +65,12 @@ where declared as XPath it is refused as unsupported, like every relative path.
 
 Unsupported queries raise `UnsupportedSelector` before the HTML is scanned. Pass `strict=False` for
 permissive empty columns. [COMPATIBILITY.md](COMPATIBILITY.md) defines selector, value and encoding behavior.
+
+`parser` picks the tree the queries are answered against. `"browser"`, the default, follows what a
+browser builds; `"lxml"` keeps value parity with lxml and Parsel. The same keyword is on
+`extract_grouped`, `check`, `Page(parser=...)` and the `FrostPage` class statement
+(`class P(FrostPage, parser="lxml")`, inherited by subclasses). Support is per mode, so `check` audits in
+the mode it is given; [Parse modes](COMPATIBILITY.md#parse-modes) lists what differs.
 
 `detect_encoding(html, encoding=None, *, content_type=None, url=None, explain=False)` answers the sniffing
 half on its own, as a WHATWG name, from the same inputs and with the same errors as `extract`:
@@ -382,14 +389,15 @@ raw = field(".desc", out=[lambda v: v.strip()]).as_value()  # processor receives
 
 On a processor-bearing bare-element field, state the input explicitly. `.as_value()` passes source;
 `.as_node()` reparses the matched element as a Parsel node. The latter is required by most
-zyte-common-items field processors:
+zyte-common-items field processors. The reparse is lxml's, so `.as_node()` needs a page object in lxml
+mode (`parser="lxml"`); browser mode refuses it at class definition:
 
 <!-- doc-test: zyte-product-page -->
 ```python
 from zyte_common_items.pages import ProductPage       # its Processors are inherited, not declared here
 from frostwork.webpoet import FrostPage, field
 
-class MyProductPage(FrostPage, ProductPage):
+class MyProductPage(FrostPage, ProductPage, parser="lxml"):
     name = field("h1::text")
     breadcrumbs = field(".crumbs").as_node()
     descriptionHtml = field(".desc").as_node()
@@ -408,6 +416,7 @@ resolved tag is context-dependent:
 | `.as_node()` with `.map()` / `.re_first()` | the transform could change the source before it is reparsed; transform the processor output instead |
 | `.as_node()` on an unconstrained selector such as `field("*")` | a synthesized document frame has no start tag in the source, so an unpinned match can be ambiguous |
 | an `.as_node()` match whose tag is `frameset` | the same source builds a different subtree at document root and inside a body; the captured source has lost that context |
+| `.as_node()` on a browser-mode page object | the node is reparsed by lxml, which builds libxml2's subtree rather than the browser's |
 
 Name or constrain an ambiguous selector, for example `field("body")` or `field("[id=main]")`. To decline an
 inherited processor, pass `out=[]`; the field then returns its ordinary value.

@@ -175,3 +175,63 @@ pub(super) fn deferrable_reverse_at(sel: &Selector) -> Option<usize> {
 pub(super) fn deferrable_reverse(sel: &Selector) -> bool {
     deferrable_reverse_at(sel).is_some()
 }
+
+/// The three names a tree builder SYNTHESIZES around content the page never framed.
+pub(crate) const FRAME_NAMES: [&str; 3] = ["html", "head", "body"];
+
+/// Could a match of `sel` be an `<html>`/`<head>`/`<body>` the page never wrote? Two conservative rules:
+/// a synthesized frame carries no attributes (see `frame.rs`), so a subject compound with an
+/// id/class/attribute cannot match one; and `:not()`, positions and `:has()` only NARROW what matches, so
+/// ignoring them over-reports the frame case, which every caller treats as a refusal.
+pub(crate) fn admits_synthesized_frame(sel: &Selector) -> bool {
+    let subject = sel.parts.last().expect("a compiled selector has a subject compound");
+    let attribute_bound = subject.id.is_some() || !subject.classes.is_empty() || !subject.attrs.is_empty();
+    let names_a_frame = match subject.tag.as_deref().filter(|t| *t != "*") {
+        Some(name) => FRAME_NAMES.iter().any(|f| f.eq_ignore_ascii_case(name)),
+        None => true, // no name test: `<html>`/`<head>`/`<body>` are among what it admits
+    };
+    names_a_frame && !attribute_bound
+}
+
+/// Could a match of `sel` be, or contain, a synthesized frame element? Its subtree holds one only when the
+/// match is an `<html>` or a `<frameset>` (libxml2 synthesizes a `<body>` inside a frameset for head
+/// content there), written or not and whatever its attributes, so a `<div>` container cannot.
+pub(crate) fn may_hold_synthesized_frame(sel: &Selector) -> bool {
+    let subject = sel.parts.last().expect("a compiled selector has a subject compound");
+    admits_synthesized_frame(sel)
+        || match subject.tag.as_deref().filter(|t| *t != "*") {
+            Some(name) => name.eq_ignore_ascii_case("html") || name.eq_ignore_ascii_case("frameset"),
+            None => true,
+        }
+}
+
+/// Why browser mode refuses a selector the lxml contract supports. Both rest on a property of libxml2's
+/// tree that HTML5's does not have, so lxml mode keeps them (docs/BROWSER_MODE.md, section 4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Refusal {
+    /// The value is read from a deferred winner's subtree by re-scanning its raw source as a standalone
+    /// document (`Matcher::resolve_tail_spans`). A libxml2 span is self-contained; an HTML5 one is not.
+    TailRescan,
+    /// The value is outer HTML, and a match can be a document-frame element the page never wrote, which
+    /// has no source of its own (see [`admits_synthesized_frame`]).
+    SynthesizedOuterHtml,
+}
+
+impl Refusal {
+    pub(crate) fn reason(self) -> &'static str {
+        match self {
+            Refusal::TailRescan => {
+                "unsupported in browser mode: the value comes from inside the element the deferred \
+                 predicate (:has(), a reverse position or a text predicate) selects, which is recovered by \
+                 re-parsing that element's source on its own, and an HTML5 parse of a fragment loses the \
+                 context it sits in (a <td> outside its table). Select the element's own text or attribute, \
+                 or use parser=\"lxml\""
+            }
+            Refusal::SynthesizedOuterHtml => {
+                "unsupported in browser mode: the selector can match an <html>, <head> or <body> the page \
+                 never wrote, which has no source of its own to return as outer HTML. Constrain it with an \
+                 attribute (body.page), select its content, or use parser=\"lxml\""
+            }
+        }
+    }
+}

@@ -284,12 +284,17 @@ a way it has read 100% while the engine was wrong:
 ## Repo map
 
 - `src/` — the engine. `lib.rs` (`extract`/`extract_grouped` entry points + routing, `Plan`
-  compile-once wrapper, `audit_schema`), `tokenizer.rs` (bytes → `TokenSink` start/text/end events),
+  compile-once wrapper, `ParseMode`, `audit_schema`/`audit_schema_with`, per-mode input preparation), `tokenizer.rs` (bytes → `TokenSink` start/text/end events),
   `matcher/` — **the real logic**: `mod.rs` (corrected-stack matcher: `CompiledSchema` compile +
-  `Matcher` streaming execute), `compile.rs` (routing eligibility: which selector shapes execute
-  faithfully vs. stay unsupported), `matching.rs` (pure read-only match predicates), `deferred.rs`
-  (bounded state machines for deferred-close predicates), `frame.rs` (document-frame state and the NAMED
-  questions the frame rules ask about it — read its header before touching one), `decode.rs` (value
+  `Matcher` streaming execute, and the primitives a tree builder drives it with), `tree.rs` (the seam:
+  the `TreeBuilder` trait each parse mode implements, which also picks the tokenizer's next state),
+  `libxml2.rs` (lxml mode's tree decisions), `browser.rs` (browser mode's: libxml2's rules plus the
+  browser behaviours that need no HTML5 insertion modes, until the HTML5 builder replaces its
+  internals), `compile.rs` (routing eligibility: which selector shapes execute
+  faithfully vs. stay unsupported, and what browser mode refuses), `matching.rs` (pure read-only match
+  predicates), `deferred.rs`
+  (bounded state machines for deferred-close predicates), `frame.rs` (the libxml2 builder's document-frame
+  state and the NAMED questions the frame rules ask about it — read its header before touching one), `decode.rs` (value
   decoding), `sig.rs` (the ONE-SIDED element/compound Bloom signatures `compound_matches` opens with — a
   set bit is necessary, never sufficient; read its header before touching the hash or the class
   tokenizer). `selector.rs` (CSS parse), `xpath.rs` (downward XPath → `Selector`), `diagnostics.rs`
@@ -320,6 +325,11 @@ a way it has read 100% while the engine was wrong:
   over exact bytes and headers), and it is where a claim about "browser behaviour" gets settled.
 - **Close to libxml2 2.15, NOT the HTML5 spec.** Tree construction (implied end tags, void set,
   `<p>`-closing) is matched *empirically* to libxml2 — it is the oracle. See `implied_close/`.
+- **Two parse modes, and a parity gate names its mode.** `ParseMode::Browser` (`parser="browser"`) is
+  the default and is graded against real browsers (docs/BROWSER_MODE.md); `ParseMode::Lxml` is the
+  libxml2 contract the two bullets above describe. Every test, tool and gate that asserts libxml2 or
+  Parsel parity pins `parser="lxml"` (the `differ` bridge defaults to it). A new one must too, or it
+  grades whatever the default is, and reads green on the wrong contract.
 - **No fallback.** An unsupported query returns an empty column — never an error, never a wrong value.
   Widening coverage means adding it natively *and proving parity*, not routing elsewhere.
 - **Local divergence, never global desync.** Accepted divergences (foster-parenting, adoption agency,

@@ -1,8 +1,9 @@
 """Frostwork — treeless, one-pass HTML extraction.
 
 `extract(html, queries, encoding=None)` is the primitive: one streaming scan answers every
-CSS/XPath query, returning one value-column per query (no DOM, no fallback). Unsupported selectors
-raise by default; pass ``strict=False`` for permissive empty columns. The declarative `Page`/`Item`
+CSS/XPath query, returning one value-column per query (no DOM, no fallback). ``parser="browser"`` (the
+default) answers against the tree a browser builds, ``parser="lxml"`` against lxml's. Unsupported
+selectors raise by default; pass ``strict=False`` for permissive empty columns. The declarative `Page`/`Item`
 layer names those columns and fills a whole item in that single pass.
 
 For Scrapy / web-poet page objects, see `frostwork.webpoet` (requires the ``web-poet`` package —
@@ -14,6 +15,7 @@ from .page import (
     GroupReport,
     Item,
     Page,
+    Parser,
     SchemaReport,
     UnsupportedSelector,
     check,
@@ -38,6 +40,7 @@ __all__ = [
     "detect_encoding",
     "resolve_label",
     "Page",
+    "Parser",
     "Item",
     "SchemaReport",
     "FieldReport",

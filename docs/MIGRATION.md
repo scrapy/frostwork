@@ -17,14 +17,17 @@ For an existing spider, work through one complete callback or page schema at a t
 
 ## Declare the schema
 
-Keep selectors and pure transforms in a module that can be imported without starting a crawl. For
-example, save this as `myproject/pages.py`:
+Keep selectors and pure transforms in a module that can be imported without starting a crawl. A port
+that must return the items Parsel returned declares lxml mode, `Page(parser="lxml")` or
+`class MyPage(FrostPage, parser="lxml")`. The default, browser mode, answers against the tree a browser
+builds, which differs from lxml's on some malformed markup. For example, save this as
+`myproject/pages.py`:
 
 <!-- doc-test: migration-schema -->
 ```python
 from frostwork import Page
 
-PRODUCT = (Page()
+PRODUCT = (Page(parser="lxml")
            .field("name", "h1::text")
            .field("price", ".price::text")
            .field_all("images", "img::attr(src)"))
@@ -64,6 +67,8 @@ To check your own `Page` schemas:
 ```
 
 `REGISTRY` is a dictionary of schema names to `Page` instances, or point at a single `Page` instead.
+Each must be in lxml mode: the reference is Parsel, so the tool refuses a browser-mode schema rather than
+grade it against a parser it does not follow.
 The command imports that module and executes its transforms. Use an import-safe schema module, and
 transforms that are deterministic and have no side effects. Values must be JSON-compatible.
 The tool is repository tooling; it is not installed as a separate package command.

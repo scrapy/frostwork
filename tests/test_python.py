@@ -290,12 +290,12 @@ def test_a_non_ascii_attribute_name_matches_under_a_legacy_encoding(label, name,
     ]
     theirs = parsel.Selector(text=text)
     for q in css:
-        assert frostwork.extract(body, [q], label) == [theirs.css(q).getall()] != [[]], q
+        assert frostwork.extract(body, [q], label, parser="lxml") == [theirs.css(q).getall()] != [[]], q
     for q in xpath:
-        assert frostwork.extract(body, [q], label) == [theirs.xpath(q).getall()] != [[]], q
+        assert frostwork.extract(body, [q], label, parser="lxml") == [theirs.xpath(q).getall()] != [[]], q
     # and a name the page does NOT carry stays empty in the same encoding, both spellings
-    assert frostwork.extract(body, [f"[{name}x]::text"], label) == [[]]
-    assert frostwork.extract(body, [f"//p[@{name}x]/text()"], label) == [[]]
+    assert frostwork.extract(body, [f"[{name}x]::text"], label, parser="lxml") == [[]]
+    assert frostwork.extract(body, [f"//p[@{name}x]/text()"], label, parser="lxml") == [[]]
 
 
 def test_extract_str_with_non_utf8_label_raises():
@@ -360,11 +360,11 @@ def test_explicit_xpath_is_never_read_as_css():
 
 
 def test_explicit_css_is_never_read_as_xpath():
-    assert frostwork.check(["/html"]).ok  # auto: an absolute path
-    report = frostwork.check(["/html"], syntax="css")
+    assert frostwork.check(["/html"], parser="lxml").ok  # auto: an absolute path
+    report = frostwork.check(["/html"], syntax="css", parser="lxml")
     assert not report.ok
     assert "CSS" in report.unsupported[0].reason
-    assert frostwork.extract(SYNTAX_HTML, ["/html"], syntax="css", strict=False) == [[]]
+    assert frostwork.extract(SYNTAX_HTML, ["/html"], syntax="css", strict=False, parser="lxml") == [[]]
 
 
 def test_syntax_none_keeps_prefix_routing():
@@ -792,7 +792,7 @@ def test_processor_on_a_bare_element_field_receives_a_node_not_raw_html():
     html = (b'<html><body><nav class="crumbs"><a href="/a">A</a><a href="/b">B</a></nav>'
             b'<h1>Title</h1><p class="p">text</p></body></html>')
 
-    class P(FrostPage):
+    class P(FrostPage, parser="lxml"):
         class Processors:
             crumbs = [fake_breadcrumbs]
 
@@ -835,7 +835,7 @@ def test_a_real_zyte_product_page_composes_and_every_processor_fires():
             b'<span class="price">$24.50</span><span class="brand">Acme</span>'
             b'<img class="hero" src="/i/1.jpg"></body></html>')
 
-    class MyProductPage(FrostPage, ProductPage):
+    class MyProductPage(FrostPage, ProductPage, parser="lxml"):
         name = field("h1::text")
         breadcrumbs = field(".crumbs").as_node()          # -> breadcrumbs_processor, by name only
         descriptionHtml = field(".desc").as_node()        # -> description_html_processor (clear-html)
@@ -887,7 +887,7 @@ def test_all_true_node_handoff_produces_a_selectorlist_not_a_plain_list():
 
     html = b'<html><body><nav class="a"><a href="/1">1</a></nav><nav class="b"></nav></body></html>'
 
-    class P(FrostPage):
+    class P(FrostPage, parser="lxml"):
         class Processors:
             navs = [needs_selectorlist]
 
@@ -915,7 +915,7 @@ def test_a_processor_receives_the_field_value_unless_the_field_says_otherwise():
 
     html = b'<html><body><div id="x">hi <b>there</b></div></body></html>'
 
-    class Frost(FrostPage):
+    class Frost(FrostPage, parser="lxml"):
         x = field("div", out=[shout]).as_value()
 
     class Parsel(WebPage):
@@ -942,7 +942,7 @@ def test_a_zyte_processor_on_an_element_field_must_state_its_input():
     html = b'<html><body><nav class="crumbs"><a href="/c1">Cat 1</a></nav></body></html>'
 
     with pytest.raises(TypeError, match="must say what that processor receives"):
-        class Unstated(FrostPage):
+        class Unstated(FrostPage, parser="lxml"):
             class Processors:
                 breadcrumbs = [breadcrumbs_processor]
 
@@ -951,19 +951,19 @@ def test_a_zyte_processor_on_an_element_field_must_state_its_input():
     # ...and the string-taking one is refused the same way, which is the conversation to have: it wants
     # `::attr(src)`, not an element
     with pytest.raises(TypeError, match="must say what that processor receives"):
-        class AlsoUnstated(FrostPage):
+        class AlsoUnstated(FrostPage, parser="lxml"):
             class Processors:
                 images = [images_processor]
 
             images = field("img")
 
-    class AsNode(FrostPage):
+    class AsNode(FrostPage, parser="lxml"):
         class Processors:
             breadcrumbs = [breadcrumbs_processor]
 
         breadcrumbs = field(".crumbs").as_node()
 
-    class AsText(FrostPage):
+    class AsText(FrostPage, parser="lxml"):
         class Processors:
             breadcrumbs = [breadcrumbs_processor]
 
@@ -989,11 +989,11 @@ def test_every_processor_bearing_element_field_must_declare_its_input():
 
     # a processor from nowhere in particular, over a bare element: the declaration is still required
     with pytest.raises(TypeError, match="must say what that processor receives"):
-        type("P", (FrostPage,), {"x": field("div", out=[whatever])})
+        type("P", (FrostPage,), {"x": field("div", out=[whatever])}, parser="lxml")
 
     # ...and either declaration satisfies it
     for spelling in (lambda f: f.as_node(), lambda f: f.as_value()):
-        cls = type("P", (FrostPage,), {"x": spelling(field("div", out=[whatever]))})
+        cls = type("P", (FrostPage,), {"x": spelling(field("div", out=[whatever]))}, parser="lxml")
         assert set(cls.frost_schema()["fields"]) == {"x"}
 
     # a field with NO processor needs no declaration — nothing is being handed anywhere
@@ -1022,7 +1022,7 @@ def test_as_node_refuses_what_it_cannot_promise(build, match):
     from frostwork.webpoet import FrostPage, field
 
     with pytest.raises(TypeError, match=match):
-        type("P", (FrostPage,), {"x": build(field)})
+        type("P", (FrostPage,), {"x": build(field)}, parser="lxml")
 
 
 @pytest.mark.webpoet_contract
@@ -1044,10 +1044,10 @@ def test_as_node_on_a_field_with_no_element_is_refused():
 
     for selector in ("h1::text", "a::attr(href)"):
         with pytest.raises(TypeError, match="is not an element"):
-            type("P", (FrostPage,), {"x": field(selector).as_node()})
+            type("P", (FrostPage,), {"x": field(selector).as_node()}, parser="lxml")
 
     with pytest.raises(TypeError, match="is not an element"):
-        type("P", (FrostPage,), {"x": field(UNSUPPORTED_SEL).as_node()}, strict=False)
+        type("P", (FrostPage,), {"x": field(UNSUPPORTED_SEL).as_node()}, strict=False, parser="lxml")
 
 
 @pytest.mark.webpoet_contract
@@ -1128,7 +1128,7 @@ def test_node_handoff_reparses_the_subtree_not_the_document():
 
     html = b'<html><body><table><tr><td class="cell"><b>deep</b></td></tr></table></body></html>'
 
-    class P(FrostPage):
+    class P(FrostPage, parser="lxml"):
         class Processors:
             cell = [capture]
 
@@ -1180,7 +1180,7 @@ def test_the_node_handoff_hands_over_parsels_own_node_for_every_element_and_shap
         )
         sel = parsel.Selector(text=doc)
         for query in (".k", tag):
-            col = frostwork.extract(doc.encode(), [query])[0]
+            col = frostwork.extract(doc.encode(), [query], parser="lxml")[0]
             theirs = sel.css(query)
             assert col and theirs, (
                 f"<{tag}> is not matched by {query!r} in the probe document — fix the document, not this list"
@@ -1205,7 +1205,7 @@ def test_the_node_handoff_hands_over_parsels_own_node_for_every_element_and_shap
 def test_a_document_with_no_frame_gives_each_field_its_own_node():
     """The case raw source cannot answer, end to end through real fields.
 
-    `extract(b"<p>x</p>", ["html", "body", "p"])` returns the SAME string three times — the page wrote no
+    `extract(b"<p>x</p>", ["html", "body", "p"], parser="lxml")` returns the SAME string three times — the page wrote no
     frame, so both frame elements' outer HTML begins with their content — and reading the tag off it would
     hand the `<p>` to all three processors."""
     import os
@@ -1218,7 +1218,7 @@ def test_a_document_with_no_frame_gives_each_field_its_own_node():
 
     parsel = _oracle()
     html = b"<p>x</p>"
-    assert frostwork.extract(html, ["html", "body", "p"]) == [["<p>x</p>"]] * 3  # the whole problem
+    assert frostwork.extract(html, ["html", "body", "p"], parser="lxml") == [["<p>x</p>"]] * 3  # the whole problem
 
     seen = {}
 
@@ -1226,7 +1226,7 @@ def test_a_document_with_no_frame_gives_each_field_its_own_node():
         seen[value.root.tag] = (subtree(value.root), value.root.getparent(), value.xpath("ancestor::*"))
         return value.root.tag
 
-    class P(FrostPage):
+    class P(FrostPage, parser="lxml"):
         class Processors:
             frame = [capture]
             page = [capture]
@@ -1255,12 +1255,12 @@ def test_a_selector_that_cannot_name_its_own_node_is_refused_at_class_definition
 
     for selector in ("*", "p, *", "[id]:not(div) *"):
         with pytest.raises(TypeError, match="never wrote"):
-            type("Star", (FrostPage,), {"any": field(selector).as_node()})
+            type("Star", (FrostPage,), {"any": field(selector).as_node()}, parser="lxml")
 
     # ...while a selector that PINS the name is fine, frame or not: every match is a `<body>`, written or
     # synthesized, and a class/attribute constraint rules a synthesized frame out entirely (it has none).
     for selector in ("body", "div", ".crumbs", "[itemprop=brand]", "//html/body"):
-        type("Named", (FrostPage,), {"any": field(selector).as_node()})
+        type("Named", (FrostPage,), {"any": field(selector).as_node()}, parser="lxml")
 
 
 @pytest.mark.webpoet_contract
@@ -1272,7 +1272,7 @@ def test_the_node_handoff_does_not_reshape_a_frameset():
 
     parsel = _oracle()
     doc = "<html><body><div><frameset><b>x</b></frameset></div></body></html>"
-    col = frostwork.extract(doc.encode(), ["frameset"])[0]
+    col = frostwork.extract(doc.encode(), ["frameset"], parser="lxml")[0]
     node = _as_node(col[0], "frameset")
     assert [c.tag for c in node.root] == ["b"], parsel.Selector(text=doc).css("frameset").get()
     assert node.css("frameset > b::text").get() == "x"
@@ -1293,7 +1293,7 @@ def test_a_body_field_reaches_its_processor_through_a_real_page_object():
 
     html = b'<html><body class="page"><p>one</p><p>two</p></body></html>'
 
-    class P(FrostPage):
+    class P(FrostPage, parser="lxml"):
         class Processors:
             frame = [capture]
 
@@ -1319,7 +1319,7 @@ def test_frame_element_node_handoff_end_to_end():
     html = (b'<html><head><meta itemprop="brand" content="Acme"></head>'
             b'<body class="page"><p>only child</p></body></html>')
 
-    class P(FrostPage):
+    class P(FrostPage, parser="lxml"):
         class Processors:
             frame = [capture]
             brand = [capture]
@@ -1639,7 +1639,7 @@ def test_out_on_a_bare_element_field_also_gets_a_node():
 
     html = b'<html><body><nav class="crumbs"><a href="/a">A</a></nav></body></html>'
 
-    class P(FrostPage):
+    class P(FrostPage, parser="lxml"):
         crumbs = field(".crumbs", out=[needs_node]).as_node()
 
     assert asyncio.run(P(response=_resp(body=html)).to_item()) == {"crumbs": ["/a"]}
@@ -1662,7 +1662,7 @@ def test_out_empty_list_cancels_an_inherited_processor():
 
     html = b'<html><body><nav class="crumbs"><a href="/a">A</a></nav></body></html>'
 
-    class P(FrostPage):
+    class P(FrostPage, parser="lxml"):
         class Processors:
             declined = [never]
             kept = [never]
@@ -2136,7 +2136,7 @@ def test_many_matches_parsel_per_container():
 
     body = GRID
     flat, grouped = frostwork.extract_grouped(
-        body, [], [(".card", [("t", "h3 a::text"), ("p", ".price::text")])]
+        body, [], [(".card", [("t", "h3 a::text"), ("p", ".price::text")])], parser="lxml"
     )
     sel = parsel.Selector(body=body)
     oracle = [[c.css("h3 a::text").getall(), c.css(".price::text").getall()]
@@ -2165,7 +2165,7 @@ def test_matches_parsel_across_selectors():
         ("//li/text()", sel.xpath("//li/text()").getall()),
     ]
     queries = [q for q, _ in checks]
-    cols = frostwork.extract(html.encode("utf-8"), queries)
+    cols = frostwork.extract(html.encode("utf-8"), queries, parser="lxml")
     for (query, expected), got in zip(checks, cols):
         assert got == expected, f"{query}: frostwork={got} parsel={expected}"
 
@@ -2206,7 +2206,7 @@ def test_input_edges_match_parsel(label, body, encoding):
     sels = ["option::text", "head title::text", "html::attr(a)", "p::text"]
     text = body.decode(encoding or "utf-8", "replace")
     theirs = [parsel.Selector(text=text, type="html").css(s).getall() for s in sels]
-    mine = frostwork.extract(body, sels, encoding)
+    mine = frostwork.extract(body, sels, encoding, parser="lxml")
     for sel, got, want in zip(sels, mine, theirs):
         assert got == want, f"{label}: {sel}: frostwork={got} parsel={want}"
 
@@ -2338,17 +2338,17 @@ def test_check_rejects_xpath_variable_and_unquoted_operands():
     html += b'<span x="02">oh-two</span><em id="foo">byname</em></body></html>'
     for q in ('//*[@id=$pid]', '//span[contains(@x,$v)]/text()', '//em[@id=foo]/text()',
               '//span[@x=2]/text()'):
-        field = frostwork.check([q]).fields[0]
+        field = frostwork.check([q], parser="lxml").fields[0]
         assert not field.supported, q
-        assert frostwork.extract(html, [q], strict=False)[0] == []  # no fallback, no wrong value
+        assert frostwork.extract(html, [q], strict=False, parser="lxml")[0] == []  # no fallback, no wrong value
         with pytest.raises(frostwork.UnsupportedSelector):
-            frostwork.extract(html, [q])
-    assert "variable" in frostwork.check(['//*[@id=$pid]']).fields[0].reason
-    assert "unquoted" in frostwork.check(['//span[@x=2]/text()']).fields[0].reason
+            frostwork.extract(html, [q], parser="lxml")
+    assert "variable" in frostwork.check(['//*[@id=$pid]'], parser="lxml").fields[0].reason
+    assert "unquoted" in frostwork.check(['//span[@x=2]/text()'], parser="lxml").fields[0].reason
     # a `$` INSIDE a string literal is data, not a variable — still supported, still correct
-    r = frostwork.check(['//div[@id="$pid"]/text()', '//div[contains(@id,"$p")]/text()'])
+    r = frostwork.check(['//div[@id="$pid"]/text()', '//div[contains(@id,"$p")]/text()'], parser="lxml")
     assert r.ok
-    assert frostwork.extract(html, ['//div[@id="$pid"]/text()'])[0] == ["LITERAL"]
+    assert frostwork.extract(html, ['//div[@id="$pid"]/text()'], parser="lxml")[0] == ["LITERAL"]
 
 
 def test_check_rejects_non_ident_unquoted_css_attr_values():
@@ -2506,7 +2506,7 @@ def test_xpath_union_or_descendant_attr_match_parsel():
         "//div//@src",
         "//a[@x]/text() | //b/text()",
     ]:
-        mine = frostwork.extract(body, [q])[0]
+        mine = frostwork.extract(body, [q], parser="lxml")[0]
         theirs = parsel.Selector(body=body, encoding="utf-8").xpath(q).getall()
         assert mine == theirs, f"{q}: frostwork={mine} parsel={theirs}"
 
@@ -2522,7 +2522,7 @@ def test_positional_matches_parsel():
     xp = ["//li[1]/text()", "//li[2]/text()", "//ul/*[3]/text()"]
     sel = parsel.Selector(body=body, encoding="utf-8")
     for q in css:
-        assert frostwork.extract(body, [q])[0] == sel.css(q).getall(), q
+        assert frostwork.extract(body, [q], parser="lxml")[0] == sel.css(q).getall(), q
     # reverse positions (attached ::text/::attr, CSS + XPath) now MATCH parsel exactly
     for q in [
         "li:last-child::text", "li:last-of-type::text",
@@ -2530,20 +2530,20 @@ def test_positional_matches_parsel():
         "li:nth-last-child(1)::text", "li:nth-last-child(2)::text", "li:nth-last-of-type(2)::text",
         "li:nth-last-child(odd)::text",
     ]:
-        assert frostwork.extract(body, [q])[0] == sel.css(q).getall(), q
+        assert frostwork.extract(body, [q], parser="lxml")[0] == sel.css(q).getall(), q
     for q in ["//li[last()]/text()", "//li[last()-1]/text()", "//ul/*[last()]/text()"]:
-        assert frostwork.extract(body, [q])[0] == sel.xpath(q).getall(), q
+        assert frostwork.extract(body, [q], parser="lxml")[0] == sel.xpath(q).getall(), q
     # SUBTREE reverse terminals are supported too (values recovered by re-scanning the winner's span)
     for q in ["li:last-child ::text", "li:nth-last-child(2) ::text", "li:only-child ::text"]:
-        assert frostwork.extract(body, [q])[0] == sel.css(q).getall(), q
+        assert frostwork.extract(body, [q], parser="lxml")[0] == sel.css(q).getall(), q
     for q in ["//li[last()]//text()", "//li[last()-1]//text()"]:
-        assert frostwork.extract(body, [q])[0] == sel.xpath(q).getall(), q
+        assert frostwork.extract(body, [q], parser="lxml")[0] == sel.xpath(q).getall(), q
     # Permissive mode exposes the engine's safe empty-column contract for the forms still out of tier
     # (a reverse position on a non-subject/ancestor compound).
-    assert frostwork.extract(body, ["li:last-child b::text"], strict=False)[0] == []
+    assert frostwork.extract(body, ["li:last-child b::text"], strict=False, parser="lxml")[0] == []
     for q in xp:
         # last() is unsupported -> frostwork empty (allowed gap); the rest match exactly
-        mine = frostwork.extract(body, [q])[0]
+        mine = frostwork.extract(body, [q], parser="lxml")[0]
         theirs = sel.xpath(q).getall()
         assert mine == theirs or (mine == [] and "last()" in q), f"{q}: {mine} vs {theirs}"
 
@@ -2564,7 +2564,7 @@ def test_normalize_space_matches_parsel():
         "normalize-space(//nope)",       # scalar '' on no match
         "normalize-space(//zzz/@q)",
     ]:
-        mine = frostwork.extract(body, [q])[0]
+        mine = frostwork.extract(body, [q], parser="lxml")[0]
         theirs = parsel.Selector(body=body, encoding="utf-8").xpath(q).getall()
         assert mine == theirs, f"{q}: frostwork={mine} parsel={theirs}"
 
@@ -2578,13 +2578,13 @@ def test_check_reason_matches_parsel_supported_boundary():
     # subtree, or a DESCENDANT's; a CHILD step into that value tail still isn't (see COMPATIBILITY)
     supported = "li:last-child b::text"
     unsupported = "li:last-child > b::text"
-    r = frostwork.check([supported, unsupported])
+    r = frostwork.check([supported, unsupported], parser="lxml")
     assert r.fields[0].supported and not r.fields[1].supported
     # supported one: frostwork column == parsel
-    got = frostwork.extract(html, [supported])[0]
+    got = frostwork.extract(html, [supported], parser="lxml")[0]
     assert got == parsel.Selector(body=html, encoding="utf-8").css(supported).getall()
     # unsupported one: frostwork empty (no fallback), parsel non-empty -> that's the gap check catches
-    assert frostwork.extract(html, [unsupported], strict=False)[0] == []
+    assert frostwork.extract(html, [unsupported], strict=False, parser="lxml")[0] == []
 
 
 def test_new_axis_and_has_selectors_match_parsel():
@@ -2610,11 +2610,11 @@ def test_new_axis_and_has_selectors_match_parsel():
         "//a/parent::div",
     ]
     for q in css_cases:
-        assert frostwork.extract(html, [q])[0] == sel.css(q).getall(), q
+        assert frostwork.extract(html, [q], parser="lxml")[0] == sel.css(q).getall(), q
     for q in xpath_cases:
-        assert frostwork.extract(html, [q])[0] == sel.xpath(q).getall(), q
+        assert frostwork.extract(html, [q], parser="lxml")[0] == sel.xpath(q).getall(), q
     # and they report as supported through the audit
-    r = frostwork.check(css_cases + xpath_cases)
+    r = frostwork.check(css_cases + xpath_cases, parser="lxml")
     assert r.ok and not r.unsupported
 
 
@@ -2637,11 +2637,11 @@ def test_text_content_predicates_match_parsel():
         '//a[contains(.,"Buy")]/@class',
     ]
     for q in cases:
-        assert frostwork.extract(html, [q])[0] == sel.xpath(q).getall(), q
+        assert frostwork.extract(html, [q], parser="lxml")[0] == sel.xpath(q).getall(), q
     # a text predicate on a preceding sibling (label->value) is now supported (Case B) — matches parsel
     combo = '//a[.="Buy now"]/following-sibling::a/text()'
-    assert frostwork.check([combo]).ok
-    assert frostwork.extract(html, [combo])[0] == sel.xpath(combo).getall()
+    assert frostwork.check([combo], parser="lxml").ok
+    assert frostwork.extract(html, [combo], parser="lxml")[0] == sel.xpath(combo).getall()
 
 
 def test_is_where_selectors_match_parsel():
@@ -2656,8 +2656,8 @@ def test_is_where_selectors_match_parsel():
     supported = [":is(h1, h2, h3)::text", "div:is(.a, .b)::text", "div:where(.a, .c)::text",
                  "a:is([href], [data-k])::text"]
     for q in supported:
-        assert frostwork.extract(html, [q])[0] == sel.css(q).getall(), q
-    assert frostwork.check(supported).ok
+        assert frostwork.extract(html, [q], parser="lxml")[0] == sel.css(q).getall(), q
+    assert frostwork.check(supported, parser="lxml").ok
 
 
 def test_nonsubject_sibling_predicate_matches_parsel():
@@ -2683,15 +2683,15 @@ def test_nonsubject_sibling_predicate_matches_parsel():
         "li:has(.new) + li::text",                                 # adjacent: only the immediate next
         "li:has(b) ~ li::text",                                    # tag inner
     ]:
-        got = frostwork.extract(html, [q])[0]
+        got = frostwork.extract(html, [q], parser="lxml")[0]
         want = (sel.xpath(q) if q.startswith("//") else sel.css(q)).getall()
         assert got == want, (q, got, want)
     # predicate that fails -> no sibling fires (empty, never a stale/wrong value)
-    assert frostwork.extract(html, ["li:has(.absent) ~ li::text"])[0] == []
-    assert frostwork.extract(html, ['//dt[.="Nope"]/following-sibling::dd/text()'])[0] == []
+    assert frostwork.extract(html, ["li:has(.absent) ~ li::text"], parser="lxml")[0] == []
+    assert frostwork.extract(html, ['//dt[.="Nope"]/following-sibling::dd/text()'], parser="lxml")[0] == []
     # a positional predicate on the sibling axis stays an unsupported gap (empty), not wrong
     assert frostwork.extract(
-        html, ['//dt[.="Price"]/following-sibling::dd[1]/text()'], strict=False
+        html, ['//dt[.="Price"]/following-sibling::dd[1]/text()'], strict=False, parser="lxml"
     )[0] == []
 
 
@@ -2749,7 +2749,7 @@ def test_has_widened_inners_match_correct_semantics():
         ("section:has(:not(p))::attr(id)", "section", ":not(p)", False),
     ]
     for frost_sel, e_css, f_css, child in cases:
-        got = frostwork.extract(html, [frost_sel])[0]
+        got = frostwork.extract(html, [frost_sel], parser="lxml")[0]
         assert got == has_ids(e_css, f_css, child), frost_sel
 
 
@@ -2782,14 +2782,14 @@ def test_has_selector_list_matches_the_union_of_its_members():
         ("div:has(a, nosuch)::attr(id)", "div:has(a)"),  # a member matching nothing adds nothing
         ("div:has(> a, > img)::attr(id)", "div:has(> a), div:has(> img)"),  # child-scoped list
     ]:
-        got = frostwork.extract(html, [frost_sel])[0]
+        got = frostwork.extract(html, [frost_sel], parser="lxml")[0]
         want = sel.css(oracle_sel).xpath("@id").getall()
         assert got == want, (frost_sel, got, want)
 
     # a list MIXING relative combinators has no faithful representation (one `rel` per `:has`), so it is
     # REPORTED unsupported rather than answered under whichever half arrived first
-    assert not frostwork.check(["div:has(> a, img)::attr(id)"]).ok
-    assert frostwork.check(["div:has(a, img)::attr(id)"]).ok
+    assert not frostwork.check(["div:has(> a, img)::attr(id)"], parser="lxml").ok
+    assert frostwork.check(["div:has(a, img)::attr(id)"], parser="lxml").ok
 
 
 def test_not_selector_list_matches_the_chained_spelling():
@@ -2815,10 +2815,10 @@ def test_not_selector_list_matches_the_chained_spelling():
         # a comma inside an attribute VALUE is data, not a member separator
         ('p:not([title="x, y"])::text', 'p:not([title="x, y"])::text'),
     ]:
-        got = frostwork.extract(html, [frost_sel])[0]
+        got = frostwork.extract(html, [frost_sel], parser="lxml")[0]
         assert got == sel.css(oracle_sel).getall(), frost_sel
 
-    assert not frostwork.check(["p:not(.a, )::text"]).ok  # empty member — cssselect rejects it too
+    assert not frostwork.check(["p:not(.a, )::text"], parser="lxml").ok  # empty member — cssselect rejects it too
 
 
 def test_attribute_case_insensitive_flag_matches_an_lxml_fold():
@@ -2840,11 +2840,11 @@ def test_attribute_case_insensitive_flag_matches_an_lxml_fold():
     with pytest.raises(cssselect.SelectorSyntaxError):
         sel.css("[type=submit i]")
 
-    assert frostwork.extract(html, ["[type=submit i]::attr(id)"])[0] == sel.xpath(
+    assert frostwork.extract(html, ["[type=submit i]::attr(id)"], parser="lxml")[0] == sel.xpath(
         f"//a[{fold}='submit']/@id"
     ).getall()
     # ...and the flag really is what makes the difference: without it the same selector matches nothing
-    assert frostwork.extract(html, ["[type=submit]::attr(id)"])[0] == []
+    assert frostwork.extract(html, ["[type=submit]::attr(id)"], parser="lxml")[0] == []
     # every operator honours it, and `~=` still tokenizes on ASCII whitespace
     for q, want in [
         ('[href^="/doc" i]::attr(id)', ["1"]),
@@ -2852,13 +2852,13 @@ def test_attribute_case_insensitive_flag_matches_an_lxml_fold():
         ('[href*="OC.p" i]::attr(id)', ["1"]),
         ("[rel~=nofollow i]::attr(id)", ["1", "2"]),
     ]:
-        assert frostwork.extract(html, [q])[0] == want, q
+        assert frostwork.extract(html, [q], parser="lxml")[0] == want, q
     # `s` is the default and parses as a no-op; the fold is ASCII-only, as CSS defines it
-    assert frostwork.extract(html, ['[type="SubMit" s]::attr(id)'])[0] == ["1"]
+    assert frostwork.extract(html, ['[type="SubMit" s]::attr(id)'], parser="lxml")[0] == ["1"]
     acc = "<p id=3 data-x='CAFÉ'>t</p>".encode()
-    assert frostwork.extract(acc, ['[data-x="café" i]::attr(id)'])[0] == []
-    assert frostwork.extract(acc, ['[data-x^="ca" i]::attr(id)'])[0] == ["3"]
-    assert frostwork.check(["[type=submit i]::attr(id)"]).ok
+    assert frostwork.extract(acc, ['[data-x="café" i]::attr(id)'], parser="lxml")[0] == []
+    assert frostwork.extract(acc, ['[data-x^="ca" i]::attr(id)'], parser="lxml")[0] == ["3"]
+    assert frostwork.check(["[type=submit i]::attr(id)"], parser="lxml").ok
 
 
 def test_detect_encoding_reports_what_extract_will_use():
@@ -2886,7 +2886,7 @@ def test_detect_encoding_reports_what_extract_will_use():
     # ...and it is the encoding `extract` actually decoded with, not a second opinion
     b = b"<meta charset=windows-1252><p>caf\xe9</p>"
     assert frostwork.detect_encoding(b) == "windows-1252"
-    assert frostwork.extract(b, ["p::text"])[0] == ["café"]
+    assert frostwork.extract(b, ["p::text"], parser="lxml")[0] == ["café"]
 
 
 def test_url_informs_autodetection():
@@ -2959,17 +2959,17 @@ def test_names_longer_than_libxml2s_buffer_are_kept_whole():
     assert sel.css(f"{tag[:100]}::text").getall() == ["u"]
 
     # ...and Frostwork answers by the name the document actually carries
-    assert frostwork.extract(html, [f"[{attr}]::text"])[0] == ["t"]
-    assert frostwork.extract(html, [f"p::attr({attr})"])[0] == ["v"]
-    assert frostwork.extract(html, [f"{tag}::text"])[0] == ["u"]
-    assert frostwork.extract(html, [f"//p/@{attr}"])[0] == ["v"]
+    assert frostwork.extract(html, [f"[{attr}]::text"], parser="lxml")[0] == ["t"]
+    assert frostwork.extract(html, [f"p::attr({attr})"], parser="lxml")[0] == ["v"]
+    assert frostwork.extract(html, [f"{tag}::text"], parser="lxml")[0] == ["u"]
+    assert frostwork.extract(html, [f"//p/@{attr}"], parser="lxml")[0] == ["v"]
 
     # THE PORT HAZARD, stated as an assertion: a selector copied out of the lxml tree carries the
     # truncated name, which is in no document and matches nothing here. An empty column, never a value.
-    assert frostwork.extract(html, [f"[{attr[:100]}]::text"])[0] == []
-    assert frostwork.extract(html, [f"{tag[:100]}::text"])[0] == []
+    assert frostwork.extract(html, [f"[{attr[:100]}]::text"], parser="lxml")[0] == []
+    assert frostwork.extract(html, [f"{tag[:100]}::text"], parser="lxml")[0] == []
     # and it is a supported selector, so the emptiness is the page's answer rather than a refusal
-    assert frostwork.check([f"[{attr[:100]}]::text", f"{tag[:100]}::text"]).ok
+    assert frostwork.check([f"[{attr[:100]}]::text", f"{tag[:100]}::text"], parser="lxml").ok
 
 
 def test_is_where_matches_correct_and_semantics():
@@ -3002,7 +3002,7 @@ def test_is_where_matches_correct_and_semantics():
     import cssselect
 
     for form, expansion in pairs:
-        got = frostwork.extract(html, [form])[0]
+        got = frostwork.extract(html, [form], parser="lxml")[0]
         assert got == sel.css(expansion).getall(), form
         # cssselect 1.5.0+ translates the direct form correctly too, so it must agree. A failure here is
         # the divergence reopening — either an upstream regression or a cssselect older than the pin.
@@ -3296,7 +3296,7 @@ def test_selectors_the_oracle_rejects_are_reported_unsupported():
             pass  # the oracle refuses it, which is the precondition for this assertion
         else:
             raise AssertionError(f"{sel!r} was expected to be oracle-invalid; fixture needs updating")
-        assert not frostwork.check([sel]).fields[0].supported, (
+        assert not frostwork.check([sel], parser="lxml").fields[0].supported, (
             f"{sel!r} is rejected by the oracle, so check() must report it unsupported"
         )
 
@@ -3308,8 +3308,8 @@ def test_css_escapes_in_quoted_values_match_parsel():
     html = b'<html><body><i data-x="a">ESCAPED</i><i data-x="\\61">RAW</i></body></html>'
     for sel in ['[data-x="\\61"]::text', '[data-x="a"]::text', '[data-x="\\0041"]::text']:
         want = parsel.Selector(body=html, encoding="utf-8").css(sel).getall()
-        assert frostwork.check([sel]).fields[0].supported, sel  # not a conditional: it MUST stay supported
-        assert frostwork.extract(html, [sel])[0] == want, sel
+        assert frostwork.check([sel], parser="lxml").fields[0].supported, sel  # not a conditional: it MUST stay supported
+        assert frostwork.extract(html, [sel], parser="lxml")[0] == want, sel
 
 
 def test_the_whole_css_escape_surface_obeys_the_contract():
@@ -3344,8 +3344,8 @@ def test_the_whole_css_escape_surface_obeys_the_contract():
             want = parsel.Selector(body=html, encoding="utf-8").css(sel).getall()
         except Exception:
             want = None  # the oracle rejects it: we may not answer at all
-        got = frostwork.extract(html, [sel], strict=False)[0]
-        supported = frostwork.check([sel]).fields[0].supported
+        got = frostwork.extract(html, [sel], strict=False, parser="lxml")[0]
+        supported = frostwork.check([sel], parser="lxml").fields[0].supported
         if want is None:
             assert not got, f"{sel!r}: parsel rejects this, so answering it is a no-fallback violation"
         elif supported:
@@ -3382,8 +3382,8 @@ def test_quoted_delimiters_in_functional_pseudos_are_supported():
     ]
     for sel in supported:
         want = parsel.Selector(body=html, encoding="utf-8").css(sel).getall()
-        assert frostwork.check([sel]).fields[0].supported, f"{sel!r} is valid CSS parsel answers"
-        assert frostwork.extract(html, [sel])[0] == want, sel
+        assert frostwork.check([sel], parser="lxml").fields[0].supported, f"{sel!r} is valid CSS parsel answers"
+        assert frostwork.extract(html, [sel], parser="lxml")[0] == want, sel
     # FAIL CLOSED on syntax that is genuinely broken. parsel raises on all of these, so any non-empty
     # column would be the OVERMATCH the selector fuzzer gates.
     for sel in [
@@ -3394,8 +3394,8 @@ def test_quoted_delimiters_in_functional_pseudos_are_supported():
     ]:
         with pytest.raises(Exception):
             parsel.Selector(body=html, encoding="utf-8").css(sel).getall()
-        assert not frostwork.extract(html, [sel], strict=False)[0], sel
-        assert not frostwork.check([sel]).fields[0].supported, sel
+        assert not frostwork.extract(html, [sel], strict=False, parser="lxml")[0], sel
+        assert not frostwork.check([sel], parser="lxml").fields[0].supported, sel
 
 
 def test_selector_grammar_surface_obeys_the_contract():
@@ -3424,8 +3424,8 @@ def test_selector_grammar_surface_obeys_the_contract():
     for sel, want_beyond in beyond.items():
         with pytest.raises(Exception):  # premise: the oracle really cannot run these
             parsel.Selector(body=html, encoding="utf-8").css(sel)
-        assert frostwork.check([sel]).fields[0].supported, f"{sel!r}: declared beyond, but refused"
-        assert frostwork.extract(html, [sel])[0] == want_beyond, sel
+        assert frostwork.check([sel], parser="lxml").fields[0].supported, f"{sel!r}: declared beyond, but refused"
+        assert frostwork.extract(html, [sel], parser="lxml")[0] == want_beyond, sel
 
     for sel in [
         "[data-k='v1']::text", "[title='it\\'s']::text", '[title="it\'s"]::text',  # single quotes
@@ -3441,10 +3441,10 @@ def test_selector_grammar_surface_obeys_the_contract():
             want = parsel.Selector(body=html, encoding="utf-8").css(sel).getall()
         except Exception:
             want = None
-        got = frostwork.extract(html, [sel], strict=False)[0]
+        got = frostwork.extract(html, [sel], strict=False, parser="lxml")[0]
         if want is None:
             assert not got, f"{sel!r}: parsel rejects this, so answering it is a no-fallback violation"
-        elif frostwork.check([sel]).fields[0].supported:
+        elif frostwork.check([sel], parser="lxml").fields[0].supported:
             assert got == want, f"{sel!r}: claimed supported, so it must equal parsel ({want!r})"
         else:
             assert not got, f"{sel!r}: unsupported must be EMPTY, got {got!r}"
@@ -3486,10 +3486,10 @@ def test_xpath_grammar_surface_obeys_the_contract():
             want = parsel.Selector(body=html, encoding="utf-8").xpath(q).getall()
         except Exception:
             want = None
-        got = frostwork.extract(html, [q], strict=False)[0]
+        got = frostwork.extract(html, [q], strict=False, parser="lxml")[0]
         if want is None:
             assert not got, f"{q!r}: lxml rejects this, so answering it is a no-fallback violation"
-        elif frostwork.check([q]).fields[0].supported:
+        elif frostwork.check([q], parser="lxml").fields[0].supported:
             assert got == want, f"{q!r}: claimed supported, so it must equal lxml ({want!r})"
         else:
             assert not got, f"{q!r}: unsupported must be EMPTY, got {got!r}"
@@ -3616,11 +3616,11 @@ def test_deferred_predicate_combinations_match_parsel():
         "div:has(a) b::text", "section:has(i) span::text", "p:has(a) a::attr(href)",
         "ul:has(li.c1) li::text",
     ]
-    sup = [f.supported for f in frostwork.check(basket).fields]
+    sup = [f.supported for f in frostwork.check(basket, parser="lxml").fields]
     for _ in range(60):
         body = "".join(flow(rng.randint(2, 4)) for _ in range(rng.randint(2, 4)))
         html = ("<html><body>" + body + "</body></html>").encode()
-        mine = frostwork.extract(html, basket, strict=False)
+        mine = frostwork.extract(html, basket, strict=False, parser="lxml")
         sel = parsel.Selector(body=html, encoding="utf-8")
         for i, q in enumerate(basket):
             want = (sel.xpath if q.startswith("/") else sel.css)(q).getall()
@@ -3649,3 +3649,133 @@ def test_scanner_handles_keyword_builder_forms():
     assert sites('Page.field("title", "h1::text")') == ["h1::text"]
     assert sites('Page.field("title", selector="h1::text")') == ["h1::text"]
     assert sites('Page.field(name="title", selector="h1::text")') == ["h1::text"]
+
+
+# --------------------------------------------------------------------------- parse modes
+# Browser mode is the default; lxml mode is libxml2 parity. Each browser answer below was measured in
+# Chrome 156 (tools/browser_oracle, claims mode); the Rust unit tests in `browser_mode_tests` carry the rest.
+
+NOSCRIPT = b"<!DOCTYPE html><body><noscript><p id=t>x</p></noscript>"
+TEMPLATE = b"<!DOCTYPE html><body><div id=d>a<template id=t><p id=y>z</p></template>c</div>"
+
+
+def test_browser_mode_is_the_default_and_lxml_mode_is_one_keyword_away():
+    # a browser runs with scripting on, so <noscript> holds raw text; libxml2 parses it as markup
+    assert frostwork.extract(NOSCRIPT, ["#t::text", "noscript::text"]) == [[], ["<p id=t>x</p>"]]
+    assert frostwork.extract(NOSCRIPT, ["#t::text"], parser="browser") == [[]]
+    assert frostwork.extract(NOSCRIPT, ["#t::text"], parser="lxml") == [["x"]]
+    # template content is not in the document
+    flat, _ = frostwork.extract_grouped(TEMPLATE, ["#y::text", "#d::text"], [])
+    assert flat == [[], ["a", "c"]]
+    flat, _ = frostwork.extract_grouped(TEMPLATE, ["#y::text"], [], parser="lxml")
+    assert flat == [["z"]]
+    # ...and the same switch reaches every compiled form
+    assert _Plan(["#t::text"], []).parser == "browser"
+    assert _Plan(["#t::text"], [], parser="lxml").extract(NOSCRIPT) == [["x"]]
+    page = Page().field("t", "#t::text")
+    assert page.parser == "browser" and page.extract(NOSCRIPT).get("t") is None
+    assert Page(parser="lxml").field("t", "#t::text").extract(NOSCRIPT).get("t") == "x"
+
+
+@pytest.mark.parametrize("call", [
+    lambda: frostwork.extract(b"", ["p::text"], parser="html5"),
+    lambda: frostwork.extract_grouped(b"", [], [], parser="LXML"),
+    lambda: frostwork.check(["p::text"], parser=""),
+    lambda: Page(parser="chrome"),
+    lambda: _Plan([], [], parser="firefox"),
+    lambda: frostwork._frostwork.extract(b"", [], parser="xml"),
+    lambda: frostwork._frostwork.audit_schema([], [], parser="xml"),
+])
+def test_an_unknown_parser_raises_value_error(call):
+    with pytest.raises(ValueError, match="parser must be 'browser' or 'lxml'"):
+        call()
+
+
+def test_support_is_per_mode():
+    """Browser mode refuses, with a reason, what would need a context-free re-parse (a deferred winner's
+    subtree) or a synthesized frame element's outer HTML; lxml mode supports both."""
+    sels = ["div:has(a) ::text", "li:last-child b::text", "body", "div:has(a)::attr(id)"]
+    browser, lxml_mode = frostwork.check(sels), frostwork.check(sels, parser="lxml")
+    assert (browser.parser, lxml_mode.parser) == ("browser", "lxml")
+    assert lxml_mode.ok
+    assert [f.supported for f in browser.fields] == [False, False, False, True]
+    assert all("browser mode" in f.reason for f in browser.unsupported)
+    assert "parser browser" in str(browser)
+    with pytest.raises(frostwork.UnsupportedSelector, match="browser mode"):
+        frostwork.extract(b"<div><a>x</a></div>", ["div:has(a) ::text"])
+    assert frostwork.extract(b"<div><a>x</a></div>", ["div:has(a) ::text"], parser="lxml") == [["x"]]
+    assert Page().field("x", "body").check().unsupported[0].name == "x"
+    assert Page(parser="lxml").field("x", "body").check().ok
+
+
+def test_the_parser_class_keyword_is_carried_on_the_class():
+    """A class keyword exists only in the `class` statement, which a rebuild (`@attrs.define`) throws away,
+    so the resolved mode lives on the class: the trap `strict=False` hit. A subclass inherits it."""
+    import attrs
+    from frostwork.webpoet import FrostPage, field
+
+    class Lxml(FrostPage, parser="lxml"):
+        t = field("#t::text")
+
+    class Child(Lxml):
+        u = field("noscript::text")
+
+    class Back(Lxml, parser="browser"):
+        pass
+
+    @attrs.define
+    class Rebuilt(FrostPage, parser="lxml"):
+        t = field("#t::text")
+
+    for cls, mode in [(Lxml, "lxml"), (Child, "lxml"), (Back, "browser"), (Rebuilt, "lxml"),
+                      (_rebuild_class(Lxml), "lxml")]:
+        assert cls._frostwork_plan.parser == mode, cls
+        assert cls.check_schema().parser == mode, cls
+    item = asyncio.run(Child(response=_resp(body=NOSCRIPT)).to_item())
+    assert item == {"t": "x", "u": None}  # lxml: <noscript> is markup, so it has no text node
+    assert asyncio.run(Rebuilt(response=_resp(body=NOSCRIPT)).to_item()) == {"t": "x"}
+    assert Back(response=_resp(body=NOSCRIPT)).t is None
+    with pytest.raises(ValueError, match="parser must be"):
+        class Bad(FrostPage, parser="dom"):
+            t = field("#t::text")
+
+
+def test_as_node_is_refused_in_browser_mode_at_class_definition():
+    """`.as_node()` re-parses with lxml, which would hand a processor libxml2's subtree for a node the
+    browser built differently."""
+    from frostwork.webpoet import FrostPage, field
+
+    with raises_at_class_definition(r"browser mode does not support"):
+        class Browser(FrostPage):
+            nav = field("nav").as_node()
+
+    class Lxml(FrostPage, parser="lxml"):
+        nav = field("nav").as_node()
+
+    assert Lxml._frostwork_specs["nav"][3] is True
+
+
+def test_the_audit_reports_each_schema_in_its_own_mode(tmp_path, capsys):
+    import json as _json
+
+    from frostwork.audit import main
+
+    target = _write(
+        tmp_path,
+        "from frostwork import Page\n"
+        "browser = Page().field('t', 'div:has(a) ::text')\n"
+        "lxml = Page(parser='lxml').field('t', 'div:has(a) ::text')\n",
+    )
+    assert main([target]) == 1
+    out = capsys.readouterr().out
+    assert "PROBLEMS  browser  (parser browser" in out and "OK        lxml  (parser lxml" in out
+    assert main([target, "--json"]) == 1
+    payload = _json.loads(capsys.readouterr().out)
+    assert {s["name"]: s["parser"] for s in payload["schemas"]} == {"browser": "browser", "lxml": "lxml"}
+    # --scan audits literals in the mode it is told
+    spider = _write_spider(tmp_path, "s.py", "v = response.css('div:has(a) ::text')\n")
+    assert main(["--scan", spider]) == 1
+    capsys.readouterr()
+    assert main(["--scan", spider, "--parser", "lxml", "--json"]) == 0
+    assert _json.loads(capsys.readouterr().out)["parser"] == "lxml"
+    assert main([target, "--parser", "lxml"]) == 2  # a schema audit uses each object's own mode

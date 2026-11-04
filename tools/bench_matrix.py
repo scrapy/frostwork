@@ -18,6 +18,8 @@ from parsel import Selector as PS
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 BIN = os.path.join(HERE, "..", "target", "release", "bench")
+# The published tables compare against Parsel, so the engine runs in lxml mode.
+MODE = ["--parser", "lxml"]
 import tempfile
 TMP = tempfile.mkdtemp(prefix="frostwork-bench-")
 
@@ -226,7 +228,7 @@ def engine_bench(html_bytes, sels):
     env = os.environ.copy()
     if SMOKE:
         env["FROSTWORK_BENCH_ITERS"] = "200"
-    p = subprocess.run([BIN, path], input="\n".join(sels).encode(), capture_output=True, env=env)
+    p = subprocess.run([BIN, path, *MODE], input="\n".join(sels).encode(), capture_output=True, env=env)
     parts = p.stderr.decode().strip().split("\t")
     return float(parts[2]), float(parts[4]), int(parts[5])
 
@@ -239,7 +241,7 @@ def engine_bench_grouped(html_bytes, container, subs):
     env = os.environ.copy()
     if SMOKE:
         env["FROSTWORK_BENCH_ITERS"] = "200"
-    p = subprocess.run([BIN, path], input=stdin, capture_output=True, env=env)
+    p = subprocess.run([BIN, path, *MODE], input=stdin, capture_output=True, env=env)
     parts = p.stderr.decode().strip().split("\t")
     return float(parts[2]), float(parts[4]), int(parts[5])
 

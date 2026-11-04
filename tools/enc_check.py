@@ -6,6 +6,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import oracle  # parity is defined against libxml2 >= 2.15 here too (meta sniffing moved between them)
 oracle.require()
 BIN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "target", "release", "differ")
+# Encoding resolution is the same in both parse modes; the values are graded in lxml mode, Parsel's.
+ENGINE = [BIN, "--parser", "lxml"]
 
 from enc_cases import (  # noqa: E402
     BODY_META_CASES, BROWSER_DIFFERENCES, BROWSER_EXCEPTIONS, C1_LABELS, DECOY, LABEL_CASES, PRECEDENCE,
@@ -16,7 +18,7 @@ from enc_cases import (  # noqa: E402
 
 def engine(body, sels, label):
     line = (label or "") + "\t" + body.hex() + "\t" + "\t".join(sels) + "\n"
-    p = subprocess.Popen([BIN], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    p = subprocess.Popen(ENGINE, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
     out, _ = p.communicate(line.encode())
     return json.loads(out.decode().splitlines()[0])
 
@@ -24,7 +26,7 @@ def engine(body, sels, label):
 def engine_inputs(body, sels, encoding, content_type):
     """`{"encoding", "source", "values"}` for a document given both caller inputs (differ's `T` line)."""
     line = "\t".join(["T", encoding or "", content_type or "", body.hex(), *sels]) + "\n"
-    p = subprocess.Popen([BIN], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    p = subprocess.Popen(ENGINE, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
     out, _ = p.communicate(line.encode())
     return json.loads(out.decode().splitlines()[0])
 

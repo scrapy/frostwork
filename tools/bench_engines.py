@@ -246,7 +246,8 @@ class Frostwork(Engine):
         key = tuple(queries)
         got = self._cache.get(key)
         if got is None:
-            got = [Plan(b, []) for b in _batches(list(queries)) if b]
+            # lxml mode: every column is checked against parsel/lxml before it is timed
+            got = [Plan(b, [], parser="lxml") for b in _batches(list(queries)) if b]
             self._cache[key] = got
         return got
 
@@ -411,7 +412,7 @@ def _frostwork_refusal(sel):
     one coverage row in this report that does not have to be inferred from the outside."""
     if sel not in _supports_cache:
         try:
-            bad = frostwork.check([sel]).unsupported
+            bad = frostwork.check([sel], parser="lxml").unsupported
             _supports_cache[sel] = bad[0].reason.split(";")[0] if bad else None
         except Exception as e:
             _supports_cache[sel] = f"{type(e).__name__}"

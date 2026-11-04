@@ -12,12 +12,19 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import attrs
 from typing_extensions import assert_type
 
-from frostwork import detect_encoding, extract_grouped
+from frostwork import Page, Parser, check, detect_encoding, extract, extract_grouped
+from frostwork._frostwork import Plan
 from frostwork.page import EncodingSource
 from frostwork.webpoet import FrostBrowserPage, FrostFields, FrostInput, FrostPage, Many, One, field
 
 
 assert_type(extract_grouped(b'', [], [('article', {'title': './h2/text()'})]), Tuple[List[List[str]], list])
+# the parse mode is spelled the same way everywhere, and is a `Literal`, not any `str`
+assert_type(extract(b'', ['h1::text'], parser="lxml"), List[List[str]])
+assert_type(extract_grouped(b'', [], [], parser="browser"), Tuple[List[List[str]], list])
+assert_type(check(['h1::text'], parser="lxml").parser, Parser)
+assert_type(Page(parser="lxml").parser, Parser)
+assert_type(Plan(['h1::text'], [], parser="lxml").parser, Parser)
 assert_type(detect_encoding(b'', content_type='text/html; charset=big5'), str)
 assert_type(detect_encoding(b'', url='https://example.jp/', explain=True), Tuple[str, EncodingSource])
 EXPLAIN: bool = False
@@ -38,7 +45,9 @@ DYNAMIC_ALL: bool = True
 DYNAMIC_SEP: Optional[str] = None
 
 
-class ProductPage(FrostPage):
+# `parser=` is a class keyword. This page is lxml mode because `.as_node()` (below) re-parses with lxml,
+# which browser mode refuses at class definition.
+class ProductPage(FrostPage, parser="lxml"):
     # cardinality drives the value type
     name = field("h1::text")
     images = field("img::attr(src)", all=True)

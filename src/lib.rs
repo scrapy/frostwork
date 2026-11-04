@@ -26,14 +26,60 @@ pub use matcher::{MAX_MEMBERS, MAX_SIB_BITS};
 pub use page::{CompiledPage, Field, Item, Page};
 pub use selector::Selector;
 
+/// Which parser's tree a schema is answered against. Fixed when a schema is compiled (see
+/// [`CompileOptions`]), because the tree rules are part of the compiled matcher: one schema runs in one
+/// mode.
+///
+/// `Browser`, the default, is graded against real browsers (Chrome where Chrome and Firefox disagree):
+/// raw input bytes with no stripping, HTML5's NUL rules, `<noscript>` read as raw text (a browser runs
+/// with scripting on) and `<template>` content kept out of the document. Its tree construction is
+/// libxml2's for everything else until the HTML5 insertion modes land, and it refuses the queries whose
+/// answer would need a re-parse without context (see [`audit_schema_with`]). `Lxml` is value parity with
+/// lxml/libxml2 2.15 behind Parsel, the contract docs/COMPATIBILITY.md describes and every lxml gate
+/// proves. docs/BROWSER_MODE.md has the design and the measured browser answers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum ParseMode {
+    #[default]
+    Browser,
+    Lxml,
+}
+
+impl ParseMode {
+    /// The mode's public name, as the Python `parser=` keyword and the bins spell it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ParseMode::Browser => "browser",
+            ParseMode::Lxml => "lxml",
+        }
+    }
+
+    /// The mode a public name spells, or `None` for any other string (exact, lowercase).
+    pub fn from_name(name: &str) -> Option<ParseMode> {
+        match name {
+            "browser" => Some(ParseMode::Browser),
+            "lxml" => Some(ParseMode::Lxml),
+            _ => None,
+        }
+    }
+}
+
+/// How [`Plan::compile_with`] compiles a schema: the parse mode its tree is built under, and the
+/// per-column cardinality described at [`Plan::compile_first_only`] (`&[]` declares none).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CompileOptions<'a> {
+    pub mode: ParseMode,
+    pub first_only: &'a [bool],
+}
+
 /// One value-column per flat query — the output of [`extract`].
 pub type FlatColumns = Vec<Vec<String>>;
 /// A grouped (`Many`/`One`) query's rows: indexed `[row][subfield][value]`.
 pub type GroupRows = Vec<Vec<Vec<String>>>;
 
-/// Extract each query's values in one streaming pass. Unsupported queries yield an empty column
-/// (there is no fallback — that is the whole point of Frostwork). Values match Parsel's per-text-node,
-/// whitespace-kept, entity-decoded semantics on the supported subset.
+/// Extract each query's values in one streaming pass, in the default [`ParseMode`]. Unsupported queries
+/// yield an empty column (there is no fallback — that is the whole point of Frostwork). Values are
+/// per-text-node, whitespace-kept and entity-decoded, as Parsel's are; for lxml parity compile a
+/// [`Plan`] with [`ParseMode::Lxml`].
 ///
 /// `encoding` is an optional caller label for an encoding the user forced; a BOM still outranks it. When
 /// `None` the encoding is sniffed (BOM -> `<meta>` -> autodetection). `url` is the URL of the response,
@@ -280,9 +326,6 @@ pub fn selector_terminals<Q: AsQuery>(queries: &[Q]) -> Vec<Option<&'static str>
         .collect()
 }
 
-/// The three names libxml2 (and this engine) SYNTHESIZE around content the page never framed.
-const FRAME_NAMES: [&str; 3] = ["html", "head", "body"];
-
 /// Per query, `(pinned, synthesized_frame)` — the matched-node IDENTITY a caller needs before it can
 /// re-parse an outer-HTML value into the node it came from.
 ///
@@ -293,11 +336,9 @@ const FRAME_NAMES: [&str; 3] = ["html", "head", "body"];
 /// An outer-HTML value is the matched element's own source, so it normally NAMES the element — but a
 /// synthesized frame has no source of its own and its value begins with its CONTENT:
 /// `extract(b"<p>x</p>", ["html", "body", "p"])` returns the same string in all three columns. So
-/// `frostwork.webpoet`'s `.as_node()` handoff has to be told the identity, or refuse the field.
-///
-/// Two rules, both conservative. A synthesized frame carries no attributes (see [`matcher::frame`]), so a
-/// compound with an id/class/attribute cannot match one. And `:not()`, positions and `:has()` only NARROW
-/// what matches, so ignoring them over-reports the frame case — a refusal rather than a wrong node.
+/// `frostwork.webpoet`'s `.as_node()` handoff has to be told the identity, or refuse the field, and
+/// browser mode refuses such a selector's outer HTML outright. The frame rule is the matcher's
+/// `admits_synthesized_frame`, which both read.
 pub fn selector_node_identity<Q: AsQuery>(queries: &[Q]) -> Vec<(Option<String>, bool)> {
     queries
         .iter()
@@ -317,13 +358,7 @@ pub fn selector_node_identity<Q: AsQuery>(queries: &[Q]) -> Vec<(Option<String>,
                     .as_deref()
                     .filter(|t| *t != "*")
                     .map(|t| t.to_ascii_lowercase());
-                let attribute_bound =
-                    subject.id.is_some() || !subject.classes.is_empty() || !subject.attrs.is_empty();
-                let admits_frame = match &name {
-                    Some(n) => FRAME_NAMES.contains(&n.as_str()),
-                    None => true, // no name test: `<html>`/`<head>`/`<body>` are among what it admits
-                };
-                synth |= admits_frame && !attribute_bound;
+                synth |= matcher::admits_synthesized_frame(sel);
                 pinned = Some(match pinned {
                     None => name,                          // first member sets the candidate
                     Some(prev) if prev == name => name,    // ...every later one has to repeat it
@@ -368,14 +403,31 @@ impl Support {
 /// compiler's: a reverse selector parses but is routed/dropped inside `CompiledSchema::compile` (a
 /// subtree/comma-grouped/ancestor reverse yields an empty column), so we ask the compiled schema whether
 /// column 0 ended up live rather than trusting parse success.
+///
+/// In the default [`ParseMode`]; [`audit_schema_with`] audits a whole schema in either mode.
 pub fn flat_query_support(q: &(impl AsQuery + ?Sized)) -> Support {
+    flat_query_support_in(q, ParseMode::default())
+}
+
+pub(crate) fn flat_query_support_in(q: &(impl AsQuery + ?Sized), mode: ParseMode) -> Support {
     let members = compile_query(q.text(), q.syntax());
-    let supported = !members.is_empty()
-        && matcher::CompiledSchema::compile(std::slice::from_ref(&members), &[]).flat_col_supported(0);
-    if supported {
+    if members.is_empty() {
+        return Support::Unsupported(diagnostics::reason(q.text(), q.syntax()));
+    }
+    let schema = matcher::CompiledSchema::compile(std::slice::from_ref(&members), &[], mode);
+    if schema.flat_col_supported(0) {
         Support::Supported
     } else {
-        Support::Unsupported(diagnostics::reason(q.text(), q.syntax()))
+        Support::Unsupported(flat_reason(&schema, 0, q))
+    }
+}
+
+/// Why flat column `col` of `schema` is unsupported: the mode's refusal when there is one, else the
+/// lxml contract's advisory reason.
+fn flat_reason(schema: &matcher::CompiledSchema, col: usize, q: &(impl AsQuery + ?Sized)) -> String {
+    match schema.flat_refusal(col) {
+        Some(refusal) => refusal.reason().to_string(),
+        None => diagnostics::reason(q.text(), q.syntax()),
     }
 }
 
@@ -383,7 +435,7 @@ pub fn flat_query_support(q: &(impl AsQuery + ?Sized)) -> Support {
 /// on a container is out of scope (the group would never open), so reject it.
 pub fn container_support(q: &(impl AsQuery + ?Sized)) -> Support {
     let input: Vec<matcher::GroupInput> = vec![(compile_one(q.text(), q.syntax()), Vec::new())];
-    let schema = matcher::CompiledSchema::compile(&[], &input);
+    let schema = matcher::CompiledSchema::compile(&[], &input, ParseMode::default());
     if schema.group_container_routed(0) {
         Support::Supported
     } else {
@@ -409,11 +461,24 @@ fn group_container_reason(q: &(impl AsQuery + ?Sized)) -> String {
 pub fn subfield_support(q: &(impl AsQuery + ?Sized)) -> Support {
     let container = compile_one("*", Syntax::Css);
     let input: Vec<matcher::GroupInput> = vec![(container, vec![compile_sub(q.text(), q.syntax())])];
-    let schema = matcher::CompiledSchema::compile(&[], &input);
+    let schema = matcher::CompiledSchema::compile(&[], &input, ParseMode::default());
     if schema.group_sub_routed(0, 0) {
         Support::Supported
     } else {
-        Support::Unsupported(group_sub_reason(q))
+        Support::Unsupported(sub_reason(&schema, 0, 0, q))
+    }
+}
+
+/// [`flat_reason`] for a grouped sub-field.
+fn sub_reason(
+    schema: &matcher::CompiledSchema,
+    group: usize,
+    sub: usize,
+    q: &(impl AsQuery + ?Sized),
+) -> String {
+    match schema.sub_refusal(group, sub) {
+        Some(refusal) => refusal.reason().to_string(),
+        None => group_sub_reason(q),
     }
 }
 
@@ -485,14 +550,28 @@ impl SchemaAudit {
 }
 
 /// Audit a schema (same shape [`extract_grouped`] accepts) without touching any HTML: report which
-/// selectors are supported (with advisory reasons for those that are not) and the budget usage.
+/// selectors are supported (with advisory reasons for those that are not) and the budget usage, in the
+/// default [`ParseMode`].
 pub fn audit_schema<Q: AsQuery>(queries: &[Q], groups: &[GroupQuery<Q>]) -> SchemaAudit {
+    audit_schema_with(queries, groups, ParseMode::default())
+}
+
+/// [`audit_schema`] in `mode`. Support is per mode: browser mode refuses, with a reason, two shapes the
+/// lxml contract supports. One is a deferred predicate whose value is read from inside the element it
+/// selects (`div:has(a) ::text`, `li:last-child b::text`), which would need a context-free re-parse of
+/// that element's source; the other is outer HTML of a selector that can match a synthesized
+/// `<html>`/`<head>`/`<body>`.
+pub fn audit_schema_with<Q: AsQuery>(
+    queries: &[Q],
+    groups: &[GroupQuery<Q>],
+    mode: ParseMode,
+) -> SchemaAudit {
     // Compile ONCE and derive every support verdict from the exact routes extraction will use. This
     // prevents the audit/strict-mode logic from drifting from matcher eligibility rules (notably the
     // deferred `:has` / text-predicate exclusions in grouped containers and sub-fields).
     let (flat_sel, grouped_sel) = compile_schema(queries, groups);
     let (members, sib_bits) = matcher::budget_usage(&flat_sel, &grouped_sel);
-    let schema = matcher::CompiledSchema::compile(&flat_sel, &grouped_sel);
+    let schema = matcher::CompiledSchema::compile(&flat_sel, &grouped_sel, mode);
     SchemaAudit {
         flat: queries
             .iter()
@@ -501,7 +580,7 @@ pub fn audit_schema<Q: AsQuery>(queries: &[Q], groups: &[GroupQuery<Q>]) -> Sche
                 if schema.flat_col_routed(i) {
                     Support::Supported
                 } else {
-                    Support::Unsupported(diagnostics::reason(q.text(), q.syntax()))
+                    Support::Unsupported(flat_reason(&schema, i, q))
                 }
             })
             .collect(),
@@ -522,7 +601,7 @@ pub fn audit_schema<Q: AsQuery>(queries: &[Q], groups: &[GroupQuery<Q>]) -> Sche
                         if schema.group_sub_routed(gi, si) {
                             Support::Supported
                         } else {
-                            Support::Unsupported(group_sub_reason(sel))
+                            Support::Unsupported(sub_reason(&schema, gi, si, sel))
                         }
                     })
                     .collect(),
@@ -535,11 +614,11 @@ pub fn audit_schema<Q: AsQuery>(queries: &[Q], groups: &[GroupQuery<Q>]) -> Sche
     }
 }
 
-/// Resolve the page encoding and yield `(bytes_to_tokenize, value_encoding)`. A non-ASCII-compatible
-/// encoding is transcoded to a fresh UTF-8 `Vec` once (owned `Cow`); everything else borrows the input,
-/// with a document-leading UTF-8 BOM stripped — libxml2 strips ONLY the leading BOM (a U+FEFF elsewhere
-/// is real content), and per-value decoding must not re-strip it (see `matcher::finalize`), so it is
-/// handled here, once per page.
+/// Resolve the page encoding and prepare the buffer the scan tokenizes: `(bytes, value_encoding,
+/// keeps_nul)`. A non-ASCII-compatible encoding is transcoded to a fresh UTF-8 `Vec` once (owned `Cow`);
+/// everything else borrows the input, with a document-leading UTF-8 BOM stripped — libxml2 and browsers
+/// strip ONLY the leading BOM (a U+FEFF elsewhere is real content), and per-value decoding must not
+/// re-strip it (see `matcher::finalize`), so it is handled here, once per page.
 ///
 /// **The transcode set is asked of `encoding_rs`, not listed here**, and that is the whole point: no
 /// hand-written list gets it right. "UTF-16, the only non-ASCII-compatible family" is the obvious one
@@ -549,26 +628,45 @@ pub fn audit_schema<Q: AsQuery>(queries: &[Q], groups: &[GroupQuery<Q>]) -> Sche
 /// predicate covers `replacement` too (the label for HZ-GB-2312 and friends), whose whole purpose is
 /// that browsers refuse to decode such a document at all — one U+FFFD and nothing else.
 ///
-/// Whitespace stripping and NUL deletion happen here too, for the whole document (see [`normalize`]).
+/// The rest is per mode. lxml mode applies Parsel's normalization to the whole document (see
+/// [`normalize`]). Browser mode tokenizes what a browser does: nothing is stripped but the BOM, and NUL
+/// stays in for the HTML5 value rules (`keeps_nul`, decided by one `memchr`).
 fn prepare_bytes<'h>(
     html: &'h [u8],
     hints: EncodingHints<'_>,
-) -> (Cow<'h, [u8]>, &'static encoding_rs::Encoding) {
+    mode: ParseMode,
+) -> (Cow<'h, [u8]>, &'static encoding_rs::Encoding, bool) {
     let (enc, _) = encoding::resolve_explained(html, hints);
     if !enc.is_ascii_compatible() {
         // Transcode FIRST: in UTF-16 every ASCII character carries a 0x00 byte, so deleting NUL bytes
         // from the raw input would shred the document. What must go is the U+0000 CHARACTER, which only
         // exists once the code units have been decoded. (Parsel deletes NUL from the raw bytes instead,
         // which is why it cannot read a UTF-16 page at all — a divergence in our favour, already
-        // documented under Encoding in docs/COMPATIBILITY.md.)
-        let utf8 = enc.decode(html).0.into_owned().into_bytes();
-        return (normalize(Cow::Owned(utf8), true), encoding_rs::UTF_8);
+        // documented under Encoding in docs/COMPATIBILITY.md.) `decode` consumes the BOM.
+        let utf8 = Cow::Owned(enc.decode(html).0.into_owned().into_bytes());
+        return match mode {
+            ParseMode::Lxml => (normalize(utf8, true), encoding_rs::UTF_8, false),
+            ParseMode::Browser => {
+                let keeps_nul = memchr::memchr(0, &utf8).is_some();
+                (utf8, encoding_rs::UTF_8, keeps_nul)
+            }
+        };
     }
-    (normalize(Cow::Borrowed(html), enc == encoding_rs::UTF_8), enc)
+    let utf8 = enc == encoding_rs::UTF_8;
+    match mode {
+        ParseMode::Lxml => (normalize(Cow::Borrowed(html), utf8), enc, false),
+        ParseMode::Browser => {
+            let body = if utf8 { html.strip_prefix(UTF8_BOM).unwrap_or(html) } else { html };
+            (Cow::Borrowed(body), enc, memchr::memchr(0, body).is_some())
+        }
+    }
 }
 
-/// Parsel's own input normalization, applied ONCE to the whole document before it is tokenized:
-/// `text.strip().replace("\x00", "")` — trim the ends, then delete NUL, **in that order**.
+/// The UTF-8 byte order mark.
+const UTF8_BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
+
+/// Parsel's own input normalization, which lxml mode applies ONCE to the whole document before it is
+/// tokenized: `text.strip().replace("\x00", "")` — trim the ends, then delete NUL, **in that order**.
 ///
 /// The order is not incidental and must not be "tidied" into recomputing the ends afterwards. Parsel's
 /// two entry points disagree about it — `Selector(text=…)` strips first, `Selector(body=…)` deletes
@@ -615,11 +713,10 @@ fn normalize(bytes: Cow<'_, [u8]>, utf8: bool) -> Cow<'_, [u8]> {
 /// none of the ASCII strip bytes can occur inside a multi-byte character in an ASCII-compatible
 /// encoding; a non-ASCII-compatible encoding is transcoded before it reaches here.
 fn document_bounds(bytes: &[u8], utf8: bool) -> (usize, usize) {
-    const BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
     let end = bytes.iter().rposition(|&b| !is_strip_ws(b)).map_or(0, |i| i + 1);
     let mut start = bytes[..end].iter().position(|&b| !is_strip_ws(b)).unwrap_or(end);
-    if utf8 && bytes[start..end].starts_with(BOM) {
-        start += BOM.len();
+    if utf8 && bytes[start..end].starts_with(UTF8_BOM) {
+        start += UTF8_BOM.len();
     }
     (start, end)
 }
@@ -674,9 +771,10 @@ pub struct Plan {
 }
 
 impl Plan {
-    /// Compile `queries` + `groups` (the same shapes [`extract_grouped`] accepts) once for reuse.
+    /// Compile `queries` + `groups` (the same shapes [`extract_grouped`] accepts) once for reuse, in the
+    /// default [`ParseMode`].
     pub fn compile<Q: AsQuery>(queries: &[Q], groups: &[GroupQuery<Q>]) -> Plan {
-        Self::compile_first_only(queries, groups, &[])
+        Self::compile_with(queries, groups, CompileOptions::default())
     }
 
     /// [`compile`](Plan::compile), plus the caller's per-column cardinality: `first_only[c]` declares
@@ -697,13 +795,28 @@ impl Plan {
         groups: &[GroupQuery<Q>],
         first_only: &[bool],
     ) -> Plan {
+        Self::compile_with(queries, groups, CompileOptions { first_only, ..CompileOptions::default() })
+    }
+
+    /// [`compile`](Plan::compile) with every compile-time choice spelled out: the parse mode and the
+    /// per-column cardinality ([`CompileOptions`]).
+    pub fn compile_with<Q: AsQuery>(
+        queries: &[Q],
+        groups: &[GroupQuery<Q>],
+        options: CompileOptions<'_>,
+    ) -> Plan {
         let (flat, grouped) = compile_schema(queries, groups);
         let budget = matcher::budget_usage(&flat, &grouped);
-        let mut schema = matcher::CompiledSchema::compile(&flat, &grouped);
-        if first_only.iter().any(|&f| f) {
-            schema.arm_early_exit(first_only);
+        let mut schema = matcher::CompiledSchema::compile(&flat, &grouped, options.mode);
+        if options.first_only.iter().any(|&f| f) {
+            schema.arm_early_exit(options.first_only);
         }
         Plan { schema, budget }
+    }
+
+    /// The parse mode this plan was compiled for.
+    pub fn mode(&self) -> ParseMode {
+        self.schema.mode()
     }
 
     /// The `(member, sibling-bit)` budget demand of this plan — see [`budget_usage`]. Computed at
@@ -728,8 +841,8 @@ impl Plan {
     /// included (see [`EncodingHints`] and [`resolve_encoding`]).
     pub fn extract_with(&self, html: &[u8], hints: EncodingHints<'_>) -> (FlatColumns, Vec<GroupRows>) {
         // Keep the prepared `Cow` alive here: the matcher borrows its bytes for the whole scan.
-        let (bytes, value_enc) = prepare_bytes(html, hints);
-        self.schema.run(matcher::EncodedInput::new(&bytes, value_enc))
+        let (bytes, value_enc, keeps_nul) = prepare_bytes(html, hints, self.mode());
+        self.schema.run(matcher::EncodedInput::new(&bytes, value_enc, keeps_nul))
     }
 }
 
@@ -751,6 +864,26 @@ pub fn extract_grouped<Q: AsQuery>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Every vector in this module asserts libxml2/lxml parity, so the one-shot entry points are pinned
+    // to lxml mode here: these local items shadow the crate's own through `use super::*`. Browser mode's
+    // vectors are in `browser_mode_tests`, each against a measured browser answer.
+    fn extract<Q: AsQuery>(html: &[u8], queries: &[Q], encoding: Option<&str>, url: Option<&str>) -> FlatColumns {
+        extract_grouped(html, queries, &[], encoding, url).0
+    }
+    fn extract_grouped<Q: AsQuery>(
+        html: &[u8],
+        queries: &[Q],
+        groups: &[GroupQuery<Q>],
+        encoding: Option<&str>,
+        url: Option<&str>,
+    ) -> (FlatColumns, Vec<GroupRows>) {
+        let lxml = CompileOptions { mode: ParseMode::Lxml, first_only: &[] };
+        Plan::compile_with(queries, groups, lxml).extract(html, encoding, url)
+    }
+    fn audit_schema<Q: AsQuery>(queries: &[Q], groups: &[GroupQuery<Q>]) -> SchemaAudit {
+        audit_schema_with(queries, groups, ParseMode::Lxml)
+    }
 
     fn ex(html: &str, q: &str) -> Vec<String> {
         extract(html.as_bytes(), &[q.to_string()], None, None).pop().unwrap()
@@ -1607,7 +1740,7 @@ mod tests {
     // libxml2 discards it and keeps the character data either side as ONE text node. Emitting two
     // values instead silently TRUNCATES a `One`-cardinality field (`.get()` -> "HELLO", not
     // "HELLOWORLD") — the one failure mode no-fallback is supposed to rule out. Real pages hit this:
-    // Sphinx emits stray `</p>`. See `Matcher::text`.
+    // Sphinx emits stray `</p>`. See `Matcher::buffer_text`.
     #[test]
     fn dropped_end_tag_does_not_split_text() {
         for tag in ["p", "span", "b", "li", "td", "bogus", "br"] {
@@ -2822,5 +2955,293 @@ mod tests {
     fn no_global_desync_sentinel() {
         let html = "<ul><li>a<li>b</ul><div class=\"end\">SENTINEL</div>";
         assert_eq!(ex(html, ".end::text"), v(&["SENTINEL"]));
+    }
+}
+
+/// Browser mode's own vectors. Every expected value was measured in Chrome 156.0.8078.80 with a
+/// CSP-served page load (`node tools/browser_oracle/probe.cjs chrome … claims`), the oracle
+/// docs/BROWSER_MODE.md section 5 describes; the comments quote what the browser returned.
+#[cfg(test)]
+mod browser_mode_tests {
+    use super::*;
+
+    fn cols(html: &[u8], qs: &[&str]) -> FlatColumns {
+        let qs: Vec<String> = qs.iter().map(|q| q.to_string()).collect();
+        Plan::compile(&qs, &[]).extract(html, None, None).0
+    }
+    fn ex(html: &[u8], q: &str) -> Vec<String> {
+        cols(html, &[q]).pop().unwrap()
+    }
+    fn lxml(html: &[u8], q: &str) -> Vec<String> {
+        let lxml = CompileOptions { mode: ParseMode::Lxml, first_only: &[] };
+        Plan::compile_with(&[q], &[], lxml).extract(html, None, None).0.pop().unwrap()
+    }
+    fn v(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| s.to_string()).collect()
+    }
+    const NONE: &[&str] = &[];
+
+    #[test]
+    fn browser_is_the_default_mode() {
+        assert_eq!(ParseMode::default(), ParseMode::Browser);
+        assert_eq!(Plan::compile::<&str>(&[], &[]).mode(), ParseMode::Browser);
+        for mode in [ParseMode::Browser, ParseMode::Lxml] {
+            assert_eq!(ParseMode::from_name(mode.as_str()), Some(mode));
+        }
+        assert_eq!(ParseMode::from_name("html5"), None);
+        assert_eq!(ParseMode::from_name("LXML"), None);
+    }
+
+    /// A browser parses with scripting on, so `<noscript>` holds raw text (entities NOT decoded), in
+    /// the body and in the head, and a first-tag `<noscript>` is head content.
+    #[test]
+    fn noscript_is_raw_text() {
+        let h = b"<!DOCTYPE html><body><noscript><p id=t>x &amp; y</p></noscript><p id=after>a</p>";
+        assert_eq!(ex(h, "#t::text"), NONE); // []
+        assert_eq!(ex(h, "noscript::text"), v(&["<p id=t>x &amp; y</p>"]));
+        assert_eq!(ex(h, "#after::text"), v(&["a"]));
+        assert_eq!(ex(h, "body > noscript::text").len(), 1); // parentNode: body
+        assert_eq!(lxml(h, "#t::text"), v(&["x & y"]), "lxml mode keeps libxml2's markup reading");
+
+        let head = b"<!DOCTYPE html><html><head><noscript><link id=l></noscript><title>T</title></head>";
+        assert_eq!(ex(head, "head > noscript::text"), v(&["<link id=l>"]));
+        assert_eq!(ex(head, "head title::text"), v(&["T"]));
+        assert_eq!(ex(head, "#l::attr(id)"), NONE); // 0 elements
+
+        let first = b"<noscript><p id=t>x</p></noscript><p id=a>a</p>";
+        assert_eq!(ex(first, "head > noscript::text"), v(&["<p id=t>x</p>"])); // parentNode: head
+        assert_eq!(ex(first, "body > #a::text"), v(&["a"]));
+    }
+
+    /// An HTML `<template>` element matches; its content is not in the document.
+    #[test]
+    fn template_content_is_inert() {
+        let h = b"<!DOCTYPE html><body><div id=d>a<template id=t>b<i>i</i></template>c</div>";
+        assert_eq!(ex(h, "#d::text"), v(&["a", "c"])); // "a|c"
+        assert_eq!(ex(h, "#t::text"), NONE); // [""]: the template has no text node
+        assert_eq!(ex(h, "#t::attr(id)"), v(&["t"]));
+        assert_eq!(ex(h, "#d i::text"), NONE);
+        assert_eq!(ex(h, "#d > *::attr(id)"), v(&["t"])); // one child element
+        assert_eq!(ex(h, "normalize-space(//div[@id='d'])"), v(&["ac"])); // textContent "ac"
+        assert_eq!(ex(h, "#d ::text"), v(&["a", "c"]));
+
+        // content is neither a child nor a sibling of anything outside; the template itself is both
+        let li = b"<!DOCTYPE html><body><ul><li id=a>1</li><template><li id=b>2</li></template><li id=c>3</li></ul>";
+        assert_eq!(ex(li, "li::text"), v(&["1", "3"])); // 2 elements
+        assert_eq!(ex(li, "li:nth-child(3)::text"), v(&["3"]));
+        assert_eq!(ex(li, "li + li::text"), NONE);
+        assert_eq!(ex(li, "template + li::text"), v(&["3"]));
+        assert_eq!(ex(li, "li:last-child::text"), v(&["3"]));
+
+        // the template is a boundary: an end tag inside it closes nothing outside
+        let o = b"<!DOCTYPE html><body><div id=o><template id=t><p></div><b id=b>x</b></template><i id=i>y</i></div>";
+        assert_eq!(ex(o, "#o > #i::text"), v(&["y"]));
+        assert_eq!(ex(o, "#b::text"), NONE);
+
+        let nested = b"<!DOCTYPE html><body><template id=t1><template id=t2><p id=y>z</p></template>\
+                       <p id=w>w</p></template><p id=after>a</p>";
+        assert_eq!(ex(nested, "#t1::attr(id)"), v(&["t1"]));
+        assert_eq!(ex(nested, "#t2::attr(id), #w::text, #y::text"), NONE);
+        assert_eq!(ex(nested, "body > #after::text"), v(&["a"]));
+
+        // raw source keeps the content, as `innerHTML` serializes it
+        let k = b"<!DOCTYPE html><body><div id=d><template id=t class=k><b>x</b></template></div>";
+        assert_eq!(ex(k, ".k"), v(&["<template id=t class=k><b>x</b></template>"]));
+        // a template is head content
+        let head = b"<!DOCTYPE html><html><head><template id=t><p id=y>z</p></template><title>T</title></head><body>";
+        assert_eq!(ex(head, "head > template::attr(id)"), v(&["t"]));
+        assert_eq!(ex(head, "head title::text"), v(&["T"]));
+        let first = b"<template id=t><p>z</p></template><title>T</title><p id=a>a</p>";
+        assert_eq!(ex(first, "head > template::attr(id)"), v(&["t"]));
+        assert_eq!(ex(first, "head > title::text"), v(&["T"]));
+        // `<noscript>` inside content is content too
+        let ns = b"<!DOCTYPE html><body><template id=t><noscript><p id=y>x</noscript></p></template><p id=a>a</p>";
+        assert_eq!(ex(ns, "#y::text"), NONE);
+        assert_eq!(ex(ns, "body > *::attr(id)"), v(&["t", "a"]));
+    }
+
+    /// Template suppression keys on the namespace: an SVG `<template>` is an ordinary element, while one
+    /// at an HTML integration point is HTML again.
+    #[test]
+    fn template_inertness_follows_the_namespace() {
+        let svg = b"<!DOCTYPE html><body><svg><template id=t><text id=y>z</text></template></svg>";
+        assert_eq!(ex(svg, "#y::text"), v(&["z"]));
+        assert_eq!(ex(svg, "svg template text::text"), v(&["z"]));
+        for h in [
+            &b"<!DOCTYPE html><body><svg><foreignObject><template id=t><p id=y>z</p></template></foreignObject></svg>"[..],
+            b"<!DOCTYPE html><body><math><mi><template id=t><p id=y>z</p></template></mi></math>",
+            b"<!DOCTYPE html><body><svg><title><template id=t><p id=y>z</p></template></title></svg>",
+        ] {
+            assert_eq!(ex(h, "#y::text"), NONE, "{}", String::from_utf8_lossy(h)); // XHTML namespace
+        }
+    }
+
+    /// HTML5 ignores `/>` on a non-void HTML element, so a raw-text element still reads its text and a
+    /// template still has content. A foreign element honours it.
+    #[test]
+    fn self_closing_does_not_cancel_an_html_text_mode() {
+        let title = b"<!DOCTYPE html><html><head><title/>a<b>x</b></title></head><body><p>p</p>";
+        assert_eq!(ex(title, "head > title::text"), v(&["a<b>x</b>"]));
+        assert_eq!(ex(title, "b"), NONE);
+        assert_eq!(lxml(title, "b::text"), v(&["x"]), "lxml mode closes the title at `/>`");
+        let body = b"<!DOCTYPE html><body><script/>a<b>x</b></script><textarea/>a<b>x</b>&amp;</textarea>\
+                     <style/>a<b>x</b>&amp;</style><p>p</p>";
+        assert_eq!(ex(body, "script::text"), v(&["a<b>x</b>"]));
+        assert_eq!(ex(body, "textarea::text"), v(&["a<b>x</b>&"]));
+        assert_eq!(ex(body, "style::text"), v(&["a<b>x</b>&amp;"]));
+        assert_eq!(ex(body, "b"), NONE);
+        let more = b"<!DOCTYPE html><body><xmp/>a<b>x</b></xmp><iframe/>c<i>y</i></iframe><noembed/>e<u>z</u>\
+                     </noembed><noscript/>n<s>s</s></noscript><plaintext/>f<s>w</s>";
+        assert_eq!(ex(more, "xmp::text"), v(&["a<b>x</b>"]));
+        assert_eq!(ex(more, "iframe::text"), v(&["c<i>y</i>"]));
+        assert_eq!(ex(more, "noembed::text"), v(&["e<u>z</u>"]));
+        assert_eq!(ex(more, "noscript::text"), v(&["n<s>s</s>"]));
+        assert_eq!(ex(more, "plaintext::text"), v(&["f<s>w</s>"]));
+        assert_eq!(ex(more, "b, i, u, s"), NONE);
+        // a self-closed template still opens its content
+        let t = b"<!DOCTYPE html><body><template id=\"t\"/><p id=y>x</p>";
+        assert_eq!(ex(t, "#t::attr(id)"), v(&["t"]));
+        assert_eq!(ex(t, "#y::text"), NONE);
+        assert_eq!(ex(t, "body > *::attr(id)"), v(&["t"]));
+        // foreign: `/>` closes, and what follows is ordinary markup
+        let svg = b"<!DOCTYPE html><body><svg><title/><text id=x>t</text></svg>";
+        assert_eq!(ex(svg, "#x::text"), v(&["t"]));
+        assert_eq!(ex(b"<!DOCTYPE html><body><svg><style/><text id=x>t</text></svg>", "#x::text"), v(&["t"]));
+        assert_eq!(ex(b"<!DOCTYPE html><body><math><style/><mi id=x>t</mi></math>", "#x::text"), v(&["t"]));
+        assert_eq!(ex(b"<!DOCTYPE html><body><svg><template id=\"t\"/><text id=y>x</text></svg>", "#y::text"), v(&["x"]));
+        // ...unless an integration point makes it HTML again
+        let fo = b"<!DOCTYPE html><body><svg><foreignObject><title/>a<b>x</b></title></foreignObject></svg>";
+        assert_eq!(ex(fo, "title::text"), v(&["a<b>x</b>"]));
+        assert_eq!(ex(fo, "b"), NONE);
+    }
+
+    /// NUL per HTML5: a NUL in a name stays (so `<di\0v>` is no `div`), markup-mode text drops it, and
+    /// every other value reads it as U+FFFD.
+    #[test]
+    fn nul_follows_html5() {
+        let name = b"<!DOCTYPE html><body><di\0v id=x>X</di\0v>";
+        assert_eq!(ex(name, "div::text"), NONE); // localName "di\u{FFFD}v", 0 divs
+        assert_eq!(ex(name, "#x::text"), v(&["X"]));
+        assert_eq!(lxml(name, "div::text"), v(&["X"]), "lxml mode deletes NUL, as Parsel does");
+
+        let text = b"<!DOCTYPE html><body><p id=p>a\0b</p><p id=q>\0</p><p id=r>\0 </p>";
+        assert_eq!(ex(text, "#p::text"), v(&["ab"]));
+        assert_eq!(ex(text, "#q::text"), NONE); // childNodes.length 0
+        assert_eq!(ex(text, "#r::text"), v(&[" "]));
+
+        let attr = b"<!DOCTYPE html><body><a id=a href='x\0y' da\0ta=z>t</a><a id=b href=x\0y>u</a>";
+        assert_eq!(ex(attr, "#a::attr(href)"), v(&["x\u{FFFD}y"]));
+        assert_eq!(ex(attr, "#b::attr(href)"), v(&["x\u{FFFD}y"]));
+        assert_eq!(ex(attr, "a::attr(data)"), NONE); // name "da\u{FFFD}ta"
+        assert_eq!(ex(attr, "[data]"), NONE);
+
+        let raw = b"<!DOCTYPE html><html><head><title>a\0b</title><style>c\0d</style><script>e\0f</script></head>\
+                    <body><textarea>g\0h</textarea><xmp>i\0j</xmp><noscript>k\0l</noscript><iframe>m\0n</iframe>";
+        let got = cols(raw, &["title::text", "style::text", "script::text", "textarea::text", "xmp::text",
+                              "noscript::text", "iframe::text"]);
+        let want: Vec<Vec<String>> =
+            ["a\u{FFFD}b", "c\u{FFFD}d", "e\u{FFFD}f", "g\u{FFFD}h", "i\u{FFFD}j", "k\u{FFFD}l", "m\u{FFFD}n"]
+                .iter()
+                .map(|s| v(&[s]))
+                .collect();
+        assert_eq!(got, want);
+        assert_eq!(ex(b"<!DOCTYPE html><body><plaintext>a\0b", "plaintext::text"), v(&["a\u{FFFD}b"]));
+        // a character reference to NUL is U+FFFD in both modes
+        assert_eq!(ex(b"<!DOCTYPE html><body><p>&#0;x</p>", "p::text"), v(&["\u{FFFD}x"]));
+        // table and select text drop it like body text
+        assert_eq!(ex(b"<!DOCTYPE html><body><table id=t>\0<tr><td>a\0b</td></tr></table>", "td::text"), v(&["ab"]));
+        assert_eq!(ex(b"<!DOCTYPE html><body><table id=t>\0<tr><td>a</td></tr></table>", "table::text"), NONE);
+        assert_eq!(ex(b"<!DOCTYPE html><body><select><option>a\0b</option></select>", "option::text"), v(&["ab"]));
+        // a dropped end tag still joins the runs either side
+        assert_eq!(ex(b"<!DOCTYPE html><body><div>a\0</span>b</div>", "div::text"), v(&["ab"]));
+    }
+
+    /// Before the body the tree builder ignores a NUL outright: it neither opens the body nor ends the
+    /// head, so `\0<title>` keeps the title in the head.
+    #[test]
+    fn nul_before_the_body_is_ignored() {
+        let lead = b"\0<title>T</title><p>x</p>";
+        assert_eq!(ex(lead, "head > title::text"), v(&["T"]));
+        assert_eq!(ex(lead, "body > p"), v(&["<p>x</p>"])); // body: 1 child, head: 1 child
+        let head = b"<!DOCTYPE html><html><head>\n\0<title>T</title></head><body><p>x</p>";
+        assert_eq!(ex(head, "head::text"), v(&["\n"])); // ["\n", "title"]
+        assert_eq!(ex(head, "head > title::text"), v(&["T"]));
+        assert_eq!(ex(b" \0 <title>T</title>", "head > title::text"), v(&["T"]));
+        // ...but the content after it still does
+        let x = b"<!DOCTYPE html><html><head> \0x<title>T</title>";
+        assert_eq!(ex(x, "head::text"), v(&[" "]));
+        assert_eq!(ex(x, "body::text"), v(&["x"]));
+        assert_eq!(ex(x, "body > title::text"), v(&["T"]));
+        // and a frameset is still a frameset document
+        let fs = b"<html>\0<frameset></frameset>";
+        assert_eq!(ex(fs, "frameset"), v(&["<frameset></frameset>"]));
+        assert_eq!(ex(fs, "body"), NONE);
+    }
+
+    /// No strip: only a BOM at offset 0 is consumed. An indented BOM and a leading vertical tab are
+    /// characters, and a character opens the body.
+    #[test]
+    fn the_input_is_not_stripped() {
+        let bom = "    \u{FEFF}<!DOCTYPE HTML><html a=1><head><title>T</title></head><body><p>x</p>";
+        assert_eq!(ex(bom.as_bytes(), "body > title::text"), v(&["T"])); // parentNode: body
+        assert_eq!(ex(bom.as_bytes(), "body::text").first().map(String::as_str), Some("\u{FEFF}"));
+        assert_eq!(lxml(bom.as_bytes(), "head > title::text"), v(&["T"]), "lxml mode strips, as Parsel does");
+        let vt = b"\x0b<html a=1><head><title>T</title></head><body><p>x</p>";
+        assert_eq!(ex(vt, "body > title::text"), v(&["T"]));
+        assert_eq!(ex("\u{FEFF}<!DOCTYPE html><title>T</title>".as_bytes(), "head > title::text"), v(&["T"]));
+        let ws = b"\n\n  <!DOCTYPE html><html><head><title>T</title></head><body><p>x</p></body></html>\n\n";
+        assert_eq!(ex(ws, "head > title::text"), v(&["T"]));
+    }
+
+    /// The two lxml-mode shapes browser mode refuses, each with a reason, and the neighbours it keeps.
+    #[test]
+    fn browser_mode_refuses_context_free_reparses_and_synthesized_outer_html() {
+        let refused = [
+            "div:has(a) ::text",
+            "div:has(a) a::attr(href)",
+            "li:last-child b::text",
+            "li:last-child ::text",
+            "//div[contains(., 'x')]//p/text()",
+            "body",
+            "html",
+            "*",
+            "//body",
+            "body:has(p)",
+            "p, body",
+        ];
+        let kept = ["div:has(a)::attr(id)", "li:last-child::text", "body.page", "div", "body::text", "p:has(b)"];
+        let all: Vec<&str> = refused.iter().chain(&kept).copied().collect();
+        let browser = audit_schema_with(&all, &[], ParseMode::Browser);
+        let lxml_mode = audit_schema_with(&all, &[], ParseMode::Lxml);
+        for (i, q) in all.iter().enumerate() {
+            assert!(lxml_mode.flat[i].is_supported(), "{q} is in the lxml contract");
+            let reason = browser.flat[i].reason();
+            if i < refused.len() {
+                assert!(reason.is_some_and(|r| r.contains("browser mode")), "{q}: {reason:?}");
+            } else {
+                assert!(reason.is_none(), "{q}: {reason:?}");
+            }
+        }
+        assert_eq!(audit_schema(&all, &[]).flat, browser.flat, "the default mode is browser");
+        // a refused column is empty, never a value
+        let h = b"<body><div id=x><a href=/1>l</a></div><ul><li><b>B</b></li></ul></body>";
+        assert!(cols(h, &refused).iter().all(Vec::is_empty));
+        // a grouped outer-HTML sub-field is refused the same way, under a container that can be a frame
+        // element (a synthesized one only ever sits inside another)
+        let group = |container: &str| GroupQuery {
+            container: container.to_string(),
+            subfields: vec![("self".to_string(), ".".to_string()), ("a".to_string(), "a".to_string())],
+        };
+        let a = audit_schema_with(
+            &[] as &[String],
+            &[group("html"), group("frameset.x"), group("div")],
+            ParseMode::Browser,
+        );
+        for g in &a.groups[..2] {
+            assert!(g.subfields[0].reason().is_some_and(|r| r.contains("browser mode")));
+            assert!(g.subfields[1].is_supported());
+        }
+        assert!(a.groups[2].subfields.iter().all(Support::is_supported), "a <div> holds no frame element");
+        assert!(audit_schema_with(&[] as &[String], &[group("html")], ParseMode::Lxml).ok());
     }
 }

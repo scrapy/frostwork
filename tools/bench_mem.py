@@ -101,8 +101,8 @@ def _child(engine, doc_path, mode, sel_json):
         # measurement honest in the direction that matters here — the plan is a fixed per-SCHEMA cost, so
         # counting it inside the per-page peak would attribute schema memory to page size, which is the
         # exact claim this file exists to test.
-        frostwork.check(list(queries)).raise_for_status()
-        plan = Plan(list(queries), [])
+        frostwork.check(list(queries), parser="lxml").raise_for_status()
+        plan = Plan(list(queries), [], parser="lxml")  # the mode the throughput tables measure
 
         def work():
             return plan.extract(body, "utf-8")

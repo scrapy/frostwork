@@ -130,14 +130,14 @@ def _engine():
 
 
 def both(html: bytes, sel: str):
-    """(lxml values, engine values) for one (page, selector)."""
-    return parsel_vals(html, sel), _engine().extract(html, [sel], strict=False)[0]
+    """(lxml values, engine values) for one (page, selector), the engine in lxml mode."""
+    return parsel_vals(html, sel), _engine().extract(html, [sel], strict=False, parser="lxml")[0]
 
 
 def both_multi(html: bytes, sels: list[str]):
     """(lxml values, engine values) for several selectors over ONE page — the full-universe sweeps run
     ~60k cells, and one engine call per page instead of per selector is what keeps them a gate."""
-    return [parsel_vals(html, s) for s in sels], _engine().extract(html, sels, strict=False)
+    return [parsel_vals(html, s) for s in sels], _engine().extract(html, sels, strict=False, parser="lxml")
 
 
 class Audit:
