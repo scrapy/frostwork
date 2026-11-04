@@ -691,16 +691,16 @@ def test_the_browser_gate_fails_on_novel_and_on_coverage():
     assert B.gate_failures(B.Report(**clean, debug_requested=True, debug_checked=1)) == []
 
 
-# What Chrome 156.0.8078.80 answers on documents the browser gate's structured families emit, one row per
-# finding of the first review of browser mode: the frame a document that ends before the body still gets
-# (an empty `<body>`, a `<head>` that is not the last child, all three for an empty document), a comment
-# in template content written after `</head>`, a comment between two runs of `<html>` whitespace in
-# "after head", and two matches at one offset (a formatting element's copy and the copy inside it).
+# What Chrome 156.0.8078.80 answers on documents the browser gate's structured families emit: the frame a
+# document that ends before the body still gets (an empty `<body>`, a `<head>` that is not the last child,
+# all three for an empty document), a comment in template content written after `</head>`, a comment
+# between two runs of `<html>` whitespace in "after head", and two matches at one offset (a formatting
+# element's copy and the copy inside it).
 _SKELETON = ["<!DOCTYPE html>", "<html{}>", "<head{}>", "<title{}>T</title>", "</head>", " ", "<template{}>", "<p{}>",
              "t", "</template>", " ", "<script{}>s</script>", " ", "<style{}>s</style>", " ", "<body{}>", "<p{}>", "t",
              "</p>", "</body>", " ", "</html>", " "]
 _CLONES = ["<!DOCTYPE html>", "<p{}>", "<b{}>", "t", "<i{}>", "t", "</p>", "t"]
-REVIEW_FINDINGS = [
+CHROME_ANSWERS = [
     ([], "grouped:body -> ::text", [[[]]]),
     (["<head{}>", "</head>"], "*:last-child::attr(id)", []),
     (["<html{}>", "<title{}>T</title>"], ":has(> body)::attr(id)", ["0"]),
@@ -712,8 +712,8 @@ REVIEW_FINDINGS = [
 ]
 
 
-def test_the_browser_gate_emits_what_the_first_review_found():
-    """A finding the generator cannot emit is one the gate can never go red on. Each row's document is a
+def test_the_structured_families_emit_the_documents_these_chrome_answers_need():
+    """A case the generator cannot emit is one the gate can never go red on. Each row's document is a
     structured family member, its column is one the gate grades there, and the engine must give Chrome's
     answer as the gate compares it: exactly, or by the raw-source allowance for outer HTML, which still
     needs the same elements in the same order."""
@@ -721,20 +721,18 @@ def test_the_browser_gate_emits_what_the_first_review_found():
     import browser_docs as D
     import browser_values as V
     import conformant
-    import frostwork
     import seq_sweep
 
     generated = {D.render(d) for d in D.structured_docs()}
     run = A.Engine("browser")
     no_quirks = ["#d", [["#dt", "html", "", ""]]]
     wrong = []
-    for tokens, sel, chrome in REVIEW_FINDINGS:
+    for tokens, sel, chrome in CHROME_ANSWERS:
         doc = tuple(enumerate(tokens))
         r = D.render(doc)
         assert r in generated, tokens
         assert sel in D.value_selectors(doc, True, list(conformant.BASKET)) + seq_sweep.fingerprint_selectors(D.ids_of(doc))
-        engine = run.grouped(r.encode(), [sel])[0] if D.grouped_spec(sel) else \
-            frostwork.extract(r.encode(), [sel], parser="browser", strict=False)[0]
+        engine = run.grouped(r.encode(), [sel])[0] if D.grouped_spec(sel) else run(r.encode(), [sel], strict=False)[0]
         agrees = A.same_values(engine, chrome, sel) or (
             sel == "b, i" and V.attribute_value(V.ValueRepro(doc, sel, engine, chrome, no_quirks)) is not None)
         if not agrees:

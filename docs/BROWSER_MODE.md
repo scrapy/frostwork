@@ -454,7 +454,7 @@ HTML5 does not have: an element's raw source, parsed on its own, builds the same
   pass streams it, and nested winners need no de-duplication. The cost is one more pass over a document
   on which a winner arose, however many tail columns and winners the schema has, and nothing for a
   schema with no tail or a document with no winner. `make gate-browser` grades the tails against Chrome
-  over documents built for this (`TAIL_CONTEXTS` in `tools/diff_browser.py`), and fails a build that
+  over documents built for this (`TAIL_CONTEXTS` in `tools/browser_docs.py`), and fails a build that
   re-scans each span alone instead.
 
   Two alternatives were weighed. A re-scan seeded with the builder's state at the winner's start would
