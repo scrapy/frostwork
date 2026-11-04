@@ -192,7 +192,7 @@ fn dom_name_is(scid: u8, raw: &[u8], want: &str) -> bool {
             }
         }
     }
-    !want.bytes().any(|c| c.is_ascii_uppercase()) && want.as_bytes().eq_ignore_ascii_case(raw)
+    want.as_bytes().eq_ignore_ascii_case(raw) && !want.bytes().any(|c| c.is_ascii_uppercase())
 }
 
 pub struct OpenElem<'a> {
@@ -456,7 +456,7 @@ impl<'a> OpenElem<'a> {
         match self.scid {
             HTML_ELEMENT => raw.eq_ignore_ascii_case(name.as_bytes()),
             SVG_ELEMENT | MATHML_ELEMENT => dom_name_is(self.scid, raw, name),
-            _ => !name.bytes().any(|c| c.is_ascii_uppercase()) && raw.eq_ignore_ascii_case(name.as_bytes()),
+            _ => raw.eq_ignore_ascii_case(name.as_bytes()) && !name.bytes().any(|c| c.is_ascii_uppercase()),
         }
     }
 
@@ -2483,9 +2483,7 @@ impl<'a> Matcher<'a> {
                         _ => continue,
                     };
                     // a group container never emits a flat value; a >=128 column can't be tracked
-                    if !cs.emit || cs.col >= 128
-                        || self.satisfied & (1u128 << cs.col) != 0
-                        || !el.names(aname, name) {
+                    if !cs.emit || cs.col >= 128 || self.satisfied & (1u128 << cs.col) != 0 {
                         continue;
                     }
                     let hit = if subtree {
@@ -2493,7 +2491,11 @@ impl<'a> Matcher<'a> {
                     } else {
                         el.matched & (1u128 << k) != 0
                     };
-                    if !hit || done.iter().any(|&(c, n)| c == cs.col && n.eq_ignore_ascii_case(aname)) {
+                    // The name comparison is the expensive test, so it runs only for an entry that matched.
+                    if !hit
+                        || !el.names(aname, name)
+                        || done.iter().any(|&(c, n)| c == cs.col && n.eq_ignore_ascii_case(aname))
+                    {
                         continue;
                     }
                     done.push((cs.col, aname));
