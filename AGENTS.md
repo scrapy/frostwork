@@ -33,7 +33,8 @@ The `Makefile` bundles these into one-command gates (`make help` lists them): `m
 the fixture corpus) + `gate-seq` (every tag sequence up to length 4, compared on the whole tree) +
 `fuzz-smoke` + `py` (which now also type-checks the shipped package) + `gate-webpoet` (the web-poet
 integration vs parsel, compared on the whole item, plus the derived upstream-surface snapshot) +
-`gate-webpoet-mutate` — the minimum pre-release check. Individual targets run their own piece.
+`gate-webpoet-mutate` + `gate-browser` and `gate-webpoet-browser` (the default parse mode against the
+Chrome build `tools/browser_oracle/html5_derivation.json` names) — the minimum pre-release check. Individual targets run their own piece.
 
 The limits of that gate are worth knowing before trusting a "100% parity" number — each bullet below is
 a way it has read 100% while the engine was wrong:

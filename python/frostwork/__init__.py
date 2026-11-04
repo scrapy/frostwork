@@ -2,9 +2,12 @@
 
 `extract(html, queries, encoding=None)` is the primitive: one streaming scan answers every
 CSS/XPath query, returning one value-column per query (no DOM, no fallback). ``parser="browser"`` (the
-default) answers against the tree a browser builds, ``parser="lxml"`` against lxml's. Unsupported
+default) answers against the tree a browser builds, ``parser="lxml"`` against lxml's. On the few pages
+where an HTML5 rule rewrites elements already parsed, browser mode answers from a compact tree of the
+finished page instead, and a deferred predicate whose value is inside its element can take a second
+scan. Unsupported
 selectors raise by default; pass ``strict=False`` for permissive empty columns. The declarative `Page`/`Item`
-layer names those columns and fills a whole item in that single pass.
+layer names those columns and fills a whole item in that one run.
 
 For Scrapy / web-poet page objects, see `frostwork.webpoet` (requires the ``web-poet`` package —
 the ``frostwork[webpoet]`` extra).

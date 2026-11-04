@@ -669,9 +669,11 @@ browser.
 - `tests/test_gates.py` seeds a regression into each of these decision functions, the fast/slow
   self-check and the bridge round trip included, so each is shown to go red.
 
-Not built yet: browser-mode verdicts in `diff_lxml`, `gate-seq` and `mutate_rules`, browser columns in
-the crawl lab, and pinned browsers in CI. `gate-browser`, `gate-webpoet-browser` and
-`gate-corpus-browser` need local browsers and are not part of `make ci`.
+`gate-browser` and `gate-webpoet-browser` are part of `make ci` and run in hosted CI, as their own job,
+against the Chrome build `html5_derivation.json` names, installed from Chrome for Testing
+(`tools/browser_oracle/chrome_build.py`). `gate-corpus-browser` is report-only and needs a corpus. Not
+built yet: browser-mode verdicts in `diff_lxml`, `gate-seq` and `mutate_rules`, and browser columns in the
+crawl lab.
 
 ## 6. Cost
 

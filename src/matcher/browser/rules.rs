@@ -6,7 +6,7 @@
 use super::tags::{breaks_out, font_breaks_out, lower, Tag, MAX_NAME};
 use super::lists::Bound;
 use super::{
-    ends_frameset_ok, has_content, ws_at, ws_prefix, Afe, Browser, EndTok, Loc, Mode, Node, Ns, StartTok, Vis, CENSUS_MERGE_ANY, HAS_CHILD,
+    attr_is, ends_frameset_ok, has_content, ws_at, ws_prefix, Afe, Browser, EndTok, Loc, Mode, Node, Ns, StartTok, Vis, CENSUS_MERGE_ANY, HAS_CHILD,
     RETRO_ADOPTION, RETRO_FRAMESET, RETRO_MERGE, RETRO_SELECTEDCONTENT, SHADOW_HOST, SYNTH,
 };
 use crate::implied_close::SPECIAL;
@@ -39,10 +39,6 @@ fn custom_element_name(name: &[u8]) -> bool {
             b"annotation-xml" | b"color-profile" | b"font-face" | b"font-face-src" | b"font-face-uri"
                 | b"font-face-format" | b"font-face-name" | b"missing-glyph"
         )
-}
-
-fn attr<'x>(attrs: &[(&'x [u8], Option<&'x [u8]>)], name: &[u8]) -> Option<&'x [u8]> {
-    attrs.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).map(|(_, v)| v.unwrap_or(b""))
 }
 
 impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
@@ -244,8 +240,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
         self.mode = Mode::InTemplate;
         self.templates.push(Mode::InTemplate);
         let host = self.stack.len() - 1;
-        let declares = attr(t.attrs, b"shadowrootmode")
-            .is_some_and(|v| v.eq_ignore_ascii_case(b"open") || v.eq_ignore_ascii_case(b"closed"));
+        let declares = attr_is(m.input, t.attrs, b"shadowrootmode", &["open", "closed"]);
         let h = &self.stack[host];
         let attaches = declares
             && host > 0
@@ -254,7 +249,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
             && valid_shadow_host(h.name);
         if attaches {
             self.stack[host].flags |= SHADOW_HOST;
-            let mut node = self.new_node(t.name, t.low, t.tag, Ns::Html, t.attrs);
+            let mut node = self.new_node(t.name, t.low, t.tag, Ns::Html);
             node.vis = Vis::Inert;
             self.stack.push(node);
         } else {
@@ -407,7 +402,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
                 }
                 self.reconstruct(m, at);
                 self.insert_void(m, t);
-                if !attr(t.attrs, b"type").is_some_and(|v| v.eq_ignore_ascii_case(b"hidden")) {
+                if !attr_is(m.input, t.attrs, b"type", &["hidden"]) {
                     self.frameset_ok = false;
                 }
             }
@@ -465,7 +460,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
                 self.reconstruct(m, at);
                 self.insert_html(m, t);
                 if REPLAY && t.tag == Tag::Option && self.cur().vis == Vis::Live {
-                    self.option_inserted(self.cur().depth);
+                    self.option_inserted(m.input, self.cur().depth);
                 }
             }
             Tag::Selectedcontent => {
@@ -514,8 +509,19 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
                 self.dom.set_prefix(n.depth, SourcePrefix::new(t.start, t.end));
             }
             self.dom.merge(n.depth, t.attrs);
-        } else if self.path.get(n.depth as usize) != Some(&n.uid) || m.merge_adds(n.depth as usize, t.attrs) {
-            self.retro |= RETRO_MERGE;
+        } else {
+            let k = match self.merged.iter().position(|(uid, _)| *uid == n.uid) {
+                Some(k) => k,
+                None => {
+                    self.merged.push((n.uid, Vec::new()));
+                    self.merged.len() - 1
+                }
+            };
+            let earlier = &self.merged[k].1;
+            if self.path.get(n.depth as usize) != Some(&n.uid) || m.merge_adds(n.depth as usize, earlier, t.attrs) {
+                self.retro |= RETRO_MERGE;
+            }
+            self.merged[k].1.extend_from_slice(t.attrs);
         }
     }
 
@@ -559,7 +565,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
                 }
             }
             Tag::Style | Tag::Script | Tag::Template => self.in_head_start(m, t),
-            Tag::Input if attr(t.attrs, b"type").is_some_and(|v| v.eq_ignore_ascii_case(b"hidden")) => {
+            Tag::Input if attr_is(m.input, t.attrs, b"type", &["hidden"]) => {
                 self.insert_void(m, t)
             }
             Tag::Form => {
@@ -1044,7 +1050,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
     fn clone_node(&mut self, tok: u32, inert: bool, at: usize) -> Node<'a> {
         let (name, tag) = (self.afe.toks[tok as usize].name, self.afe.toks[tok as usize].tag);
         let mut buf = [0; MAX_NAME];
-        let mut node = self.new_node(name, lower(name, &mut buf), tag, Ns::Html, &[]);
+        let mut node = self.new_node(name, lower(name, &mut buf), tag, Ns::Html);
         if inert {
             node.vis = Vis::Inert;
         } else if REPLAY {

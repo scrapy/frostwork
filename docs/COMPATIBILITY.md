@@ -74,7 +74,9 @@ What remains are not tree divergences:
 - Outer HTML is the raw source, as in lxml mode, so it is not Chrome's serialisation. That includes
   attributes a later `<html>` or `<body>` tag merged into the element: its source has only its own. An
   `<html>` or `<body>` the page never wrote reads its source from the first later tag that gave it
-  attributes.
+  attributes. The same holds for the content a `<select>` copies from its selected option into a
+  `<selectedcontent>`: the element's source is empty, so its outer HTML and an ancestor's have it empty,
+  while `selectedcontent::text` is the copy, as in Chrome.
 
 Where Chrome and Firefox build different trees, browser mode follows Chrome. The gate's
 `--browsers chrome,firefox` table lists them; the ones it finds are Firefox making `<search>` and

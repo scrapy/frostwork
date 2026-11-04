@@ -1,6 +1,7 @@
 """Regression tests for the metadata gate that protects the published package page."""
 
 from pathlib import Path
+import re
 import sys
 import tarfile
 
@@ -133,9 +134,43 @@ def test_release_gate_is_wired_into_local_ci_and_tag_publishing():
     ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     publish = (ROOT / ".github" / "workflows" / "publish.yml").read_text(encoding="utf-8")
 
-    assert "ci: test gate gate-corpus gate-seq fuzz-smoke py gate-webpoet " \
-        "gate-webpoet-mutate release-check" in makefile
+    assert "release-check" in make_ci_targets(makefile)
     assert "- run: make release-check" in ci
     assert "uses: ./.github/workflows/ci.yml" in publish
     assert 'python tools/verify_pypi.py "$GITHUB_REF_NAME"' in publish
     assert "needs: verify" in publish
+
+
+def make_ci_targets(makefile: str) -> list[str]:
+    """The prerequisites of the Makefile's `ci` target, across continuation lines."""
+    joined = makefile.replace("\\\n", " ")
+    line = next(l for l in joined.splitlines() if l.startswith("ci:"))
+    return line[len("ci:"):].split()
+
+
+def workflow_jobs(workflow: str) -> dict[str, str]:
+    """Each top-level job of a workflow file, as its id and its text."""
+    body = workflow.split("\njobs:\n", 1)[1]
+    parts = re.split(r"^  ([\w-]+):\n", body, flags=re.M)
+    return dict(zip(parts[1::2], parts[2::2]))
+
+
+def test_every_local_ci_gate_runs_in_hosted_ci_and_release_qualification():
+    """A gate `make ci` lists and no workflow runs is a gate a pull request and a release skip."""
+    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+    ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    publish = (ROOT / ".github" / "workflows" / "publish.yml").read_text(encoding="utf-8")
+
+    targets = make_ci_targets(makefile)
+    run = set(re.findall(r"^\s*- run: make ([\w-]+)\s*$", ci, flags=re.M))
+    assert [t for t in targets if t not in run] == []
+    # browser mode is the default, so its gates are part of both
+    assert {"gate-browser", "gate-webpoet-browser"} <= set(targets)
+    browser = workflow_jobs(ci)["browser"]
+    assert "- run: make gate-browser" in browser and "- run: make gate-webpoet-browser" in browser
+    # against the Chrome the rule tables were derived from, not whatever the runner has
+    assert "tools/browser_oracle/chrome_build.py" in browser and "FROSTWORK_CHROME=" in browser
+    # a release reuses the whole workflow, and nothing is built until it passes
+    jobs = workflow_jobs(publish)
+    assert "uses: ./.github/workflows/ci.yml" in jobs["quality"]
+    assert "quality" in jobs["linux"].split("needs:", 1)[1].splitlines()[0]

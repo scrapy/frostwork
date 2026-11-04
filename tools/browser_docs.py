@@ -351,11 +351,39 @@ DEEP_TAILS: list[list[str]] = [
     ["<svg{}>", "<desc{}>", "t", "</svg>", "t"],
     ["<a{} href=x>", "<div{}>", "t", "</a>", "t"],
 ]
+# Successive `<html>` and `<body>` tags: each adds the attributes the element lacks, the first tag to name
+# one winning, and the rule selectors below match only the attributes of two tags together.
+FRAME_MERGES: list[list[str]] = [
+    ["<p{}>", "t", "<body class=a>", "<body title=b>"],
+    ["<p{}>", "t", "<html class=a>", "<html title=b>"],
+    ["<p{}>", "t", "<body class=a>", "<body class=x title=b>"],
+    ["<p{}>", "t", "<body class=a>", "<body title=c>"],
+    ["<body class=a>", "<p{}>", "t", "<body title=b>"],
+    ["<html class=a>", "<p{}>", "t", "<html title=b>"],
+    ["<p{}>", "t", "<body class=a>", "<body title=b>", "<body lang=c>"],
+]
+# The attribute values a tree-construction rule reads, each spelled literally and with a character
+# reference: a rule reads the decoded value, so the two spellings build one tree. The other spellings
+# are the edges of each test (case, a trailing space, the parse of `size`).
+RULE_VALUES: list[list[str]] = (
+    [["<table{}>", f'<input{{}} type="{v}">', "</table>", "t"]
+     for v in ("hidden", "hidd&#101;n", "HIDD&#x45;N", "hidden ")]
+    + [[f'<input{{}} type="{v}">', "<frameset{}>", "</frameset>"] for v in ("hidden", "hidd&#101;n", "text")]
+    + [["<div{}>", f'<template{{}} shadowrootmode="{v}">', "<p{}>", "t", "</template>", "</div>"]
+       for v in ("open", "o&#112;en", "CLOSED", "&#99;losed", "none")]
+    + [["<math{}>", f'<annotation-xml{{}} encoding="{v}">', "<style{}>s</style>", "<b{}>", "t", "</annotation-xml>",
+        "</math>"]
+       for v in ("text/html", "text&#47;html", "TEXT/HTML", "application&#47;xhtml+xml", "text/plain")]
+    + [[f'<select{{}} size="{v}">', "<button{}>", "<selectedcontent{}>", "</selectedcontent>", "</button>",
+        "<option{}>", "t", "</select>"]
+       for v in ("2", "&#50;", "2px", "&#32;2", "+2", "-0", "0x2", "4294967295", "4294967296", "")]
+)
 
 
 def structured_docs() -> list[Doc]:
     """Every structured family member, as a document."""
-    seqs = [lead + f for f in EOF_FRAMES + FORMATTING + RAW_ENDS for lead in ([], [DOCTYPE])]
+    seqs = [lead + f for f in EOF_FRAMES + FORMATTING + RAW_ENDS + FRAME_MERGES + RULE_VALUES
+            for lead in ([], [DOCTYPE])]
     seqs += [s[:k] + [COMMENT] + s[k:] for s in COMMENT_SKELETONS for k in range(len(s) + 1)]
     seqs += [[DOCTYPE] + f for f in ARK_FAMILY]
     seqs += [[DOCTYPE, deep] + tail for deep in DEEP for tail in DEEP_TAILS]
@@ -439,6 +467,8 @@ RULE_SELECTORS: list[str] = [
     # changes, and the parents it gives
     '*:last-child::attr(id)', '*:only-child::attr(id)', 'html > :last-child::attr(id)', ':has(> body)::attr(id)',
     ':has(> head)::attr(id)',
+    # the attributes of two `<html>` or `<body>` tags together (FRAME_MERGES)
+    'body.a[title="b"] p::text', 'html.a[title="b"] p::text', 'body.a[lang]::attr(title)',
     # two matches of one column at one offset: a formatting element's copy, and the copy inside it
     'b, i', 'b:has(i)', '*:has(> i)::attr(id)', 'b:last-child::attr(id)', 'b i::attr(id)',
 ]

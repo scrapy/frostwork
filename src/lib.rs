@@ -1,5 +1,7 @@
 //! Frostwork: a treeless, one-pass HTML extraction engine — a bespoke tokenizer + corrected-stack
-//! matcher, "close to lxml, always streams, no fallback". See docs/COMPATIBILITY.md and docs/TESTING.md.
+//! matcher, no fallback. Lxml mode always streams in one pass; browser mode answers a page where an HTML5
+//! rule rewrites elements already parsed from a compact tree of the finished page (the replay), and reads
+//! a deferred predicate's inner value in a second pass. See docs/DESIGN.md and docs/COMPATIBILITY.md.
 //!
 //! Pipeline:  bytes ─▶ tokenizer (TokenSink events) ─▶ corrected-stack matcher ─▶ per-selector cols.
 //! The tokenizer is deliberately swappable behind `TokenSink`; the matcher is where implied-close
@@ -76,7 +78,7 @@ pub type FlatColumns = Vec<Vec<String>>;
 /// A grouped (`Many`/`One`) query's rows: indexed `[row][subfield][value]`.
 pub type GroupRows = Vec<Vec<Vec<String>>>;
 
-/// Extract each query's values in one streaming pass, in the default [`ParseMode`]. Unsupported queries
+/// Extract each query's values in one run, in the default [`ParseMode`]. Unsupported queries
 /// yield an empty column (there is no fallback — that is the whole point of Frostwork). Values are
 /// per-text-node, whitespace-kept and entity-decoded, as Parsel's are; for lxml parity compile a
 /// [`Plan`] with [`ParseMode::Lxml`].
@@ -856,7 +858,7 @@ impl Plan {
     }
 }
 
-/// One streaming pass returning both flat query columns and grouped (`Many`/`One`) results.
+/// One run returning both flat query columns and grouped (`Many`/`One`) results.
 /// `grouped[g]` is group `g`'s rows in document order; each row is one value-column per sub-field
 /// (`[group][row][subfield][value]`). The caller (the Python/Rust `Page` layer) applies per-field
 /// cardinality (first/all/join) and, for `One`, takes the first row. This is the one-shot form; to run
@@ -3682,6 +3684,46 @@ mod browser_mode_tests {
         }
         for q in ["body.late p::text", ".late::attr(id)", "body::attr(title)", ":not(.late) > p::text", "* ::attr(title)"] {
             assert!(merge(q), "{q}");
+        }
+    }
+
+    /// Successive frame tags merge first tag first, and a later one is judged with the earlier ones'
+    /// attributes in place, so a compound only their attributes together match is answered whatever else
+    /// the schema asks.
+    #[test]
+    fn successive_frame_tags_merge_together() {
+        for (h, q) in [
+            (&b"<body><p>X</p><body class=a><body id=b>"[..], "body.a#b p::text"),
+            (b"<p>X</p><html class=a><html id=b>", "html.a#b p::text"),
+            (b"<body class=a><p>X</p><body id=b><body lang=c>", "body.a#b[lang=c] p::text"),
+        ] {
+            assert_eq!(ex(h, q), v(&["X"]), "{q}");
+            let both = cols(h, &[q, "body::attr(class)"]);
+            assert_eq!(both[0], v(&["X"]), "{q} beside another column");
+        }
+        assert_eq!(ex(b"<p>X</p><body class=a><body class=b id=b>", "body.b p::text"), NONE);
+    }
+
+    /// The attribute values tree construction reads are compared decoded, so a character reference
+    /// builds the tree its literal does.
+    #[test]
+    fn tree_rules_read_decoded_attribute_values() {
+        let h = b"<table><input type=\"hidd&#101;n\" id=x></table>";
+        assert_eq!(ex(h, "table > input::attr(id)"), v(&["x"]));
+        assert_eq!(ex(b"<input type=\"hidd&#101;n\"><frameset id=f>", "frameset::attr(id)"), v(&["f"]));
+        assert_eq!(ex(b"<div><template shadowrootmode=\"o&#112;en\" id=t></template></div>", "template::attr(id)"), NONE);
+        let h = b"<math><annotation-xml encoding=\"text&#47;html\"><b id=b>x</b></annotation-xml></math>";
+        assert_eq!(ex(h, "annotation-xml > b::attr(id)"), v(&["b"]));
+        let select = |size: &str| {
+            let h = format!("<select size=\"{size}\"><button><selectedcontent></selectedcontent></button><option>A</option></select>");
+            ex(h.as_bytes(), "selectedcontent::text")
+        };
+        // HTML's non-negative integer, into Chrome's 32 bits: a size above 1 shows several options
+        for size in ["&#50;", "2px", " 2", "+2", "4294967295"] {
+            assert_eq!(select(size), NONE, "{size}");
+        }
+        for size in ["", "1", "0", "-0", "-2", "0x2", "1.5", "4294967296", "\u{a0}2"] {
+            assert_eq!(select(size), v(&["A"]), "{size}");
         }
     }
 

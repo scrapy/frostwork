@@ -1,7 +1,7 @@
 """Type stubs for the native Frostwork core (`frostwork._frostwork`).
 
 The ergonomic, fully-typed surface is `frostwork.page` / `frostwork.webpoet`; these are the raw
-one-pass primitives crossing the PyO3 boundary. `html` must be `bytes` (or a `bytes` subclass such
+primitives crossing the PyO3 boundary. `html` must be `bytes` (or a `bytes` subclass such
 as web-poet's `HttpResponseBody`); the pure-Python wrappers accept other bytes-likes and `str`.
 """
 
@@ -30,7 +30,7 @@ def extract(
     url: Optional[str] = ...,
     parser: Parser = ...,
 ) -> List[List[str]]:
-    """One streaming pass: one value-column per query, in query order."""
+    """One run over ``html``: one value-column per query, in query order."""
 
 def extract_grouped(
     html: Union[bytes, str],
@@ -42,7 +42,7 @@ def extract_grouped(
     url: Optional[str] = ...,
     parser: Parser = ...,
 ) -> Tuple[List[List[str]], List[List[List[List[str]]]]]:
-    """One streaming pass returning ``(flat_columns, grouped)`` — ``grouped[g][row][subfield][value]``."""
+    """One run returning ``(flat_columns, grouped)`` — ``grouped[g][row][subfield][value]``."""
 
 def audit_schema(
     flat_queries: Sequence[Query],

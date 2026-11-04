@@ -653,7 +653,8 @@ def test_the_browser_gate_fails_on_novel_and_on_coverage():
     something. Each of these alone reads exactly like a clean run, so each is seeded."""
     import diff_browser as B
 
-    clean = dict(graded=10, selfcheck_checked=5, bridge_checked=10, value_graded=10, css_mirror_checked=10)
+    clean = dict(graded=10, selfcheck_checked=5, bridge_checked=10, value_graded=10, css_mirror_checked=10,
+                 alone_checked=10)
     assert B.gate_failures(B.Report(**clean)) == []
     explained = B.Report(**clean, buckets={"implied <tbody>": [B.Divergence((), "//*/@id", ("engine", "chrome"))]})
     assert B.gate_failures(explained) == [], "an attributed divergence is expected until its rule lands"
@@ -674,6 +675,8 @@ def test_the_browser_gate_fails_on_novel_and_on_coverage():
         "bridge XPath differs from the native evaluator": B.Report(**clean, bridge_xpath_differ=[("<p>", "//*/@id")]),
         # value columns
         "no value column graded": B.Report(**{**clean, "value_graded": 0}),
+        "no value column asked alone": B.Report(**{**clean, "alone_checked": 0}),
+        "a column answered differently alone": B.Report(**clean, alone_differ=[("<p>", 'body.a[title="b"] p::text')]),
         "value token never emitted": B.Report(**clean, missing_value_tokens=[' lang="EN"']),
         "value NOVEL": B.Report(**clean, value_novel=[value]),
         "fast path's CSS differs from a page load's": B.Report(**clean, selfcheck_css_differ=["<p>"]),
@@ -795,6 +798,21 @@ def test_the_merged_frame_allowance_excuses_only_attributes_a_later_tag_added():
     assert verdict('<body id=3 class=k>x', '<body id="3">x</body>') is None
     assert verdict('<div id=3>x', '<div id="3" class="k">x</div>') is None
     assert verdict('<body id=3>x', '<html id="3" class="k"></html>') is None
+
+
+def test_the_selectedcontent_allowance_excuses_only_the_copy():
+    """A `<selectedcontent>`'s source is what the page wrote, not the option content a select copies into
+    it. The allowance excuses exactly that copy: any other content the engine's value lacks is NOVEL."""
+    import browser_values as V
+
+    def verdict(engine, oracle):
+        return V.attribute_value(V.ValueRepro((), '[id="1"]', [engine], [oracle], ["#d", []]))
+
+    copy = "raw-source outer HTML of a <selectedcontent> copy"
+    assert verdict('<selectedcontent id="1"></selectedcontent>', '<selectedcontent id="1">t</selectedcontent>') == copy
+    assert verdict('<button id="1"><selectedcontent>', '<button id="1"><selectedcontent><b>t</b></selectedcontent></button>') == copy
+    assert verdict('<button id="1"><selectedcontent>', '<button id="1">u<selectedcontent>t</selectedcontent></button>') is None
+    assert verdict('<div id="1"></div>', '<div id="1">t</div>') is None
 
 
 def test_the_browser_gate_reads_the_document_mode_from_the_doctype():

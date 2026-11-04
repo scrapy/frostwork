@@ -1,4 +1,4 @@
-//! Ergonomic page-object layer over the one-pass [`extract`](crate::extract) primitive.
+//! Ergonomic page-object layer over the [`extract`](crate::extract) primitive.
 //!
 //! A *page object* is a `{field: selector}` schema. You declare the fields once, then fill an entire
 //! [`Item`] from a page in a **single** streaming scan: [`Page::extract`] makes exactly one `extract`
@@ -18,7 +18,7 @@
 //! let html = b"<div class=product><h1>Widget</h1>\
 //!              <span class=price>$9</span>\
 //!              <img src=/a.png><img src=/b.png></div>";
-//! let item = page.extract(html);              // ONE streaming pass fills every field
+//! let item = page.extract(html);              // one run fills every field
 //!
 //! assert_eq!(item.get("title"), Some("Widget"));
 //! assert_eq!(item.get("price"), Some("$9"));
@@ -180,7 +180,7 @@ impl Page {
         crate::Plan::compile_with(&self.queries, &[], options)
     }
 
-    /// Fill an [`Item`] from `html` in one streaming pass, sniffing the encoding
+    /// Fill an [`Item`] from `html` in one run, sniffing the encoding
     /// (BOM → `<meta>` → autodetection). One-shot; to reuse the schema across pages, [`compile`](Page::compile).
     pub fn extract(&self, html: &[u8]) -> Item {
         self.extract_with_encoding(html, None, None)
@@ -206,7 +206,7 @@ pub struct CompiledPage {
 }
 
 impl CompiledPage {
-    /// Fill an [`Item`] from `html` in one streaming pass, sniffing the encoding (BOM → `<meta>` → autodetection).
+    /// Fill an [`Item`] from `html` in one run, sniffing the encoding (BOM → `<meta>` → autodetection).
     pub fn extract(&self, html: &[u8]) -> Item {
         self.extract_with_encoding(html, None, None)
     }

@@ -3176,22 +3176,42 @@ impl<'a> Matcher<'a> {
         }
     }
 
-    /// Does a second `<html>` or `<body>` start tag with `raw_attrs` change an answer about the open
-    /// element at `depth`? A browser adds the attributes it does not have yet, which matters only where
-    /// one of the schema's compounds matches the element differently with them, or a terminal reads one.
-    pub(super) fn merge_adds(&self, depth: usize, raw_attrs: &[(&'a [u8], Option<&'a [u8]>)]) -> bool {
+    /// Does a later `<html>` or `<body>` start tag with `raw_attrs` change an answer about the open
+    /// element at `depth`, which `earlier` such tags have already merged into without changing one? A
+    /// browser adds the attributes the element does not have yet, first tag first, which matters only
+    /// where one of the schema's compounds matches the element differently with them, or a terminal
+    /// reads one.
+    pub(super) fn merge_adds(
+        &self,
+        depth: usize,
+        earlier: &[(&'a [u8], Option<&'a [u8]>)],
+        raw_attrs: &[(&'a [u8], Option<&'a [u8]>)],
+    ) -> bool {
+        fn absent<'a>(have: &[(&'a [u8], Cow<'a, str>)], more: &mut Vec<(&'a [u8], Cow<'a, str>)>, attrs: Vec<(&'a [u8], Cow<'a, str>)>) {
+            for (name, value) in attrs {
+                if !have.iter().chain(more.iter()).any(|(n, _)| n.eq_ignore_ascii_case(name)) {
+                    more.push((name, value));
+                }
+            }
+        }
         let el = &self.stack[depth];
-        let added: Vec<_> = self
-            .interesting_attrs(raw_attrs)
-            .into_iter()
-            .filter(|(name, _)| !el.attrs.iter().any(|(n, _)| n.eq_ignore_ascii_case(name)))
-            .collect();
+        let mut before = Vec::new();
+        absent(&el.attrs, &mut before, self.interesting_attrs(earlier));
+        let with_earlier;
+        let base = if before.is_empty() {
+            el
+        } else {
+            with_earlier = el.with_attrs(&before);
+            &with_earlier
+        };
+        let mut added = Vec::new();
+        absent(&base.attrs, &mut added, self.interesting_attrs(raw_attrs));
         if added.is_empty() {
             return false;
         }
-        let merged = el.with_attrs(&added);
+        let merged = base.with_attrs(&added);
         let schema = self.schema;
-        schema.frame_probes.iter().any(|c| matching::compound_matches_unfiltered(c, el) != matching::compound_matches_unfiltered(c, &merged))
+        schema.frame_probes.iter().any(|c| matching::compound_matches_unfiltered(c, base) != matching::compound_matches_unfiltered(c, &merged))
             || schema.frame_reads.iter().any(|(subject, name)| {
                 added.iter().any(|(n, _)| n.eq_ignore_ascii_case(name.as_bytes()))
                     && subject.as_ref().is_none_or(|c| matching::compound_matches_unfiltered(c, &merged))

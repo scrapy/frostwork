@@ -124,7 +124,7 @@ response adapters and runtime item validation.
 
 ```bash
 make bootstrap     # create .venv and install the pinned Python test toolchain
-make ci            # Rust, Python, lxml differential, encoding, and fuzz gates
+make ci            # Rust, Python, lxml and Chrome differentials, encoding, and fuzz gates
 make bench         # benchmark matrix against Parsel
 make soak          # multi-seed differential and fuzz soak
 ```

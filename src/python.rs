@@ -1,4 +1,4 @@
-//! PyO3 bindings — expose the one-pass `extract` primitive to Python as the native module
+//! PyO3 bindings — expose the `extract` primitive to Python as the native module
 //! `frostwork._frostwork`. Deliberately minimal: only the hot path crosses the FFI boundary. The
 //! ergonomic `Page`/`Item` layer and the web-poet integration ride on top of this in pure Python
 //! (`python/frostwork/`), so there is nothing to keep in sync between two implementations of the
@@ -280,7 +280,7 @@ impl Plan {
         self.inner.mode().as_str()
     }
 
-    /// One streaming pass over `html`, returning one value-column per flat query (query order).
+    /// One run over `html` for every flat query, returning one value-column per query (query order).
     /// The GIL is released for the duration of the scan (`html` is an immutable buffer and
     /// the compiled plan is read-only), so concurrent extracts on a thread pool run in parallel.
     #[pyo3(signature = (html, encoding=None, *, content_type=None, url=None))]
@@ -297,7 +297,7 @@ impl Plan {
         Ok(py.detach(|| self.inner.extract_with(bytes, hints).0))
     }
 
-    /// One streaming pass returning `(flat_columns, grouped)` — see the `extract_grouped` free function.
+    /// One run returning `(flat_columns, grouped)` — see the `extract_grouped` free function.
     /// Releases the GIL for the duration of the scan, like `extract`.
     #[pyo3(signature = (html, encoding=None, *, content_type=None, url=None))]
     #[allow(clippy::type_complexity)]
@@ -315,7 +315,7 @@ impl Plan {
     }
 }
 
-/// One streaming pass over `html`, returning one value-column per query (in query order) — the exact
+/// One run over `html` for every query, returning one value-column per query (in query order) — the exact
 /// output of [`crate::extract`]. `html` is `bytes` (or a `bytes` subclass such as web-poet's
 /// `HttpResponseBody`) or an already-decoded `str` — see [`Html`]; the pure-Python `frostwork.extract`
 /// wrapper converts the remaining bytes-likes.
@@ -342,11 +342,11 @@ fn extract(
     Ok(py.detach(|| crate::Plan::compile_with(&queries, &[], options).extract_with(bytes, hints).0))
 }
 
-/// One streaming pass returning `(flat_columns, grouped)`. `groups` is a list of
+/// One run returning `(flat_columns, grouped)`. `groups` is a list of
 /// `(container_selector, [(subfield_name, subfield_selector), ...])`; `grouped[g]` is that group's
 /// rows in document order, each row a list of sub-field value-columns (`[group][row][subfield][value]`).
 /// Sub-field names are carried by the caller (the pure-Python `Page`/`webpoet` layer); the engine keys
-/// sub-columns positionally. Same one-pass, no-DOM, no-fallback semantics as `extract`.
+/// sub-columns positionally. Same scanning, tree and no-fallback semantics as `extract`.
 #[pyfunction]
 #[pyo3(signature = (html, flat_queries, groups, encoding=None, *, content_type=None, url=None, parser="browser"))]
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
@@ -466,7 +466,7 @@ fn audit_schema(
 
 #[pymodule]
 fn _frostwork(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add("__doc__", "Native Frostwork core: treeless, one-pass HTML extraction.")?;
+    m.add("__doc__", "Native Frostwork core: streaming HTML extraction.")?;
     m.add_function(wrap_pyfunction!(extract, m)?)?;
     m.add_function(wrap_pyfunction!(extract_grouped, m)?)?;
     m.add_function(wrap_pyfunction!(audit_schema, m)?)?;

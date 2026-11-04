@@ -1,6 +1,9 @@
 # Design: how Frostwork is built, and why
 
-Frostwork extracts data from HTML in **one streaming pass with no parse tree**. This is the *why* and
+Frostwork extracts data from HTML in **one streaming pass with no parse tree**, with two browser-mode
+exceptions: a page where an HTML5 rule rewrites elements already parsed is answered from a compact tree
+of the finished page (the replay, under 2% of pages), and a deferred predicate whose value is inside its
+element is read in a second pass over the document, on the pages where one arose. This is the *why* and
 *how* behind that; [COMPATIBILITY.md](COMPATIBILITY.md) is the precise contract, and the differential
 harness in `tools/` is the executable spec.
 
@@ -11,7 +14,8 @@ DOM and then discards the 96–99% of nodes no selector touches — and parsing 
 cost. Frostwork treats extraction as a **query**: scan the bytes once, keep just enough structure (a
 corrected open-element stack) to answer the selectors, and materialise/decode only the values emitted.
 
-There is **no DOM** and **no fallback**: the engine answers every query itself.
+There is **no DOM** outside browser mode's replay, which builds a tree for the page in hand only where
+streaming cannot give the browser's answer, and **no fallback**: the engine answers every query itself.
 
 ## Two parse modes
 

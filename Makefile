@@ -12,12 +12,11 @@
 #   make fuzz-smoke  quick selector + malformed-HTML fuzz (crash/WRONG/OVERMATCH gate)
 #   make gate-corpus [CORPUS=<dir>]  value-parity gate over a page corpus (defaults to tests/corpus)
 #   make gate-seq    every tag SEQUENCE up to depth 4, compared on the whole tree
-#   make gate-browser  the same whole-tree fingerprint against real Chrome (BROWSERS=chrome,firefox for
-#                    both), each divergence reduced and filed under a docs/BROWSER_MODE.md construct,
-#                    plus value columns (native CSS, XPath through the lxml bridge); fails on NOVEL or
-#                    on coverage; then re-measures the HTML5 categories in Chrome and fails if they moved
-#                    (tools/gen_html5_rules.py --check --live). Needs Node 22+ and the browsers
-#                    (FROSTWORK_CHROME=…)
+#   make gate-browser  browser mode (the default) on the whole-tree fingerprint and value columns against
+#                    real Chrome (BROWSERS=chrome,firefox also compares Firefox), each divergence reduced
+#                    to its smallest repro; fails on any or on coverage; then re-measures the HTML5
+#                    categories in Chrome and fails if they moved (tools/gen_html5_rules.py --check
+#                    --live). Needs Node 22+ and the Chrome build in html5_derivation.json (FROSTWORK_CHROME=…)
 #   make gate-corpus-browser [CORPUS=<dir>]  browser mode vs Chrome page loads over a page corpus,
 #                    per selector, split tree vs value (report-only)
 #   make corpus-real fetch REAL pages into fixtures/realweb (gitignored), then gate over them
@@ -161,16 +160,14 @@ gate-seq:
 	$(PY) tools/seq_sweep.py --depth $(SEQ_DEPTH) --random 20000 --length 8 --gate
 
 # The browser-mode differential (docs/BROWSER_MODE.md, section 5): gate-seq's fingerprint graded against
-# the tree a real browser builds, over gate-seq's short sequences plus seeded random documents from an
-# HTML5-heavy alphabet. Until browser mode implements a construct its divergences are expected, so each
-# one is reduced to its smallest reproducing token subsequence and filed under the section 3 construct
-# that explains it. The gate fails on NOVEL (a divergence nothing explains) and on coverage: nothing
-# graded, a token never emitted, an oracle error, or a DOMParser tree that differs from a page load.
-# It also grades VALUE columns: a selector basket answered with native CSS in the browser and with XPath
-# through the lossless lxml bridge (whose round trip it gates), split by whether the fingerprint already
-# explains a difference. Every graded document also goes through a DEBUG `differ`, whose debug_asserts
-# are the builder's invariants; a panic fails the gate.
-# Not part of `ci`: it needs local browsers, and today's NOVEL list is the work browser mode starts from.
+# the tree a real browser builds, over gate-seq's short sequences plus seeded random and structured
+# documents from an HTML5-heavy alphabet. Each divergence is reduced to its smallest reproducing token
+# subsequence; the gate fails on any (no tree construct is a divergence) and on coverage: nothing graded,
+# a token never emitted, an oracle error, or a DOMParser tree that differs from a page load. It also
+# grades VALUE columns: a selector basket answered with native CSS in the browser and with XPath through
+# the lossless lxml bridge (whose round trip it gates), each column also asked of the engine alone.
+# Every graded document also goes through a DEBUG `differ`, whose debug_asserts are the builder's
+# invariants; a panic fails the gate. Part of `ci`, and its own job in hosted CI.
 BROWSERS ?= chrome
 BROWSER_SEQ_DEPTH ?= 2
 BROWSER_RANDOM ?= 1000
@@ -244,7 +241,7 @@ gate-webpoet: ext
 # The same differential with browser-mode page objects, the expected item taken from Chrome: CSS fields
 # natively, XPath fields through the lossless lxml bridge. `.as_node()` must be refused at class definition,
 # and a field whose engine column already differs from the browser's is ENGINE (gate-browser's), not
-# DIVERGE. Not part of `ci`: it needs a local Chrome (FROSTWORK_CHROME=…) and Node 22+.
+# DIVERGE. Part of `ci`; needs Chrome (FROSTWORK_CHROME=…) and Node 22+, like gate-browser.
 gate-webpoet-browser: ext
 	$(PY) tools/diff_webpoet.py --schemas $(WEBPOET_SCHEMAS) --parser browser
 
@@ -284,5 +281,6 @@ bench-engines: ext
 bench-engines-mem: ext
 	$(PY) tools/bench_mem.py --engines $(CORPUS) $(MEM_DOCS)
 
-ci: test gate gate-corpus gate-seq fuzz-smoke py gate-webpoet gate-webpoet-mutate release-check
+ci: test gate gate-corpus gate-seq fuzz-smoke py gate-webpoet gate-webpoet-mutate gate-browser \
+	gate-webpoet-browser release-check
 	@echo "frostwork: all local gates passed"

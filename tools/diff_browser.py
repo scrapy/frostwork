@@ -208,6 +208,9 @@ class Report:
     value_unseen_tree: dict[str, list[Divergence]] = field(default_factory=dict)
     value_buckets: dict[str, list[Divergence]] = field(default_factory=dict)
     value_novel: list[Divergence] = field(default_factory=list)
+    # each value column asked alone: a column's answer must not depend on the others in its schema
+    alone_checked: int = 0
+    alone_differ: list[tuple[str, str]] = field(default_factory=list)   # (document, column)
     # the debug build's invariants, when `--debug-differ` names one
     debug_requested: bool = False
     debug_checked: int = 0
@@ -244,6 +247,11 @@ def gate_failures(report: Report) -> list[str]:
                      f"answers differently from the native evaluator, e.g. {report.bridge_xpath_differ[0]}")
     if report.value_graded == 0:
         fails.append("no value column was graded")
+    if report.alone_checked == 0:
+        fails.append("no value column was asked alone")
+    if report.alone_differ:
+        fails.append(f"{len(report.alone_differ)} value column(s) the engine answers differently alone than "
+                     f"beside the run's other columns, e.g. {report.alone_differ[0]}")
     if report.missing_value_tokens:
         fails.append(f"{len(report.missing_value_tokens)} value token(s) never emitted: "
                      f"{report.missing_value_tokens}")
@@ -595,6 +603,25 @@ def grade_values(run: Run, report: Report, graded: list[tuple[Doc, str]]) -> Non
     report.rule_refused = [s for s in RULE_SELECTORS if s in run.refused]
 
 
+def check_alone(run: Run, report: Report, graded: list[tuple[Doc, str]]) -> None:
+    """Every value column of every decorated document asked of the engine ALONE, against its answer beside
+    the run's other columns. Which columns share a schema decides what the engine has to track (an
+    attribute merged into `<body>` matters only to a schema that reads it), so a column graded only in a
+    basket can be right there and wrong in a schema that asks it alone."""
+    answers, decorated = run.answers, run.docs.decorated
+    for d, r in graded:
+        if r not in decorated:
+            continue
+        for s in sorted(value_selectors(d, True, run.basket)):
+            if s in run.refused or ("engine", r, s) not in answers.values:
+                continue
+            doc = r.encode()
+            alone = run.engine.grouped(doc, [s])[0] if grouped_spec(s) else run.engine(doc, [s], strict=False)[0]
+            report.alone_checked += 1
+            if alone != answers.values[("engine", r, s)]:
+                report.alone_differ.append((r, s))
+
+
 def check_debug_build(run: Run, report: Report, graded: list[tuple[Doc, str]]) -> None:
     """Every graded document through a DEBUG build of the `differ` bridge, whose invariants are the builder's."""
     checked = [(r, seq_sweep.fingerprint_selectors(ids_of(d)) + RULE_SELECTORS) for d, r in graded]
@@ -669,6 +696,10 @@ def print_report(run: Run, report: Report) -> None:
               f"{len(report.debug_panics)} panic")
         for r, why in report.debug_panics[:args.show]:
             print(f"    {json.dumps(r)[:160]}  {why[:200]}")
+    print(f"columns alone     : {report.alone_checked} value columns asked alone, "
+          f"{len(report.alone_differ)} answered differently than beside the others")
+    for r, col in report.alone_differ[:args.show]:
+        print(f"    {col}  {json.dumps(r)[:140]}")
     print(f"self-check        : {report.selfcheck_checked} fast-path documents page-loaded, "
           f"{len(report.selfcheck_differ)} trees and {len(report.selfcheck_css_differ)} CSS answers differ")
     print(f"native CSS        : {report.css_mirror_checked} columns checked against parsel's .css() over the "
@@ -780,6 +811,7 @@ def write_results(run: Run, report: Report) -> None:
                 "novel": shape_rows(by_shape(report.value_novel)),
                 "engine_refused": sorted(run.refused), "basket_oracle_empty": run.basket_oracle_empty,
             },
+            "alone": {"checked": report.alone_checked, "differ": report.alone_differ[:20]},
             "debug": {"checked": report.debug_checked, "panics": report.debug_panics[:20]},
             "bridge": {"checked": report.bridge_checked, "failures": report.bridge_failures[:20],
                        "unrepresentable": report.bridge_unrepresentable[:20],
@@ -842,6 +874,7 @@ def main() -> int:
         check_bridge(run.answers, args.browsers, graded, report)
         phases.mark("grading")
         grade_values(run, report, graded)
+        check_alone(run, report, graded)
         phases.mark("values")
         if args.debug_differ:
             check_debug_build(run, report, graded)

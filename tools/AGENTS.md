@@ -142,7 +142,8 @@ raises on any other, and `from_lxml` converts lxml's own tree to the same format
 evaluator and that test together whenever the fingerprint gains a shape. Every other XPath column goes
 through the bridge, and `diff_browser` checks on every run that the two agree on the fingerprint. The
 same module reads a tree's document mode from its doctype (`is_quirks`) and lists its elements
-(`elements`), which the value constructs and the CSS mirror check use.
+(`elements`), which the value constructs and the CSS mirror check use. `chrome_build.py` prints the Chrome build
+`html5_derivation.json` was derived from, which hosted CI installs from Chrome for Testing.
 
 `diff_browser.py` is the browser differential (`make gate-browser`). It grades the engine on
 `seq_sweep`'s fingerprint against Chrome's tree, over `seq_sweep`'s short sequences plus seeded random
@@ -206,15 +207,22 @@ the special elements nothing else in it closes, text with references and an inne
 the same attribute set, which Noah's Ark compares. Every fourth random document is up to `LONG_TOKENS`
 long. `structured_docs` adds what a random run of a few tokens almost never assembles: documents that
 end before the body or inside a raw-text, RCDATA or script end tag, a comment in every position of three
-skeletons, formatting copies that share an offset, Noah's Ark families and `DEEP` runs of nested divs at Chrome's depth cap (one token each, with no
-ids, so reduction drops a run whole). A flat column cannot see an element with no attribute and no text,
+skeletons, formatting copies that share an offset, Noah's Ark families, `DEEP` runs of nested divs at Chrome's depth cap (one token each, with no
+ids, so reduction drops a run whole), successive `<html>` and `<body>` tags whose attributes only together
+match a rule selector (`FRAME_MERGES`), and every attribute value a tree rule reads spelled both literally
+and with a character reference (`RULE_VALUES`). A flat column cannot see an element with no attribute and no text,
 such as the empty `<body>` a document that ends in its head still gets, so `GROUPED_COLUMNS`
 (`grouped:<container> -> <sub> | <sub>`) grade grouped rows too; the frame's outer HTML is listed but
 browser mode refuses it. `--debug-differ` runs every graded document through a DEBUG `differ` and fails
 on a panic: the builder's `debug_assert!`s are invariants a release build can break while every value
 still passes the raw-source allowance (`make gate-browser` passes it).
 
-`diff_webpoet.py --parser browser` (`make gate-webpoet-browser`, outside `ci`) builds browser-mode page
+Every value column of a decorated document is also asked of the engine ALONE and compared with its answer
+beside the run's other columns (`check_alone`). Which columns share a schema decides what the engine
+tracks, an attribute merged into `<body>` mattering only to a schema that reads it, so the basket can be
+right where the column alone is wrong.
+
+`diff_webpoet.py --parser browser` (`make gate-webpoet-browser`, in `ci`) builds browser-mode page
 objects and takes the expected item from Chrome: the parsel page objects keep their getters, `Processors`
 and `out=`, and their values come from native CSS or the bridge. `.as_node()` must be refused at class
 definition in browser mode, so a schema with a node-taking processor is checked for that refusal and then

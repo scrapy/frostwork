@@ -164,10 +164,24 @@ def _merged_frame_source(r: ValueRepro) -> bool:
     return all(a == b or (a[0] == b[0] in ("html", "body") and set(a[1]) < set(b[1])) for a, b in pairs)
 
 
+_SELECTEDCONTENT = re.compile(r"(<selectedcontent\b[^>]*>).*?(</selectedcontent>)", re.S)
+
+
+def _selectedcontent_copy(r: ValueRepro) -> bool:
+    """Outer HTML holding a `<selectedcontent>` its select's selected option was copied into: the copy is
+    no part of the page's source, so the raw source has the element as the page wrote it. Raw source once
+    the browser's copies are emptied too, and only then."""
+    if not is_node_query(r.sel):
+        return False
+    emptied = [_SELECTEDCONTENT.sub(r"\1\2", b) for b in r.oracle]
+    return emptied != r.oracle and _raw_source(ValueRepro(r.doc, r.sel, r.engine, emptied, r.tree))
+
+
 VALUE_CONSTRUCTS: list[ValueConstruct] = [
     ValueConstruct("quirks-mode class and id matching (deferred)", _quirks_class_or_id),
     ValueConstruct("raw-source outer HTML", _raw_source),
     ValueConstruct("raw-source outer HTML of a merged <html>/<body>", _merged_frame_source),
+    ValueConstruct("raw-source outer HTML of a <selectedcontent> copy", _selectedcontent_copy),
 ]
 
 

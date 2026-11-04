@@ -7,9 +7,9 @@ Frostwork has no fallback parser. Correctness therefore has three parts:
 3. the gates must prove that the relevant rules and cases were actually exercised.
 
 `make ci` is the minimum local release check. The sections below explain what it covers, which oracle owns
-each subsystem, and which broader checks run separately. The browser-mode gates (`make gate-browser`,
-`make gate-webpoet-browser`, `make gate-corpus-browser`) need local Chrome and Firefox and are not part of
-`make ci`; [BROWSER_MODE.md](BROWSER_MODE.md) section 5 describes them.
+each subsystem, and which broader checks run separately. Two browser-mode gates are part of it,
+`make gate-browser` and `make gate-webpoet-browser`, and need Chrome and Node 22; the report-only
+`make gate-corpus-browser` is not. [BROWSER_MODE.md](BROWSER_MODE.md) section 5 describes them.
 
 ## Oracles and pass criteria
 

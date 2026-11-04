@@ -1,4 +1,4 @@
-"""Declarative page-object API over the one-pass :func:`frostwork.extract` primitive — a pure-Python
+"""Declarative page-object API over the :func:`frostwork.extract` primitive — a pure-Python
 mirror of the Rust ``Page``/``Item``. A page object is a ``{field: selector}`` schema; one
 ``extract`` call fills the whole item with one shared document scan; matching work still grows with
 the number and complexity of fields.
@@ -10,7 +10,7 @@ the number and complexity of fields.
     ...         .field("title", "h1::text")             # first match -> value or None
     ...         .field("price", ".price::text")
     ...         .field_all("images", "img::attr(src)"))  # every match -> list
-    >>> item = page.extract(html)                        # ONE streaming pass fills every field
+    >>> item = page.extract(html)                        # one run fills every field
     >>> item.get("title")
     'Widget'
     >>> item.get_all("images")
@@ -249,7 +249,7 @@ def extract(
     syntax: Optional[str] = None,
     parser: Parser = "browser",
 ) -> List[List[str]]:
-    """One streaming pass over ``html``: return one value-column per query, in query order.
+    """One run over ``html`` for every query: return one value-column per query, in query order.
 
     ``html`` is bytes (preferred — Frostwork tokenizes raw bytes) or ``str`` (encoded UTF-8).
     ``queries`` is an iterable of CSS/XPath selectors. ``encoding`` is a label the user forced, ranked
@@ -286,7 +286,7 @@ def extract_grouped(
     syntax: Optional[str] = None,
     parser: Parser = "browser",
 ) -> Tuple[List[List[str]], list]:
-    """One streaming pass returning ``(flat_columns, grouped)``. ``groups`` is a list of
+    """One run returning ``(flat_columns, grouped)``. ``groups`` is a list of
     ``(container_selector, [(subfield_name, subfield_selector), ...])`` (a subfield mapping is also
     accepted); for every element matching
     ``container_selector`` (document order) each sub-field is extracted **scoped to it**
@@ -829,7 +829,7 @@ class Page:
         url: Optional[str] = None,
         strict: Optional[bool] = None,
     ) -> "Item":
-        """Fill an :class:`Item` from ``html`` in one streaming pass. ``encoding``, ``content_type``
+        """Fill an :class:`Item` from ``html`` in one run. ``encoding``, ``content_type``
         and ``url`` are the encoding inputs described in :func:`extract`. Unsupported selectors
         raise :class:`UnsupportedSelector` by default. Construct with ``Page(strict=False)`` or pass
         ``strict=False`` here for permissive empty results. A successful default validation is cached

@@ -315,7 +315,7 @@ impl<'a> std::ops::IndexMut<usize> for OpenStack<'a> {
     }
 }
 
-type RawAttr<'a> = (&'a [u8], Option<&'a [u8]>);
+pub(super) type RawAttr<'a> = (&'a [u8], Option<&'a [u8]>);
 
 /// The start tag a formatting element was created for, kept so a clone can be made from it. Its
 /// attributes are `attrs` of [`Formatting::attrs`]; `span` is the tag's source, which a clone's outer

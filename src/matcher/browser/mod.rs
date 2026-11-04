@@ -80,7 +80,7 @@ use crate::implied_close::{
     html5_cat, html5_data_mode, BUTTON_SCOPE, IMPLIED_END, IMPLIED_END_THOROUGH, LIST_ITEM_SCOPE, SCOPE,
     SPECIAL,
 };
-use lists::{Afe, Bound, Formatting, OpenStack};
+use lists::{Afe, Bound, Formatting, OpenStack, RawAttr};
 use crate::tokenizer::DataMode;
 use tags::{tag_of, tag_of_lower, Tag};
 pub(super) use tags::{lower, namespaced_foreign_attr, svg_attr_name, svg_local_name, MAX_NAME};
@@ -281,6 +281,9 @@ pub(super) struct Browser<'a, const REPLAY: bool> {
     /// Where the next `<html>` or `<body>` tag-like bytes are at or after the offset of the last search,
     /// as `(searched from, found at)`; see [`Self::settled`].
     frame_tag: std::cell::Cell<(usize, usize)>,
+    /// Streaming, the attributes earlier `<html>` and `<body>` tags merged into the open element of each
+    /// uid without changing an answer: a later merge is judged with them in place.
+    merged: Vec<(u32, Vec<RawAttr<'a>>)>,
 }
 
 impl<const REPLAY: bool> Default for Browser<'_, REPLAY> {
@@ -310,8 +313,36 @@ impl<const REPLAY: bool> Default for Browser<'_, REPLAY> {
             dom: dom::Dom::new(0),
             selected: Vec::new(),
             frame_tag: std::cell::Cell::new((usize::MAX, 0)),
+            merged: Vec::new(),
         }
     }
+}
+
+/// Does the attribute `name` (its first occurrence) hold one of `values`, ASCII case-insensitively, once
+/// its character references are decoded? Every value a tree-construction rule reads goes through this.
+pub(super) fn attr_is(input: EncodedInput<'_>, attrs: &[RawAttr<'_>], name: &[u8], values: &[&str]) -> bool {
+    attrs.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).is_some_and(|(_, v)| {
+        let v = input.attr_value(v.unwrap_or(b""));
+        values.iter().any(|w| v.eq_ignore_ascii_case(w))
+    })
+}
+
+/// HTML's rules for parsing a non-negative integer, into the unsigned 32 bits Chrome parses it into:
+/// leading ASCII whitespace, an optional sign, then digits up to the first non-digit. `None` is a parse
+/// error, which an overflow is too.
+fn non_negative_integer(v: &str) -> Option<u32> {
+    let v = v.trim_start_matches(['\t', '\n', '\x0c', '\r', ' ']);
+    let (negative, v) = match v.as_bytes().first() {
+        Some(b'-') => (true, &v[1..]),
+        Some(b'+') => (false, &v[1..]),
+        _ => (false, v),
+    };
+    let end = v.bytes().position(|b| !b.is_ascii_digit()).unwrap_or(v.len());
+    if end == 0 {
+        return None;
+    }
+    let n = v[..end].bytes().try_fold(0u32, |n, d| n.checked_mul(10)?.checked_add(u32::from(d - b'0')))?;
+    (!negative || n == 0).then_some(n)
 }
 
 /// How many open elements Chrome nests an element under (`kMaximumHTMLParserDOMTreeDepth`): with more
@@ -460,7 +491,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
     // ------------------------------------------------------------------ nodes
 
     /// A stack entry for an element named `name`, which is `low` lowercased (see [`StartTok::low`]).
-    fn new_node(&mut self, name: &'a [u8], low: Option<&[u8]>, tag: Tag, ns: Ns, attrs: &Attrs<'a>) -> Node<'a> {
+    fn new_node(&mut self, name: &'a [u8], low: Option<&[u8]>, tag: Tag, ns: Ns) -> Node<'a> {
         let uid = self.next_uid;
         self.next_uid += 1;
         let ip = SPECIAL | SCOPE | LIST_ITEM_SCOPE | BUTTON_SCOPE;
@@ -472,13 +503,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
             },
             Ns::MathMl => match low {
                 Some(b"mi" | b"mo" | b"mn" | b"ms" | b"mtext") => (Tag::Other, ip, MATHML_TEXT_IP),
-                Some(b"annotation-xml") => {
-                    let html = attrs.iter().find(|(n, _)| n.eq_ignore_ascii_case(b"encoding")).is_some_and(|(_, v)| {
-                        let v = v.unwrap_or(b"");
-                        v.eq_ignore_ascii_case(b"text/html") || v.eq_ignore_ascii_case(b"application/xhtml+xml")
-                    });
-                    (Tag::Other, ip, ANNOTATION_XML | if html { HTML_IP } else { 0 })
-                }
+                Some(b"annotation-xml") => (Tag::Other, ip, ANNOTATION_XML),
                 _ => (Tag::Other, 0, 0),
             },
         };
@@ -740,7 +765,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
 
     /// Insert an HTML element for a start tag.
     fn insert_html(&mut self, m: &mut Matcher<'a>, t: &StartTok<'a, '_>) {
-        let node = self.new_node(t.name, t.low, t.tag, Ns::Html, t.attrs);
+        let node = self.new_node(t.name, t.low, t.tag, Ns::Html);
         self.insert_node(m, node, t.attrs, t.start);
         self.dom_open_end(t.end);
     }
@@ -754,7 +779,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
 
     /// Insert an element the page never wrote (no attributes, no source of its own), at `at`.
     fn insert_synth(&mut self, m: &mut Matcher<'a>, name: &'static [u8], tag: Tag, at: usize) {
-        let mut node = self.new_node(name, Some(name), tag, Ns::Html, &[]);
+        let mut node = self.new_node(name, Some(name), tag, Ns::Html);
         node.flags |= SYNTH;
         self.insert_node(m, node, &[], at);
     }
@@ -771,7 +796,12 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
             Ns::Svg => t.low.and_then(tags::svg_camel_case).unwrap_or(t.name),
             _ => t.name,
         };
-        let node = self.new_node(name, t.low, Tag::Other, ns, t.attrs);
+        let mut node = self.new_node(name, t.low, Tag::Other, ns);
+        if node.flags & ANNOTATION_XML != 0
+            && attr_is(m.input, t.attrs, b"encoding", &["text/html", "application/xhtml+xml"])
+        {
+            node.flags |= HTML_IP;
+        }
         self.insert_node(m, node, t.attrs, t.start);
         self.dom_open_end(t.end);
         if t.self_closing {
@@ -935,7 +965,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
             let (name, tag) = (self.afe.toks[tok as usize].name, self.afe.toks[tok as usize].tag);
             let attrs = self.afe.attrs_of(tok).to_vec();
             let mut buf = [0; MAX_NAME];
-            let node = self.new_node(name, lower(name, &mut buf), tag, Ns::Html, &attrs);
+            let node = self.new_node(name, lower(name, &mut buf), tag, Ns::Html);
             let uid = node.uid;
             self.insert_node(m, node, &attrs, at);
             let span = self.afe.toks[tok as usize].span;
@@ -1137,13 +1167,13 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
     /// An option has been inserted into the replay's tree: its select's selectedness, as Chrome sets it
     /// while parsing. A `selected` option becomes the selected one; otherwise the first option that is
     /// not disabled does, in a select that shows one option (no `multiple`, `size` at most 1).
-    fn option_inserted(&mut self, option: u32) {
+    fn option_inserted(&mut self, input: EncodedInput<'a>, option: u32) {
         let Some(select) = self.owner_select(option, true) else { return };
         let current = self.selected.iter().position(|&(s, _)| s == select);
         let selected = if self.has_attr(option, b"selected") {
             true
         } else {
-            current.is_none() && !self.has_attr(option, b"disabled") && self.shows_one(select)
+            current.is_none() && !self.has_attr(option, b"disabled") && self.shows_one(input, select)
         };
         match (selected, current) {
             (true, Some(k)) => self.selected[k].1 = option,
@@ -1153,14 +1183,14 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
     }
 
     /// Does the select show a single option, so that one is selected by default?
-    fn shows_one(&self, select: u32) -> bool {
+    fn shows_one(&self, input: EncodedInput<'a>, select: u32) -> bool {
         let Some(e) = self.dom.elem(select) else { return false };
         let attrs = self.dom.attrs(e);
         if attrs.iter().any(|(n, _)| n.eq_ignore_ascii_case(b"multiple")) {
             return false;
         }
-        let size = attrs.iter().find(|(n, _)| n.eq_ignore_ascii_case(b"size")).and_then(|(_, v)| *v);
-        size.and_then(|v| std::str::from_utf8(v).ok()).and_then(|v| v.trim().parse::<u64>().ok()).is_none_or(|n| n <= 1)
+        let size = attrs.iter().find(|(n, _)| n.eq_ignore_ascii_case(b"size"));
+        size.and_then(|(_, v)| non_negative_integer(&input.attr_value(v.unwrap_or(b"")))).is_none_or(|n| n <= 1)
     }
 
     /// The `<selectedcontent>` elements of `select` that take its selected option's content: none of a

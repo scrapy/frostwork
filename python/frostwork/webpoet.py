@@ -934,7 +934,7 @@ class FrostFields(ItemPage):
 
     @cached_method
     def _frostwork_run(self):
-        """Run the page object's whole schema — flat fields AND `Many`/`One` groups — in ONE pass
+        """Run the page object's whole schema — flat fields AND `Many`/`One` groups — in ONE run
         through the class's pre-compiled `Plan`; cached per instance so every field reads one scan."""
         given = FrostInput(*self.frostwork_input())
         flat_cols, grouped = self._frostwork_plan.extract_grouped(
@@ -946,7 +946,7 @@ class FrostFields(ItemPage):
         )
 
     def _frostwork_columns(self) -> Dict[str, List[str]]:
-        """Flat columns from the shared one-pass run (grouped fields read `_frostwork_run()[1]`)."""
+        """Flat columns from the shared run (grouped fields read `_frostwork_run()[1]`)."""
         return self._frostwork_run()[0]
 
 
