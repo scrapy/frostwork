@@ -13,38 +13,68 @@
 //!   `</form>` removes a form whose `<div>` is still open, so `#f #after` matches in
 //!   `<form id=f><div>a</form><p id=after>`. Its matcher element stays on the matcher stack, with no
 //!   builder entry, and closes when the insertion point next moves below it ([`Browser::place`]).
-//! * **Parked elements.** Foster parenting inserts beside the last table, in the table's DOM parent,
-//!   while the table and its rows stay open. The table's matcher elements are [`Matcher::park`]ed, so
-//!   fostered content is a child of the table's parent and not a descendant of the table, and they are
-//!   put back when the next insertion targets them. The head is parked the same way in "after head",
-//!   where whitespace goes to `<html>` but a later `<script>` still goes into the head, and so is the
-//!   current node past Chrome's depth cap, where a new element becomes its sibling.
+//! * **Parked elements.** The head is [`Matcher::park`]ed in "after head", where whitespace goes to
+//!   `<html>` but a later `<script>` still goes into the head, and so is the current node past Chrome's
+//!   depth cap, where a new element becomes its sibling: the parked elements stay open, and are put back
+//!   when the next insertion targets them. Foster parenting parks the table the same way, for the rest
+//!   of the token that fostered; the streaming pass ends there (below).
 //! * **Inert elements.** Template content and a declarative shadow root are parsed with the full rules
 //!   but never reach the matcher; their tokens are absorbed into the text gap, so the text either side
 //!   of a shadow-root `<template>` is one node, as in the browser.
 //! * **Pending elements.** The adoption agency's clones enter the HTML5 stack without a matcher element
-//!   (their content was already matched under the originals) and get one only if something is later
-//!   inserted into them ([`Browser::materialize`]).
+//!   and get one only if the same token inserts into them ([`Browser::materialize`]); the streaming pass
+//!   ends after it (below).
 //!
 //! Each builder entry records its matcher depth and a uid, and `path` holds the uid of every matcher
 //! element, so "is this entry's element open, and where" is one comparison. Lxml mode never runs any of
 //! this: `OpenElem` and the libxml2 builder are unchanged.
 //!
-//! What streams exactly and what does not: everything that decides where a token goes, and every
-//! element's ancestry at the moment it opens, follows the browser. Four rules change decisions already
-//! made, and only their forward state is exact here: the adoption agency with a furthest block (the
-//! moved elements keep the ancestors they opened under), the document order of fostered content (it
-//! counts as following its table), a second `<html>`/`<body>` (its attributes reach later matches, not
-//! the element's own), and a `<frameset>` replacing a body already parsed (the body's matches stand).
-//! A fifth, an `<option>`'s content cloned into `<selectedcontent>`, is a DOM mutation of an element
-//! already closed.
+//! # Retroactive rules and the replay
+//!
+//! Everything that decides where a token goes, and every element's ancestry at the moment it opens,
+//! streams. Five rules change a decision the matcher has already made:
+//!
+//! * a second `<html>` or `<body>` tag merges its attributes into an element already matched;
+//! * foster parenting puts content before a table that is already open, so it precedes the table in
+//!   document order and in the table's sibling positions, and fostered text joins the text node before
+//!   the table;
+//! * a `<frameset>` removes the body and everything in it;
+//! * the adoption agency with a furthest block moves the block out of the formatting element, and the
+//!   block's content into a copy of that element;
+//! * Chrome copies the selected `<option>`'s content into its select's `<selectedcontent>` elements,
+//!   which usually precede it.
+//!
+//! None of them fires on most pages: over 30,000 Common Crawl pages (`tools/retro_census.py`) a merge
+//! that adds an attribute the page's own selectors ask about fires on 1.5%, the adoption agency with a
+//! furthest block on 1.1%, foster parenting on 0.5%, the frameset on one page and `<selectedcontent>`
+//! on none, 3.0% in all. So the streaming pass is unchanged on the common path, and the first of them to
+//! fire ([`Browser::retro`]) ends it; [`run`] then answers the document with the REPLAY. That is the
+//! same builder with `REPLAY` set: the same rules, but each insertion is a DOM operation on an arena of
+//! the finished tree ([`dom::Dom`]: append, insert before the table, move, copy, detach), and
+//! [`dom::Dom::walk`] then drives the matcher over it in pre-order, with each node's rank as its
+//! position, so every value comes out in document order. A merge counts only when it adds an attribute
+//! a selector asks about, and it is the one rule whose firing depends on the schema.
+//!
+//! The other design, a second pass that replays the tokens with hints about what is to come (a body
+//! inert from the start, a table's subtree deferred past its fostered content, the adoption agency's
+//! final parents applied when the block opens), needs every event known before it starts, so it runs
+//! the builder over the whole document first, and it needs a mechanism per rule where the tree needs
+//! one for all five. On a replayed page `extract` costs a median 1.35 and a 90th percentile 2.0 times
+//! one streaming pass (200 such pages, minimum of 15 runs each), against 1.06 on pages that stream.
+//!
+//! Early exit is sound because the first rule to fire ends the streaming pass, so what it accepted was
+//! the browser's; it stops only where no later token can reach back ([`Browser::settled`]), and a
+//! replay walks a finished tree. The tail pass of `Matcher::resolve_tail_pass` must open what the first
+//! pass opened, so it replays exactly when the first pass did ([`run_tail`]).
 
 mod doctype;
+mod dom;
 mod rules;
 mod tags;
 
 use super::tree::TreeBuilder;
-use super::{HeldText, Matcher, Parked};
+use super::{CompiledSchema, EncodedInput, HeldText, Matcher, Parked};
+use crate::{FlatColumns, GroupRows};
 use crate::implied_close::{
     html5_cat, html5_data_mode, BUTTON_SCOPE, IMPLIED_END, IMPLIED_END_THOROUGH, LIST_ITEM_SCOPE, SCOPE,
     SPECIAL, TABLE_SCOPE,
@@ -103,6 +133,8 @@ const ANNOTATION_XML: u8 = 1 << 2;
 const SHADOW_HOST: u8 = 1 << 3;
 /// An element or text node has been inserted into the element.
 const HAS_CHILD: u8 = 1 << 4;
+/// The page never wrote the element's start tag.
+const SYNTH: u8 = 1 << 5;
 
 /// One entry of the HTML5 stack of open elements.
 #[derive(Clone, Copy, Debug)]
@@ -116,9 +148,26 @@ struct Node<'a> {
     flags: u8,
     uid: u32,
     vis: Vis,
-    /// Its depth on the matcher stack, while `vis` is `Live`.
+    /// While `vis` is `Live`: its depth on the matcher stack when streaming, its node in the replay's
+    /// tree when replaying.
     depth: u32,
 }
+
+/// The retroactive rules (see the module header), as the bits of [`Browser::retro`].
+const RETRO_MERGE: u8 = 1 << 0;
+const RETRO_FOSTER: u8 = 1 << 1;
+const RETRO_FRAMESET: u8 = 1 << 2;
+const RETRO_ADOPTION: u8 = 1 << 3;
+const RETRO_SELECTEDCONTENT: u8 = 1 << 4;
+/// Not a rule: a later `<html>` or `<body>` tag carried attributes, whether or not a selector asks
+/// about them. Only [`retro_census`] reports it.
+const CENSUS_MERGE_ANY: u8 = 1 << 5;
+/// Past Chrome's depth cap an element opens beside the current node, which stays open, so later content
+/// of the current node precedes the new element in document order. Not one of the five rules: the cap
+/// is 512 open elements, and the replay is simply the exact answer there too.
+const RETRO_DEPTH: u8 = 1 << 6;
+const RETRO_RULES: u8 =
+    RETRO_MERGE | RETRO_FOSTER | RETRO_FRAMESET | RETRO_ADOPTION | RETRO_SELECTEDCONTENT | RETRO_DEPTH;
 
 /// The start tag a formatting element was created for, kept so a clone can be made from it. `span` is
 /// the tag's source, which a clone's outer HTML begins with.
@@ -174,7 +223,9 @@ enum Loc {
     Inert,
 }
 
-pub(super) struct Browser<'a> {
+/// The builder. `REPLAY` picks what it builds: the matcher's stack, streamed (`false`), or the replay's
+/// tree (`true`). The rules are the same code either way; only the insertion primitives differ.
+pub(super) struct Browser<'a, const REPLAY: bool> {
     mode: Mode,
     original: Mode,
     templates: Vec<Mode>,
@@ -203,9 +254,21 @@ pub(super) struct Browser<'a> {
     touched: bool,
     /// The state the current start tag's content is tokenized in.
     data: DataMode,
+    /// The retroactive rules that have fired (`RETRO_*`). Streaming, the first one ends the pass.
+    retro: u8,
+    /// Stream to the end whatever fires: to count the rules ([`retro_census`]), and for the tail pass of
+    /// a document the first pass streamed ([`run_tail`]).
+    run_through: bool,
+    /// The replay's tree.
+    dom: dom::Dom<'a>,
+    /// The replay's selected option of each `<select>`, as `(select, option)` nodes.
+    selected: Vec<(u32, u32)>,
+    /// Where the next `<html>` or `<body>` tag-like bytes are at or after the offset of the last search,
+    /// as `(searched from, found at)`; see [`Self::settled`].
+    frame_tag: std::cell::Cell<(usize, usize)>,
 }
 
-impl Default for Browser<'_> {
+impl<const REPLAY: bool> Default for Browser<'_, REPLAY> {
     fn default() -> Self {
         Browser {
             mode: Mode::Initial,
@@ -227,6 +290,11 @@ impl Default for Browser<'_> {
             next_uid: 1,
             touched: false,
             data: DataMode::Normal,
+            retro: 0,
+            run_through: false,
+            dom: dom::Dom::new(),
+            selected: Vec::new(),
+            frame_tag: std::cell::Cell::new((usize::MAX, 0)),
         }
     }
 }
@@ -292,6 +360,29 @@ fn has_content(b: &[u8]) -> bool {
     ws_prefix(b, true) < b.len()
 }
 
+/// Does inserting the run clear frameset-ok? Chrome keeps it set for whitespace, NUL and U+FFFD, the
+/// replacement character spelled as its UTF-8 bytes (`utf8`) or as a reference that resolves to it:
+/// `&#0;`, a surrogate, a code point past U+10FFFF.
+fn ends_frameset_ok(b: &[u8], utf8: bool) -> bool {
+    let mut i = 0;
+    while i < b.len() {
+        let rest = &b[i..];
+        let k = ws_at(rest, true);
+        if k > 0 {
+            i += k;
+        } else if utf8 && rest.starts_with("\u{FFFD}".as_bytes()) {
+            i += 3;
+        } else if let Some((_, len)) =
+            numeric_ref(rest).filter(|&(v, _)| v == 0 || v == 0xFFFD || (0xD800..=0xDFFF).contains(&v) || v > 0x10FFFF)
+        {
+            i += len;
+        } else {
+            return true;
+        }
+    }
+    false
+}
+
 /// The leading newline `<pre>`, `<listing>` and `<textarea>` drop: a LF, a CR or CRLF (the input stream
 /// makes both a LF), or a character reference to U+000A, which reaches the tree builder as the same
 /// character token.
@@ -304,7 +395,78 @@ fn leading_lf(b: &[u8]) -> usize {
     }
 }
 
-impl<'a> Browser<'a> {
+/// The offset of the first `<html` or `<body` at or after `from` that could start a tag (the name ends at
+/// whitespace, `/`, `>` or the end of input), or `usize::MAX`. An occurrence in a comment or a script
+/// only costs an early exit.
+fn frame_tag_from(b: &[u8], from: usize) -> usize {
+    let Some(rest) = b.get(from..) else { return usize::MAX };
+    for i in memchr::memchr_iter(b'<', rest) {
+        let name = &rest[i + 1..];
+        let frame = name.get(..4).is_some_and(|n| n.eq_ignore_ascii_case(b"html") || n.eq_ignore_ascii_case(b"body"));
+        if frame && name.get(4).is_none_or(|&c| is_ws(c) || c == b'/' || c == b'>') {
+            return from + i;
+        }
+    }
+    usize::MAX
+}
+
+/// Run `schema` over one document in browser mode. One streaming pass answers it unless a retroactive
+/// rule fires; then the pass stops there, and the replay builds the document's tree and walks it.
+pub(super) fn run<'a>(schema: &'a CompiledSchema, input: EncodedInput<'a>) -> (FlatColumns, Vec<GroupRows>) {
+    let mut scan = super::tree::Scan { m: Matcher::new(schema, input), builder: Browser::<'a, false>::default() };
+    crate::tokenizer::tokenize(input.bytes(), &mut scan);
+    if scan.builder.retro & RETRO_RULES == 0 {
+        scan.builder.finish(&mut scan.m);
+        return scan.m.finish_grouped();
+    }
+    replay(schema, input, Vec::new())
+}
+
+/// The tail pass of a document (`Matcher::resolve_tail_pass`), which must open the elements the first
+/// pass opened in the same order: replayed when the first pass was, and otherwise streamed to the end.
+pub(super) fn run_tail<'a>(
+    schema: &'a CompiledSchema,
+    input: EncodedInput<'a>,
+    marks: Vec<(u32, String)>,
+    replayed: bool,
+) -> (FlatColumns, Vec<GroupRows>) {
+    if replayed {
+        return replay(schema, input, marks);
+    }
+    let mut m = Matcher::new(schema, input);
+    m.marks = marks;
+    let mut scan = super::tree::Scan { m, builder: Browser::<'a, false>::default() };
+    scan.builder.run_through = true;
+    crate::tokenizer::tokenize(input.bytes(), &mut scan);
+    scan.builder.finish(&mut scan.m);
+    scan.m.finish_grouped()
+}
+
+/// The replay: the whole tree, built with the DOM operations a browser performs, walked in pre-order.
+fn replay<'a>(
+    schema: &'a CompiledSchema,
+    input: EncodedInput<'a>,
+    marks: Vec<(u32, String)>,
+) -> (FlatColumns, Vec<GroupRows>) {
+    let mut m = Matcher::new(schema, input);
+    m.marks = marks;
+    let mut scan = super::tree::Scan { m, builder: Browser::<'a, true>::default() };
+    crate::tokenizer::tokenize(input.bytes(), &mut scan);
+    scan.builder.finish(&mut scan.m);
+    scan.builder.dom.walk(&mut scan.m);
+    scan.m.finish_grouped()
+}
+
+/// Which retroactive rules fire on a document (`RETRO_*`, and [`CENSUS_MERGE_ANY`]), over the whole
+/// document. A merge counts only when it adds an attribute `schema` selects on.
+pub(super) fn retro_census(schema: &CompiledSchema, input: EncodedInput<'_>) -> u8 {
+    let mut scan = super::tree::Scan { m: Matcher::new(schema, input), builder: Browser::<'_, false>::default() };
+    scan.builder.run_through = true;
+    crate::tokenizer::tokenize(input.bytes(), &mut scan);
+    scan.builder.retro
+}
+
+impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
     // ------------------------------------------------------------------ nodes
 
     fn new_node(&mut self, name: &'a [u8], tag: Tag, ns: Ns, attrs: &Attrs<'a>) -> Node<'a> {
@@ -485,6 +647,13 @@ impl<'a> Browser<'a> {
         if n.vis != Vis::Live {
             return;
         }
+        if REPLAY {
+            self.dom.set_end(n.depth, end);
+            if n.tag == Tag::Option {
+                self.option_closed(n.depth);
+            }
+            return;
+        }
         let d = n.depth as usize;
         loop {
             if self.path.get(d) == Some(&n.uid) {
@@ -516,22 +685,44 @@ impl<'a> Browser<'a> {
     fn insert_node(&mut self, m: &mut Matcher<'a>, mut node: Node<'a>, attrs: &Attrs<'a>, at: usize) {
         match self.location() {
             Loc::Inert => node.vis = Vis::Inert,
+            Loc::Document if REPLAY => {
+                self.dom_element(&mut node, attrs, at);
+                self.dom.set_root(node.depth);
+            }
             Loc::Document => self.open(m, &mut node, attrs, at),
             Loc::Into(i) => {
-                self.place(m, i, at);
-                if self.stack.len() > MAX_DEPTH && i > 0 && self.stack[i].vis == Vis::Live {
-                    // Past Chrome's depth cap the element is the current node's sibling: the current node
-                    // stays open, so it parks like a fostered table.
-                    let d = self.stack[i].depth as usize;
-                    self.park_from(m, d);
-                } else {
+                if !REPLAY {
+                    self.place(m, i, at);
+                }
+                // Past Chrome's depth cap the element is the current node's sibling.
+                let capped = self.stack.len() > MAX_DEPTH && i > 0 && self.stack[i].vis == Vis::Live;
+                if !capped {
                     self.stack[i].flags |= HAS_CHILD;
                 }
-                self.open(m, &mut node, attrs, at);
+                if REPLAY {
+                    let target = self.stack[i].depth;
+                    let parent = if capped { self.dom.parent(target) } else { target };
+                    self.dom_element(&mut node, attrs, at);
+                    self.dom.append(parent, node.depth);
+                } else {
+                    if capped {
+                        // The current node stays open, so it parks like a fostered table.
+                        self.retro |= RETRO_DEPTH;
+                        let d = self.stack[i].depth as usize;
+                        self.park_from(m, d);
+                    }
+                    self.open(m, &mut node, attrs, at);
+                }
             }
             Loc::Foster(t) => {
-                self.foster_place(m, t, at);
-                self.open(m, &mut node, attrs, at);
+                self.retro |= RETRO_FOSTER;
+                if REPLAY {
+                    self.dom_element(&mut node, attrs, at);
+                    self.dom_foster(t, node.depth);
+                } else {
+                    self.foster_place(m, t, at);
+                    self.open(m, &mut node, attrs, at);
+                }
             }
         }
         if node.ns == Ns::Html {
@@ -543,6 +734,23 @@ impl<'a> Browser<'a> {
         self.stack.push(node);
     }
 
+    /// The replay's element for `node`, not yet in the tree.
+    fn dom_element(&mut self, node: &mut Node<'a>, attrs: &Attrs<'a>, at: usize) {
+        node.depth = self.dom.element(node.name, node.ns == Ns::Html, attrs.to_vec(), at);
+        node.vis = Vis::Live;
+    }
+
+    /// Put the replay's node `id` where foster parenting puts it: before the table at stack index `t`,
+    /// in the table's parent, or at the end of the element above the table when it has none.
+    fn dom_foster(&mut self, t: usize, id: u32) {
+        let table = self.stack[t].depth;
+        if self.dom.parent(table) != dom::NIL {
+            self.dom.insert_before(table, id);
+        } else {
+            self.dom.append(self.stack[t - 1].depth, id);
+        }
+    }
+
     /// Insert an HTML element for a start tag.
     fn insert_html(&mut self, m: &mut Matcher<'a>, t: &StartTok<'a, '_>) {
         let node = self.new_node(t.name, t.tag, Ns::Html, t.attrs);
@@ -551,7 +759,8 @@ impl<'a> Browser<'a> {
 
     /// Insert an element the page never wrote (no attributes, no source of its own), at `at`.
     fn insert_synth(&mut self, m: &mut Matcher<'a>, name: &'static [u8], tag: Tag, at: usize) {
-        let node = self.new_node(name, tag, Ns::Html, &[]);
+        let mut node = self.new_node(name, tag, Ns::Html, &[]);
+        node.flags |= SYNTH;
         self.insert_node(m, node, &[], at);
     }
 
@@ -577,16 +786,47 @@ impl<'a> Browser<'a> {
     /// Insert a character run where the next node goes.
     fn insert_text(&mut self, m: &mut Matcher<'a>, b: &'a [u8], dm: DataMode, s: usize) {
         match self.location() {
-            Loc::Inert | Loc::Document => m.absorb_into_text_gap(s, s + b.len()),
+            Loc::Inert | Loc::Document => self.absorb(m, s, s + b.len()),
             Loc::Into(i) => {
-                self.place(m, i, s);
-                m.buffer_text(b, dm, s);
+                if REPLAY {
+                    if !Self::no_node(m, b, dm) {
+                        self.dom.append_text(self.stack[i].depth, (b, dm, s));
+                    }
+                } else {
+                    self.place(m, i, s);
+                    m.buffer_text(b, dm, s);
+                }
                 self.stack[i].flags |= HAS_CHILD;
             }
             Loc::Foster(t) => {
-                self.foster_place(m, t, s);
-                m.buffer_text(b, dm, s);
+                self.retro |= RETRO_FOSTER;
+                if REPLAY {
+                    if !Self::no_node(m, b, dm) {
+                        let table = self.stack[t].depth;
+                        if self.dom.parent(table) != dom::NIL {
+                            self.dom.text_before(table, (b, dm, s));
+                        } else {
+                            self.dom.append_text(self.stack[t - 1].depth, (b, dm, s));
+                        }
+                    }
+                } else {
+                    self.foster_place(m, t, s);
+                    m.buffer_text(b, dm, s);
+                }
             }
+        }
+    }
+
+    /// A run that is no text node: markup-mode NUL, which a browser drops (see [`Matcher::buffer_text`]).
+    fn no_node(m: &Matcher<'a>, b: &[u8], dm: DataMode) -> bool {
+        m.input.keeps_nul() && dm == DataMode::Normal && b.iter().all(|&c| c == 0)
+    }
+
+    /// Markup over `[from, to)` that leaves no node. Streaming, the text node around it continues
+    /// across it; the replay's tree needs no telling.
+    fn absorb(&self, m: &mut Matcher<'a>, from: usize, to: usize) {
+        if !REPLAY {
+            m.absorb_into_text_gap(from, to);
         }
     }
 
@@ -766,8 +1006,14 @@ impl<'a> Browser<'a> {
             let node = self.new_node(name, tag, Ns::Html, &attrs);
             let uid = node.uid;
             self.insert_node(m, node, &attrs, at);
-            if self.path.last() == Some(&uid) {
-                m.set_source_prefix(self.toks[tok as usize].span);
+            let span = self.toks[tok as usize].span;
+            if REPLAY {
+                let n = *self.cur();
+                if n.vis == Vis::Live {
+                    self.dom.set_prefix(n.depth, span);
+                }
+            } else if self.path.last() == Some(&uid) {
+                m.set_source_prefix(span);
             }
             self.toks[tok as usize].attrs = attrs;
             self.afe[j] = Afe::El { uid, tok };
@@ -797,6 +1043,9 @@ impl<'a> Browser<'a> {
 
     /// Put the held `<html>` whitespace back, continuing to `at`, with `<html>` the current element.
     fn release_html_text(&mut self, m: &mut Matcher<'a>, at: usize) {
+        if REPLAY {
+            return;
+        }
         if let Some(held) = self.html_text.take() {
             self.place(m, 0, at);
             m.restore_text(held, at);
@@ -826,6 +1075,145 @@ impl<'a> Browser<'a> {
             return;
         }
         self.mode = Mode::InBody;
+    }
+
+    // ------------------------------------------------------------------ early exit
+
+    /// Can nothing after `at` change a value the matcher has already accepted? Before the first
+    /// retroactive rule fires, every accepted value is the browser's; a rule that fires later reaches
+    /// back only through what is open now, or through a later `<html>`/`<body>` start tag.
+    fn settled(&self, m: &Matcher<'a>, at: usize) -> bool {
+        // A `<frameset>` would remove the body, with everything in it.
+        if self.frameset_ok && self.stack.get(1).is_some_and(|n| n.tag == Tag::Body) {
+            return false;
+        }
+        // Content fostered out of an open table goes before everything the table holds.
+        if self.stack.iter().any(|n| n.tag == Tag::Table && n.vis == Vis::Live) {
+            return false;
+        }
+        // A special element open inside a formatting element can still be its furthest block, moved
+        // out of it with its content.
+        let formatting = self.stack.iter().position(|n| n.vis != Vis::Inert && self.afe_index_of(n.uid).is_some());
+        if formatting.is_some_and(|k| self.stack[k + 1..].iter().any(|n| n.vis != Vis::Inert && n.cat & SPECIAL != 0)) {
+            return false;
+        }
+        // A later `<html>` or `<body>` start tag adds its attributes to the open one.
+        let (from, found) = self.frame_tag.get();
+        let found = if from <= at && found >= at {
+            found
+        } else {
+            let found = frame_tag_from(m.input.bytes(), at);
+            self.frame_tag.set((at, found));
+            found
+        };
+        found == usize::MAX
+    }
+
+    // ------------------------------------------------------------------ the replay's other rules
+
+    /// The `<select>` an option or a `<selectedcontent>` in the replay's tree belongs to: its nearest
+    /// ancestor `<select>`, with no `<option>` in between, and for an option no `<datalist>` or `<hr>`
+    /// and at most one `<optgroup>` either.
+    fn owner_select(&self, id: u32, option: bool) -> Option<u32> {
+        let mut optgroups = 0;
+        let mut a = self.dom.parent(id);
+        while a != dom::NIL {
+            let e = self.dom.elem(a)?;
+            if e.html {
+                let mut buf = [0; 24];
+                match lower(e.name, &mut buf) {
+                    Some(b"select") => return Some(a),
+                    Some(b"option") => return None,
+                    Some(b"datalist" | b"hr") if option => return None,
+                    Some(b"optgroup") if option => {
+                        optgroups += 1;
+                        if optgroups > 1 {
+                            return None;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            a = self.dom.parent(a);
+        }
+        None
+    }
+
+    fn has_attr(&self, id: u32, name: &[u8]) -> bool {
+        self.dom.elem(id).is_some_and(|e| e.attrs.iter().any(|(n, _)| n.eq_ignore_ascii_case(name)))
+    }
+
+    /// An option has been inserted into the replay's tree: its select's selectedness, as Chrome sets it
+    /// while parsing. A `selected` option becomes the selected one; otherwise the first option that is
+    /// not disabled does, in a select that shows one option (no `multiple`, `size` at most 1).
+    fn option_inserted(&mut self, option: u32) {
+        let Some(select) = self.owner_select(option, true) else { return };
+        let current = self.selected.iter().position(|&(s, _)| s == select);
+        let selected = if self.has_attr(option, b"selected") {
+            true
+        } else {
+            current.is_none() && !self.has_attr(option, b"disabled") && self.shows_one(select)
+        };
+        match (selected, current) {
+            (true, Some(k)) => self.selected[k].1 = option,
+            (true, None) => self.selected.push((select, option)),
+            (false, _) => {}
+        }
+    }
+
+    /// Does the select show a single option, so that one is selected by default?
+    fn shows_one(&self, select: u32) -> bool {
+        let Some(e) = self.dom.elem(select) else { return false };
+        if e.attrs.iter().any(|(n, _)| n.eq_ignore_ascii_case(b"multiple")) {
+            return false;
+        }
+        let size = e.attrs.iter().find(|(n, _)| n.eq_ignore_ascii_case(b"size")).and_then(|(_, v)| *v);
+        size.and_then(|v| std::str::from_utf8(v).ok()).and_then(|v| v.trim().parse::<u64>().ok()).is_none_or(|n| n <= 1)
+    }
+
+    /// The `<selectedcontent>` elements of `select` that take its selected option's content: none of a
+    /// `multiple` select's, and none inside an option.
+    fn selectedcontents(&self, select: u32) -> Vec<u32> {
+        if self.has_attr(select, b"multiple") {
+            return Vec::new();
+        }
+        let mut all = self.dom.descendants_where(select, |e| e.html && e.name.eq_ignore_ascii_case(b"selectedcontent"));
+        all.retain(|&sc| self.owner_select(sc, false) == Some(select));
+        all
+    }
+
+    /// Replace the content of `target` with copies of the option's.
+    fn copy_option(&mut self, option: u32, target: u32) {
+        self.dom.clear_children(target);
+        let mut c = self.dom.first_child(option);
+        while c != dom::NIL {
+            let copy = self.dom.deep_clone(c);
+            self.dom.append(target, copy);
+            c = self.dom.next_sibling(c);
+        }
+    }
+
+    /// An option has left the stack of open elements, popped or removed: if it is its select's selected
+    /// option, Chrome copies its content into the select's `<selectedcontent>` elements.
+    fn option_closed(&mut self, option: u32) {
+        let Some(select) = self.owner_select(option, true) else { return };
+        if !self.selected.iter().any(|&(s, o)| s == select && o == option) {
+            return;
+        }
+        for sc in self.selectedcontents(select) {
+            self.copy_option(option, sc);
+        }
+    }
+
+    /// A `<selectedcontent>` has been inserted: it takes the content of its select's selected option.
+    fn selectedcontent_inserted(&mut self, sc: u32) {
+        let Some(select) = self.owner_select(sc, false) else { return };
+        if self.has_attr(select, b"multiple") {
+            return;
+        }
+        if let Some(&(_, option)) = self.selected.iter().find(|&&(s, _)| s == select) {
+            self.copy_option(option, sc);
+        }
     }
 
     // ------------------------------------------------------------------ dispatch
@@ -860,7 +1248,7 @@ impl<'a> Browser<'a> {
     }
 }
 
-impl<'a> TreeBuilder<'a> for Browser<'a> {
+impl<'a, const REPLAY: bool> TreeBuilder<'a> for Browser<'a, REPLAY> {
     fn start_tag(
         &mut self,
         m: &mut Matcher<'a>,
@@ -877,7 +1265,7 @@ impl<'a> TreeBuilder<'a> for Browser<'a> {
         let before = self.stack.last().map(|n| n.uid);
         self.start(m, &t);
         if !self.touched {
-            m.absorb_into_text_gap(span_start, open_end);
+            self.absorb(m, span_start, open_end);
         }
         // Only an element this tag inserted, and left open, reads its content as text.
         if self.stack.last().map(|n| n.uid) == before || self.stack.last().is_some_and(|n| n.ns != Ns::Html) {
@@ -892,7 +1280,7 @@ impl<'a> TreeBuilder<'a> for Browser<'a> {
         self.touched = false;
         self.end(m, EndTok { name, tag: tag_of(name), start: close_start, end: close_end });
         if !self.touched {
-            m.absorb_into_text_gap(close_start, close_end);
+            self.absorb(m, close_start, close_end);
         }
     }
 
@@ -901,7 +1289,7 @@ impl<'a> TreeBuilder<'a> for Browser<'a> {
         if std::mem::take(&mut self.skip_lf) {
             let k = leading_lf(b);
             if k > 0 {
-                m.absorb_into_text_gap(s, s + k);
+                self.absorb(m, s, s + k);
                 b = &b[k..];
                 s += k;
             }
@@ -929,20 +1317,26 @@ impl<'a> TreeBuilder<'a> for Browser<'a> {
             self.quirks = doctype::doc_mode(raw) == doctype::DocMode::Quirks;
             self.mode = Mode::BeforeHtml;
         }
-        m.absorb_into_text_gap(from, to);
+        self.absorb(m, from, to);
     }
 
     fn comment(&mut self, m: &mut Matcher<'a>, from: usize, to: usize) {
         self.skip_lf = false;
-        self.release_html_text(m, from);
         // A comment is a node of whatever it is inserted into. It ends the text node there; inserted
         // anywhere else (the document, the `<html>` after the body, a table whose text is fostered out
         // of it, template content) it leaves the pending text node open.
         let target = match self.mode {
             Mode::Initial | Mode::BeforeHtml | Mode::AfterAfterBody | Mode::AfterAfterFrameset => None,
-            Mode::AfterBody => self.stack.first(),
-            _ => self.stack.last(),
+            Mode::AfterBody => self.stack.first().copied(),
+            _ => self.stack.last().copied(),
         };
+        if REPLAY {
+            if let Some(n) = target.filter(|n| n.vis == Vis::Live && n.tag != Tag::Template) {
+                self.dom.append_comment(n.depth);
+            }
+            return;
+        }
+        self.release_html_text(m, from);
         let splits =
             target.is_some_and(|n| n.vis == Vis::Live && n.tag != Tag::Template && self.path.last() == Some(&n.uid));
         if !splits {
@@ -952,6 +1346,19 @@ impl<'a> TreeBuilder<'a> for Browser<'a> {
 
     fn finish(&mut self, m: &mut Matcher<'a>) {
         let end = m.input.len();
+        if REPLAY {
+            // End of input pops everything, the current node first.
+            for k in (0..self.stack.len()).rev() {
+                let n = self.stack[k];
+                if n.vis == Vis::Live {
+                    self.dom.set_end(n.depth, end);
+                    if n.tag == Tag::Option {
+                        self.option_closed(n.depth);
+                    }
+                }
+            }
+            return;
+        }
         if let Some(held) = self.html_text.take() {
             m.flush_text();
             while self.path.len() > 1 {
@@ -969,5 +1376,12 @@ impl<'a> TreeBuilder<'a> for Browser<'a> {
             }
             self.unpark_last(m, end);
         }
+    }
+
+    /// Streaming stops at the first retroactive rule, which a replay answers instead, and once the
+    /// matcher is done if nothing that follows can change what it has seen ([`Self::settled`]). A
+    /// replay builds the whole tree.
+    fn stop(&self, m: &Matcher<'a>, at: usize) -> bool {
+        !REPLAY && ((self.retro & RETRO_RULES != 0 && !self.run_through) || (m.done() && self.settled(m, at)))
     }
 }

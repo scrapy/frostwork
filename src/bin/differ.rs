@@ -7,10 +7,13 @@
 //!            (k groups in ONE pass, so cross-group routing gets differential coverage)
 //!            encoding case = `T \t ENC \t CONTENT_TYPE \t HEXHTML \t sel1 \t ...` (CONTENT_TYPE = a
 //!            raw `Content-Type` header value or empty; used by tools/enc_check.py's precedence rows)
+//!            census case   = `R \t PATH \t sel1 \t ...`: which of browser mode's retroactive rules fire
+//!            on the file at PATH (tools/retro_census.py)
 //!   stdout : flat    -> a JSON array of value-columns (arrays of strings)
 //!            grouped -> a JSON array of `k` groups, each an array of rows, each row an array of
 //!                       sub-field value-columns  (`[group][row][sub][value]`)
 //!            encoding -> `{"encoding": NAME, "source": RANK, "values": [value-columns]}`
+//!            census   -> the rule bits as a number, or `null` for an unreadable file
 //!
 //! One long-running process streams the whole batch, so the Python driver (which owns lxml/Parsel)
 //! can diff millions of (page × selector) pairs without a PyO3 build or a process-per-case.
@@ -115,6 +118,19 @@ fn main() {
                 out.push_str(if support.is_supported() { "true" } else { "false" });
             }
             out.push(']');
+        } else if first == "R" {
+            // retroactive census (tools/retro_census.py): R \t PATH \t sel1 ... -> the rule bits that
+            // fire on the file's bytes in browser mode (frostwork::Plan::retro_census)
+            let path = parts.next().unwrap_or("");
+            let sels: Vec<String> = parts.map(str::to_string).collect();
+            let browser = CompileOptions { mode: ParseMode::Browser, first_only: &[] };
+            let bits = match std::fs::read(path) {
+                Ok(html) => Plan::compile_with(&sels, &[], browser)
+                    .retro_census(&html, frostwork::EncodingHints::default())
+                    .to_string(),
+                Err(_) => "null".to_string(),
+            };
+            out.push_str(&bits);
         } else if first == "T" {
             // encoding: T \t ENC \t CONTENT_TYPE \t HEX \t sel1 ...
             let non_empty = |s: &'_ str| -> Option<String> { (!s.is_empty()).then(|| s.to_string()) };

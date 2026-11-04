@@ -845,6 +845,17 @@ impl Plan {
     }
 }
 
+impl Plan {
+    /// Which of browser mode's retroactive rules fire on `html`, one bit per rule (see the header of
+    /// `matcher::browser`), whatever the plan's mode. A second `<html>`/`<body>` tag counts only when it
+    /// adds an attribute this plan's selectors ask about. For `tools/retro_census.py`.
+    #[doc(hidden)]
+    pub fn retro_census(&self, html: &[u8], hints: EncodingHints<'_>) -> u8 {
+        let (bytes, value_enc, keeps_nul) = prepare_bytes(html, hints, ParseMode::Browser);
+        self.schema.retro_census(matcher::EncodedInput::new(&bytes, value_enc, keeps_nul))
+    }
+}
+
 /// One streaming pass returning both flat query columns and grouped (`Many`/`One`) results.
 /// `grouped[g]` is group `g`'s rows in document order; each row is one value-column per sub-field
 /// (`[group][row][subfield][value]`). The caller (the Python/Rust `Page` layer) applies per-field
@@ -3533,6 +3544,7 @@ mod browser_mode_tests {
         h.extend(b"x<p id=p>y</p>z</div>w");
         // d509 > [d510, d511, d512, d513 > "w", d514 > "xz", p > "y"]
         assert_eq!(ex(&h, "#d509 > *::attr(id)"), v(&["d510", "d511", "d512", "d513", "d514", "p"]));
+        assert_eq!(ex(&h, "#d509 ::text"), v(&["w", "xz", "y"]), "in document order");
         assert_eq!(ex(&h, "#d514::text"), v(&["xz"]));
         assert_eq!(ex(&h, "#d513::text"), v(&["w"]));
         assert_eq!(ex(&h, "#d508 > *::attr(id)"), v(&["d509"]));
@@ -3562,5 +3574,148 @@ mod browser_mode_tests {
         // a custom element can; a second template on the same host stays
         let two = b"<x-y id=h><template id=t shadowrootmode=OPEN>x</template><template id=u shadowrootmode=open>y</template></x-y>";
         assert_eq!(ex(two, "#h > template::attr(id)"), v(&["u"]));
+    }
+
+    // The retroactive rules. A document where one fires is replayed over its finished tree, so what was
+    // matched before the rule fired comes out as the browser has it. Every expected value below is
+    // Chrome 156's (tools/browser_oracle/client.py).
+
+    /// A later `<html>` or `<body>` tag's attributes reach the element itself and everything matched
+    /// before the tag.
+    #[test]
+    fn a_later_frame_tag_merges_into_what_was_matched() {
+        // html.k[lang=en] > [head, body#b.late[title=t] > [p#p > "a", div#d > "y"]]
+        let h = b"<!DOCTYPE html><p id=p>a</p><html lang=en class=k><body id=b><body class=late title=t><div id=d>y</div>";
+        assert_eq!(ex(h, "html.k #p::text"), v(&["a"]));
+        assert_eq!(ex(h, "html::attr(class)"), v(&["k"]));
+        assert_eq!(ex(h, "body.late#b > *::attr(id)"), v(&["p", "d"]));
+        assert_eq!(ex(h, "body::attr(title)"), v(&["t"]));
+        assert_eq!(ex(h, "[title=t] div::text"), v(&["y"]));
+        // an attribute no selector asks about changes nothing, and costs no replay
+        assert_eq!(ex(b"<p>a</p><body lang=en>", "body p::text"), v(&["a"]));
+    }
+
+    /// Fostered content goes before its table: in document order, in the table's sibling positions, and
+    /// into the text node before the table.
+    #[test]
+    fn fostered_content_comes_before_its_table() {
+        // body > ["xy", div#d > "F", "z", table#t > tbody > tr > td#c > "a", "w"]
+        let h = b"<!DOCTYPE html>x<table id=t><tr><td id=c>a</td></tr>y<div id=d>F</div>z</table>w";
+        assert_eq!(ex(h, "body > *::attr(id)"), v(&["d", "t"]));
+        assert_eq!(ex(h, "body::text"), v(&["xy", "z", "w"]));
+        assert_eq!(ex(h, "#d + #t::attr(id)"), v(&["t"]));
+        assert_eq!(ex(h, "#t:nth-child(2)::attr(id)"), v(&["t"]));
+        assert_eq!(ex(h, "#t ~ div::attr(id)"), NONE);
+        assert_eq!(ex(h, "#d:first-child::attr(id)"), v(&["d"]));
+        assert_eq!(ex(h, "body ::text"), v(&["xy", "F", "z", "a", "w"]));
+        assert_eq!(ex(h, "td, div"), v(&["<div id=d>F</div>", "<td id=c>a</td>"]));
+    }
+
+    /// A `<frameset>` takes the body out of the document with everything in it, while frameset-ok holds,
+    /// and U+FFFD, however it is spelled, leaves frameset-ok set in Chrome.
+    #[test]
+    fn a_frameset_removes_the_body() {
+        // html > [head, frameset#f > frame#g]
+        let h = b"<a id=a><div id=d></div> <frameset id=f><frame id=g></frameset>";
+        assert_eq!(ex(h, "#a, #d"), NONE);
+        assert_eq!(ex(h, "html > *::attr(id)"), v(&["f"]));
+        assert_eq!(ex(h, "head + frameset > frame::attr(id)"), v(&["g"]));
+        for lead in ["&#0;", "&#xFFFD;", "\u{FFFD}", "&#xD800;", "&#x110000;", "<div>&#0;</div>"] {
+            let h = format!("{lead}<frameset id=f>");
+            assert_eq!(ex(h.as_bytes(), "html > frameset::attr(id)"), v(&["f"]), "{lead}");
+        }
+        // any other character ends frameset-ok, and the frameset is ignored
+        assert_eq!(ex(b"&#x80;<frameset id=f>", "frameset"), NONE);
+    }
+
+    /// The adoption agency with a furthest block: the block leaves the formatting element, and what it
+    /// held moves into a copy of that element inside it.
+    #[test]
+    fn the_adoption_agency_moves_what_was_matched() {
+        // body > [b#b > "1", p#p > [b#b > ["2", i#i > "3"], i#i > "4"]]
+        let h = b"<!DOCTYPE html><b id=b>1<p id=p>2<i id=i>3</b>4</p>";
+        assert_eq!(ex(h, "b p::text"), NONE);
+        assert_eq!(ex(h, "p > b::text"), v(&["2"]));
+        assert_eq!(ex(h, "#b + #p::attr(id)"), v(&["p"]));
+        assert_eq!(ex(h, "#p > b > #i::text"), v(&["3"]));
+        assert_eq!(ex(h, "#p::text"), NONE);
+        assert_eq!(ex(h, "b::text"), v(&["1", "2"]));
+        assert_eq!(ex(h, "i::text"), v(&["3", "4"]));
+        // body > [a#a > "1", div#d > [a#a > "2", a#e > "3"]]
+        let a = b"<!DOCTYPE html><a id=a href=x>1<div id=d>2<a id=e href=y>3</a></div>";
+        assert_eq!(ex(a, "a::attr(id)"), v(&["a", "a", "e"]));
+        assert_eq!(ex(a, "#d > a::text"), v(&["2", "3"]));
+        assert_eq!(ex(a, "a div::attr(id)"), NONE);
+        assert_eq!(ex(a, "body > *::attr(id)"), v(&["a", "d"]));
+    }
+
+    /// Chrome copies the selected option's content into its select's `<selectedcontent>` elements: when
+    /// the option leaves the stack, and when a `<selectedcontent>` is inserted after it.
+    #[test]
+    fn the_selected_option_is_copied_into_selectedcontent() {
+        // select#s > [button > selectedcontent#c > "B", option#o > [b#x > "A", " t"], option#q > "B"]
+        let h = b"<!DOCTYPE html><select id=s><button><selectedcontent id=c></selectedcontent></button>\
+                  <option id=o><b id=x>A</b> t</option><option selected id=q>B</option></select>";
+        assert_eq!(ex(h, "#c::text"), v(&["B"]));
+        assert_eq!(ex(h, "[id=x]::text"), v(&["A"]));
+        assert_eq!(ex(h, "option::text"), v(&[" t", "B"]));
+        // the copy is a copy, ids included: select > [button > selectedcontent > [b#x > "A", " t"], option]
+        let copy = b"<select><button><selectedcontent></button><option><b id=x>A</b> t</option></select>";
+        assert_eq!(ex(copy, "[id=x]::text"), v(&["A", "A"]));
+        assert_eq!(ex(copy, "selectedcontent::text"), v(&[" t"]));
+        // inserted after the option, it takes a copy and keeps its own text: one node "AZ"
+        let after = b"<select><option>A</option><button><selectedcontent>Z</selectedcontent></button></select>";
+        assert_eq!(ex(after, "selectedcontent::text"), v(&["AZ"]));
+        // the first option that is not disabled is the selected one; a multiple select has none
+        let disabled = b"<select><button><selectedcontent></selectedcontent></button><option disabled>A</option><option>B</option></select>";
+        assert_eq!(ex(disabled, "selectedcontent::text"), v(&["B"]));
+        let multiple = b"<select multiple><button><selectedcontent></selectedcontent></button><option>A</option></select>";
+        assert_eq!(ex(multiple, "selectedcontent::text"), NONE);
+    }
+
+    /// Early exit stops only where nothing later can change a value already accepted. Each of these
+    /// accepts a first value before a retroactive rule fires that changes it.
+    #[test]
+    fn early_exit_waits_for_what_can_still_change() {
+        let first = |html: &[u8], q: &str| {
+            Plan::compile_first_only(&[q], &[], &[true]).extract(html, None, None).0.pop().unwrap()
+        };
+        // the paragraph leaves the <b> at </b>
+        assert_eq!(first(b"<!DOCTYPE html><b><p>x<span>y</span></b>", "b p::text"), NONE);
+        // the body takes the class at the later tag
+        assert_eq!(first(b"<!DOCTYPE html><p>a</p><p>b</p><body class=x>", "body:not(.x) p::text"), NONE);
+        // the second <div> is fostered before the table that holds the first
+        let foster = b"<!DOCTYPE html><table><tr><td><div>A</div></td></tr><div>B</div></table>";
+        assert_eq!(first(foster, "div::text"), v(&["B"]));
+        // the frameset removes the body
+        assert_eq!(first(b"<a id=x></a><div></div><frameset><frame></frameset>", "a::attr(id)"), NONE);
+        // and where nothing can change it, the first value stands
+        assert_eq!(first(b"<!DOCTYPE html><p>a</p><p>b</p>", "p::text"), v(&["a"]));
+    }
+
+    /// A deferred tail is read by a second pass that must open what the first pass opened, so it runs
+    /// under the replay whenever the first pass did.
+    #[test]
+    fn a_deferred_tail_follows_the_replay() {
+        // li:last-child > [b > "F", table > tbody > tr > td > "c"]
+        let foster = b"<!DOCTYPE html><ul><li>a</li><li><table><tr><td>c</td></tr><b>F</b></table></li></ul>";
+        assert_eq!(ex(foster, "li:last-child b::text"), v(&["F"]));
+        assert_eq!(ex(foster, "li:last-child ::text"), v(&["F", "c"]));
+        // div#d > [b > "1", p > [b > "2", "3"]]
+        let aa = b"<!DOCTYPE html><div id=d><b>1<p>2</b>3</p></div><div><i>4</i></div>";
+        assert_eq!(ex(aa, "div:has(b) ::text"), v(&["1", "2", "3"]));
+        assert_eq!(ex(aa, "p:has(b) ::text"), v(&["2", "3"]));
+        // body.x > ul > [li > "a", li > ["b", i > "c"]]
+        let merged = b"<!DOCTYPE html><ul><li>a</li><li>b<i>c</i></li></ul><body class=x>";
+        assert_eq!(ex(merged, "body.x li:last-child ::text"), v(&["b", "c"]));
+        assert_eq!(ex(merged, ".x li:last-child i::text"), v(&["c"]));
+        // the body is gone
+        let fs = b"<div id=w><span id=a></span><span id=l></span></div><frameset><frame></frameset>";
+        assert_eq!(ex(fs, "div:has(span) span::attr(id)"), NONE);
+        assert_eq!(ex(fs, "span:last-child::attr(id)"), NONE);
+        // select > button > selectedcontent > [b > "A", "t"]
+        let sc = b"<!DOCTYPE html><select><button><selectedcontent></selectedcontent></button><option><b>A</b>t</option></select>";
+        assert_eq!(ex(sc, "selectedcontent:has(b) ::text"), v(&["A", "t"]));
+        assert_eq!(ex(sc, "button:has(b) b::text"), v(&["A"]));
     }
 }

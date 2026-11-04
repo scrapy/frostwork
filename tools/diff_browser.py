@@ -19,11 +19,11 @@ see it:
     VALUE_TEXTS, for the value columns below, under the same refusal, plus every TAIL_CONTEXTS x
     TAIL_BODIES document, where a deferred winner's content depends on what is open outside it.
 
-Until browser mode implements a construct, its divergences are expected. So every differing column is
-REDUCED to the smallest token subsequence that still differs on that column (ids are kept, so the column
-still names the same element), and the reduced document, not the page it came from, is attributed to a
-construct from section 3's table. Page-scoped attribution over-credits (AGENTS.md, the truncated-tag
-lesson); a two-token repro has nowhere to hide. Anything no construct explains is NOVEL.
+Every differing column is REDUCED to the smallest token subsequence that still differs on that column (ids
+are kept, so the column still names the same element), and the reduced document, not the page it came from,
+is attributed to a row of CONSTRUCTS: a section 3 construct browser mode does not build as the browser does.
+Page-scoped attribution over-credits (AGENTS.md, the truncated-tag lesson); a two-token repro has nowhere to
+hide. Anything no construct explains is NOVEL, and today that is every tree divergence.
 
 VALUE COLUMNS grade what a selector returns: conformant.py's basket, RULE_SELECTORS (case folding, class
 lists, NUL, entities, control characters, deferred winners whose value is inside them) and per-id
@@ -111,6 +111,9 @@ ALPHABET: list[str] = [
     "<template{} shadowrootmode=OPEN>", " ", "\r\n", "&#10;",
     '<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">',
     '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "x">',
+    # The replay's inputs: the selectedness `<selectedcontent>` copies (a `selected` option, a disabled
+    # one, a `multiple` select, which has none), and U+FFFD, which leaves frameset-ok set in Chrome.
+    "<option{} selected>", "<option{} disabled>", "<select{} multiple>", "</selectedcontent>", "&#0;", "\ufffd",
 ]
 MAX_TOKENS = 7
 
@@ -575,14 +578,6 @@ def tag_name(token: str) -> str:
     return body.split("{", 1)[0].split(">", 1)[0].split("/", 1)[0].split(" ", 1)[0].lower()
 
 
-FORMATTING = {"a", "b", "big", "code", "em", "font", "i", "nobr", "s", "small", "strike", "strong", "tt", "u"}
-# What a table can hold without fostering it out ("in table" and its sub-modes).
-TABLE_CONTENT = {"table", "caption", "colgroup", "col", "tbody", "thead", "tfoot", "tr", "td", "th",
-                 "template", "script", "style", "form"}
-# Tokens that leave the frame where it is: they can come before an explicit <body> without opening one.
-FRAME_NEUTRAL = {"<!--c-->", "\n", "</%>", "</>", "<?pi?>"}
-
-
 @dataclass
 class Repro:
     """A reduced document as the attribution rules see it.
@@ -625,74 +620,18 @@ class Repro:
         return sum(n in names for n in self.starts())
 
 
-def _second_frame_tag(r: Repro) -> bool:
-    """A `<body>` after body content, or an `<html>` after anything: the browser merges its attributes."""
-    toks = r.tokens
-    for k, t in enumerate(toks):
-        if not _start_tag(t) or tag_name(t) not in ("html", "body"):
-            continue
-        before = [u for u in toks[:k] if u not in FRAME_NEUTRAL and not u.lower().startswith("<!doctype")]
-        if tag_name(t) == "html" and before:
-            return True
-        if tag_name(t) == "body" and any(tag_name(u) not in ("html", "head") or not _start_tag(u) for u in before
-                                         if u != "</head>"):
-            return True
-    return False
-
-
-def _misnested_end(r: Repro) -> bool:
-    """A formatting element ended with an element that is not a formatting element opened inside it: by
-    its end tag, or by a second `<a>` or `<nobr>`, which run the adoption agency for the first one."""
-    toks = r.tokens
-    for k, t in enumerate(toks):
-        if _start_tag(t) and tag_name(t) in FORMATTING:
-            name = tag_name(t)
-            for j in range(k + 1, len(toks)):
-                u = toks[j]
-                if u == f"</{name}>" or (name in ("a", "nobr") and _start_tag(u) and tag_name(u) == name):
-                    if any(_start_tag(v) and tag_name(v) not in FORMATTING for v in toks[k + 1:j]):
-                        return True
-                    break
-    return False
-
-
-def _foster(r: Repro) -> bool:
-    toks = r.tokens
-    for k, t in enumerate(toks):
-        if not (_start_tag(t) and tag_name(t) == "table"):
-            continue
-        for u in toks[k + 1:]:
-            if u in ("</table>",) or (_start_tag(u) and tag_name(u) in ("td", "th", "caption")):
-                break
-            if u == "t" or u == "x" or (_start_tag(u) and tag_name(u) not in TABLE_CONTENT):
-                return True
-    return False
-
-
 @dataclass(frozen=True)
 class Construct:
     name: str                       # the section 3 row it stands for
     test: Callable[[Repro], bool]   # does this smallest repro exhibit it?
 
 
-# What browser mode does not stream: section 3's constructs whose rule changes a decision the one-pass
-# matcher has already made, so only the forward state (what is open, where later content goes) is the
-# browser's. Every other section 3 row is implemented, so its divergences are NOVEL and the gate holds it
-# at zero.
-CONSTRUCTS: list[Construct] = [
-    # The body leaves the document with everything in it; the matches made there stand.
-    Construct("frameset replacing the body", lambda r: "frameset" in r.starts()),
-    # The attributes reach the elements matched after the tag, not the frame element's own match.
-    Construct("second <html>/<body> tag", _second_frame_tag),
-    # The furthest block moves out of the formatting element, and its content into a clone, after both
-    # were matched.
-    Construct("adoption agency", _misnested_end),
-    # A fostered node comes before its table in document order, and counts as following it here.
-    Construct("foster parenting", _foster),
-    # When an <option> is popped, a copy of its content replaces the children of the <selectedcontent> in
-    # its <select>, which has usually closed by then.
-    Construct("<selectedcontent> clone", lambda r: {"select", "selectedcontent", "option"} <= set(r.starts())),
-]
+# The section 3 constructs browser mode does not build as the browser does, each a rule its reduced repro
+# satisfies. Empty: every section 3 row is implemented, the five retroactive rules by the replay (the header
+# of `src/matcher/browser/mod.rs`), so every tree divergence is NOVEL and the gate holds each construct at
+# zero. A construct that cannot be made exact gets a row here, with the reason, and a divergence entry in
+# docs/COMPATIBILITY.md.
+CONSTRUCTS: list[Construct] = []
 
 
 def counterfactuals(r: Repro) -> list[Doc]:
@@ -853,9 +792,21 @@ def _raw_source(r: ValueRepro) -> bool:
     return all(_outer_root(a) is not None and _outer_root(a) == _outer_root(b) for a, b in zip(r.engine, r.oracle))
 
 
+def _merged_frame_source(r: ValueRepro) -> bool:
+    """Outer HTML of an `<html>` or `<body>` that a later start tag merged attributes into: the raw source
+    holds the element's own start tag, so the browser's has every name it has and more."""
+    if not is_node_query(r.sel) or len(r.engine) != len(r.oracle):
+        return False
+    pairs = [(_outer_root(a), _outer_root(b)) for a, b in zip(r.engine, r.oracle)]
+    if any(a is None or b is None for a, b in pairs) or all(a == b for a, b in pairs):
+        return False
+    return all(a == b or (a[0] == b[0] in ("html", "body") and set(a[1]) < set(b[1])) for a, b in pairs)
+
+
 VALUE_CONSTRUCTS: list[ValueConstruct] = [
     ValueConstruct("quirks-mode class and id matching (deferred)", _quirks_class_or_id),
     ValueConstruct("raw-source outer HTML", _raw_source),
+    ValueConstruct("raw-source outer HTML of a merged <html>/<body>", _merged_frame_source),
 ]
 
 

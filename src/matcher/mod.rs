@@ -1064,6 +1064,10 @@ pub struct Matcher<'a> {
     // DROPPED end tags can be re-joined first (libxml2 makes it ONE text node; see `buffer_text`). Flushed by
     // the next start tag / matched end tag / EOF, so ordering vs. tag events is unchanged.
     pending_text: Option<PendingText<'a>>,
+    /// A browser-mode replay drives this scan (see [`Self::begin_replay`]): positions are document-order
+    /// ranks, and `replay_spans[rank]` is the raw source of the element at that rank.
+    replay: bool,
+    replay_spans: Vec<(usize, usize)>,
 }
 
 /// A buffered text node. In the common case it is ONE borrowed run (`joined` empty, no allocation).
@@ -1485,6 +1489,16 @@ impl CompiledSchema {
         }
         // Every tail is registered by now (Case-B triggers emit no value), so the groups are final.
         let (tail_schemas, tail_pass) = tails.finish();
+        // Browser mode streams a document unless a retroactive rule fires, and a second `<html>` or
+        // `<body>` tag counts only by the attributes it adds that a selector asks about. The tail pass
+        // must open what the first pass opened, so its selectors' attributes count too.
+        if let Some(pass) = &tail_pass {
+            for name in &pass.schema.interesting {
+                if !interesting.iter().any(|x| x.eq_ignore_ascii_case(name)) {
+                    interesting.push(name.clone());
+                }
+            }
+        }
 
         // Case-B preceding-sibling TRIGGER entries: each carries `C`'s deferred predicate and, at `C`'s
         // close, fires its sibling boundary bit on the parent (instead of emitting) so the later value
@@ -1652,6 +1666,9 @@ impl CompiledSchema {
     ///
     /// A dead (over-budget) column is excluded rather than blocking: it can never receive a value, so
     /// requiring one would disarm the mechanism instead of just never firing.
+    ///
+    /// Browser mode adds a third runtime condition: a later token must not be able to reach back and
+    /// change a value already taken, as a retroactive rule does (see `browser::Browser::settled`).
     pub fn arm_early_exit(&mut self, first_only: &[bool]) {
         self.stop_mask = 0;
         self.first_mask = 0;
@@ -1694,8 +1711,14 @@ impl CompiledSchema {
     pub fn run(&self, input: EncodedInput) -> (FlatColumns, Vec<GroupRows>) {
         match self.mode {
             ParseMode::Lxml => self.run_with(input, libxml2::Libxml2::default(), Vec::new()),
-            ParseMode::Browser => self.run_with(input, browser::Browser::default(), Vec::new()),
+            ParseMode::Browser => browser::run(self, input),
         }
+    }
+
+    /// Which of browser mode's retroactive rules fire on one document, as a bit per rule (see
+    /// `browser::retro_census`). For measuring how often each does; nothing else reads it.
+    pub(crate) fn retro_census(&self, input: EncodedInput) -> u8 {
+        browser::retro_census(self, input)
     }
 
     /// One document under one tree builder. Generic so each mode's per-token path is its own code, with
@@ -1799,6 +1822,8 @@ impl<'a> Matcher<'a> {
             marks: Vec::new(),
             mark_at: 0,
             pending_text: None,
+            replay: false,
+            replay_spans: Vec::new(),
         }
     }
 
@@ -1850,7 +1875,7 @@ impl<'a> Matcher<'a> {
             }
             max_end = e;
             let tail = &self.schema.tail_schemas[slot];
-            let (cols, _) = tail.schema.run(self.input.sub(s..e));
+            let (cols, _) = tail.schema.run(self.input.sub(self.raw_span(s..e)));
             for (vals, &col) in cols.into_iter().zip(&tail.cols) {
                 self.results[col].extend(vals);
             }
@@ -1884,7 +1909,7 @@ impl<'a> Matcher<'a> {
                 _ => marks.push((elem, slot.to_string())),
             }
         }
-        let (cols, _) = pass.schema.run_with(self.input, browser::Browser::default(), marks);
+        let (cols, _) = browser::run_tail(&pass.schema, self.input, marks, self.replay);
         for (vals, &col) in cols.into_iter().zip(&pass.cols) {
             self.results[col].extend(vals);
         }
@@ -2934,29 +2959,41 @@ impl<'a> Matcher<'a> {
         }
     }
 
-    /// Add the attributes of `raw_attrs` that the open element at `depth` does not already have, the
-    /// way a second `<html>` or `<body>` start tag does in a browser. Later elements see them, since
-    /// matching reads an ancestor's attributes when it runs; the element's own match was decided when
-    /// it opened and stays as it was.
-    pub(super) fn merge_attrs(&mut self, depth: usize, raw_attrs: &[(&'a [u8], Option<&'a [u8]>)]) {
+    /// Would a second `<html>` or `<body>` start tag with `raw_attrs` give the open element at `depth`
+    /// an attribute a selector asks about that it does not have yet? A browser adds those to it.
+    pub(super) fn merge_adds(&self, depth: usize, raw_attrs: &[(&'a [u8], Option<&'a [u8]>)]) -> bool {
         let attrs = if self.decode_names {
             self.materialize_attrs::<true>(raw_attrs)
         } else {
             self.materialize_attrs::<false>(raw_attrs)
         };
-        if attrs.is_empty() {
-            return;
+        let el = &self.stack[depth];
+        attrs.iter().any(|(name, _)| !el.attrs.iter().any(|(n, _)| n.eq_ignore_ascii_case(name)))
+    }
+
+    /// The scan is a browser-mode replay: every position the builder passes from here on is a node's
+    /// document-order rank, and an element's raw source is registered against its rank
+    /// ([`Self::register_span`]).
+    pub(super) fn begin_replay(&mut self) {
+        self.replay = true;
+    }
+
+    /// In a replay, the raw source of the element at rank `rank`.
+    pub(super) fn register_span(&mut self, rank: usize, start: usize, end: usize) {
+        if self.replay_spans.len() <= rank {
+            self.replay_spans.resize(rank + 1, (0, 0));
         }
-        let wants = self.schema.wants;
-        let el = &mut self.stack[depth];
-        for (name, value) in attrs {
-            if !el.attrs.iter().any(|(n, _)| n.eq_ignore_ascii_case(name)) {
-                el.attrs.push((name, value));
-            }
+        self.replay_spans[rank] = (start, end);
+    }
+
+    /// The byte range of the raw source a `start..end` position pair stands for: itself, or in a
+    /// replay the span registered against the element at rank `start`.
+    fn raw_span(&self, span: std::ops::Range<usize>) -> std::ops::Range<usize> {
+        if !self.replay {
+            return span;
         }
-        if wants.any() {
-            el.sig = el.signature(wants);
-        }
+        let (s, e) = self.replay_spans[span.start];
+        s..e
     }
 }
 
@@ -2972,6 +3009,7 @@ impl<'a> Matcher<'a> {
 
     /// An element's outer HTML: its raw source, after its prefix if it has one.
     fn source(&self, prefix: (usize, usize), span: std::ops::Range<usize>) -> String {
+        let span = self.raw_span(span);
         if prefix == (0, 0) {
             return self.input.raw_source(span);
         }
@@ -3352,9 +3390,9 @@ mod tail_merge_tests {
         let input = EncodedInput::new(page, encoding_rs::UTF_8, true);
         assert_eq!(sch.run(input).0, [Vec::<String>::new()], "an unmarked page matches nothing");
         // `elem` counts html, head, body, ul, then the two <li>s
-        let marked = sch.run_with(input, browser::Browser::default(), vec![(5, "0".to_string())]).0;
+        let marked = browser::run_tail(&sch, input, vec![(5, "0".to_string())], false).0;
         assert_eq!(marked, [["u"]], "the second <li> is the one marked");
-        let other = sch.run_with(input, browser::Browser::default(), vec![(5, "1".to_string())]).0;
+        let other = browser::run_tail(&sch, input, vec![(5, "1".to_string())], false).0;
         assert_eq!(other, [Vec::<String>::new()], "a mark for another slot is not this slot's");
     }
 

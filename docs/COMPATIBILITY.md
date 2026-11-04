@@ -53,37 +53,31 @@ support per mode.
 
 ### Browser mode's divergences from Chrome
 
-`make gate-browser` (`tools/diff_browser.py`) grades the whole tree and the value columns against Chrome
-and files every divergence under one of the constructs below, reduced to its smallest token sequence.
-Each is a rule that changes a decision the one-pass matcher has already made, so only its forward state
-(what is open, where later content goes) follows Chrome:
+`make gate-browser` (`tools/diff_browser.py`) grades the whole tree and the value columns against Chrome,
+reduces every divergence to its smallest token sequence and fails on any. No tree construct is a
+divergence. Five rules change a decision the one-pass matcher has already made: a second `<html>` or
+`<body>` tag's attributes, the document order of fostered content, a `<frameset>` that removes a body,
+the adoption agency with a furthest block, and the copy of an `<option>` into `<selectedcontent>`. A
+document where one of them fires is answered by a second pass over the finished tree, so in
+`<b>1<p>2</b>3` `b p::text` is `[]` and `b::text` is `["1", "2"]`, `x<table>y` gives `body::text`
+`["xy"]`, `<p>x</p><body class=late>` matches `body.late p`, and so on, as in Chrome. That pass costs
+time, not values: on 30,000 Common Crawl pages it ran on 3% (`tools/retro_census.py`). Early exit
+(`first_only`) waits while a later token could still change a value it has taken: while a table is open,
+while a formatting element holds an open block, while a `<frameset>` could still remove the body, and
+while the rest of the page holds anything that could be an `<html>` or `<body>` start tag.
 
-- **The adoption agency with a furthest block.** In `<b>1<p>2</b>3` Chrome moves the `<p>` out of the `<b>`
-  and its content into a copy of the `<b>`. Here the `<p>` keeps the ancestor it opened under and its
-  text: `b p::text` is `["23"]` (Chrome `[]`) and `b::text` is `["1"]` (Chrome `["1", "2"]`). What follows
-  is placed as in Chrome: `<b>1<p>2</b>3<i id=x>` puts `#x` in the `<p>`, and `p > #x` matches.
-- **The document order of fostered content.** `<table><div id=d>x</div></table>` puts the div outside
-  the table as Chrome does, so `table #d` is empty, but the div counts as following the table: `div + table`
-  is empty (Chrome matches) and positions follow the source. Fostered text that Chrome joins with the
-  text before the table is a separate node: `x<table>y` is `["x", "y"]` here, `["xy"]` in Chrome.
-- **A second `<html>` or `<body>` start tag.** Its attributes join the open element, so what opens after
-  it sees them (`<body><p>x</p><body class=late><div id=d>` matches `body.late #d`), but the element's
-  own match was decided when it opened: `body.late` is empty in `<p>x<body class=late>`.
-- **A `<frameset>` that replaces a body.** In `<div id=x>d</div><frameset>` Chrome removes the body and
-  everything in it; here `#x::text` is still `["d"]`.
-- **`<selectedcontent>`.** When an `<option>` closes, Chrome copies its content into the
-  `<selectedcontent>` of its `<select>`: `<select><selectedcontent id=s></selectedcontent><option>y</option></select>`
-  gives `#s::text` `["y"]`, and here `[]`.
+What remains are not tree divergences:
 
-A deferred winner's subtree (`li:last-child b::text`) is read by a second pass that builds the same tree,
-so these reach a tail column exactly as they reach any other column, and the second pass adds no
-divergence of its own.
-
-Three more are not tree divergences. Class and id selectors in a quirks-mode document (no doctype) match
-ASCII-case-insensitively in a browser, and exactly here: `.a` misses `<p class=A>` (deferred,
-docs/BROWSER_MODE.md section 8). Outer HTML is the raw source, as in lxml mode, so it is not Chrome's
-serialisation. And past the depth cap, text inserted into an earlier sibling after a later one opened
-comes after it in a column, where Chrome's document order puts it before.
+- Class and id selectors in a quirks-mode document (no doctype) match ASCII-case-insensitively in a
+  browser, and exactly here: `.a` misses `<p class=A>` (deferred, docs/BROWSER_MODE.md section 8).
+- Outer HTML is the raw source, as in lxml mode, so it is not Chrome's serialisation. That includes
+  attributes a later `<html>` or `<body>` tag merged into the element: its source has only its own. An
+  `<html>` or `<body>` the page never wrote reads its source from the first later tag that gave it
+  attributes.
+- Chrome leaves the frameset-ok flag set for U+FFFD, which follows it here when the page spells the
+  character as UTF-8 or as a reference (`&#0;`, a surrogate, a code point past U+10FFFF). A U+FFFD that
+  a legacy encoding's decoder produces from an invalid byte counts here as a character, so a
+  `<frameset>` after it is ignored.
 
 Where Chrome and Firefox build different trees, browser mode follows Chrome. The gate's
 `--browsers chrome,firefox` table lists them; the ones it finds are Firefox making `<search>` and

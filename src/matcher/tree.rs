@@ -54,6 +54,12 @@ pub(super) trait TreeBuilder<'a> {
     fn finish(&mut self, m: &mut Matcher<'a>) {
         let _ = m;
     }
+
+    /// May the scan stop before the next token, which starts at `at`? See [`TokenSink::done`].
+    fn stop(&self, m: &Matcher<'a>, at: usize) -> bool {
+        let _ = at;
+        m.done()
+    }
 }
 
 /// One document's scan: the matcher's state plus the tree builder of the schema's mode.
@@ -104,8 +110,8 @@ impl<'a, B: TreeBuilder<'a>> TokenSink<'a> for Scan<'a, B> {
     }
 
     #[inline]
-    fn done(&self) -> bool {
-        self.m.done()
+    fn done(&self, at: usize) -> bool {
+        self.builder.stop(&self.m, at)
     }
 
     fn cdata_is_text(&self) -> bool {

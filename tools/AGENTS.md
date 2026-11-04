@@ -146,17 +146,21 @@ documents from an HTML5-heavy alphabet in which every start tag carries an id, a
 unless every token is emitted. Each differing column is reduced to the smallest token subsequence that
 still differs on it (ids survive the reduction, so the column names the same element) and the reduced
 document is attributed to a row of `CONSTRUCTS`. Attribute by the repro, never by the page it came from.
-The only rows left are the constructs browser mode cannot stream, because their rule changes a decision
-the matcher has already made (the adoption agency's moves, fostered content's document order, a second
-`<html>`/`<body>`, a `<frameset>` replacing a body, `<selectedcontent>`). Anything else is NOVEL. `--gate` fails on NOVEL and on coverage: nothing graded,
+It has no rows: the retroactive rules that used to fill it (the adoption agency's moves, fostered content's
+document order, a second `<html>`/`<body>`, a `<frameset>` replacing a body, `<selectedcontent>`) are exact
+through the replay, so every tree divergence is NOVEL. `--gate` fails on NOVEL and on coverage: nothing graded,
 a token never emitted, an oracle error, or a self-check difference. `gate_failures` and `attribute` are
 its decision functions, seeded in `tests/test_gates.py`. With `--browsers chrome,firefox` the columns
 where the two browsers disagree go into their own reduced table and the engine is graded against
 Chrome there. `--parser` (default `browser`) is passed to `frostwork.extract` only when the installed
 extension accepts it, and the run prints which mode it graded. `seq_sweep.parser_kwargs` is the one probe
 for that keyword: `seq_sweep` and the engine calls in `tests/test_gates.py` pass `parser="lxml"` through
-it, so lxml mode's gates keep grading libxml2 behaviour whatever the default mode is. When one of those
-constructs becomes streamable, delete its row in the same change, so the gate holds it at zero.
+it, so lxml mode's gates keep grading libxml2 behaviour whatever the default mode is. A construct that
+cannot be made exact gets a row, with its divergence in docs/COMPATIBILITY.md; when it becomes exact, delete
+the row in the same change, so the gate holds it at zero.
+
+`retro_census.py` counts, per retroactive rule, the fraction of a corpus's pages where it fires (through the
+differ's `R` op, reading the pages where they lie), which is the share of pages browser mode replays.
 
 `diff_browser.py` also grades VALUE columns, over the same documents plus `--values` decorated ones:
 ALPHABET tokens carrying `VALUE_ATTRS` and `VALUE_TEXTS` (case variants of the attributes HTML folds,

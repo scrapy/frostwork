@@ -4,7 +4,10 @@
 //! "reprocess" a call after switching modes.
 
 use super::tags::{breaks_out, font_breaks_out, Tag};
-use super::{has_content, ws_at, ws_prefix, Afe, Browser, EndTok, Mode, Node, Ns, StartTok, Vis, HAS_CHILD, SHADOW_HOST};
+use super::{
+    ends_frameset_ok, has_content, ws_at, ws_prefix, Afe, Browser, EndTok, Mode, Node, Ns, StartTok, Vis, CENSUS_MERGE_ANY, HAS_CHILD,
+    RETRO_ADOPTION, RETRO_FRAMESET, RETRO_MERGE, RETRO_SELECTEDCONTENT, SHADOW_HOST, SYNTH,
+};
 use crate::implied_close::{SCOPE, SPECIAL};
 use crate::tokenizer::DataMode;
 use crate::matcher::Matcher;
@@ -37,7 +40,7 @@ fn attr<'x>(attrs: &[(&'x [u8], Option<&'x [u8]>)], name: &[u8]) -> Option<&'x [
     attrs.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).map(|(_, v)| v.unwrap_or(b""))
 }
 
-impl<'a> Browser<'a> {
+impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
     // ================================================================== start tags, HTML content
 
     pub(super) fn html_start(&mut self, m: &mut Matcher<'a>, t: &StartTok<'a, '_>) {
@@ -88,7 +91,7 @@ impl<'a> Browser<'a> {
                 Tag::Base | Tag::Basefont | Tag::Bgsound | Tag::Link | Tag::Meta | Tag::Noframes | Tag::Script
                 | Tag::Style | Tag::Template | Tag::Title => {
                     let Some(head) = self.head else { return };
-                    if self.path.len() == 1 && self.html_text.is_none() {
+                    if !REPLAY && self.path.len() == 1 && self.html_text.is_none() {
                         self.html_text = m.take_text();
                     }
                     self.stack.push(head);
@@ -294,7 +297,11 @@ impl<'a> Browser<'a> {
             }
             Tag::Frameset => {
                 if self.stack.len() > 1 && self.stack[1].tag == Tag::Body && self.frameset_ok {
-                    // The body and everything in it leave the document. Already matched, they stand.
+                    // The body and everything in it leave the document.
+                    self.retro |= RETRO_FRAMESET;
+                    if REPLAY {
+                        self.dom.detach(self.stack[1].depth);
+                    }
                     self.pop_to(m, 1, at, at);
                     self.insert_html(m, t);
                     self.mode = Mode::InFrameset;
@@ -481,6 +488,20 @@ impl<'a> Browser<'a> {
                 }
                 self.reconstruct(m, at);
                 self.insert_html(m, t);
+                if REPLAY && t.tag == Tag::Option && self.cur().vis == Vis::Live {
+                    self.option_inserted(self.cur().depth);
+                }
+            }
+            Tag::Selectedcontent => {
+                self.reconstruct(m, at);
+                self.insert_html(m, t);
+                let n = *self.cur();
+                if n.vis == Vis::Live {
+                    self.retro |= RETRO_SELECTEDCONTENT;
+                    if REPLAY {
+                        self.selectedcontent_inserted(n.depth);
+                    }
+                }
             }
             Tag::Rb | Tag::Rtc | Tag::Rp | Tag::Rt => {
                 if self.in_scope(Tag::Ruby).is_some() {
@@ -503,11 +524,22 @@ impl<'a> Browser<'a> {
         }
     }
 
-    /// A second `<html>` or `<body>` start tag: its attributes join the open element's.
+    /// A second `<html>` or `<body>` start tag: its attributes join the open element's. Streaming, the
+    /// element was matched without them, so one a selector asks about makes the document a replay.
     fn merge_into(&mut self, m: &mut Matcher<'a>, i: usize, t: &StartTok<'a, '_>) {
         let n = self.stack[i];
-        if n.vis == Vis::Live && self.path.get(n.depth as usize) == Some(&n.uid) {
-            m.merge_attrs(n.depth as usize, t.attrs);
+        if n.vis != Vis::Live || t.attrs.is_empty() {
+            return;
+        }
+        self.retro |= CENSUS_MERGE_ANY;
+        if REPLAY {
+            // An element the page never wrote reads its source from the first tag that gave it any.
+            if n.flags & SYNTH != 0 && !self.dom.has_prefix(n.depth) {
+                self.dom.set_prefix(n.depth, (t.start, t.end));
+            }
+            self.dom.merge(n.depth, t.attrs);
+        } else if self.path.get(n.depth as usize) != Some(&n.uid) || m.merge_adds(n.depth as usize, t.attrs) {
+            self.retro |= RETRO_MERGE;
         }
     }
 
@@ -931,8 +963,7 @@ impl<'a> Browser<'a> {
     /// The stack of open elements and the list come out exactly as the spec's do, so what is open and
     /// where later content goes are the browser's. With a furthest block the algorithm also moves
     /// elements already matched (the block leaves the formatting element, and its content moves into a
-    /// clone); those keep the ancestors they opened under, and the elements removed from the stack stay
-    /// their matcher ancestors until the insertion point leaves them.
+    /// clone): streaming, that is a retroactive rule, and the replay's tree performs the moves.
     fn adoption_agency(&mut self, m: &mut Matcher<'a>, t: EndTok<'a>) {
         if let Some(c) = self.stack.last() {
             if c.ns == Ns::Html && c.tag == t.tag && self.afe_index_of(c.uid).is_none() {
@@ -961,9 +992,12 @@ impl<'a> Browser<'a> {
                 }
                 return;
             };
+            if self.stack[bi].vis == Vis::Live {
+                self.retro |= RETRO_ADOPTION;
+            }
             let empty = self.stack[bi].flags & HAS_CHILD == 0;
-            let clone_at = self.furthest_block(si, fi, bi, ftok);
-            if empty {
+            let clone_at = self.furthest_block(si, fi, bi, ftok, t.start);
+            if !REPLAY && empty {
                 // The clone is appended to a block with nothing in it yet, which is an insertion at the
                 // current position like any other.
                 self.materialize(m, clone_at, t.start);
@@ -971,15 +1005,19 @@ impl<'a> Browser<'a> {
         }
     }
 
-    /// The furthest-block half of the adoption agency, on the stack and the list. Clones are pending:
-    /// they get matcher elements only if something is inserted into them. Returns the stack index of
-    /// the formatting element's clone, which the furthest block now holds.
-    fn furthest_block(&mut self, si: usize, fi: usize, bi: usize, ftok: u32) -> usize {
-        let common_inert = self.stack[si - 1].vis == Vis::Inert;
+    /// The furthest-block half of the adoption agency, on the stack, the list and the replay's tree.
+    /// Streaming, clones are pending: they get matcher elements only if something is inserted into
+    /// them. A clone made at `at` reads its source from the start tag it copies. Returns the stack index
+    /// of the formatting element's clone, which the furthest block now holds.
+    fn furthest_block(&mut self, si: usize, fi: usize, bi: usize, ftok: u32, at: usize) -> usize {
+        let common = self.stack[si - 1];
+        // The block's world is inert when the formatting element is template content.
+        let inert = common.vis == Vis::Inert || self.stack[bi].vis == Vis::Inert;
         let fuid = self.stack[si].uid;
-        let block_uid = self.stack[bi].uid;
+        let block = self.stack[bi];
         let mut bookmark = fi;
         let mut bookmark_moved = false;
+        let mut last = block.depth;
         let mut node_i = bi;
         let mut inner = 0;
         loop {
@@ -1001,33 +1039,77 @@ impl<'a> Browser<'a> {
             }
             let Some(ai) = ai else {
                 self.stack.remove(node_i);
+                if REPLAY && n.tag == Tag::Option && n.vis == Vis::Live {
+                    self.option_closed(n.depth);
+                }
                 continue;
             };
             let Afe::El { tok, .. } = self.afe[ai] else { unreachable!() };
-            let clone = self.clone_node(tok, common_inert);
+            let clone = self.clone_node(tok, inert, at);
             self.afe[ai] = Afe::El { uid: clone.uid, tok };
             self.stack[node_i] = clone;
             if !bookmark_moved {
                 bookmark = ai + 1;
                 bookmark_moved = true;
             }
+            if REPLAY && !inert {
+                self.dom.append(clone.depth, last);
+                last = clone.depth;
+            }
         }
-        let clone = self.clone_node(ftok, common_inert);
+        if REPLAY && !inert {
+            self.adopt_into_common(common, last);
+        }
+        let clone = self.clone_node(ftok, inert, at);
+        if REPLAY && !inert {
+            self.dom.move_children(block.depth, clone.depth);
+            self.dom.append(block.depth, clone.depth);
+        }
         let fi = self.afe_index_of(fuid).expect("the formatting element is on the list");
         self.afe.remove(fi);
         let bookmark = if fi < bookmark { bookmark - 1 } else { bookmark };
         self.afe.insert(bookmark.min(self.afe.len()), Afe::El { uid: clone.uid, tok: ftok });
         let si = self.index_of(fuid).expect("the formatting element is open");
         self.stack.remove(si);
-        let bi = self.index_of(block_uid).expect("the furthest block is open");
+        let bi = self.index_of(block.uid).expect("the furthest block is open");
         self.stack.insert(bi + 1, clone);
         bi + 1
     }
 
-    fn clone_node(&mut self, tok: u32, inert: bool) -> Node<'a> {
+    /// Insert the replay's node `last` at the appropriate place with `common` as the override target:
+    /// at its end, before the last table when foster parenting is on and it is a table part, and out of
+    /// the document when it is a template.
+    fn adopt_into_common(&mut self, common: Node<'a>, last: u32) {
+        if common.tag == Tag::Template {
+            self.dom.detach(last);
+            return;
+        }
+        if self.foster && matches!(common.tag, Tag::Table | Tag::Tbody | Tag::Tfoot | Tag::Thead | Tag::Tr) {
+            match self.stack.iter().rposition(|n| matches!(n.tag, Tag::Table | Tag::Template)) {
+                Some(k) if self.stack[k].tag == Tag::Table && self.stack[k].vis == Vis::Live => {
+                    return self.dom_foster(k, last);
+                }
+                Some(_) => return self.dom.detach(last),
+                None => return self.dom.append(self.stack[0].depth, last),
+            }
+        }
+        self.dom.append(common.depth, last);
+    }
+
+    /// A copy of the formatting element made for token `tok`: pending while streaming, a node of the
+    /// replay's tree when replaying.
+    fn clone_node(&mut self, tok: u32, inert: bool, at: usize) -> Node<'a> {
         let (name, tag) = (self.toks[tok as usize].name, self.toks[tok as usize].tag);
         let mut node = self.new_node(name, tag, Ns::Html, &[]);
-        node.vis = if inert { Vis::Inert } else { Vis::Pending(tok) };
+        if inert {
+            node.vis = Vis::Inert;
+        } else if REPLAY {
+            let attrs = self.toks[tok as usize].attrs.clone();
+            node.depth = self.dom.element(name, true, attrs, at);
+            self.dom.set_prefix(node.depth, self.toks[tok as usize].span);
+        } else {
+            node.vis = Vis::Pending(tok);
+        }
         node
     }
 
@@ -1078,7 +1160,7 @@ impl<'a> Browser<'a> {
         // Foreign content keeps a NUL as U+FFFD, which is how RCDATA text decodes.
         let dm = if dm == DataMode::Normal { DataMode::Rcdata } else { dm };
         self.insert_text(m, b, dm, s);
-        if has_content(b) {
+        if ends_frameset_ok(b, m.input.encoding() == encoding_rs::UTF_8) {
             self.frameset_ok = false;
         }
     }
@@ -1093,7 +1175,7 @@ impl<'a> Browser<'a> {
                 Mode::Initial | Mode::BeforeHtml | Mode::BeforeHead => {
                     let k = lead(b, true);
                     if k > 0 {
-                        m.absorb_into_text_gap(s, s + k);
+                        self.absorb(m, s, s + k);
                         (b, s) = (&b[k..], s + k);
                         continue;
                     }
@@ -1142,7 +1224,7 @@ impl<'a> Browser<'a> {
                         continue;
                     }
                     if !self.cur_is(Tag::Colgroup) {
-                        return m.absorb_into_text_gap(s, s + b.len());
+                        return self.absorb(m, s, s + b.len());
                     }
                     self.pop(m, s);
                     self.mode = Mode::InTable;
@@ -1168,7 +1250,7 @@ impl<'a> Browser<'a> {
                             }
                         }
                         let j = (k..b.len()).find(|&p| ws_at(&b[p..], false) > 0).unwrap_or(b.len());
-                        m.absorb_into_text_gap(s + k, s + j);
+                        self.absorb(m, s + k, s + j);
                         (b, s) = (&b[j..], s + j);
                     }
                     return;
@@ -1181,11 +1263,11 @@ impl<'a> Browser<'a> {
     /// Character tokens under the in-body rules.
     fn body_text(&mut self, m: &mut Matcher<'a>, b: &'a [u8], dm: DataMode, s: usize) {
         if dm == DataMode::Normal && b.iter().all(|&c| c == 0) {
-            return m.absorb_into_text_gap(s, s + b.len());
+            return self.absorb(m, s, s + b.len());
         }
         self.reconstruct(m, s);
         self.insert_text(m, b, dm, s);
-        if has_content(b) {
+        if ends_frameset_ok(b, m.input.encoding() == encoding_rs::UTF_8) {
             self.frameset_ok = false;
         }
     }
@@ -1199,7 +1281,7 @@ impl<'a> Browser<'a> {
             .is_some_and(|n| matches!(n.tag, Tag::Table | Tag::Tbody | Tag::Template | Tag::Tfoot | Tag::Thead | Tag::Tr));
         if in_table_text && !has_content(b) {
             if b.iter().all(|&c| c == 0) {
-                return m.absorb_into_text_gap(s, s + b.len());
+                return self.absorb(m, s, s + b.len());
             }
             return self.insert_text(m, b, dm, s);
         }

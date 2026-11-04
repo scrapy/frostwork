@@ -704,29 +704,40 @@ def test_the_browser_gates_ask_about_each_selector_alone():
 
 
 def test_browser_attribution_is_by_the_smallest_repro_and_leaves_the_rest_novel():
-    """A divergence is filed under a construct only when its REDUCED document exhibits it, and only the
-    constructs browser mode cannot stream have one. Everything else is implemented, so a divergence there
-    must reach NOVEL and fail the gate: a stray `<td>`, an implied `<tbody>`, a `<p>` closed by a table.
-    The adoption-agency row needs a furthest block, because without one the algorithm only pops.
-    """
+    """A divergence is filed under a construct only when its REDUCED document exhibits it, and only a
+    construct browser mode does not build as the browser does has one. The five retroactive rules are
+    exact through the replay, so their repros, like a stray `<td>` or an implied `<tbody>`, must reach
+    NOVEL and fail the gate."""
     import diff_browser as B
 
     def repro(tokens):
         return B.Repro(tuple(enumerate(tokens)), "//*/@id", lambda doc: True, [])
 
-    for implemented in (["<td{}>"], ["<table{}>", "<tr{}>"], ["<p{}>", "<table{}>"], ["<div{}>"],
-                        ["<p{}>", "<b{}>", "t", "</p>", "t"], ["<b{}>", "<i{}>", "</b>"], ["<a{} href=x>", "<a{} href=x>"]):
-        assert B.attribute(repro(implemented)) is None, implemented
-    assert B.attribute(repro(["<table{}>", "<div{}>"])) == "foster parenting"
-    assert B.attribute(repro(["<div{}>", "<body{}>"])) == "second <html>/<body> tag"
-    assert B.attribute(repro(["<b{}>", "<p{}>", "</b>"])) == "adoption agency"
-    assert B.attribute(repro(["<nobr{}>", "<div{}>", "<nobr{}>"])) == "adoption agency"
-    assert B.attribute(repro(["<div{}>", "<frameset{}>"])) == "frameset replacing the body"
     selected = ["<select{}>", "<selectedcontent{}>", "</selectedcontent>", "<option{}>", "t", "</option>"]
-    assert B.attribute(repro(selected)) == "<selectedcontent> clone"
-    assert B.attribute(repro(["<select{}>", "<option{}>", "t", "</option>"])) is None
-    assert [c.name for c in B.CONSTRUCTS] == ["frameset replacing the body", "second <html>/<body> tag",
-                                              "adoption agency", "foster parenting", "<selectedcontent> clone"]
+    for implemented in (["<td{}>"], ["<table{}>", "<tr{}>"], ["<p{}>", "<table{}>"], ["<div{}>"],
+                        ["<p{}>", "<b{}>", "t", "</p>", "t"], ["<b{}>", "<i{}>", "</b>"], ["<a{} href=x>", "<a{} href=x>"],
+                        ["<table{}>", "<div{}>"], ["<div{}>", "<body{}>"], ["<b{}>", "<p{}>", "</b>"],
+                        ["<nobr{}>", "<div{}>", "<nobr{}>"], ["<div{}>", "<frameset{}>"], selected):
+        assert B.attribute(repro(implemented)) is None, implemented
+    assert B.CONSTRUCTS == []
+
+
+def test_the_merged_frame_allowance_excuses_only_attributes_a_later_tag_added():
+    """The raw source of a `<body>` or `<html>` that a later tag merged attributes into has only its own
+    start tag. The allowance excuses exactly that: the browser's root has the same tag and every name the
+    engine's has, plus more. Fewer names, another tag or an element other than the frame is a value NOVEL."""
+    import diff_browser as B
+
+    def verdict(engine, oracle, sel='[id="3"]'):
+        return B.attribute_value(B.ValueRepro((), sel, [engine], [oracle], ["#d", []]))
+
+    merged = "raw-source outer HTML of a merged <html>/<body>"
+    assert verdict('<body id=3>x<body class=k>', '<body id="3" class="k">x</body>') == merged
+    assert verdict('<html id=3><p>', '<html id="3" lang="en"><head></head><body><p></p></body></html>') == merged
+    assert verdict('<body id=3>x', '<body id="3">x</body>') == "raw-source outer HTML"
+    assert verdict('<body id=3 class=k>x', '<body id="3">x</body>') is None
+    assert verdict('<div id=3>x', '<div id="3" class="k">x</div>') is None
+    assert verdict('<body id=3>x', '<html id="3" class="k"></html>') is None
 
 
 # A browser tree holding what lxml cannot: control characters in text and attribute values, a `p"x` tag

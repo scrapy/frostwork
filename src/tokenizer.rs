@@ -58,13 +58,15 @@ pub trait TokenSink<'a> {
         let _ = (from, to);
     }
 
-    /// May [`tokenize`] stop? Asked once per markup token, and answered `false` by every sink that has
-    /// no notion of "enough" — including this default, which the optimizer folds away.
+    /// May [`tokenize`] stop? Asked once per markup token, with the offset the next token starts at,
+    /// and answered `false` by every sink that has no notion of "enough" — including this default,
+    /// which the optimizer folds away.
     ///
     /// Stopping is the sink's decision alone: the tokenizer has no idea what a schema wants, and a sink
     /// that answers `true` while its answer could still change would silently truncate the document.
     /// See `matcher::CompiledSchema::arm_early_exit` for the only implementation that ever does.
-    fn done(&self) -> bool {
+    fn done(&self, at: usize) -> bool {
+        let _ = at;
         false
     }
 
@@ -401,7 +403,7 @@ pub fn tokenize<'a, S: TokenSink<'a>>(b: &'a [u8], sink: &mut S) {
                         // branch compiled out, `ab_bench.py` reports median -0.1% over 26 cells, one cell
                         // above its own jitter and that one FASTER. Unarmed it is a `u128` comparison
                         // against a zero mask (`Matcher::done`).
-                        if sink.done() {
+                        if sink.done(after) {
                             return;
                         }
                     }
