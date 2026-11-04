@@ -93,13 +93,20 @@ pub(super) fn compound_matches_unfiltered(c: &Compound, el: &OpenElem) -> bool {
     compound_matches_impl::<false>(c, el)
 }
 
+/// The signature filter, then [`compound_compare`]. Always inlined, so the filter runs in the caller
+/// and a pair it rejects never enters the comparison's frame: the filter decides most pairs, and the
+/// comparison saves a dozen registers before it can test anything.
+#[inline(always)]
 fn compound_matches_impl<const FILTER: bool>(c: &Compound, el: &OpenElem) -> bool {
     // One-sided: a `req` bit the element lacks proves no match, so this can only turn a `false` into a
     // faster `false`. `req` covers only the compound's own positive tag/id/classes — `:not()` args and
     // `:is()` alternatives contribute nothing here and are filtered by their own recursive call below.
-    if FILTER && el.sig & c.req != c.req {
-        return false;
-    }
+    (!FILTER || el.sig & c.req == c.req) && compound_compare::<FILTER>(c, el)
+}
+
+/// The exact comparisons of [`compound_matches_impl`], for a pair the signature filter let through.
+#[inline(never)]
+fn compound_compare<const FILTER: bool>(c: &Compound, el: &OpenElem) -> bool {
     if let Some(t) = &c.tag {
         // An XPath name is lowercase (`xpath::valid_name`), so it never names a camel-cased SVG element.
         if t != "*"
