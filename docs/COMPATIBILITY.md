@@ -41,14 +41,50 @@ audit does not classify a page's values into the four buckets or prove parity on
 | NUL | deleted before tokenizing, so `<di\0v>` is a `div` | kept: a NUL in a tag or attribute name never matches an ASCII selector, body text drops it, every other value reads it as U+FFFD; before the body it is ignored |
 | `<noscript>` | markup (libxml2 parses with scripting off) | raw text, as a browser with scripting on reads it; head content |
 | HTML `<template>` | an ordinary element | the element matches; its content is not in the document, and is no element's child, sibling or text. An SVG `<template>` stays ordinary |
-| `/>` on a raw-text element or `<template>` | closes it: `<title/>` holds no text | ignored, so `<title/>`, `<script/>`, `<textarea/>`, `<style/>` still read their text |
+| tree construction | libxml2 2.15's rules, below | HTML5 tree construction as Chrome 156 builds it: the insertion modes, a head that is always built, the scopes and implied end tags, tables with an implied `<tbody>`, `<tr>` and `<colgroup>` and foster parenting, customisable `<select>`, foreign content and its integration points, the active formatting elements and the adoption agency, the form pointer, the document mode from the doctype, declarative shadow roots, and a depth cap of 512 open elements |
+| `/>` on a non-void HTML element | closes it: `<title/>` holds no text, `<div/>` is empty | ignored, so `<div/>x` puts `x` in the div; honoured on an SVG or MathML element |
+| CSS attribute values | compared exactly unless the selector says `i` | the values of HTML's 46 listed attributes (`type`, `lang`, `rel`, `align`...) compare ASCII-case-insensitively on an HTML element, as in a browser; XPath compares exactly in both modes |
 | deferred predicate whose value is inside the selected element (`div:has(a) ::text`, `li:last-child b::text`) | supported, by re-scanning the element's source | unsupported: an HTML5 fragment parse loses the element's context |
-| outer HTML of a selector that can match an `<html>`/`<head>`/`<body>` the page never wrote (`body`, `*`) | supported: the value is the element's content | unsupported: there is no source of its own to return |
+| outer HTML of a selector that can match an element the page never wrote | supported: the value is the element's content | unsupported: there is no source of its own to return. Besides `<html>`/`<head>`/`<body>`, browser mode builds an implied `<tbody>`, `<tr>` and `<colgroup>`, an empty `<p>` for a stray `</p>`, and copies of formatting elements (`a`, `b`, `i`, `font`, `nobr`...) that carry the original's attributes. So `tr`, `p`, `a`, `b.k`, `.price` and `*` are refused; `tr.row`, `p.lead`, `div.price` and `span` are not |
 | `.as_node()` in `frostwork.webpoet` | supported | refused at class definition: the reparse is lxml's |
 
-Everything else, including encoding resolution, value decoding and the rest of tree construction, is the
-same in both modes until browser mode's HTML5 tree builder lands. `frostwork.check(..., parser=...)`
-reports support per mode.
+Encoding resolution and value decoding are the same in both modes. `frostwork.check(..., parser=...)` reports
+support per mode.
+
+### Browser mode's divergences from Chrome
+
+`make gate-browser` (`tools/diff_browser.py`) grades the whole tree and the value columns against Chrome
+and files every divergence under one of the constructs below, reduced to its smallest token sequence.
+Each is a rule that changes a decision the one-pass matcher has already made, so only its forward state
+(what is open, where later content goes) follows Chrome:
+
+- **The adoption agency with a furthest block.** In `<b>1<p>2</b>3` Chrome moves the `<p>` out of the `<b>`
+  and its content into a copy of the `<b>`. Here the `<p>` keeps the ancestor it opened under and its
+  text: `b p::text` is `["23"]` (Chrome `[]`) and `b::text` is `["1"]` (Chrome `["1", "2"]`). What follows
+  is placed as in Chrome: `<b>1<p>2</b>3<i id=x>` puts `#x` in the `<p>`, and `p > #x` matches.
+- **The document order of fostered content.** `<table><div id=d>x</div></table>` puts the div outside
+  the table as Chrome does, so `table #d` is empty, but the div counts as following the table: `div + table`
+  is empty (Chrome matches) and positions follow the source. Fostered text that Chrome joins with the
+  text before the table is a separate node: `x<table>y` is `["x", "y"]` here, `["xy"]` in Chrome.
+- **A second `<html>` or `<body>` start tag.** Its attributes join the open element, so what opens after
+  it sees them (`<body><p>x</p><body class=late><div id=d>` matches `body.late #d`), but the element's
+  own match was decided when it opened: `body.late` is empty in `<p>x<body class=late>`.
+- **A `<frameset>` that replaces a body.** In `<div id=x>d</div><frameset>` Chrome removes the body and
+  everything in it; here `#x::text` is still `["d"]`.
+- **`<selectedcontent>`.** When an `<option>` closes, Chrome copies its content into the
+  `<selectedcontent>` of its `<select>`: `<select><selectedcontent id=s></selectedcontent><option>y</option></select>`
+  gives `#s::text` `["y"]`, and here `[]`.
+
+Three more are not tree divergences. Class and id selectors in a quirks-mode document (no doctype) match
+ASCII-case-insensitively in a browser, and exactly here: `.a` misses `<p class=A>` (deferred,
+docs/BROWSER_MODE.md section 8). Outer HTML is the raw source, as in lxml mode, so it is not Chrome's
+serialisation. And past the depth cap, text inserted into an earlier sibling after a later one opened
+comes after it in a column, where Chrome's document order puts it before.
+
+Where Chrome and Firefox build different trees, browser mode follows Chrome. The gate's
+`--browsers chrome,firefox` table lists them; the ones it finds are Firefox making `<search>` and
+`<dialog>` special, `</br>` leaving the frameset-ok flag set, a `</p>` inside a MathML integration point,
+and processing instructions, which Firefox parses as comments.
 
 ---
 

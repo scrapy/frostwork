@@ -143,21 +143,20 @@ through the bridge, and `diff_browser` checks on every run that the two agree on
 `diff_browser.py` is the browser differential (`make gate-browser`). It grades the engine on
 `seq_sweep`'s fingerprint against Chrome's tree, over `seq_sweep`'s short sequences plus seeded random
 documents from an HTML5-heavy alphabet in which every start tag carries an id, and it refuses to grade
-unless every token is emitted. Until browser mode implements a construct its divergences are expected,
-so each differing column is reduced to the smallest token subsequence that still differs on it (ids
-survive the reduction, so the column names the same element) and the reduced document is attributed to
-a row of `docs/BROWSER_MODE.md` section 3. Attribute by the repro, never by the page it came from. Some
-rows are decided by a counterfactual the oracle answers, such as whether a doctype or an explicit
-`<head></head>` makes the column agree, and formatting clones are read off the browser's tree as a
-repeated id. Anything no row explains is NOVEL. `--gate` fails on NOVEL and on coverage: nothing graded,
+unless every token is emitted. Each differing column is reduced to the smallest token subsequence that
+still differs on it (ids survive the reduction, so the column names the same element) and the reduced
+document is attributed to a row of `CONSTRUCTS`. Attribute by the repro, never by the page it came from.
+The only rows left are the constructs browser mode cannot stream, because their rule changes a decision
+the matcher has already made (the adoption agency's moves, fostered content's document order, a second
+`<html>`/`<body>`, a `<frameset>` replacing a body, `<selectedcontent>`). Anything else is NOVEL. `--gate` fails on NOVEL and on coverage: nothing graded,
 a token never emitted, an oracle error, or a self-check difference. `gate_failures` and `attribute` are
 its decision functions, seeded in `tests/test_gates.py`. With `--browsers chrome,firefox` the columns
 where the two browsers disagree go into their own reduced table and the engine is graded against
 Chrome there. `--parser` (default `browser`) is passed to `frostwork.extract` only when the installed
 extension accepts it, and the run prints which mode it graded. `seq_sweep.parser_kwargs` is the one probe
 for that keyword: `seq_sweep` and the engine calls in `tests/test_gates.py` pass `parser="lxml"` through
-it, so lxml mode's gates keep grading libxml2 behaviour whatever the default mode is. When a Phase 2 rule lands, delete its row from `CONSTRUCTS` in
-the same change, so the gate holds that construct at zero from then on.
+it, so lxml mode's gates keep grading libxml2 behaviour whatever the default mode is. When one of those
+constructs becomes streamable, delete its row in the same change, so the gate holds it at zero.
 
 `diff_browser.py` also grades VALUE columns, over the same documents plus `--values` decorated ones:
 ALPHABET tokens carrying `VALUE_ATTRS` and `VALUE_TEXTS` (case variants of the attributes HTML folds,
