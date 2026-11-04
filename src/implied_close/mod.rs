@@ -13,6 +13,11 @@
 
 mod generated;
 
+// The HTML5 element categories for browser mode: a second whole generated file, measured from Chrome by
+// `tools/gen_html5_rules.py`. The tree builder that reads it is not wired in yet.
+#[allow(dead_code)]
+mod generated_html5;
+
 // The derived tables live in `generated.rs` — a whole file, written by `tools/gen_tree_rules.py` from
 // libxml2 itself. They are re-exported here so callers see one `implied_close` module: the split is about
 // who may EDIT what, not about who may call what.
@@ -207,5 +212,109 @@ mod tests {
         for t in ["div", "table", "td", "p"] {
             assert!(end_tag_discardable(t.as_bytes()), "</{t}> is discardable when out-ranked");
         }
+    }
+}
+
+/// The browser categories in `generated_html5.rs`: a handful of cells whose answer is known from the
+/// WHATWG text and from what the stored derivation reads. `tools/gen_html5_rules.py --check` is the gate
+/// that the file matches Chrome; these only pin the shapes a builder relies on.
+#[cfg(test)]
+mod html5_categories {
+    use super::generated_html5::*;
+    use crate::tokenizer::DataMode;
+
+    fn cat(name: &str) -> u16 {
+        html5_cat(name.as_bytes())
+    }
+
+    #[test]
+    fn formatting_elements_are_not_special() {
+        for n in ["a", "b", "big", "code", "em", "font", "i", "nobr", "s", "small", "strike", "strong", "tt", "u"] {
+            assert!(cat(n) & FORMATTING != 0, "<{n}> is a formatting element");
+            assert!(cat(n) & SPECIAL == 0, "<{n}> must not also be special");
+        }
+        for n in ["span", "div", "p", "button", "table", "li", "xunknown"] {
+            assert!(cat(n) & FORMATTING == 0, "<{n}> is not a formatting element");
+        }
+    }
+
+    #[test]
+    fn the_scope_lists_extend_the_default_scope() {
+        let extended = SCOPE | LIST_ITEM_SCOPE | BUTTON_SCOPE;
+        for n in ["applet", "caption", "html", "marquee", "object", "select", "table", "td", "template", "th"] {
+            assert!(cat(n) & extended == extended, "<{n}> bounds every scope that extends the default one");
+        }
+        assert!(cat("ul") & LIST_ITEM_SCOPE != 0 && cat("ol") & LIST_ITEM_SCOPE != 0);
+        assert!(cat("ul") & (SCOPE | BUTTON_SCOPE) == 0, "<ul> bounds the list item scope only");
+        assert!(cat("button") & BUTTON_SCOPE != 0);
+        assert!(cat("button") & (SCOPE | LIST_ITEM_SCOPE) == 0, "<button> bounds the button scope only");
+        // the table scope is three names, and a cell is not one of them
+        for n in ["html", "table", "template"] {
+            assert!(cat(n) & TABLE_SCOPE != 0, "<{n}> bounds the table scope");
+        }
+        for n in ["td", "th", "tr", "tbody", "caption", "div", "select", "object"] {
+            assert!(cat(n) & TABLE_SCOPE == 0, "<{n}> does not bound the table scope");
+        }
+        for n in ["div", "span", "b", "option", "optgroup", "xunknown"] {
+            assert!(cat(n) & SCOPE == 0, "<{n}> does not bound the default scope");
+        }
+    }
+
+    #[test]
+    fn implied_end_tags_and_the_thorough_set() {
+        for n in ["dd", "dt", "li", "optgroup", "option", "p", "rb", "rp", "rt", "rtc"] {
+            assert!(cat(n) & IMPLIED_END != 0, "</{n}> is implied");
+            assert!(cat(n) & IMPLIED_END_THOROUGH != 0, "the thorough set contains the plain one");
+        }
+        for n in ["caption", "colgroup", "tbody", "td", "tfoot", "th", "thead", "tr"] {
+            assert!(cat(n) & IMPLIED_END == 0, "</{n}> is implied only thoroughly");
+            assert!(cat(n) & IMPLIED_END_THOROUGH != 0);
+        }
+        for n in ["div", "span", "b", "table", "ul"] {
+            assert!(cat(n) & (IMPLIED_END | IMPLIED_END_THOROUGH) == 0);
+        }
+    }
+
+    #[test]
+    fn void_elements_are_special_and_nothing_else_is_void() {
+        for n in ["area", "base", "br", "col", "embed", "frame", "hr", "img", "input", "keygen", "link", "meta",
+                  "param", "source", "track", "wbr"] {
+            assert!(cat(n) & VOID != 0, "<{n}> is void");
+            assert!(cat(n) & SPECIAL != 0, "<{n}> is special");
+        }
+        // `<image>` is renamed to `<img>` before any lookup, `<isindex>` is an ordinary element
+        for n in ["div", "p", "image", "isindex", "script", "xunknown"] {
+            assert!(cat(n) & VOID == 0, "<{n}> is not void");
+        }
+    }
+
+    /// Where Chrome 156 and the WHATWG text part ways. A name here is a measured difference, not a typo:
+    /// when Chrome catches up the stored derivation changes and this fails as stale.
+    #[test]
+    fn chrome_does_not_treat_search_as_special() {
+        assert!(cat("search") & SPECIAL == 0);
+        assert!(cat("dialog") & SPECIAL == 0, "the spec closes a <p> for <dialog> but does not make it special");
+        assert!(cat("select") & SCOPE != 0, "select is a scope boundary in both the text and Chrome");
+    }
+
+    #[test]
+    fn data_modes() {
+        for n in ["title", "textarea"] {
+            assert!(html5_data_mode(n.as_bytes()) == DataMode::Rcdata, "<{n}> is RCDATA");
+        }
+        for n in ["style", "xmp", "iframe", "noembed", "noframes", "noscript", "script"] {
+            assert!(html5_data_mode(n.as_bytes()) == DataMode::Rawtext, "<{n}> is raw text with scripting on");
+        }
+        assert!(html5_data_mode(b"plaintext") == DataMode::Plaintext);
+        for n in ["div", "select", "template", "listing", "pre", "xunknown", "svg", "math"] {
+            assert!(html5_data_mode(n.as_bytes()) == DataMode::Normal, "<{n}> holds ordinary markup");
+        }
+    }
+
+    #[test]
+    fn an_unrecognised_name_is_an_ordinary_element() {
+        assert_eq!(cat("xunknown"), 0);
+        assert_eq!(cat("my-element"), 0);
+        assert_eq!(cat(""), 0);
     }
 }
