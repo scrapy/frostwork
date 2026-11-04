@@ -48,6 +48,11 @@ first public release.
   `<meta charset>` inside an attribute value (`<img alt="<meta charset=big5>">`) no longer declares the
   encoding.
 
+- A selector deferred on an ancestor (`:has()`, `:contains()`, a reverse position such as `:last-child`
+  or `[last()]`) followed by a descendant step that the ancestor itself could match, such as `*` or its
+  own tag, no longer returns that ancestor, e.g. `li:last-child *` returned the `<li>` as well as its
+  descendants, and `//li[last()]//*/@class` its `class`.
+
 ## 0.1.6 (2026-09-23)
 
 ### Python API and tooling

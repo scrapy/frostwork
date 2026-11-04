@@ -1302,6 +1302,22 @@ mod tests {
         assert_eq!(ex(d, "div:has(a) p:has(b)::text"), Vec::<String>::new());
     }
 
+    /// A tail matches only proper descendants of the deferred element, even when the element itself
+    /// (`*`, its own tag) or the frame its span re-scan synthesizes (`body`) would satisfy it.
+    #[test]
+    fn deferred_tails_exclude_the_deferred_element() {
+        let l = "<ul><li class=a>1</li><li class=b>2<b class=c>B</b></li></ul>";
+        assert_eq!(ex(l, "li:last-child *"), v(&["<b class=c>B</b>"]));
+        assert_eq!(ex(l, "//li[last()]//*/@class"), v(&["c"]));
+        assert_eq!(ex(l, "li:last-child li::text"), Vec::<String>::new());
+        assert_eq!(ex(l, "li:last-child body"), Vec::<String>::new());
+        assert_eq!(ex(l, "li:last-child ::text"), v(&["2", "B"]));
+        let d = "<div id=d><p>x</p><div id=e><a>y</a></div></div>";
+        assert_eq!(ex(d, "div:has(a) div::attr(id)"), v(&["e"]));
+        assert_eq!(ex(d, "div:has(a) *"), v(&["<p>x</p>", "<div id=e><a>y</a></div>", "<a>y</a>"]));
+        assert_eq!(ex(d, "//div[contains(.,\"y\")]//div/@id"), v(&["e"]));
+    }
+
     #[test]
     fn normalize_space_values() {
         let h = "<h1>  Hello   <b>big</b>  world </h1><h1> second </h1><a href='  /x '>k</a><p>a\tb\n c</p>";

@@ -301,30 +301,30 @@ pub(super) fn gate_open(seen: u64, prev: u64, bit: usize, adjacent: bool) -> boo
 /// segment's sibling gate is checked at its own first compound (inside [`seg_match_anchored`]), so a
 /// descendant/child step after a sibling combinator (`a + b c`) resolves against the sibling element's
 /// parent, not the subject's.
-pub(super) fn eval_one(cs: &CSel, stack: &[OpenElem], top: usize) -> (bool, u64) {
+pub(super) fn eval_one(cs: &CSel, stack: &[OpenElem], top: usize, floor: usize) -> (bool, u64) {
     // An over-budget entry never matches and (crucially) has no `seg_bits`, so short-circuit BEFORE
     // any `1 << seg_bits[..]` shift could run — that is the whole point of the DEAD flag.
     if cs.dead {
         return (false, 0);
     }
-    // Flat/container selectors are unscoped: floor 0.
+    // Flat/container selectors are unscoped (`floor` 0), except in a span re-scan (see `Matcher::floor`).
     if cs.segments.len() == 1 {
-        return (seg_match(&cs.segments[0], stack, top, 0), 0);
+        return (seg_match(&cs.segments[0], stack, top, floor), 0);
     }
     // Each non-leftmost segment roots its first compound at a sibling anchor (bit seg_bits[i-1],
     // established at the anchor element's open by `compute_anchors`); a matched subject at `top` sets
     // that segment's own trigger for the boundary to its right.
     let mut trig = 0u64;
-    if seg_match_anchored(&cs.segments[0], stack, top, 0, None) {
+    if seg_match_anchored(&cs.segments[0], stack, top, floor, None) {
         trig |= 1 << cs.seg_bits[0];
     }
     let last = cs.segments.len() - 1;
     for i in 1..last {
-        if seg_match_anchored(&cs.segments[i], stack, top, 0, Some(cs.seg_bits[i - 1])) {
+        if seg_match_anchored(&cs.segments[i], stack, top, floor, Some(cs.seg_bits[i - 1])) {
             trig |= 1 << cs.seg_bits[i];
         }
     }
-    let subj = seg_match_anchored(&cs.segments[last], stack, top, 0, Some(cs.seg_bits[last - 1]));
+    let subj = seg_match_anchored(&cs.segments[last], stack, top, floor, Some(cs.seg_bits[last - 1]));
     (subj, trig)
 }
 

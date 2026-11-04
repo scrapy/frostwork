@@ -942,6 +942,12 @@ pub struct Matcher<'a> {
     // DROPPED end tags can be re-joined first (libxml2 makes it ONE text node; see `text`). Flushed by
     // the next start tag / matched end tag / EOF, so ordering vs. tag events is unchanged.
     pending_text: Option<PendingText<'a>>,
+    // A span re-scan (`resolve_tail_spans`) parses one element's raw source as a document of its own, so
+    // the frame is synthesized around it. Matching is scoped to that element: `floor` follows each
+    // element that opens at offset 0, which is the frame and then the span's root, so a strict tail
+    // excludes the root and no compound binds to the frame above it. 0 (unscoped) otherwise.
+    span_root: bool,
+    floor: usize,
     // Everything the document-frame rules know that the stack cannot tell them, plus the questions they
     // ask about it — see `frame.rs`, which explains why this is one owner of NAMED questions rather than
     // the insertion-mode enum it looks like it should be.
@@ -1549,6 +1555,15 @@ impl CompiledSchema {
         m.finish_grouped()
     }
 
+    /// [`run`](Self::run) over one element's raw span, matching inside that element only (see
+    /// `Matcher::floor`).
+    fn run_span(&self, input: EncodedInput) -> (FlatColumns, Vec<GroupRows>) {
+        let mut m = Matcher::new(self, input);
+        m.span_root = true;
+        crate::tokenizer::tokenize(input.bytes(), &mut m);
+        m.finish_grouped()
+    }
+
     /// Whether the schema has no flat query and no group.
     pub(crate) fn is_empty(&self) -> bool {
         self.n_flat_cols == 0 && self.n_groups == 0
@@ -1631,6 +1646,8 @@ impl<'a> Matcher<'a> {
             txt_open: 0,
             tail_spans: Vec::new(),
             pending_text: None,
+            span_root: false,
+            floor: 0,
             frame: DocumentFrame::default(),
             nav: None,
         }
@@ -1673,7 +1690,7 @@ impl<'a> Matcher<'a> {
             }
             max_end = e;
             let tail = &self.schema.tail_schemas[slot];
-            let (cols, _) = tail.schema.run(self.input.sub(s..e));
+            let (cols, _) = tail.schema.run_span(self.input.sub(s..e));
             for (vals, &col) in cols.into_iter().zip(&tail.cols) {
                 self.results[col].extend(vals);
             }
@@ -2139,7 +2156,7 @@ impl<'a> Matcher<'a> {
         let mut matched = 0u128;
         let mut trig = 0u64;
         for (k, cs) in self.schema.entries.iter().enumerate() {
-            let (subj, tg) = eval_one(cs, &self.stack, top);
+            let (subj, tg) = eval_one(cs, &self.stack, top, self.floor);
             if subj && k < 128 {
                 matched |= 1u128 << k;
             }
@@ -2629,6 +2646,9 @@ impl<'a> TokenSink<'a> for Matcher<'a> {
         // attributes; a schema referencing neither leaves both at 0 and the filter idle.
         self.stack.push(OpenElem::open(name, scid, attrs, span_start, self.schema.wants));
         let top = self.stack.len() - 1;
+        if self.span_root && span_start == 0 {
+            self.floor = top;
+        }
         // Assign this element's 1-based sibling positions from its parent's running counts, BEFORE
         // `eval` (positional compounds read them). Only when the schema uses positions.
         if self.schema.has_positional {
