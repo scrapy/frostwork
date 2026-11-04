@@ -649,17 +649,34 @@ def test_the_browser_gate_fails_on_novel_and_on_coverage():
     something. Each of these alone reads exactly like a clean run, so each is seeded."""
     import diff_browser as B
 
-    clean = dict(graded=10, selfcheck_checked=5)
+    clean = dict(graded=10, selfcheck_checked=5, bridge_checked=10, value_graded=10, css_mirror_checked=10)
     assert B.gate_failures(B.Report(**clean)) == []
     explained = B.Report(**clean, buckets={"implied <tbody>": [B.Divergence((), "//*/@id", ("engine", "chrome"))]})
     assert B.gate_failures(explained) == [], "an attributed divergence is expected until its rule lands"
+    value = B.Divergence(((0, "<p{}>"),), '[id="0"]::text', ("engine", "chrome"))
+    explained_values = B.Report(**clean, value_on_tree=[value], value_unseen_tree={"stray </p>": [value]},
+                                value_buckets={"raw-source outer HTML": [value]})
+    assert B.gate_failures(explained_values) == [], "a value column the tree or a value construct explains"
     seeded = {
         "novel": B.Report(**clean, novel=[B.Divergence(((0, "<td{}>"),), "//*/@id", ("engine", "chrome"))]),
-        "nothing graded": B.Report(graded=0, selfcheck_checked=5),
+        "nothing graded": B.Report(**{**clean, "graded": 0}),
         "token never emitted": B.Report(**clean, missing_tokens=["<col{}>"]),
         "oracle error": B.Report(**clean, oracle_errors=[{"doc": "<p>", "error": "load timeout"}]),
-        "self-check ran on nothing": B.Report(graded=10, selfcheck_checked=0),
+        "self-check ran on nothing": B.Report(**{**clean, "selfcheck_checked": 0}),
         "fast path differs from a page load": B.Report(**clean, selfcheck_differ=["<p>"]),
+        # the bridge
+        "bridge round-tripped nothing": B.Report(**{**clean, "bridge_checked": 0}),
+        "bridge changed a tree": B.Report(**clean, bridge_failures=[("<p>", "/1/0: 'a\\x01' != 'a'")]),
+        "bridge XPath differs from the native evaluator": B.Report(**clean, bridge_xpath_differ=[("<p>", "//*/@id")]),
+        # value columns
+        "no value column graded": B.Report(**{**clean, "value_graded": 0}),
+        "value token never emitted": B.Report(**clean, missing_value_tokens=[' lang="EN"']),
+        "value NOVEL": B.Report(**clean, value_novel=[value]),
+        "fast path's CSS differs from a page load's": B.Report(**clean, selfcheck_css_differ=["<p>"]),
+        "a value-rule selector answered nowhere": B.Report(**clean, rule_never_answered=['[lang="en"]::attr(id)']),
+        "a value-rule selector the engine refuses": B.Report(**clean, rule_refused=["//text()"]),
+        "native CSS checked against parsel nowhere": B.Report(**{**clean, "css_mirror_checked": 0}),
+        "native CSS disagrees with parsel": B.Report(**clean, css_mirror_differ=[("<p>", "p ::text")]),
     }
     for why, report in seeded.items():
         assert B.gate_failures(report), f"{why} must fail the gate"
@@ -692,6 +709,167 @@ def test_browser_attribution_is_by_the_smallest_repro_and_leaves_the_rest_novel(
     tokens = ["<p{}>", "<b{}>", "t", "</p>", "t"]
     assert B.attribute(repro(tokens, ids=["0", "1", "1"])) == "formatting reconstruction"
     assert B.attribute(repro(tokens, ids=["0", "1"])) is None
+
+
+# A browser tree holding what lxml cannot: control characters in text and attribute values, a `p"x` tag
+# name and a `{x}y` attribute name, comments with `--` and a trailing `-`, a processing instruction, SVG
+# with its namespace, a doctype, an open shadow root and HTML template content.
+BROWSER_ODD = ["#d", [["#dt", "html", "", ""], ["#c", "top--"], ["html", 0, [], [["head", 0, [], []], ["body", 0, [], [
+    ['p"x', 0, ["id", "0", "title", "a\x01b", "{x}y", "1"], ["t\x0bu"]],
+    ["svg", "http://www.w3.org/2000/svg", ["id", "1", "viewBox", "0 0 1 1"], [
+        ["foreignObject", "http://www.w3.org/2000/svg", ["id", "2"], ["z"]]]],
+    ["#7", "pi", "d"], ["#c", "a--b-"],
+    ["div", 0, ["id", "3"], ["a", ["#shadow", "open", [["p", 0, ["id", "s"], []]]]]],
+    ["template", 0, ["id", "4"], [["#d", [["p", 0, ["id", "y"], ["q\x0c<"]]]]]]]]]]]]
+
+
+def test_the_xpath_bridge_answers_lxml_xpath_on_what_lxml_cannot_hold():
+    """Browser-mode XPath is lxml's XPath over the BROWSER's tree (docs/BROWSER_MODE.md, decision 5), so the
+    tree is rebuilt in lxml through a reversible map rather than sanitised. On a tree full of what lxml
+    refuses it must round-trip exactly, answer every fingerprint column as the native evaluator does, match a
+    literal holding a control character, keep lxml's name semantics, and serialise an element as the
+    browser's `outerHTML` does, template content included."""
+    import seq_sweep
+    from browser_oracle import bridge as Br
+    from browser_oracle import tree as T
+
+    assert Br.round_trip_failures([BROWSER_ODD]) == ([], [])
+    b = Br.Bridge(BROWSER_ODD)
+    assert b.mapped_names, "p\"x and {x}y cannot be lxml names as they are"
+    assert b.xpath('//*[@title="a\x01b"]/@id') == ["0"]
+    assert b.xpath("//svg/@id") == ["1"] and b.xpath("//P") == [] and b.xpath("//foreignobject") == []
+    assert b.xpath('//*[@id="0"]/text()') == ["t\x0bu"]
+    assert b.xpath('//*[@id="y"]') == [] and b.xpath('//*[@id="s"]') == [], "outside the document view"
+    assert b.xpath('//*[@id="4"]') == ['<template id="4"><p id="y">q\x0c&lt;</p></template>']
+    assert b.xpath("//processing-instruction()") == ["<?pi d?>"]
+    sels = seq_sweep.fingerprint_selectors(["0", "1", "2", "3", "4"])
+    assert [b.xpath(s) for s in sels] == T.fingerprint(BROWSER_ODD, sels)
+
+    # lxml merges adjacent text nodes, so a tree with two is REPORTED, never graded through lxml
+    adjacent = ["#d", [["html", 0, [], [["body", 0, [], ["a", "b"]]]]]]
+    failures, unrepresentable = Br.round_trip_failures([adjacent])
+    assert failures == [] and len(unrepresentable) == 1
+
+
+def test_the_round_trip_gate_fails_on_a_lossy_bridge():
+    """Each seeded bridge loses something lxml cannot hold, the way a sanitising rebuild would. The round
+    trip must catch every one; a bridge that only ever saw clean trees reads exactly like a lossless one."""
+    from browser_oracle import bridge as Br
+    from browser_oracle import tree as T
+
+    original_to_json = Br.Bridge.to_json
+    seeded = {
+        "drops control characters": ("encode", lambda self, s: Br._VALUE_RE.sub("", s)),
+        "maps nothing, so lxml refuses": ("encode", lambda self, s: s),
+        "never decodes": ("decode", lambda self, s: s),
+        "forgets template content and shadow roots": ("to_json", lambda self: T.document_view(original_to_json(self))),
+    }
+    for why, (name, fn) in seeded.items():
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(Br.Bridge, name, fn)
+            failures, _unrepresentable = Br.round_trip_failures([BROWSER_ODD])
+        assert failures, f"a bridge that {why} must fail the round trip"
+
+
+def test_the_css_plan_mirrors_parsels_pseudo_elements():
+    """Native CSS answers parsel's selectors with querySelectorAll, so what parsel defines on top (`::text`,
+    `::attr()`, the subtree form after a descendant combinator, `:contains()`, comma groups) is planned from
+    parsel's own translator and checked against it. A form the planner cannot verify is refused, so a
+    lost rewrite is an `Unplannable`, never a wrong answer."""
+    import re
+
+    import conformant
+    from browser_oracle import css as C
+
+    def one(sel):
+        (m,) = C.plan(sel)["members"]
+        return m["css"], m["value"], m["scope"], m["attr"]
+
+    assert one("p::text") == ("p", "text", "self", None)
+    assert one("p ::text") == ("p", "text", "subtree", None)
+    assert one("div *::text") == ("div", "text", "subtree", None), "parsel: div/descendant-or-self::text()"
+    assert one("div * ::text") == ("div *", "text", "subtree", None)
+    assert one("div > *::text") == ("div > *", "text", "self", None)
+    assert one("dt + ::text") == ("dt + *", "text", "self", None)
+    assert one("p ::attr(href)") == ("p", "attr", "subtree", "href")
+    assert one("a") == ("a", "outer", "self", None)
+    (m,) = C.plan('p:contains("a\\"b")::text')["members"]
+    assert m["css"] == "p[data-fw-contains-0]" and m["contains"] == [("data-fw-contains-0", 'a"b')]
+    assert len(C.plan("h1::text, :is(p, span)::text")["members"]) == 2
+    for bad in ("p::foo", "p[", "::attr(1 2)"):
+        with pytest.raises(C.Unplannable):
+            C.plan(bad)
+    for s in conformant.BASKET:
+        if C.is_css(s):
+            C.plan(s)  # every basket selector plans
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(C, "_PSEUDO", re.compile("(?!)"))  # a planner that cannot find the pseudo-element
+        with pytest.raises(C.Unplannable):
+            C.plan("p ::text")
+
+
+def test_value_columns_split_by_the_tree_and_attribute_by_the_oracle_tree():
+    """A value column that differs where the fingerprint already differs is a TREE divergence and must not
+    reach the value verdict. Where the fingerprint agrees, a value construct explains it only from the
+    oracle's own tree: case folding applies to listed attributes on HTML elements and never to XPath, the
+    quirks-mode class rule needs a quirks-mode document, and raw-source outer HTML needs the same element."""
+    import diff_browser as B
+    import seq_sweep
+    from browser_oracle import tree as T
+
+    report, items = B.Report(), []
+    d = B.Divergence(((0, "<p{}>"),), "p::text", ("engine", "chrome"))
+    B.split_value(d, {B.render(d.doc)}, report, items)
+    assert report.value_on_tree == [d] and items == []
+    B.split_value(d, set(), report, items)
+    assert items == [d]
+
+    def page(kids, doctype=True):
+        frame = [["html", 0, [], [["head", 0, [], []], ["body", 0, [], kids]]]]
+        return ["#d", ([["#dt", "html", "", ""]] if doctype else []) + frame]
+
+    def r(sel, tree, engine=(), oracle=("0",)):
+        return B.ValueRepro((), sel, list(engine), list(oracle), tree)
+
+    p_en = ["p", 0, ["lang", "EN", "id", "0"], []]
+    svg_en = ["svg", "http://www.w3.org/2000/svg", ["lang", "EN", "id", "0"], []]
+    assert B.attribute_value(r('[lang="en"]::attr(id)', page([p_en]))) == "case-insensitive attribute values (CSS)"
+    assert B.attribute_value(r('//*[@lang="en"]/@id', page([p_en]))) is None, "XPath never folds"
+    assert B.attribute_value(r('[lang="en"]::attr(id)', page([svg_en]))) is None, "SVG matches exactly"
+    mixed = ["p", 0, ["data-case", "Mixed", "id", "0"], []]
+    assert B.attribute_value(r('[data-case="mixed"]::attr(id)', page([mixed]))) is None, "not a listed attribute"
+    upper = ["p", 0, ["class", "A", "id", "0"], []]
+    assert B.attribute_value(r(".a::attr(id)", page([upper], doctype=False))) == \
+        "quirks-mode class and id matching (deferred)"
+    assert B.attribute_value(r(".a::attr(id)", page([upper]))) is None, "no-quirks mode matches exactly"
+    raw = ['<table id="0"><tr><td>x</table>']
+    serial = ['<table id="0"><tbody><tr><td>x</td></tr></tbody></table>']
+    assert B.attribute_value(r("table", page([]), raw, serial)) == "raw-source outer HTML"
+    assert B.attribute_value(r("table", page([]), ['<table id="1"><tr></table>'], serial)) is None
+
+    # an empty id-less element answers every fingerprint column like no element at all, so only a value
+    # column that names it can show it
+    with_p = page([["div", 0, ["id", "0"], [["p", 0, [], []]]]])
+    sels = seq_sweep.fingerprint_selectors(["0"])
+    assert T.fingerprint(with_p, sels) == T.fingerprint(page([["div", 0, ["id", "0"], []]]), sels)
+    assert r("p", with_p, oracle=["<p></p>"]).unseen_elements() == ["p"]
+    assert r("span", with_p, oracle=[]).unseen_elements() == []
+
+
+def test_value_documents_keep_their_decorations_through_attribution_edits():
+    """Tree attribution reads ALPHABET tokens, so a value document is undecorated for it and every
+    counterfactual edit is decorated again, by id, before the oracle is asked. An edit to the token itself
+    (dropping a `/>`) must survive that, and a counterfactual must not lose the attributes it is about."""
+    import diff_browser as B
+
+    docs, _used = B.value_docs(40, 0)
+    decorated = next(d for d in docs if any(t != B.undecorate(d)[0][k][1] for k, (_i, t) in enumerate(d)))
+    plain, decos = B.undecorate(decorated)
+    assert B.redecorate(plain, decos) == decorated
+    assert all(t in B.ALPHABET + B.VALUE_STRUCTURE + [B.DOCTYPE, B.PLAIN_HEAD] for _i, t in plain)
+    slashed = ((0, '<p{}/>'),)
+    deco = {0: ("attrs", ' title="t"')}
+    assert B.redecorate(B.Repro(slashed, "", lambda d: True, []).deslashed(), deco) == ((0, '<p title="t"{}>'),)
 
 
 def test_the_rule_audit_has_no_bypass_for_a_start_close_divergence():

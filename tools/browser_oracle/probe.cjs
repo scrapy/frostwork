@@ -91,6 +91,7 @@ window.__ser = (n) => {
   if (n.nodeType === 3) return n.data;
   if (n.nodeType === 8) return ['#c', n.data];
   if (n.nodeType === 10) return ['#dt', n.name, n.publicId, n.systemId];
+  if (n.nodeType === 7) return ['#7', n.target, n.data];
   if (n.nodeType === 9 || n.nodeType === 11) return ['#d', [...n.childNodes].map(__ser)];
   if (!n.attributes) return ['#' + n.nodeType];
   const at = []; for (const x of n.attributes) at.push(x.name, x.value);
@@ -98,6 +99,48 @@ window.__ser = (n) => {
   if (n.localName === 'template' && n.namespaceURI === XHTML) kids.push(__ser(n.content));
   if (n.shadowRoot) kids.push(['#shadow', n.shadowRoot.mode, [...n.shadowRoot.childNodes].map(__ser)]);
   return [n.localName, n.namespaceURI === XHTML ? 0 : n.namespaceURI, at, kids]; };
+// Parsel's CSS over document d, from the plans tools/browser_oracle/css.py compiles. A plan is
+// {members: [{css, anchored, value: text|attr|outer, attr, scope: self|subtree, contains: [[mark, s]]}]},
+// or {container: plan, subs: [plan]} for values relative to each container match. One answer per plan:
+// the values in document order, one per node (a comma group is a union), or {error} if the browser
+// refuses the selector. Marker attributes exist only for the duration of one querySelectorAll.
+window.__css = (d, plans) => {
+  // Document order, as XPath has it: an element, then its attributes, then its children. Each node is
+  // numbered BEFORE any marker is added, and an attribute by its owner's number plus its position, so
+  // a result never depends on Attr object identity.
+  const order = new Map(); let k = 0;
+  const walk = (n) => { order.set(n, k); k += 1 + (n.attributes ? n.attributes.length : 0);
+    for (const c of n.childNodes) walk(c); };
+  walk(d);
+  const run = (m, scope, acc) => {
+    const marked = [];
+    let els;
+    try {
+      for (const [name, needle] of m.contains) {
+        for (const e of d.querySelectorAll('*')) if (e.textContent.includes(needle)) { e.setAttribute(name, ''); marked.push([e, name]); }
+      }
+      if (scope) { scope.setAttribute('data-fw-scope', ''); marked.push([scope, 'data-fw-scope']); }
+      els = [...d.querySelectorAll(scope ? m.anchored : m.css)];
+    } finally { for (const [e, name] of marked) e.removeAttribute(name); }
+    for (const el of els) {
+      if (m.value === 'outer') acc.set(order.get(el), el);
+      else if (m.value === 'text') {
+        if (m.scope === 'self') { for (const c of el.childNodes) if (c.nodeType === 3) acc.set(order.get(c), c.data); }
+        else { const w = d.createTreeWalker(el, 4); let t; while ((t = w.nextNode())) acc.set(order.get(t), t.data); }
+      } else {
+        const take = (e) => { let i = 0; for (const a of e.attributes) { if (a.name === m.attr) acc.set(order.get(e) + 1 + i, a.value); i++; } };
+        take(el); if (m.scope === 'subtree') for (const e of el.querySelectorAll('*')) take(e);
+      }
+    }
+  };
+  const answer = (p, scope) => { const acc = new Map(); for (const m of p.members) run(m, scope, acc);
+    return [...acc.keys()].sort((a, b) => a - b).map((key) => acc.get(key)); };
+  const value = (v) => (typeof v === 'string' ? v : v.outerHTML);
+  return plans.map((p) => { try {
+    if (p.subs) return answer(p.container, null).map((c) => p.subs.map((s) => answer(s, c).map(value)));
+    return answer(p, null).map(value);
+  } catch (e) { return { error: String((e && e.message) || e) }; } });
+};
 window.__q = (d, s) => [...d.querySelectorAll(s)]
   .map(e => [...e.childNodes].filter(n => n.nodeType === 3).map(n => n.data).join('|'));
 window.__x = (d, x) => { const r = d.evaluate(x, d, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null); const o = [];
@@ -123,8 +166,15 @@ const server = http.createServer((req, res) => {
   else if (u.pathname.startsWith('/small/')) body = small(+u.pathname.slice(7));
   else if (u.pathname === '/big') body = BIG;
   else if (u.pathname.startsWith('/seq/')) body = SEQ[+u.pathname.slice(5)];
-  else if (u.pathname.startsWith('/doc/')) body = SERVED.get(+u.pathname.slice(5));
-  else if (u.pathname === '/harness') body = '<!DOCTYPE html><meta charset="utf-8"><title>h</title><body>';
+  else if (u.pathname.startsWith('/doc/')) {
+    // a served document is a string (sent as UTF-8) or {body: Buffer, ctype}: exact bytes, and the
+    // Content-Type header as given (omitted when null), so the browser resolves the encoding itself
+    const s = SERVED.get(+u.pathname.slice(5));
+    if (s !== undefined && typeof s !== 'string') {
+      if (s.ctype === null) delete h['Content-Type']; else h['Content-Type'] = s.ctype;
+      body = s.body;
+    } else body = s;
+  } else if (u.pathname === '/harness') body = '<!DOCTYPE html><meta charset="utf-8"><title>h</title><body>';
   if (body === undefined) { res.writeHead(404); return res.end(); }
   res.writeHead(200, h); res.end(body);
 });
@@ -383,9 +433,16 @@ async function claims(B, base, out) {
 //   trees[i]   __ser's lossless tree of docs[i], or null when its page load failed
 //   paths[i]   "domparser" for a FAST_PATH_ELIGIBLE document, "page" for a CSP-served page load
 //   errors     [{index, error}] for every null tree
+// A request may also carry CSS: "plans" (a table of css.py plans) and "queries" (per document, indexes
+// into it). The reply then has "css": per document, one __css answer per query, computed on the same
+// document the tree was serialised from, after serialising it.
+// "bodies" (base64, one per document, in place of "docs") and "ctypes" (a Content-Type value or null
+// per document) serve exact bytes with that header, and "page": true sends every document down the
+// page-load path; bodies always take it, since only a page load decodes bytes as a browser does.
 // With "selfcheck", every eligible document is also page-loaded, and the reply carries
-// "selfcheck": {"checked": n, "differ": [index, ...], "failed": [index, ...]}: the eligible documents
-// whose two trees differ, and those whose page load failed.
+// "selfcheck": {"checked": n, "differ": [index, ...], "css_differ": [index, ...], "failed": [index, ...]}:
+// the eligible documents whose two trees differ, those whose CSS answers differ, and those whose page
+// load failed.
 // A request that cannot be read is answered {"id": null, "error": ...}. The browser closes when stdin
 // ends.
 async function serve(B, base) {
@@ -394,24 +451,30 @@ async function serve(B, base) {
   const tabs = await Promise.all([...Array(TABS)].map(() => B.tab()));
   let served = 0;
 
-  const viaDomparser = async (docs) => {
+  // Each path answers [tree JSON, CSS answers JSON or null] per document. `queriesOf(j)` is the j-th
+  // document's list of indexes into `plans`; the DOMParser path sends the table once per chunk.
+  const viaDomparser = async (docs, plans, queriesOf) => {
     const out = [];
     for (let i = 0; i < docs.length; i += CHUNK) {
-      out.push(...await h.evaluate(
-        `${JSON.stringify(docs.slice(i, i + CHUNK))}.map(x => ${ser("new DOMParser().parseFromString(x, 'text/html')")})`));
+      const qs = docs.slice(i, i + CHUNK).map((_, j) => queriesOf(i + j));
+      out.push(...await h.evaluate(`(() => { const P = ${JSON.stringify(plans || [])}; const Q = ${JSON.stringify(qs)};
+        return ${JSON.stringify(docs.slice(i, i + CHUNK))}.map((x, j) => { const d = new DOMParser().parseFromString(x, 'text/html');
+          const t = JSON.stringify(__ser(d)); return [t, Q[j] ? JSON.stringify(__css(d, Q[j].map((p) => P[p]))) : null]; }); })()`));
     }
     return out;
   };
   // A shared queue over the tab pool. A tab whose load failed is replaced, so one wedged page cannot
   // fail every document after it.
-  const viaPage = async (docs) => {
+  const viaPage = async (docs, plans, queriesOf) => {
     const out = Array(docs.length).fill(null); const errors = []; let next = 0;
     await Promise.all(tabs.map(async (_, k) => {
       while (next < docs.length) {
         const i = next++; const key = served++; SERVED.set(key, docs[i]);
         try {
           await tabs[k].navigate(`${base}/doc/${key}?csp=script`); await B.lib(tabs[k]);
-          out[i] = await tabs[k].evaluate(ser('document'));
+          const qi = queriesOf(i); const q = qi ? qi.map((p) => plans[p]) : null;
+          out[i] = await tabs[k].evaluate(`(() => { const t = JSON.stringify(__ser(document));
+            return [t, ${q ? `JSON.stringify(__css(document, ${JSON.stringify(q)}))` : 'null'}]; })()`);
         } catch (e) {
           errors.push({ index: i, error: e.message.slice(0, 200) });
           try { tabs[k] = await B.tab(); } catch { /* keep the old tab */ }
@@ -422,22 +485,31 @@ async function serve(B, base) {
   };
 
   async function answer(req) {
-    const docs = req.docs; const n = docs.length;
-    const eligible = docs.map(FAST_PATH_ELIGIBLE);
+    const bodies = Array.isArray(req.bodies) ? req.bodies : null;
+    const docs = bodies
+      ? bodies.map((b, i) => ({ body: Buffer.from(b, 'base64'), ctype: req.ctypes ? req.ctypes[i] : 'text/html' }))
+      : req.docs;
+    const n = docs.length;
+    const plans = req.plans || null;
+    const queriesOf = (i) => (plans && req.queries && req.queries[i] ? req.queries[i] : null);
+    const eligible = bodies || req.page ? docs.map(() => false) : docs.map(FAST_PATH_ELIGIBLE);
     const fastIdx = [...Array(n).keys()].filter((i) => eligible[i]);
     const slowIdx = req.selfcheck ? [...Array(n).keys()] : [...Array(n).keys()].filter((i) => !eligible[i]);
-    const [fast, slow] = await Promise.all([viaDomparser(fastIdx.map((i) => docs[i])),
-      viaPage(slowIdx.map((i) => docs[i]))]);
-    const trees = Array(n).fill(null); const paged = Array(n).fill(null);
-    fastIdx.forEach((i, j) => { trees[i] = fast[j]; });
-    slowIdx.forEach((i, j) => { paged[i] = slow.out[j]; if (!eligible[i]) trees[i] = slow.out[j]; });
+    const [fast, slow] = await Promise.all([
+      viaDomparser(fastIdx.map((i) => docs[i]), plans, (j) => queriesOf(fastIdx[j])),
+      viaPage(slowIdx.map((i) => docs[i]), plans, (j) => queriesOf(slowIdx[j]))]);
+    const got = Array(n).fill(null); const paged = Array(n).fill(null);
+    fastIdx.forEach((i, j) => { got[i] = fast[j]; });
+    slowIdx.forEach((i, j) => { paged[i] = slow.out[j]; if (!eligible[i]) got[i] = slow.out[j]; });
     const errors = slow.errors.map((e) => ({ ...e, index: slowIdx[e.index] })).filter((e) => !eligible[e.index]);
-    const parts = [`"id":${JSON.stringify(req.id)}`, `"trees":[${trees.map((t) => t ?? 'null').join(',')}]`,
+    const parts = [`"id":${JSON.stringify(req.id)}`, `"trees":[${got.map((t) => (t ? t[0] : 'null')).join(',')}]`,
       `"paths":${JSON.stringify(eligible.map((e) => (e ? 'domparser' : 'page')))}`, `"errors":${JSON.stringify(errors)}`];
+    if (plans) parts.push(`"css":[${got.map((t) => (t && t[1] ? t[1] : 'null')).join(',')}]`);
     if (req.selfcheck) {
       const loaded = fastIdx.filter((i) => paged[i] !== null);
       parts.push(`"selfcheck":${JSON.stringify({ checked: loaded.length,
-        differ: loaded.filter((i) => paged[i] !== trees[i]),
+        differ: loaded.filter((i) => paged[i][0] !== got[i][0]),
+        css_differ: loaded.filter((i) => paged[i][1] !== got[i][1]),
         failed: slow.errors.filter((e) => eligible[slowIdx[e.index]]).map((e) => slowIdx[e.index]) })}`);
     }
     return `{${parts.join(',')}}`;
@@ -450,7 +522,9 @@ async function serve(B, base) {
     let reply;
     try {
       const req = JSON.parse(line);
-      if (!Array.isArray(req.docs) || !req.docs.every((d) => typeof d === 'string')) throw new Error('docs must be a list of strings');
+      const listed = Array.isArray(req.bodies) ? req.bodies : req.docs;
+      if (!Array.isArray(listed) || !listed.every((d) => typeof d === 'string')) throw new Error('docs (or bodies) must be a list of strings');
+      if (req.queries && (!Array.isArray(req.plans) || req.queries.length !== listed.length)) throw new Error('queries needs plans and one entry per document');
       reply = await answer(req);
     } catch (e) {
       let id = null; try { id = JSON.parse(line).id ?? null; } catch { /* unreadable */ }

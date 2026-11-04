@@ -151,13 +151,17 @@ gate-seq:
 # one is reduced to its smallest reproducing token subsequence and filed under the section 3 construct
 # that explains it. The gate fails on NOVEL (a divergence nothing explains) and on coverage: nothing
 # graded, a token never emitted, an oracle error, or a DOMParser tree that differs from a page load.
+# It also grades VALUE columns: a selector basket answered with native CSS in the browser and with XPath
+# through the lossless lxml bridge (whose round trip it gates), split by whether the fingerprint already
+# explains a difference.
 # Not part of `ci`: it needs local browsers, and today's NOVEL list is the work browser mode starts from.
 BROWSERS ?= chrome
 BROWSER_SEQ_DEPTH ?= 2
 BROWSER_RANDOM ?= 1000
+BROWSER_VALUES ?= 1000
 gate-browser: ext
 	$(PY) tools/diff_browser.py --browsers $(BROWSERS) --seq-depth $(BROWSER_SEQ_DEPTH) \
-		--random $(BROWSER_RANDOM) --gate
+		--random $(BROWSER_RANDOM) --values $(BROWSER_VALUES) --gate
 
 # "Is every rule cell RIGHT?" is what tools/audit_tree_rules.py answers. This answers "if a cell were
 # WRONG, would any gate notice?" — the only check here that finds blind spots without a human guessing
