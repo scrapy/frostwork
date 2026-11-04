@@ -153,6 +153,40 @@ def _first_compound_end(css: str) -> int:
     return len(css)
 
 
+def _pseudo_parts(text: str, pseudo: Any) -> tuple[str, Optional[str], str, str]:
+    """What a member answers and where its selector ends: `(value, attr, the selector before the
+    pseudo-element, the pseudo-element)`, with `value` one of `outer`, `text` and `attr`."""
+    m = _PSEUDO.search(text)
+    if pseudo is None:
+        return "outer", None, text, ""
+    if pseudo == "text" and m:
+        return "text", None, text[:m.start()], "::text"
+    if isinstance(pseudo, FunctionalPseudoElement) and pseudo.name == "attr" and m and len(pseudo.arguments) == 1:
+        argument = text[m.start():].split("(", 1)[1].rsplit(")", 1)[0].strip()
+        return "attr", pseudo.arguments[0].value, text[:m.start()], f"::attr({argument})"
+    raise Unplannable(f"pseudo-element {pseudo!r} in {text!r}")
+
+
+def _native_form(text: str, want: str, value: str, attr: Optional[str], pre: str, suffix: str
+                 ) -> tuple[str, str, str]:
+    """`(css for the browser, scope, the XPath that css translates to)`. `want` is parsel's XPath for the
+    member, and the subtree form is the one it ends in `descendant-or-self::`."""
+    if value != "outer" and (want.endswith("/descendant-or-self::text()")
+                             or want.endswith("/descendant-or-self::*/@" + str(attr))):
+        if pre[-1:].isspace():
+            css = pre.rstrip()
+        elif pre.rstrip().endswith("*") and pre.rstrip()[:-1][-1:].isspace():
+            css = pre.rstrip()[:-1].rstrip()
+        else:
+            raise Unplannable(f"cannot find the subtree form's left part in {text!r}")
+        tail = "/descendant-or-self::text()" if value == "text" else f"/descendant-or-self::*/@{attr}"
+        return css, "subtree", _T.css_to_xpath(css) + tail
+    css = pre.rstrip() or "*"
+    if css[-1] in ">+~":
+        css += " *"
+    return css, "self", _T.css_to_xpath(css + suffix)
+
+
 def _member(text: str) -> dict[str, Any]:
     try:
         parsed = cssselect.parse(text)
@@ -161,34 +195,8 @@ def _member(text: str) -> dict[str, Any]:
         raise Unplannable(f"{type(e).__name__}: {e}") from None
     if len(parsed) != 1:
         raise Unplannable(f"{text!r} is not one comma-group member")
-    pe = parsed[0].pseudo_element
-    m = _PSEUDO.search(text)
-    if pe is None:
-        value, attr, pre, suffix = "outer", None, text, ""
-    elif pe == "text" and m:
-        value, attr, pre, suffix = "text", None, text[:m.start()], "::text"
-    elif isinstance(pe, FunctionalPseudoElement) and pe.name == "attr" and m and len(pe.arguments) == 1:
-        value, attr, pre = "attr", pe.arguments[0].value, text[:m.start()]
-        suffix = f"::attr({text[m.start():].split('(', 1)[1].rsplit(')', 1)[0].strip()})"
-    else:
-        raise Unplannable(f"pseudo-element {pe!r} in {text!r}")
-    scope = "self"
-    if value != "outer" and (want.endswith("/descendant-or-self::text()")
-                             or want.endswith("/descendant-or-self::*/@" + str(attr))):
-        scope = "subtree"
-        if pre[-1:].isspace():
-            css = pre.rstrip()
-        elif pre.rstrip().endswith("*") and pre.rstrip()[:-1][-1:].isspace():
-            css = pre.rstrip()[:-1].rstrip()
-        else:
-            raise Unplannable(f"cannot find the subtree form's left part in {text!r}")
-        check = _T.css_to_xpath(css) + (
-            "/descendant-or-self::text()" if value == "text" else f"/descendant-or-self::*/@{attr}")
-    else:
-        css = pre.rstrip() or "*"
-        if css[-1] in ">+~":
-            css += " *"
-        check = _T.css_to_xpath(css + suffix)
+    value, attr, pre, suffix = _pseudo_parts(text, parsed[0].pseudo_element)
+    css, scope, check = _native_form(text, want, value, attr, pre, suffix)
     if check != want:
         raise Unplannable(f"the native form of {text!r} would translate to {check!r}, not parsel's {want!r}")
     marks: list[tuple[str, str]] = []
