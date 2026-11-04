@@ -70,6 +70,7 @@ from typing import Any, Callable, Optional
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import conformant  # noqa: E402  (its selector basket)
+import diff_lxml  # noqa: E402  (the engine's member budget, and what a bare-element selector is)
 import seq_sweep  # noqa: E402  (the fingerprint and the short-sequence alphabet)
 import webpoet_structure  # noqa: E402  (the one structural comparison for outer HTML)
 from browser_oracle import bridge as Br  # noqa: E402
@@ -514,7 +515,7 @@ def oracle_form(col: str) -> Any:
 
 
 # ---------------------------------------------------------------- the engine
-MAX_SELECTORS_PER_PASS = 96  # the engine's member budget, as in diff_lxml
+MAX_SELECTORS_PER_PASS = diff_lxml.MAX_SELECTORS_PER_PASS
 
 
 def engine_runner(parser: str) -> tuple[Callable[[bytes, list[str]], list[list[str]]], str]:
@@ -719,12 +720,10 @@ def same_values(mine: list[str], theirs: list[str], sel: str) -> bool:
 
 
 def is_node_query(sel: str) -> bool:
-    """A bare-element selector: its value is outer HTML. (`diff_lxml.is_node_query`'s rule, without
-    importing a module that needs the `differ` binary.)"""
+    """A bare-element selector: its value is outer HTML. `diff_lxml`'s rule, and the scalar forms this
+    gate's columns add (`string()`, `count()`, `/@*`)."""
     s = sel.strip()
-    if "::text" in s or "::attr" in s or s.startswith(("normalize-space(", "string(", "count(")):
-        return False
-    return not (s.endswith("text()") or re.search(r"/@[A-Za-z_][\w:.-]*$", s) or s.endswith("/@*"))
+    return diff_lxml.is_node_query(s) and not (s.startswith(("string(", "count(")) or s.endswith("/@*"))
 
 
 # ---------------------------------------------------------------- reduction to the smallest repro
@@ -797,12 +796,6 @@ def reduce_values(items: list[Divergence], answers: Answers) -> None:
 
 
 # ---------------------------------------------------------------- attribution
-def tag_name(token: str) -> str:
-    """`<a{} href=x>` -> `a`, `</p>` -> `p`; lowercased, as the tokenizer reads it."""
-    body = token[2:] if token.startswith("</") else token[1:]
-    return body.split("{", 1)[0].split(">", 1)[0].split("/", 1)[0].split(" ", 1)[0].lower()
-
-
 @dataclass
 class Repro:
     """A reduced document as the attribution rules see it.
@@ -818,18 +811,8 @@ class Repro:
     differs: Callable[[Doc], bool]
     browser_ids: list[str]
 
-    @property
-    def tokens(self) -> list[str]:
-        return [t for _, t in self.doc]
-
-    def starts(self) -> list[str]:
-        return [tag_name(t) for t in self.tokens if _start_tag(t)]
-
-    def ends(self) -> list[str]:
-        return [tag_name(t) for t in self.tokens if t.startswith("</") and len(t) > 3]
-
     def has_doctype(self) -> bool:
-        return any(t.lower().startswith("<!doctype") for t in self.tokens)
+        return any(t.lower().startswith("<!doctype") for _i, t in self.doc)
 
     def with_doctype(self) -> Doc:
         return ((-1, DOCTYPE),) + self.doc
@@ -840,9 +823,6 @@ class Repro:
 
     def deslashed(self) -> Doc:
         return tuple((i, t.replace("{}/>", "{}>")) for i, t in self.doc)
-
-    def counts(self, names: set[str]) -> int:
-        return sum(n in names for n in self.starts())
 
 
 @dataclass(frozen=True)
@@ -1008,18 +988,6 @@ language link media method multiple nohref noresize noshade nowrap readonly rel 
 selected shape target text type valign valuetype vlink""".split())
 _ATTR_TEST = re.compile(r"""\[\s*([^\s~|^$*!=\]]+)\s*([~|^$*]?=)\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\]\s]+)\s*\]""")
 _ASCII_WS = re.compile(r"[\t\n\x0c\r ]+")
-
-
-def _op(op: str, value: str, want: str) -> bool:
-    if op == "=":
-        return value == want
-    if op == "~=":
-        return want in _ASCII_WS.split(value)
-    if op == "|=":
-        return value == want or value.startswith(want + "-")
-    if not want:
-        return False
-    return {"^=": value.startswith, "$=": value.endswith, "*=": value.__contains__}[op](want)
 
 
 _CLASS_OR_ID = re.compile(r"([.#])((?:[\w-]|\\[0-9a-fA-F]{1,6}[ \t\n\r\f]?|\\.)+)")
