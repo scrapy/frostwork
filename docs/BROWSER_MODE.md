@@ -12,8 +12,8 @@ w3lib integration.
 
 In short:
 
-- **Encoding** follows the browser through every entry point. Over the 48 cases of
-  `~/src/encoding-hacks` the engine differs from Chrome on 2, both decided: unlabelled valid UTF-8 stays
+- **Encoding** follows the browser through every entry point. Over 48 encoding cases measured in
+  Chrome as exact bytes and headers, the engine differs on 2, both decided: unlabelled valid UTF-8 stays
   UTF-8 (E2), and autodetection follows Firefox's detector (E3).
 - **The parse modes** share the tokenizer, the matcher, encoding and value decoding, and differ only in
   the tree builder behind one interface (section 4).
@@ -24,17 +24,18 @@ In short:
 - **Five HTML5 rules change a decision a forward pass has already made**: the adoption agency with a
   furthest block, foster parenting's document order, a second `<html>` or `<body>` tag merging its
   attributes, a `<frameset>` replacing a body, and an `<option>` copied into a `<selectedcontent>` before
-  it. Where one fires and changes an answer, browser mode answers the page from a compact tree of the
-  finished document (section 4, "The replay"), on 1.6% of 30,031 crawl and real-web pages. So browser mode
+  it. Where one fires and changes an answer, or a page nests past Chrome's depth cap of 512, browser mode
+  answers the page from a compact tree of the finished document (section 4, "The replay"), on 1.6% of
+  30,031 crawl and real-web pages. So browser mode
   is exact on all five, and builds no tree on every other page.
 
 ## 1. Encoding
 
 The encoding decision is the same in both parse modes, and the browser is its standard.
-`tools/browser_oracle/lab_compare.py` grades the engine against the lab's browser column: 2 of 48 cases
-differ, given the header or through `Page.extract_response`, and they are the two decisions below. The
-lab's fallback-dependent cases are Chrome 156 top-level loads; the other 32 are a Chrome 148 iframe
-capture that Chrome 156 reproduces.
+`tools/browser_oracle/lab_compare.py` grades the engine against 48 cases of exact bytes and headers
+whose rendering was recorded in Chrome: 2 differ, given the header or through `Page.extract_response`,
+and they are the two decisions below. The fallback-dependent cases are Chrome 156 top-level loads; the
+other 32 are a Chrome 148 iframe capture that Chrome 156 reproduces.
 
 ### E1. The engine takes the transport label, not a decision
 
@@ -63,7 +64,7 @@ capture that Chrome 156 reproduces.
   `.encoding` from the same decision.
 - `Page.extract_response` and `FrostPage` pass the header and the URL, and a forced `_encoding` as
   `encoding=`. They never pass web-poet's resolved `.encoding`: it is always a string, it outranks the
-  prescan, and passing it loses 14 of the 48 lab cases. PYTHON.md ("Encoding inputs") is the integrator
+  prescan, and passing it loses 14 of the 48 cases. PYTHON.md ("Encoding inputs") is the integrator
   contract.
 - `diff_webpoet` grades against parsel built from `response.text`, which is w3lib's decision, so its
   generator stays out of the shapes where the two decisions differ.
@@ -219,8 +220,8 @@ Under libxml2 the two coincide. Under HTML5 they differ in four ways:
   builder entry, and closes when the insertion point next moves below it.
 - **Parked elements.** Foster parenting inserts in the table's parent while the table and its rows stay
   open. The matcher parks the table's run of elements, with their positions, group instances and pending
-  text, and unparks them when the next insertion targets them. The head is parked in "after head", and so
-  is the current node past Chrome's depth cap of 512.
+  text, and unparks them when the next insertion targets them. The head is parked in "after head". The
+  current node past Chrome's depth cap of 512 is parked too, until the replay takes over (below).
 - **Inert elements.** HTML template content and declarative shadow roots are parsed with the full rules
   but never reach the matcher. An SVG or MathML `<template>` is an ordinary element, so this keys on
   namespace and name together.
@@ -231,7 +232,10 @@ Under libxml2 the two coincide. Under HTML5 they differ in four ways:
 
 ### The replay
 
-The streaming pass runs until the first of the five retroactive rules fires, and stops. The page is then
+The streaming pass runs until the first of the five retroactive rules fires, or the depth cap is
+reached, and stops. The cap is not a rule of its own kind: past it a new element opens beside the current
+node, which stays open, so later content of the current node comes first in document order, and the
+replay is the exact answer there too. The page is then
 answered by the replay: the same builder, compiled with `REPLAY` set, runs again from the start, and every
 insertion becomes a DOM operation (append, insert before the table, move, copy, detach) on an arena tree in
 `browser/dom.rs`. The matcher then walks the finished tree in pre-order, each node's rank serving as its
@@ -253,6 +257,8 @@ fire on these shares of pages:
 | `<selectedcontent>` | none |
 | any of them, so the page replays | 1.59% (none of the 31 realweb pages) |
 
+The last row also counts pages that nest past the depth cap.
+
 The tree holds attributes and text runs in two arenas and lives only while its page is answered. Building
 and walking it costs little more than streaming; most of what a replayed page costs is the streamed prefix
 the replay starts again from. `docs/BENCHMARKS.md` ("Browser mode against lxml mode") has the figures.
@@ -272,8 +278,8 @@ frameset could still remove, and no `<html` or `<body` bytes left in the page.
   of their own. A formatting element's copy carries the original's attributes, and its outer HTML is the
   start tag it was copied from followed by its own content.
 - **Input preparation.** Browser mode skips Parsel's strip and NUL deletion, and consumes only a UTF-8
-  BOM at offset 0. NUL follows HTML5: tag and attribute names keep the byte, so `<di\0v>` does not match
-  `div`; body text drops it; raw text, RCDATA and attribute values turn it into U+FFFD.
+  BOM at offset 0. NUL follows HTML5: a NUL in a tag or attribute name stands for U+FFFD, as in Chrome, so
+  `<di\0v>` does not match `div`; body text drops it; raw text, RCDATA and attribute values turn it into U+FFFD.
 - **Names.** Attribute names follow Chrome's DOM: lowercased, SVG camel case, MathML `definitionURL`, and
   `xlink:`/`xml:`/`xmlns` namespaced on foreign elements. `::attr()` reads a name as `getAttribute()`
   does: lowercased on an HTML element, compared exactly on an SVG or MathML one. An XPath `@name` must be
@@ -406,7 +412,8 @@ and when it fails. The lxml-mode gates all pin `parser="lxml"`.
 
 - Quirks-mode class and id matching, where CSS compares case-insensitively without a doctype (decision 2).
 - Outer HTML is the element's raw source, as in lxml mode, and is refused for an element the page never
-  wrote. Attributes a later `<html>` or `<body>` tag merged in, and the content a `<select>` copies into a
+  wrote. A formatting element's copy has no source of its own either: its outer HTML is the start tag it
+  was copied from followed by its own content. Attributes a later `<html>` or `<body>` tag merged in, and the content a `<select>` copies into a
   `<selectedcontent>`, are not in that source.
 - `.as_node()` is refused. A faithful one would hand over a node built from browser mode's own tree,
   never an lxml reparse.
@@ -414,7 +421,7 @@ and when it fails. The lxml-mode gates all pin `parser="lxml"`.
   so XPath cannot reach a camel-cased foreign name: `@viewBox` and `//clipPath` are refused, and
   `@viewbox` and `//clippath` match nothing. CSS reaches them (`svg::attr(viewBox)`, `clipPath`).
 - Not built: browser-mode verdicts in `diff_lxml`, `gate-seq` and `mutate_rules`, browser columns in the
-  crawl lab, a Firefox column in the encoding lab, and gating the Chrome-versus-Firefox table in both
+  Common Crawl corpus checks, a Firefox column in the encoding measurements, and gating the Chrome-versus-Firefox table in both
   directions.
 
 ## 8. Decisions
@@ -442,8 +449,8 @@ Measured on 2026-11-03, on macOS:
 
 - Chrome 156.0.8078.80 and Firefox 159.0, stock builds, headless, each from a fresh profile, over CDP and
   WebDriver BiDi.
-- `~/src/encoding-hacks` at its 2026-11-03 state, with 32 cells from a Chrome 148 iframe capture and 16
-  from Chrome 156 top-level loads, and web-poet 2.5.0 with w3lib from the repo's `.venv`.
+- 48 encoding cases, 32 from a Chrome 148 iframe capture and 16 from Chrome 156 top-level loads, and
+  web-poet 2.5.0 with w3lib from the repo's `.venv`.
 - `tools/browser_oracle/`: `probe.cjs` and its fixtures for section 5, `claims.json` for section 3,
   `lab_compare.py` for section 1, and the raw outputs in `evidence/2026-11-03/`.
 

@@ -170,7 +170,7 @@ BROWSER_DIFFERENCES = [
 # ---- DELIBERATE differences from the BROWSER: the encoding rule's named exceptions ---------------
 # Each row is (name, document, Frostwork's encoding, Frostwork's values, the browser's encoding, the
 # browser's values, the browser build that was measured, why). The browser column is a recorded
-# measurement from ~/src/encoding-hacks, so the gate checks it two ways instead of re-measuring it:
+# browser measurement, so the gate checks it two ways instead of re-measuring it:
 # decoding the document with the browser's encoding must give the browser's values (the record is
 # self-consistent), and Frostwork must still differ from them (the exception is still real).
 BROWSER_EXCEPTIONS = [

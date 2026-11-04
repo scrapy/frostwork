@@ -45,7 +45,7 @@ first public release.
   `response.encoding`. Frostwork's own prescan and autodetection now run behind a web-poet or Scrapy
   response, so a `<meta charset>` deep in the head or early in the body, a stray quote in a charset value,
   `<meta charset=utf-16>`, an XML declaration after offset 0 and an HTTP `charset=x-user-defined` decode
-  as a browser decodes them. Over the encoding lab's 48 cases, a web-poet response now differs from
+  as a browser decodes them. Over 48 encoding cases measured in Chrome, a web-poet response now differs from
   Chrome on 2, both deliberate (docs/COMPATIBILITY.md), where it differed on 21. A forced encoding
   is still honoured, below a BOM.
 

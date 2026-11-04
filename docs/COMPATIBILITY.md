@@ -671,8 +671,8 @@ Encoding *sniffing* is still oracled against `w3lib.encoding.html_to_unicode` (w
 everything the two agree on, because Parsel itself never looks at `<meta>` — `parsel.Selector(body=…)`
 just defaults to UTF-8, so oracling a prescan against it is vacuous. But w3lib is **evidence, not the
 target**. Claims about "what browsers do" are settled by measuring a browser, not by quoting the
-standard at it: `~/src/encoding-hacks` runs exact bytes and exact HTTP headers past a real browser
-and twelve scraper stacks side by side, and that is where a row in the table below comes from.
+standard at it: exact bytes and exact HTTP headers are run past a real browser and twelve scraper
+stacks side by side, and that is where a row in the table below comes from.
 
 Resolution order (`src/encoding.rs`):
 
@@ -727,7 +727,7 @@ the integrator contract: what to pass for each input, and what goes wrong otherw
 ### Deliberate differences from browsers
 
 Two places where Frostwork's encoding decision is not the one a browser makes. Both are decided, and both
-are measured against Chrome 156 in `~/src/encoding-hacks`.
+are measured against Chrome 156.
 
 **Unlabelled valid UTF-8 is read as UTF-8.** This is the encoding rule's one named exception. On a page
 with no BOM, no label and no declaration, browsers refuse to detect UTF-8 by policy: Chrome 156 shows

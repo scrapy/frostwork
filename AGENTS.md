@@ -49,7 +49,7 @@ happening again; docs/TESTING.md has the detail.
 
 - Generated pages hold only the malformations their author thought of. Before trusting a parity number,
   run `make gate-corpus`, `make corpus-real` (about 30 real pages, gitignored) and a Common Crawl sample
-  through `~/src/frostwork-crawl-lab`. A check that samples says so where its number is quoted.
+  (`make gate-corpus CORPUS=<dir>`). A check that samples says so where its number is quoted.
 - When a divergence looks like libxml2 being odd, check html5lib before calling it a divergence; for
   browser mode, check Chrome. A documented divergence is a claim and can be wrong.
 - Parsel parses `text.strip().replace("\x00", "")`, not the response bytes. Lxml mode reproduces both.
@@ -150,8 +150,8 @@ than list them; it has the engine's derive, audit and mutate trio.
   become which characters (BOM handling, the `<meta>` prescan, label resolution, the decoder indexes) the
   target is what a browser renders, and w3lib, lxml, Parsel and the spec are evidence. Where an oracle
   disagrees, implement the browser's answer and assert the oracle's in `tools/enc_check.py`'s difference
-  table, so an upstream fix fails as stale. Measure the browser rather than quoting the spec at it:
-  `~/src/encoding-hacks` is the lab for that.
+  table, so an upstream fix fails as stale. Measure the browser, with exact bytes and headers, rather than
+  quoting the spec at it.
 - **Each mode matches its oracle empirically.** Lxml mode follows libxml2 2.15, not the HTML5 spec.
   Browser mode follows Chrome, not the spec, and where Chrome and Firefox differ it follows Chrome.
 - **A parity gate names its mode.** Every test, tool and gate that asserts libxml2 or Parsel parity pins

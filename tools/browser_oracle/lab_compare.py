@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Frostwork against the browser column of the encoding-hacks lab, three ways (docs/BROWSER_MODE.md,
+"""Frostwork against a recorded browser column of encoding cases, three ways (docs/BROWSER_MODE.md,
 section 1 and E1).
 
 Each lab case is exact bytes plus a `Content-Type`, and the lab records what a real browser rendered for
@@ -12,7 +12,7 @@ once through a response adapter, and counts the cases whose values differ from t
   extract_response  `Page.extract_response` on a web-poet `HttpResponse`, which passes the raw header and
                     the URL, as `FrostPage` does
 
-    .venv/bin/python tools/browser_oracle/lab_compare.py [--lab ~/src/encoding-hacks]
+    .venv/bin/python tools/browser_oracle/lab_compare.py --lab <dir>
 """
 from __future__ import annotations
 
@@ -56,7 +56,7 @@ def values_of(extract):
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--lab", type=Path, default=Path("~/src/encoding-hacks").expanduser())
+    ap.add_argument("--lab", type=Path, required=True, help="the case lab: its cases and browser results")
     ap.add_argument("--json", action="store_true", help="print the per-case table as JSON")
     args = ap.parse_args()
     sys.path.insert(0, str(args.lab))

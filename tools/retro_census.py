@@ -11,7 +11,7 @@ A second `<html>` or `<body>` tag is counted twice: with any attribute at all, a
 change an answer to the page object's own selectors, which is the only case that costs a replay.
 
 Usage:
-  .venv/bin/python tools/retro_census.py fixtures/realweb ~/src/frostwork-crawl-lab/corpora/<sample> ...
+  .venv/bin/python tools/retro_census.py fixtures/realweb <corpus> ...
   .venv/bin/python tools/retro_census.py --limit 2000 <dir>     # the first 2000 pages of each corpus
 """
 from __future__ import annotations

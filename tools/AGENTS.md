@@ -122,8 +122,8 @@ The one Node tool here (Node 22 or later, no packages).
   and only the shapes `seq_sweep.fingerprint_selectors` emits. `from_lxml` lets `tests/test_gates.py`
   prove it returns parsel's answers on lxml's trees; widen the evaluator and that test together. It also
   reads a tree's document mode (`is_quirks`) and lists its elements.
-- `lab_compare.py` grades the engine against the encoding-hacks browser column with three encoding labels,
-  and once through `Page.extract_response` on a web-poet `HttpResponse`.
+- `lab_compare.py` grades the engine against a recorded browser column of encoding cases (`--lab <dir>`)
+  with three encoding labels, and once through `Page.extract_response` on a web-poet `HttpResponse`.
 - `chrome_build.py` prints the Chrome build `html5_derivation.json` was derived from, which hosted CI
   installs from Chrome for Testing.
 

@@ -11,12 +11,13 @@ explain what it covers, which oracle owns each subsystem, and which broader chec
 
 ## Oracles and pass criteria
 
-There is no single oracle for every layer, and two of them depend on the parse mode:
+There is no single oracle for every layer, and two of them depend on the parse mode. Browser mode is the
+default; lxml mode is `parser="lxml"`.
 
 - **Extracted values:** in lxml mode, Parsel/lxml using libxml2 2.15 or newer. In browser mode, Chrome:
   CSS answered natively by `querySelectorAll` and XPath through a lossless bridge from the browser's tree.
-- **CSS selector acceptance:** cssselect/lxml's parser. A selector rejected by the oracle must be reported
-  unsupported, not answered with an empty value that looks legitimate.
+- **CSS selector acceptance:** cssselect/lxml's parser. A selector rejected by the oracle must be refused
+  as unsupported, never answered as if it had matched nothing.
 - **HTML tree construction:** in lxml mode, empirical parity with libxml2. In browser mode, the tree
   Chrome builds, with Firefox run alongside on request. Every lxml-mode gate pins `parser="lxml"`.
 - **Encoding:** browser/WHATWG behavior is the target. `w3lib` is used where it agrees with browsers; known
@@ -58,7 +59,7 @@ make gate-browser       # browser mode against Chrome: trees, values, debug inva
 make gate-webpoet-browser
 ```
 
-`make help` lists every target. The Rust test binaries must be built without the `python` feature; maturin
+`make ci` runs every target in that block, then `make release-check`. `make help` lists every target. The Rust test binaries must be built without the `python` feature; maturin
 owns the extension-module build used by the Python checks. The browser gates need Chrome and Node 22;
 `FROSTWORK_CHROME` names the binary, and hosted CI installs the Chrome for Testing build that
 `tools/browser_oracle/chrome_build.py` prints.
@@ -274,7 +275,9 @@ Value parity remains the job of the oracle-backed jobs.
 Use this checklist for a new selector, parser rule or integration behavior:
 
 1. Choose the oracle for that subsystem and record any deliberate difference in COMPATIBILITY.md.
-2. Assert both halves of the no-fallback contract: supported means oracle parity; unsupported means empty.
+2. Assert both halves of the no-fallback contract: supported means oracle parity; unsupported means
+   refused, so `frostwork.check` reports it, the default strict mode raises `UnsupportedSelector`, and
+   `strict=False` gives an empty column.
 3. Add the smallest focused regression vector.
 4. Add or extend the generated family, rule audit, sequence sweep or integration contract that owns the
    broader surface.
