@@ -14,7 +14,6 @@ import re
 import sys
 from collections import Counter
 from dataclasses import dataclass
-from html.parser import HTMLParser
 from typing import Any, Callable, Optional
 
 import frostwork
@@ -66,6 +65,34 @@ _ASCII_WS = re.compile(r"[\t\n\x0c\r ]+")
 _CLASS_OR_ID = re.compile(r"([.#])((?:[\w-]|\\[0-9a-fA-F]{1,6}[ \t\n\r\f]?|\\.)+)")
 
 
+def _outside_strings_and_brackets(css: str) -> str:
+    """`css` with strings and attribute brackets blanked, escapes kept. Unlike `css.top_level`, a
+    pseudo-class's argument stays: a class inside `:not()` or `:has()` is still a class selector."""
+    out, quote, depth, k = [], None, 0, 0
+    while k < len(css):
+        ch = css[k]
+        if ch == "\\":
+            out.append(css[k:k + 2] if not quote and not depth else "  "[:len(css[k:k + 2])])
+            k += 2
+            continue
+        if quote:
+            quote = None if ch == quote else quote
+            out.append(" ")
+        elif ch in "\"'":
+            quote = ch
+            out.append(" ")
+        elif ch == "[":
+            depth += 1
+            out.append(" ")
+        elif ch == "]" and depth:
+            depth -= 1
+            out.append(" ")
+        else:
+            out.append(" " if depth else ch)
+        k += 1
+    return "".join(out)
+
+
 def _quirks_class_or_id(r: ValueRepro) -> bool:
     """A class or id selector that a quirks-mode document's element passes only case-folded.
 
@@ -73,7 +100,7 @@ def _quirks_class_or_id(r: ValueRepro) -> bool:
     but matches class and id selectors case-sensitively in every mode."""
     if not C.is_css(r.sel) or grouped_spec(r.sel) or not r.quirks():
         return False
-    for kind, raw in _CLASS_OR_ID.findall(C.top_level(r.sel)):
+    for kind, raw in _CLASS_OR_ID.findall(_outside_strings_and_brackets(r.sel)):
         want = C.unescape(raw)
         for el in T.elements(r.tree):
             attrs = dict(zip(el[2][0::2], el[2][1::2]))
@@ -89,22 +116,52 @@ class ValueConstruct:
     test: Callable[[ValueRepro], bool]
 
 
-class _FirstStartTag(HTMLParser):
-    """The first start tag of a value, as `(tag, sorted attribute names, id)`. `<image>` is the `<img>` a
-    browser makes of it: raw source keeps the name the page wrote."""
+_WS = "\t\n\x0c\r "
 
-    root: Optional[tuple] = None
 
-    def handle_starttag(self, tag, attrs):
-        if self.root is not None:
-            return
-        names: list[str] = []
-        ident = None
-        for k, v in attrs:
-            if k not in names:
-                names.append(k)
-                ident = v if k == "id" else ident
-        self.root = ("img" if tag == "image" else tag, tuple(sorted(names)), ident)
+def _start_tag(html: str) -> Optional[tuple]:
+    """The start tag at the head of `html`, read with HTML5's tokenizer states: `(tag, attribute names
+    in order with the first of a repeated one kept, id as written)`, or None for anything else or a tag
+    the input ends inside. Names are ASCII-lowercased. Values are raw: no reference is decoded."""
+    if len(html) < 2 or html[0] != "<" or not ("a" <= html[1].lower() <= "z"):
+        return None
+    n, k = len(html), 1
+    while k < n and html[k] not in _WS + "/>":
+        k += 1
+    tag, names, ident = html[1:k].lower(), [], None
+    while k < n:
+        ch = html[k]
+        if ch in _WS or ch == "/":
+            k += 1
+            continue
+        if ch == ">":
+            return tag, names, ident
+        start = k   # an attribute name: its first character may be `=`
+        k += 1
+        while k < n and html[k] not in _WS + "/>=":
+            k += 1
+        name = html[start:k].lower()
+        while k < n and html[k] in _WS:
+            k += 1
+        value = None
+        if k < n and html[k] == "=":
+            k += 1
+            while k < n and html[k] in _WS:
+                k += 1
+            if k < n and html[k] in "\"'":
+                close = html.find(html[k], k + 1)
+                if close < 0:
+                    return None
+                value, k = html[k + 1:close], close + 1
+            else:
+                start = k
+                while k < n and html[k] not in _WS + ">":
+                    k += 1
+                value = html[start:k]
+        if name not in names:
+            names.append(name)
+            ident = value if name == "id" else ident
+    return None
 
 
 _BR_END_TAG = re.compile(r"</br[\t\n\x0c\r /][^>]*>|</br>", re.I)
@@ -113,19 +170,18 @@ _BR_END_TAG = re.compile(r"</br[\t\n\x0c\r /][^>]*>|</br>", re.I)
 def _outer_root(html: str) -> Optional[tuple]:
     """The element an outer-HTML value's start tag names: its tag, its attribute names (the first of a
     repeated one, as a browser keeps) and its id. Read by a tokenizer rather than by parsing the value
-    as a fragment, which loses an `<html>` (a fragment parse has nowhere to put it), and without the
-    other values, whose raw spelling (`&noti=c`) Python's unescaping does not read as a browser does.
+    as a fragment, which loses an `<html>` (a fragment parse has nowhere to put it), and with HTML5's
+    attribute states, which Python's `HTMLParser` does not follow (a quote left open runs past a `>`).
     A `</br>` is the source of the `<br>` a browser makes of it, which has no attributes."""
     if _BR_END_TAG.fullmatch(html):
         return ("br", (), None)
     if not html.startswith("<"):
         return None  # a value that begins with content is not one element's source
-    p = _FirstStartTag(convert_charrefs=False)
-    try:
-        p.feed(html)
-    except Exception:  # noqa: BLE001 - a value the tokenizer cannot read has no root to compare
+    tag = _start_tag(html)
+    if tag is None:
         return None
-    return p.root
+    name, names, ident = tag
+    return ("img" if name == "image" else name, tuple(sorted(names)), ident)
 
 
 _TRAILING_END_TAGS = re.compile(r"(?:</[^<>]*>)+$")

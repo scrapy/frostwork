@@ -1908,3 +1908,15 @@ def test_unlabelled_utf8_is_excused_only_as_its_exact_windows_1252_reading():
     assert verdict(["café"], ["cafÃ¨"]) is None
     assert verdict(["café", "x"], ["cafÃ©", "y"]) is None
     assert verdict(["a"], ["a", "b"]) is None
+
+
+def test_the_quirks_construct_sees_a_class_inside_a_pseudo_class():
+    """A class selector inside `:not()` is still a class selector, which quirks mode folds."""
+    import browser_values as V
+
+    quirks = ["#d", [["html", 0, [], [["head", 0, [], []], ["body", 0, [], [
+        ["table", 0, [], [["tbody", 0, [], [["tr", 0, [], [["td", 0, ["class", "Japanese12"], [" "]]]]]]]]]]]]]]
+    r = V.ValueRepro(((0, '<table><td class="Japanese12"> '),), "td:not(.japanese12)::text", [" "], [], quirks)
+    assert V.attribute_value(r) == "quirks-mode class and id matching (deferred)"
+    r = V.ValueRepro(((0, '<table><td class="Japanese12"> '),), "td:not([class=x])::text", [" "], [], quirks)
+    assert V.attribute_value(r) is None
