@@ -103,7 +103,7 @@ def split_members(css: str) -> list[str]:
 _PSEUDO = re.compile(r"::\s*(text|attr\s*\([^)]*\))\s*$", re.I)
 
 
-def _unescape(s: str) -> str:
+def unescape(s: str) -> str:
     """CSS escapes in an identifier or string: `\\` + 1-6 hex digits (+ one whitespace), or `\\` + a char."""
     def one(m: re.Match) -> str:
         h = m.group(1)
@@ -127,12 +127,12 @@ def _replace_contains(css: str, marks: list[tuple[str, str]]) -> str:
             q, e = css[j], j + 1
             while e < len(css) and css[e] != q:
                 e += 2 if css[e] == "\\" else 1
-            needle, j = _unescape(css[j + 1:e]), e + 1
+            needle, j = unescape(css[j + 1:e]), e + 1
         else:
             e = j
             while e < len(css) and css[e] not in " \t\n\r\f)":
                 e += 2 if css[e] == "\\" else 1
-            needle, j = _unescape(css[j:e]), e
+            needle, j = unescape(css[j:e]), e
         while j < len(css) and css[j] in " \t\n\r\f":
             j += 1
         if j >= len(css) or css[j] != ")":
@@ -221,8 +221,10 @@ def is_css(selector: str) -> bool:
     return not (s.startswith(("/", "(", "./")) or s.startswith(("normalize-space(", "string(", "count(")))
 
 
-def try_plan(selector: str) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+def try_plan(selector: Any) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+    """`(plan, None)` for a selector (a `str`) or a grouped column (`(container, [sub, ...])`), else
+    `(None, why not)`."""
     try:
-        return plan(selector), None
+        return (grouped(selector[0], list(selector[1])) if isinstance(selector, tuple) else plan(selector)), None
     except Unplannable as e:
         return None, str(e)

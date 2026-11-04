@@ -19,7 +19,7 @@ than sanitising:
     `substring()` and `translate()` exact;
   * the namespace of each element, the doctype, HTML template content and shadow roots are kept beside
     the lxml tree, not in it: XPath reaches none of them (`tree.document_view`), and `to_json` restores
-    them, so `to_json(to_lxml(tree)) == tree` is checkable.
+    them, so `Bridge(tree).to_json() == tree` is checkable.
 
 What no map can express raises `Unrepresentable`: two adjacent text nodes or an empty one (lxml has one
 `.text`/`.tail` slot per position, so the two would merge and `text()` would return one string where
@@ -96,6 +96,7 @@ class Bridge:
         self._node_of: dict[Any, Any] = {}  # lxml element -> its browser JSON node
         self._meta: list[tuple[Any, list[tuple[int, Any]]]] = []  # per element, in document order
         self._doctypes: list[tuple[int, Any]] = []
+        self._selector = None
         top = tree[1]
         roots = [k for k, n in enumerate(top) if is_element(n)]
         if len(roots) != 1:
@@ -117,7 +118,6 @@ class Bridge:
             self.root.addprevious(self._leaf(n))
         for n in reversed(after):
             self.root.addnext(self._leaf(n))
-        self._selector = None
 
     # ------------------------------------------------------------------ the map
     def _sub(self, pattern: re.Pattern, s: str) -> str:
@@ -135,17 +135,11 @@ class Bridge:
             return s
         return "".join(chr(ord(ch) - lo) if lo <= ord(ch) < hi else ch for ch in s)
 
-    def _tag(self, name: str) -> str:
+    def _name(self, name: str, pattern: re.Pattern, what: str) -> str:
+        """An element or attribute name in lxml's alphabet."""
         if not name:
-            raise Unrepresentable("an empty element name")
-        out = self._sub(_TAG_RE, name)
-        self.mapped_names |= out != name
-        return out
-
-    def _attr(self, name: str) -> str:
-        if not name:
-            raise Unrepresentable("an empty attribute name")
-        out = self._sub(_ATTR_RE, name)
+            raise Unrepresentable(f"an empty {what} name")
+        out = self._sub(pattern, name)
         self.mapped_names |= out != name
         return out
 
@@ -173,13 +167,13 @@ class Bridge:
         stack = [(el, node)]
         while stack:
             el, node = stack.pop()
-            el.tag = self._tag(node[0])
+            el.tag = self._name(node[0], _TAG_RE, "element")
             hidden: list[tuple[int, Any]] = []
             self._meta.append((node[1], hidden))
             self._node_of[el] = node  # keeps the proxy alive, so XPath hands back this same object
             flat = node[2]
             for k in range(0, len(flat), 2):
-                el.set(self._attr(flat[k]), self.encode(flat[k + 1]))
+                el.set(self._name(flat[k], _ATTR_RE, "attribute"), self.encode(flat[k + 1]))
             last, prev_text = None, False
             pending: list[tuple[Any, Any]] = []
             for idx, kid in enumerate(node[3]):
@@ -219,17 +213,18 @@ class Bridge:
         out = []
         for s in results:
             root = s.root
-            node = self._node_of.get(root) if isinstance(root, etree._Element) else None
+            if not isinstance(root, etree._Element):
+                out.append("1" if root is True else "0" if root is False else self.decode(str(root)))
+                continue
+            node = self._node_of.get(root)
             if node is not None:
                 out.append(outer_html(node))
-            elif isinstance(root, etree._Element) and root.tag is etree.Comment:
+            elif root.tag is etree.Comment:
                 out.append(outer_html(["#c", self.decode(root.text or "")]))
-            elif isinstance(root, etree._Element) and root.tag is etree.ProcessingInstruction:
+            elif root.tag is etree.ProcessingInstruction:
                 out.append(outer_html(["#7", root.target, self.decode(root.text or "")]))
-            elif isinstance(root, etree._Element):
-                raise AssertionError(f"an lxml node the bridge did not build: {root!r}")
             else:
-                out.append("1" if root is True else "0" if root is False else self.decode(str(root)))
+                raise AssertionError(f"an lxml node the bridge did not build: {root!r}")
         return out
 
     def xpath(self, query: str) -> list[str]:
@@ -280,10 +275,6 @@ class Bridge:
         for idx, dt in self._doctypes:
             top.insert(idx, dt)
         return ["#d", top]
-
-
-def to_lxml(tree: Any) -> Bridge:
-    return Bridge(tree)
 
 
 # ---------------------------------------------------------------- the browser's serialisation

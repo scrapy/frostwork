@@ -28,28 +28,30 @@ def header_label(ctype):
     return m.group(1).strip("\"'") if m else None
 
 
-def labels(case):
-    from w3lib.encoding import http_content_type_encoding
+def response(case):
     from web_poet import HttpResponse
 
+    headers = {"Content-Type": case["ctype"]} if case["ctype"] else {}
+    return HttpResponse(url="http://example.com/", body=case["body"], headers=headers)
+
+
+def labels(case):
+    from w3lib.encoding import http_content_type_encoding
+
     ctype = case["ctype"]
-    headers = {"Content-Type": ctype} if ctype else {}
     return {
         "header": header_label(ctype),
         "w3lib": http_content_type_encoding(ctype) if ctype else None,
-        "web-poet": HttpResponse(url="http://example.com/", body=case["body"], headers=headers).encoding,
+        "web-poet": response(case).encoding,
     }
 
 
-def via_extract_response(case):
-    from web_poet import HttpResponse
-
-    import frostwork
-
-    ctype = case["ctype"]
-    headers = {"Content-Type": ctype} if ctype else {}
-    response = HttpResponse(url="http://example.com/", body=case["body"], headers=headers)
-    return frostwork.Page().field_all("v", case["sel"]).extract_response(response).value("v")
+def values_of(extract):
+    """What `extract()` returns, or the error it raises as a value, so a refusal is a row and not a crash."""
+    try:
+        return extract()
+    except ValueError as e:
+        return [f"ERR: {e}"]
 
 
 def main() -> int:
@@ -71,23 +73,16 @@ def main() -> int:
             continue
         row = {"case": case["id"], "browser": want}
         for mode, label in labels(case).items():
-            try:
-                got = frostwork.extract(case["body"], [case["sel"]], label)[0]
-            except ValueError as e:
-                got = [f"ERR: {e}"]
+            got = values_of(lambda: frostwork.extract(case["body"], [case["sel"]], label)[0])
             row[mode] = {"label": label, "values": got, "agrees": got == want}
-        try:
-            got = via_extract_response(case)
-        except ValueError as e:
-            got = [f"ERR: {e}"]
+        got = values_of(lambda: frostwork.Page().field_all("v", case["sel"]).extract_response(response(case)).value("v"))
         row["extract_response"] = {"label": None, "values": got, "agrees": got == want}
         rows.append(row)
 
     if args.json:
         print(json.dumps(rows, indent=1, ensure_ascii=False))
         return 0
-    modes = ("header", "w3lib", "web-poet", "extract_response")
-    for mode in modes:
+    for mode in ("header", "w3lib", "web-poet", "extract_response"):
         bad = [r["case"] for r in rows if not r[mode]["agrees"]]
         print(f"{mode:16} {len(bad):3} of {len(rows)} differ from the browser: {', '.join(bad)}")
     print()

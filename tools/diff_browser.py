@@ -1033,7 +1033,7 @@ def _quirks_class_or_id(r: ValueRepro) -> bool:
     if not C.is_css(r.sel) or grouped_spec(r.sel) or not r.quirks():
         return False
     for kind, raw in _CLASS_OR_ID.findall(C.top_level(r.sel)):
-        want = C._unescape(raw)
+        want = C.unescape(raw)
         for el in r.elements():
             attrs = dict(zip(el[2][0::2], el[2][1::2]))
             have = _ASCII_WS.split(attrs.get("class", "")) if kind == "." else [attrs.get("id", "")]

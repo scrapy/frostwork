@@ -86,7 +86,7 @@ class BrowserOracle:
         self.selfcheck_differ: list[str] = []
         self.selfcheck_css_differ: list[str] = []
         self.last_charsets: list[Optional[str]] = []
-        self._plans: dict[str, tuple[Optional[dict[str, Any]], Optional[str]]] = {}
+        self._plans: dict[str, tuple[Optional[dict[str, Any]], Optional[str]]] = {}  # selector -> (plan, why not)
         self._proc: Optional[subprocess.Popen] = None
         self._browser_pid: Optional[int] = None
         self._next_id = 0
@@ -196,6 +196,44 @@ class BrowserOracle:
             out.extend(reply["trees"])
         return out
 
+    def _plan(self, selector: Any) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+        key = _key(selector)
+        if key not in self._plans:
+            self._plans[key] = css.try_plan(selector)
+        return self._plans[key]
+
+    def _plan_table(self, per_doc: list[list[Any]]) -> tuple[list[dict[str, Any]], list[list[int]]]:
+        """The distinct plans of a batch, and per document the indexes of its plannable selectors."""
+        index: dict[str, int] = {}
+        plans: list[dict[str, Any]] = []
+        queries: list[list[int]] = []
+        for sels in per_doc:
+            row = []
+            for s in sels:
+                plan, _why = self._plan(s)
+                if plan is None:
+                    continue
+                key = _key(s)
+                if key not in index:
+                    index[key] = len(plans)
+                    plans.append(plan)
+                row.append(index[key])
+            queries.append(row)
+        return plans, queries
+
+    def _answer_row(self, sels: list[Any], got: list[Any]) -> list[Any]:
+        """One document's answers, in `sels` order: what the browser returned, or why there is none."""
+        returned = iter(got)
+        row: list[Any] = []
+        for s in sels:
+            plan, why = self._plan(s)
+            if plan is None:
+                row.append(Refused(why or "", "plan"))
+                continue
+            answer = next(returned)
+            row.append(Refused(answer["error"], "browser") if isinstance(answer, dict) else answer)
+        return row
+
     def query(self, docs: Iterable[Any], selectors: Any, *, selfcheck: bool = False,
               content_types: Optional[list[Optional[str]]] = None,
               page: bool = False) -> tuple[list[Any], list[Optional[list[Any]]]]:
@@ -215,36 +253,13 @@ class BrowserOracle:
             [list(selectors)] * len(docs)
         if len(per_doc) != len(docs):
             raise ValueError(f"{len(per_doc)} selector lists for {len(docs)} documents")
-        for sels in per_doc:
-            for s in sels:
-                key = _key(s)
-                if key not in self._plans:
-                    try:
-                        self._plans[key] = (css.grouped(s[0], list(s[1])) if isinstance(s, tuple)
-                                            else css.plan(s)), None
-                    except css.Unplannable as e:
-                        self._plans[key] = None, str(e)
         trees: list[Any] = []
         answers: list[Optional[list[Any]]] = []
         self.last_charsets = []
         for start in range(0, len(docs), self.batch):
             chunk = docs[start:start + self.batch]
             sels = per_doc[start:start + self.batch]
-            table: dict[str, int] = {}
-            plans: list[Any] = []
-            queries: list[list[int]] = []
-            for doc_sels in sels:
-                q = []
-                for s in doc_sels:
-                    p, _why = self._plans[_key(s)]
-                    if p is None:
-                        continue
-                    k = _key(s)
-                    if k not in table:
-                        table[k] = len(plans)
-                        plans.append(p)
-                    q.append(table[k])
-                queries.append(q)
+            plans, queries = self._plan_table(sels)
             extra: dict[str, Any] = {"plans": plans, "queries": queries}
             if page:
                 extra["page"] = True
@@ -254,18 +269,6 @@ class BrowserOracle:
             self._record(chunk, reply, selfcheck)
             trees.extend(reply["trees"])
             self.last_charsets.extend(reply["charsets"])
-            for doc_sels, got in zip(sels, reply["css"]):
-                if got is None:
-                    answers.append(None)
-                    continue
-                it = iter(got)
-                row: list[Any] = []
-                for s in doc_sels:
-                    p, why = self._plans[_key(s)]
-                    if p is None:
-                        row.append(Refused(why or "", "plan"))
-                        continue
-                    a = next(it)
-                    row.append(Refused(a["error"], "browser") if isinstance(a, dict) else a)
-                answers.append(row)
+            answers.extend(None if got is None else self._answer_row(doc_sels, got)
+                           for doc_sels, got in zip(sels, reply["css"]))
         return trees, answers
