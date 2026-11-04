@@ -3,6 +3,12 @@
 //! operations the spec names (append, insert before a table, move, clone, detach), so text nodes merge
 //! where a browser merges them and nothing is ever placed by token order. [`Dom::walk`] then drives the
 //! matcher over it in pre-order.
+//!
+//! Attributes and text runs live in two arenas, and a node holds a range of one, so building the tree
+//! allocates per arena rather than per node. A node's range grows in place while it is the arena's last;
+//! one that grows later moves to the end first.
+
+use std::ops::Range;
 
 use super::super::{Matcher, SourcePrefix};
 use crate::tokenizer::DataMode;
@@ -12,14 +18,15 @@ pub(super) const NIL: u32 = u32::MAX;
 /// The end of an element that has not left the stack of open elements by a pop.
 const OPEN: usize = usize::MAX;
 
-type RawAttrs<'a> = Vec<(&'a [u8], Option<&'a [u8]>)>;
+type Attr<'a> = (&'a [u8], Option<&'a [u8]>);
 
 #[derive(Clone)]
 pub(super) struct Elem<'a> {
     pub(super) name: &'a [u8],
     /// The matcher's class id: the element's namespace (`HTML_ELEMENT` and the others).
     pub(super) class: u8,
-    pub(super) attrs: RawAttrs<'a>,
+    /// Its range of [`Dom::attrs`].
+    attrs: Range<u32>,
     /// Raw source: from the start tag, or the token that inserted an element the page never wrote, to
     /// where it was popped. An element that leaves the stack another way ends with its content, and no
     /// earlier than its own start tag (`open_end`). A copy begins where its content does when that is
@@ -37,7 +44,8 @@ type Run<'a> = (&'a [u8], DataMode, usize);
 #[derive(Clone)]
 enum Kind<'a> {
     Element(Elem<'a>),
-    Text(Vec<Run<'a>>),
+    /// Its range of [`Dom::runs`].
+    Text(Range<u32>),
     Comment,
 }
 
@@ -55,14 +63,35 @@ const UNLINKED: Link = Link { parent: NIL, prev: NIL, next: NIL, first: NIL, las
 pub(super) struct Dom<'a> {
     kinds: Vec<Kind<'a>>,
     links: Vec<Link>,
+    attrs: Vec<Attr<'a>>,
+    runs: Vec<Run<'a>>,
     /// The `<html>` element.
     root: u32,
 }
 
-impl<'a> Dom<'a> {
-    pub(super) fn new() -> Self {
-        Dom { kinds: Vec::new(), links: Vec::new(), root: NIL }
+/// Grow `range` of `arena` by `items`: in place when it ends the arena, or after moving it to the end.
+fn extend<T: Copy>(arena: &mut Vec<T>, range: &mut Range<u32>, items: &[T]) {
+    if range.end as usize != arena.len() {
+        let start = arena.len() as u32;
+        arena.extend_from_within(range.start as usize..range.end as usize);
+        *range = start..arena.len() as u32;
     }
+    arena.extend_from_slice(items);
+    range.end = arena.len() as u32;
+}
+
+impl<'a> Dom<'a> {
+    /// An empty tree, with room for the nodes of a typical document of `len` bytes, about one per 64.
+    pub(super) fn new(len: usize) -> Self {
+        let nodes = len / 64;
+        Dom { kinds: Vec::with_capacity(nodes), links: Vec::with_capacity(nodes), attrs: Vec::new(), runs: Vec::new(), root: NIL }
+    }
+
+    /// The element's attributes.
+    pub(super) fn attrs(&self, e: &Elem<'a>) -> &[Attr<'a>] {
+        &self.attrs[e.attrs.start as usize..e.attrs.end as usize]
+    }
+
 
     fn push(&mut self, kind: Kind<'a>) -> u32 {
         self.kinds.push(kind);
@@ -71,7 +100,10 @@ impl<'a> Dom<'a> {
     }
 
     /// A new element, not yet in the tree.
-    pub(super) fn element(&mut self, name: &'a [u8], class: u8, attrs: RawAttrs<'a>, start: usize) -> u32 {
+    pub(super) fn element(&mut self, name: &'a [u8], class: u8, attrs: &[Attr<'a>], start: usize) -> u32 {
+        let from = self.attrs.len() as u32;
+        self.attrs.extend_from_slice(attrs);
+        let attrs = from..self.attrs.len() as u32;
         self.push(Kind::Element(Elem { name, class, attrs, start, end: OPEN, open_end: start, prefix: None }))
     }
 
@@ -128,11 +160,12 @@ impl<'a> Dom<'a> {
     }
 
     /// A later `<html>` or `<body>` start tag: its attributes the element does not have yet.
-    pub(super) fn merge(&mut self, id: u32, attrs: &[(&'a [u8], Option<&'a [u8]>)]) {
-        let e = self.elem_mut(id);
+    pub(super) fn merge(&mut self, id: u32, attrs: &[Attr<'a>]) {
+        let Kind::Element(e) = &mut self.kinds[id as usize] else { unreachable!("not an element") };
         for &(n, v) in attrs {
-            if !e.attrs.iter().any(|(o, _)| o.eq_ignore_ascii_case(n)) {
-                e.attrs.push((n, v));
+            let own = &self.attrs[e.attrs.start as usize..e.attrs.end as usize];
+            if !own.iter().any(|(o, _)| o.eq_ignore_ascii_case(n)) {
+                extend(&mut self.attrs, &mut e.attrs, &[(n, v)]);
             }
         }
     }
@@ -229,12 +262,19 @@ impl<'a> Dom<'a> {
         let last = self.links[parent as usize].last;
         if last != NIL {
             if let Kind::Text(runs) = &mut self.kinds[last as usize] {
-                runs.push(run);
+                extend(&mut self.runs, runs, &[run]);
                 return;
             }
         }
-        let t = self.push(Kind::Text(vec![run]));
+        let t = self.text(run);
         self.append(parent, t);
+    }
+
+    /// A new text node of one run, not yet in the tree.
+    fn text(&mut self, run: Run<'a>) -> u32 {
+        self.runs.push(run);
+        let at = self.runs.len() as u32;
+        self.push(Kind::Text(at - 1..at))
     }
 
     /// Insert a text run immediately before `before`: it continues the node before it when that is a
@@ -243,11 +283,11 @@ impl<'a> Dom<'a> {
         let prev = self.links[before as usize].prev;
         if prev != NIL {
             if let Kind::Text(runs) = &mut self.kinds[prev as usize] {
-                runs.push(run);
+                extend(&mut self.runs, runs, &[run]);
                 return;
             }
         }
-        let t = self.push(Kind::Text(vec![run]));
+        let t = self.text(run);
         self.insert_before(before, t);
     }
 
@@ -295,7 +335,7 @@ impl<'a> Dom<'a> {
         while c != NIL {
             let start = match &self.kinds[c as usize] {
                 Kind::Element(_) => Some(self.source_start(c)),
-                Kind::Text(runs) => runs.first().map(|&(_, _, at)| at),
+                Kind::Text(runs) => Some(self.runs[runs.start as usize].2),
                 Kind::Comment => None,
             };
             if let Some(start) = start {
@@ -316,7 +356,7 @@ impl<'a> Dom<'a> {
         if self.root == NIL {
             return;
         }
-        m.begin_replay();
+        m.begin_replay(self.kinds.len());
         // Per open element: its rank, and the furthest end of anything in it so far.
         let mut open: Vec<(usize, usize)> = Vec::new();
         let mut rank = 0usize;
@@ -327,7 +367,7 @@ impl<'a> Dom<'a> {
             match &self.kinds[cur as usize] {
                 Kind::Element(e) => {
                     m.flush_text();
-                    m.open_element(e.name, e.class, &e.attrs, rank);
+                    m.open_element(e.name, e.class, self.attrs(e), rank);
                     if let Some(prefix) = e.prefix {
                         m.set_source_prefix(prefix);
                     }
@@ -336,6 +376,7 @@ impl<'a> Dom<'a> {
                 }
                 Kind::Text(runs) => {
                     m.flush_text();
+                    let runs = &self.runs[runs.start as usize..runs.end as usize];
                     let mut at = rank;
                     for &(bytes, mode, _) in runs {
                         m.buffer_text(bytes, mode, at);

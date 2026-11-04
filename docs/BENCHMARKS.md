@@ -278,27 +278,33 @@ has no wall-clock figures for browser mode yet.
 
 | pages | count | browser / lxml instructions, p10 – median – p90 |
 | --- | --- | --- |
-| `fixtures/realweb`, each with its own selectors | 31 | 1.13× – 1.16× – 1.22× |
-| Common Crawl pages browser mode streams | 60 | 0.98× – 1.04× – 1.07× |
-| Common Crawl pages browser mode replays | 60 | 1.18× – 1.32× – 2.07× |
+| `fixtures/realweb`, each with its own selectors | 31 | 1.13× – 1.17× – 1.23× |
+| Common Crawl pages browser mode streams | 60 | 1.01× – 1.06× – 1.09× |
+| Common Crawl pages browser mode replays | 60 | 1.19× – 1.60× – 2.05× |
 
 The Common Crawl rows are pages over 2 KB from one 10 000-page CC-MAIN-2026-30 sample in a private lab,
 each with 32 selectors generated from its own markup, and the streamed set is matched by size to the
-replayed one. A page replays when one of five HTML5 rules fires (docs/BROWSER_MODE.md, section 4), about
-3% of real pages, so the replayed row is the tail and the streamed row the common case.
+replayed one. A page replays when one of five HTML5 rules changes an answer (docs/BROWSER_MODE.md,
+section 4), about 1.6% of real pages, so the replayed row is the tail and the streamed row the common case.
 
-The cost is in the scan. On the generated pages below with no selectors, browser mode retires 1.58× lxml
+On those replayed pages, building and walking the tree from the start would cost a median 1.11× lxml
+mode; stopping a streaming pass where the rule fires and starting again costs the 1.60× above, so a median
+82% of a replay's extra cost is the streamed prefix it throws away. The tree itself, over the 639 replays
+in a 40 000-page sample, holds a median 1 100 nodes and 150 KB (p90 500 KB, max 4 MB), about 2.3 times the
+page's bytes, and is freed with its page.
+
+The cost is in the scan. On the generated pages below with no selectors, browser mode retires 1.59× lxml
 mode's instructions; with 16 to 32 selectors the ratio is 1.08× to 1.14×, because matching, which the two
 modes share, then dominates.
 
 | generated page (≈196 KB), selectors | lxml, M instructions | browser, M instructions | browser / lxml |
 | --- | ---: | ---: | ---: |
-| utility-CSS, none (pure scan) | 7.1 | 11.2 | 1.58× |
-| attribute-heavy, 16 attribute-predicate | 27.9 | 31.9 | 1.14× |
-| utility-CSS, 32 descendant-led | 50.6 | 54.7 | 1.08× |
-| utility-CSS, 32 class-led | 51.8 | 55.8 | 1.08× |
-| table, 32 tag-led | 158.4 | 176.9 | 1.12× |
-| product listing, 16 tag-led | 76.4 | 84.7 | 1.11× |
+| utility-CSS, none (pure scan) | 7.1 | 11.2 | 1.59× |
+| attribute-heavy, 16 attribute-predicate | 27.8 | 31.8 | 1.14× |
+| utility-CSS, 32 descendant-led | 48.4 | 52.5 | 1.09× |
+| utility-CSS, 32 class-led | 49.9 | 53.9 | 1.08× |
+| table, 32 tag-led | 148.3 | 166.7 | 1.12× |
+| product listing, 16 tag-led | 74.1 | 82.6 | 1.12× |
 
 ## Page shape — the synthetic matrix
 

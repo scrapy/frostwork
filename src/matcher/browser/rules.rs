@@ -1048,8 +1048,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
         if inert {
             node.vis = Vis::Inert;
         } else if REPLAY {
-            let attrs = self.afe.attrs_of(tok).to_vec();
-            node.depth = self.dom.element(name, super::super::HTML_ELEMENT, attrs, at);
+            node.depth = self.dom.element(name, super::super::HTML_ELEMENT, self.afe.attrs_of(tok), at);
             self.dom.set_prefix(node.depth, self.afe.toks[tok as usize].span);
         } else {
             node.vis = Vis::Pending(tok);

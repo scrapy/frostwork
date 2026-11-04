@@ -24,8 +24,8 @@ first public release.
   exactly.
 - Five HTML5 rules change elements a forward scan has already passed (a second `<html>` or `<body>`
   merging attributes, the adoption agency with a furthest block, foster parenting's document order, a
-  `<frameset>` replacing the body, and `<selectedcontent>`). On a page where one fires, about 3% of real
-  pages, browser mode answers from a compact tree of the finished page instead of the stream.
+  `<frameset>` replacing the body, and `<selectedcontent>`). On a page where one changes an answer, about
+  1.6% of real pages, browser mode answers from a compact tree of the finished page instead of the stream.
 - Browser mode refuses, with a reason, the outer HTML of an element the page never wrote (the frame, an
   implied `<tbody>`, `<tr>` or `<colgroup>`, the `<p>` a stray `</p>` inserts) and `.as_node()` handoffs.
   Deferred selectors with a tail (`li:last-child b::text`, `div:has(a) ::text`) are supported, read by a

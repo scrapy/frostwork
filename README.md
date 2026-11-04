@@ -5,7 +5,7 @@ Fast HTML extraction for Python and Rust, without a DOM.
 Frostwork compiles a set of CSS or XPath selectors and extracts their values in one scan of an HTML
 response. Reuse the schema across Scrapy callbacks, web-poet pages or standalone code. Working memory
 tracks parser state, pending matches and returned values, without storing a document tree. The
-exception is the roughly 3% of pages where an HTML5 rule rewrites elements already parsed: browser mode
+exception is the under 2% of pages where an HTML5 rule rewrites elements already parsed: browser mode
 answers those from a compact tree of the finished page.
 
 Frostwork supports a focused selector subset. By default it answers against the tree a browser builds,

@@ -62,7 +62,7 @@ the adoption agency with a furthest block, and the copy of an `<option>` into `<
 document where one of them fires is answered by a second pass over the finished tree, so in
 `<b>1<p>2</b>3` `b p::text` is `[]` and `b::text` is `["1", "2"]`, `x<table>y` gives `body::text`
 `["xy"]`, `<p>x</p><body class=late>` matches `body.late p`, and so on, as in Chrome. That pass costs
-time, not values: on 30,000 Common Crawl pages it ran on 3% (`tools/retro_census.py`). Early exit
+time, not values: on 30,000 Common Crawl pages it ran on 1.6% (`tools/retro_census.py`). Early exit
 (`first_only`) waits while a later token could still change a value it has taken: while a table is open,
 while a formatting element holds an open block, while a `<frameset>` could still remove the body, and
 while the rest of the page holds anything that could be an `<html>` or `<body>` start tag.

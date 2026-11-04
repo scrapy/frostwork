@@ -35,8 +35,8 @@ against Chrome, and against Firefox on request.
 **Five HTML5 rules change a decision a single forward pass has already made**: the adoption agency with
 a furthest block, foster parenting's document order, a second `<html>` or `<body>` tag merging its
 attributes into an element already matched, a `<frameset>` replacing a body already parsed, and an
-`<option>`'s content copied into a `<selectedcontent>` that precedes it. None of them fired on 97% of the
-30,031 crawl and real-web pages measured (`tools/retro_census.py`). When one fires, browser mode stops streaming and answers the page from a compact tree of the
+`<option>`'s content copied into a `<selectedcontent>` that precedes it. None of them called for the tree on
+98.4% of the 30,031 crawl and real-web pages measured (`tools/retro_census.py`). When one fires, browser mode stops streaming and answers the page from a compact tree of the
 finished document, built by the same builder (section 4, "The replay"). So browser mode is exact on
 all five, and treeless on every page where none of them fires.
 
@@ -290,7 +290,7 @@ the rule changes a decision already made, and the page is answered from its fini
 | CDATA in foreign content | `<svg><text><![CDATA[b]]>` | bogus comment | text | tokenizer hook |
 | foster parenting | `<table><p id=t>moved` | `table #t` matches | `<p>` moved before the table (lab, browser) | ancestry streams (the table is parked); document order by replay |
 | adoption agency | `<b>1<p>2</b>3`; `<a><div>t</a>u</div>` | `b::text` is `1`; `a::text` empty | `<p>` moves out of the `<b>`, so `b p` is empty and `b::text` is `1`, `2` (browser); `t` inside a cloned `<a>` | streams without a furthest block; replay with one |
-| second `<html>`/`<body>` tag | `<body x=1>…<body y=2>` | ignored | attributes merged into the open element | replay, when it adds an attribute a selector reads |
+| second `<html>`/`<body>` tag | `<body x=1>…<body y=2>` | ignored | attributes merged into the open element | replay, when the attributes change an answer |
 | `<selectedcontent>` | `<select><button><selectedcontent></selectedcontent></button><option>A` | an empty element | the selected option's content is copied in when the option closes (browser) | replay |
 | foreign attribute names | `<svg viewbox="0 0 1 1">`, `<math definitionurl=x>`, `xlink:href` | as written, lowercased | `viewBox`, `definitionURL`, and `xlink:`/`xml:`/`xmlns` namespaced on foreign elements (browser) | streams |
 | depth cap | more than 512 nested elements | nested | a new element becomes a sibling of the current node (browser) | replay |
@@ -387,23 +387,27 @@ same builder, compiled with `REPLAY` set, runs again from the start, and every i
 operation (append, insert before the table, move, copy, detach) on an arena of the finished tree in
 `browser/dom.rs`. The matcher then walks that tree in pre-order, each node's rank serving as its document
 position, so values come out in document order even where fostering moved them. A merge of `<html>` or
-`<body>` attributes counts only when it adds an attribute some selector of the schema reads, which makes
-it the one rule whose firing depends on the schema.
+`<body>` attributes counts only when it changes an answer: a compound of the schema that can match the
+element matches it differently with the new attributes, or a terminal reads one of them. That makes it
+the one rule whose firing depends on the schema.
 
 Over 30,031 pages, three Common Crawl samples plus `fixtures/realweb` (`tools/retro_census.py`, each
-page with its own production selectors), the rules fire on these shares of pages:
+page with its own selectors: production ones on realweb, ones generated from the page on the crawl), the
+rules fire on these shares of pages:
 
 | rule | pages |
 |---|---|
-| a second `<html>`/`<body>` adds an attribute a selector reads | 1.48% (2.42% for any attribute) |
+| a second `<html>`/`<body>` changes an answer | 0.03% (2.42% with any attribute) |
 | the adoption agency with a furthest block | 1.14% |
 | foster parenting | 0.46% |
 | a `<frameset>` replacing the body | 1 page |
 | `<selectedcontent>` | none |
-| any of them, so the page replays | 2.99% (none of the 31 realweb pages) |
+| any of them, so the page replays | 1.59% (none of the 31 realweb pages) |
 
-On a replayed page, `extract` took a median of 1.35 and a 90th percentile of 2.0 times one streaming
-pass (200 such pages, minimum of 15 runs each, on a shared CPU), against 1.06 on pages that stream.
+The tree holds attributes and text runs in two arenas, so building it allocates per arena rather than
+per node, and it lives only while its page is answered. Building and walking it costs little more than
+streaming; most of what a replayed page costs is the streamed prefix the replay starts again from.
+`docs/BENCHMARKS.md` ("Browser mode against lxml mode") has the tree's size and the figures.
 
 The alternative was to replay the tokens with hints about what is to come: a body inert from the start,
 a table's subtree deferred past its fostered content, the adoption agency's final parents applied when
@@ -673,7 +677,7 @@ the crawl lab, and pinned browsers in CI. `gate-browser`, `gate-webpoet-browser`
 
 - **Engine.** Browser mode is one more tree builder behind the seam, plus the replay. Lxml mode keeps
   its own code path, and `OpenElem` its size. Browser mode costs more than lxml mode in the scan, which
-  shared matching then dilutes as selectors are added; the replay costs more again on the 3% of pages it
+  shared matching then dilutes as selectors are added; the replay costs more again on the 1.6% of pages it
   runs on (section 4), and a deferred tail costs one more pass on a page where it has a winner.
   `docs/BENCHMARKS.md` ("Browser mode against lxml mode") has the figures and how they were measured.
 - **Gates.** A second oracle for the tree, values and the page-object layer, which needs local browsers.
@@ -712,7 +716,7 @@ Chrome. The six questions this proposal left open were settled as recommended:
 6. `encoding=` stays below the BOM, with no BOM-beating override.
 
 One decision was taken during the build and is Shane's to confirm: the replay builds a tree of the page
-on the 3% of pages where a retroactive rule fires, instead of leaving those rules as documented
+on the 1.6% of pages where a retroactive rule changes an answer, instead of leaving those rules as documented
 divergences.
 
 ## Sources and versions

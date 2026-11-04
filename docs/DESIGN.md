@@ -27,7 +27,7 @@ primitives; the matcher does all selector evaluation, capture and decoding for b
 lxml mode's builder and `browser/` is browser mode's. The schema's mode picks the builder once per
 document and the scan is monomorphised over it. Browser mode keeps the matcher's stack as the DOM path
 to the insertion point, separate from its own HTML5 stack of open elements, so foster parenting, the
-form pointer and the adoption agency's copies match as the browser's tree does. On the roughly 3% of
+form pointer and the adoption agency's copies match as the browser's tree does. On the under 2% of
 pages where a rule rewrites elements already parsed, it answers from a compact tree of the finished page
 (BROWSER_MODE.md section 4, "The replay").
 

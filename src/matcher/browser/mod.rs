@@ -45,22 +45,22 @@
 //!   which usually precede it.
 //!
 //! None of them fires on most pages: over 30,000 Common Crawl pages (`tools/retro_census.py`) a merge
-//! that adds an attribute the page's own selectors ask about fires on 1.5%, the adoption agency with a
+//! that changes an answer to the page's own selectors fires on 0.03%, the adoption agency with a
 //! furthest block on 1.1%, foster parenting on 0.5%, the frameset on one page and `<selectedcontent>`
-//! on none, 3.0% in all. So the streaming pass is unchanged on the common path, and the first of them to
+//! on none, 1.6% in all. So the streaming pass is unchanged on the common path, and the first of them to
 //! fire ([`Browser::retro`]) ends it; [`run`] then answers the document with the REPLAY. That is the
 //! same builder with `REPLAY` set: the same rules, but each insertion is a DOM operation on an arena of
 //! the finished tree ([`dom::Dom`]: append, insert before the table, move, copy, detach), and
 //! [`dom::Dom::walk`] then drives the matcher over it in pre-order, with each node's rank as its
-//! position, so every value comes out in document order. A merge counts only when it adds an attribute
-//! a selector asks about, and it is the one rule whose firing depends on the schema.
+//! position, so every value comes out in document order. A merge counts only when it changes an answer
+//! ([`Matcher::merge_adds`]), and it is the one rule whose firing depends on the schema.
 //!
 //! The other design, a second pass that replays the tokens with hints about what is to come (a body
 //! inert from the start, a table's subtree deferred past its fostered content, the adoption agency's
 //! final parents applied when the block opens), needs every event known before it starts, so it runs
 //! the builder over the whole document first, and it needs a mechanism per rule where the tree needs
-//! one for all five. On a replayed page `extract` costs a median 1.35 and a 90th percentile 2.0 times
-//! one streaming pass (200 such pages, minimum of 15 runs each), against 1.06 on pages that stream.
+//! one for all five. The tree is cheap to build and walk; most of what a replayed page costs is the
+//! streamed prefix the replay starts again from (docs/BENCHMARKS.md).
 //!
 //! Early exit is sound because the first rule to fire ends the streaming pass, so what it accepted was
 //! the browser's; it stops only where no later token can reach back ([`Browser::settled`]), and a
@@ -307,7 +307,7 @@ impl<const REPLAY: bool> Default for Browser<'_, REPLAY> {
             data: DataMode::Normal,
             retro: 0,
             run_through: false,
-            dom: dom::Dom::new(),
+            dom: dom::Dom::new(0),
             selected: Vec::new(),
             frame_tag: std::cell::Cell::new((usize::MAX, 0)),
         }
@@ -439,7 +439,8 @@ fn replay<'a>(
     input: EncodedInput<'a>,
     marks: Vec<(u32, String)>,
 ) -> (FlatColumns, Vec<GroupRows>) {
-    Scan::tokenize(schema, input, Browser::<'a, true>::default(), marks).finish()
+    let builder = Browser::<'a, true> { dom: dom::Dom::new(input.len()), ..Browser::default() };
+    Scan::tokenize(schema, input, builder, marks).finish()
 }
 
 /// Which retroactive rules fire on a document (`RETRO_*`, and [`CENSUS_MERGE_ANY`]), over the whole
@@ -722,7 +723,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
 
     /// The replay's element for `node`, not yet in the tree.
     fn dom_element(&mut self, node: &mut Node<'a>, attrs: &Attrs<'a>, at: usize) {
-        node.depth = self.dom.element(node.name, node.ns.class(), attrs.to_vec(), at);
+        node.depth = self.dom.element(node.name, node.ns.class(), attrs, at);
         node.vis = Vis::Live;
     }
 
@@ -1130,7 +1131,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
     }
 
     fn has_attr(&self, id: u32, name: &[u8]) -> bool {
-        self.dom.elem(id).is_some_and(|e| e.attrs.iter().any(|(n, _)| n.eq_ignore_ascii_case(name)))
+        self.dom.elem(id).is_some_and(|e| self.dom.attrs(e).iter().any(|(n, _)| n.eq_ignore_ascii_case(name)))
     }
 
     /// An option has been inserted into the replay's tree: its select's selectedness, as Chrome sets it
@@ -1154,10 +1155,11 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
     /// Does the select show a single option, so that one is selected by default?
     fn shows_one(&self, select: u32) -> bool {
         let Some(e) = self.dom.elem(select) else { return false };
-        if e.attrs.iter().any(|(n, _)| n.eq_ignore_ascii_case(b"multiple")) {
+        let attrs = self.dom.attrs(e);
+        if attrs.iter().any(|(n, _)| n.eq_ignore_ascii_case(b"multiple")) {
             return false;
         }
-        let size = e.attrs.iter().find(|(n, _)| n.eq_ignore_ascii_case(b"size")).and_then(|(_, v)| *v);
+        let size = attrs.iter().find(|(n, _)| n.eq_ignore_ascii_case(b"size")).and_then(|(_, v)| *v);
         size.and_then(|v| std::str::from_utf8(v).ok()).and_then(|v| v.trim().parse::<u64>().ok()).is_none_or(|n| n <= 1)
     }
 
