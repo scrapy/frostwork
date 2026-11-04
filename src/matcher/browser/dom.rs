@@ -4,7 +4,7 @@
 //! where a browser merges them and nothing is ever placed by token order. [`Dom::walk`] then drives the
 //! matcher over it in pre-order.
 
-use super::super::Matcher;
+use super::super::{Matcher, SourcePrefix};
 use crate::tokenizer::DataMode;
 
 /// No node.
@@ -26,7 +26,7 @@ pub(super) struct Elem<'a> {
     end: usize,
     open_end: usize,
     /// The start tag a copy was made from, read before its own source.
-    prefix: (usize, usize),
+    prefix: Option<SourcePrefix>,
 }
 
 /// One run of a text node: its bytes, the state it was read in, and its offset.
@@ -70,7 +70,7 @@ impl<'a> Dom<'a> {
 
     /// A new element, not yet in the tree.
     pub(super) fn element(&mut self, name: &'a [u8], class: u8, attrs: RawAttrs<'a>, start: usize) -> u32 {
-        self.push(Kind::Element(Elem { name, class, attrs, start, end: OPEN, open_end: start, prefix: (0, 0) }))
+        self.push(Kind::Element(Elem { name, class, attrs, start, end: OPEN, open_end: start, prefix: None }))
     }
 
     pub(super) fn elem(&self, id: u32) -> Option<&Elem<'a>> {
@@ -104,11 +104,11 @@ impl<'a> Dom<'a> {
     }
 
     pub(super) fn has_prefix(&self, id: u32) -> bool {
-        self.elem(id).is_some_and(|e| e.prefix != (0, 0))
+        self.elem(id).is_some_and(|e| e.prefix.is_some())
     }
 
-    pub(super) fn set_prefix(&mut self, id: u32, prefix: (usize, usize)) {
-        self.elem_mut(id).prefix = prefix;
+    pub(super) fn set_prefix(&mut self, id: u32, prefix: SourcePrefix) {
+        self.elem_mut(id).prefix = Some(prefix);
     }
 
     /// The element's start tag ends at `end`.
@@ -317,8 +317,8 @@ impl<'a> Dom<'a> {
                 Kind::Element(e) => {
                     m.flush_text();
                     m.open_element(e.name, e.class, &e.attrs, rank);
-                    if e.prefix != (0, 0) {
-                        m.set_source_prefix(e.prefix);
+                    if let Some(prefix) = e.prefix {
+                        m.set_source_prefix(prefix);
                     }
                     open.push((rank, e.start));
                     first = self.links[cur as usize].first;

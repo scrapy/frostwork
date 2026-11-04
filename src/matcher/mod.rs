@@ -262,9 +262,7 @@ pub struct OpenElem<'a> {
 #[derive(Default)]
 struct ColdState {
     gcaps: Vec<(u64, usize)>, // grouped outer-HTML captures: (instance seq, sub) this element feeds
-    /// Raw source read before the element's own: a clone's original start tag (see
-    /// [`Matcher::set_source_prefix`]); `(0, 0)` for none.
-    prefix: (usize, usize),
+    prefix: Option<SourcePrefix>,
     rev_buf: Vec<(u32, usize, String)>, // (rev-entry, offset, value) captured while this el is a subject
     rev_pending: Vec<RevPend>, // candidates promoted from this element's children, resolved at its close
     has_buf: Vec<(u32, usize, String)>, // (has-entry, offset, value) captured while this el is a subject
@@ -278,13 +276,31 @@ struct ColdState {
 /// no allocation and lets [`OpenElem::cold`] be infallible without the box existing.
 static NO_COLD: ColdState = ColdState {
     gcaps: Vec::new(),
-    prefix: (0, 0),
+    prefix: None,
     rev_buf: Vec::new(),
     rev_pending: Vec::new(),
     has_buf: Vec::new(),
     txt_states: Vec::new(),
     txt_emit: Vec::new(),
 };
+
+/// Raw source read before an element's own: the start tag a browser-mode copy of a formatting element
+/// was made from (see [`Matcher::set_source_prefix`]). A start tag is never empty, so its end is never 0
+/// and an `Option<SourcePrefix>` is no larger than the two offsets.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) struct SourcePrefix {
+    start: usize,
+    end: std::num::NonZeroUsize,
+}
+
+impl SourcePrefix {
+    /// The start tag at `start..end`.
+    pub(super) fn new(start: usize, end: usize) -> Self {
+        SourcePrefix { start, end: std::num::NonZeroUsize::new(end).expect("a start tag is never empty") }
+    }
+}
+
+const _: () = assert!(std::mem::size_of::<Option<SourcePrefix>>() == std::mem::size_of::<(usize, usize)>());
 
 /// Where a value sits in document order: the offset of its node (in a browser-mode replay, the node's
 /// rank), then, for an element's own value (an attribute, its outer HTML), the order the element opened
@@ -1090,9 +1106,8 @@ pub struct Matcher<'a> {
     // Raw-source outer-HTML fragments are sliced out of it; emitted values are decoded with it.
     input: EncodedInput<'a>,
     /// `(pos, end, dest, prefix)` raw-source spans, sorted by `pos` at finish: the span is
-    /// `pos.0..end`, and `prefix` is a span read before it, the start tag of the element a browser-mode
-    /// clone was made from (`(0, 0)`: none).
-    captures: Vec<(DocPos, usize, Dest, (usize, usize))>,
+    /// `pos.0..end`, read after the element's `prefix` if it has one.
+    captures: Vec<(DocPos, usize, Dest, Option<SourcePrefix>)>,
     // Must a non-ASCII attribute NAME be decoded before it is compared? Only when the schema spells one
     // that way and the page is byte-scanned under a legacy encoding — see `interesting_name`.
     decode_names: bool,
@@ -3070,19 +3085,17 @@ impl<'a> Matcher<'a> {
     /// Give the current element raw source that begins before its own: a browser-mode copy of a
     /// formatting element has no start tag in the page, and its outer HTML is the start tag it was
     /// copied from followed by its own content, the raw-source reading of `<b class=k>2</b>`.
-    pub(super) fn set_source_prefix(&mut self, prefix: (usize, usize)) {
+    pub(super) fn set_source_prefix(&mut self, prefix: SourcePrefix) {
         if let Some(top) = self.stack.last_mut() {
-            top.cold_mut().prefix = prefix;
+            top.cold_mut().prefix = Some(prefix);
         }
     }
 
     /// An element's outer HTML: its raw source, after its prefix if it has one.
-    fn source(&self, prefix: (usize, usize), span: std::ops::Range<usize>) -> String {
+    fn source(&self, prefix: Option<SourcePrefix>, span: std::ops::Range<usize>) -> String {
         let span = self.raw_span(span);
-        if prefix == (0, 0) {
-            return self.input.raw_source(span);
-        }
-        let mut out = self.input.raw_source(prefix.0..prefix.1);
+        let Some(SourcePrefix { start, end }) = prefix else { return self.input.raw_source(span) };
+        let mut out = self.input.raw_source(start..end.get());
         out.push_str(&self.input.raw_source(span));
         out
     }

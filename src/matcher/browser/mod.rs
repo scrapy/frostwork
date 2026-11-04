@@ -74,7 +74,7 @@ mod rules;
 mod tags;
 
 use super::tree::{Scan, TreeBuilder};
-use super::{CompiledSchema, EncodedInput, HeldText, Matcher, Parked};
+use super::{CompiledSchema, EncodedInput, HeldText, Matcher, Parked, SourcePrefix};
 use crate::{FlatColumns, GroupRows};
 use crate::implied_close::{
     html5_cat, html5_data_mode, BUTTON_SCOPE, IMPLIED_END, IMPLIED_END_THOROUGH, LIST_ITEM_SCOPE, SCOPE,
@@ -192,7 +192,7 @@ struct FmtTok<'a> {
     name: &'a [u8],
     tag: Tag,
     attrs: Vec<(&'a [u8], Option<&'a [u8]>)>,
-    span: (usize, usize),
+    span: SourcePrefix,
     ark: u64,
 }
 
@@ -1006,7 +1006,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
         let values: Vec<(&[u8], std::borrow::Cow<'_, str>)> =
             firsts.map(|j| (attrs[j].0, m.input.attr_value(attrs[j].1.unwrap_or(b"")))).collect();
         let ark = lists::ark_key(t.tag, values.iter().map(|(n, v)| (*n, v.as_ref())));
-        self.toks.push(FmtTok { name: t.name, tag: t.tag, attrs, span: (t.start, t.end), ark });
+        self.toks.push(FmtTok { name: t.name, tag: t.tag, attrs, span: SourcePrefix::new(t.start, t.end), ark });
         self.insert_html(m, t);
         let uid = self.cur().uid;
         self.push_afe(m, uid, tok);

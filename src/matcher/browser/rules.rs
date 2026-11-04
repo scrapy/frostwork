@@ -10,7 +10,7 @@ use super::{
     RETRO_ADOPTION, RETRO_FRAMESET, RETRO_MERGE, RETRO_SELECTEDCONTENT, SHADOW_HOST, SYNTH,
 };
 use crate::implied_close::SPECIAL;
-use crate::matcher::Matcher;
+use crate::matcher::{Matcher, SourcePrefix};
 use crate::tokenizer::DataMode;
 
 const HEADINGS: [Tag; 6] = [Tag::H1, Tag::H2, Tag::H3, Tag::H4, Tag::H5, Tag::H6];
@@ -520,7 +520,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
         if REPLAY {
             // An element the page never wrote reads its source from the first tag that gave it any.
             if n.flags & SYNTH != 0 && !self.dom.has_prefix(n.depth) {
-                self.dom.set_prefix(n.depth, (t.start, t.end));
+                self.dom.set_prefix(n.depth, SourcePrefix::new(t.start, t.end));
             }
             self.dom.merge(n.depth, t.attrs);
         } else if self.path.get(n.depth as usize) != Some(&n.uid) || m.merge_adds(n.depth as usize, t.attrs) {
