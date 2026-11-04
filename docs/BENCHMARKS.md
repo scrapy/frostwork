@@ -278,9 +278,9 @@ has no wall-clock figures for browser mode yet.
 
 | pages | count | browser / lxml instructions, p10 – median – p90 |
 | --- | --- | --- |
-| `fixtures/realweb`, each with its own selectors | 31 | 1.13× – 1.17× – 1.23× |
+| `fixtures/realweb`, each with its own selectors | 31 | 1.14× – 1.18× – 1.24× |
 | Common Crawl pages browser mode streams | 60 | 1.01× – 1.06× – 1.09× |
-| Common Crawl pages browser mode replays | 60 | 1.19× – 1.60× – 2.05× |
+| Common Crawl pages browser mode replays | 60 | 1.19× – 1.61× – 2.06× |
 
 The Common Crawl rows are pages over 2 KB from one 10 000-page CC-MAIN-2026-30 sample in a private lab,
 each with 32 selectors generated from its own markup, and the streamed set is matched by size to the
@@ -288,23 +288,23 @@ replayed one. A page replays when one of five HTML5 rules changes an answer (doc
 section 4), about 1.6% of real pages, so the replayed row is the tail and the streamed row the common case.
 
 On those replayed pages, building and walking the tree from the start would cost a median 1.11× lxml
-mode; stopping a streaming pass where the rule fires and starting again costs the 1.60× above, so a median
-82% of a replay's extra cost is the streamed prefix it throws away. The tree itself, over the 639 replays
+mode; stopping a streaming pass where the rule fires and starting again costs the 1.61× above, so a median
+81% of a replay's extra cost is the streamed prefix it throws away. The tree itself, over the 639 replays
 in a 40 000-page sample, holds a median 1 100 nodes and 150 KB (p90 500 KB, max 4 MB), about 2.3 times the
 page's bytes, and is freed with its page.
 
-The cost is in the scan. On the generated pages below with no selectors, browser mode retires 1.59× lxml
-mode's instructions; with 16 to 32 selectors the ratio is 1.08× to 1.14×, because matching, which the two
+The cost is in the scan. On the generated pages below with no selectors, browser mode retires 1.63× lxml
+mode's instructions; with 16 to 32 selectors the ratio is 1.08× to 1.19×, because matching, which the two
 modes share, then dominates.
 
 | generated page (≈196 KB), selectors | lxml, M instructions | browser, M instructions | browser / lxml |
 | --- | ---: | ---: | ---: |
-| utility-CSS, none (pure scan) | 7.1 | 11.2 | 1.59× |
-| attribute-heavy, 16 attribute-predicate | 27.8 | 31.8 | 1.14× |
-| utility-CSS, 32 descendant-led | 48.4 | 52.5 | 1.09× |
-| utility-CSS, 32 class-led | 49.9 | 53.9 | 1.08× |
-| table, 32 tag-led | 148.3 | 166.7 | 1.12× |
-| product listing, 16 tag-led | 74.1 | 82.6 | 1.12× |
+| utility-CSS, none (pure scan) | 6.7 | 10.9 | 1.63× |
+| attribute-heavy, 16 attribute-predicate | 26.2 | 31.1 | 1.19× |
+| utility-CSS, 32 descendant-led | 46.5 | 50.5 | 1.09× |
+| utility-CSS, 32 class-led | 48.0 | 52.1 | 1.08× |
+| table, 32 tag-led | 140.5 | 159.6 | 1.14× |
+| product listing, 16 tag-led | 71.9 | 80.4 | 1.12× |
 
 ## Page shape — the synthetic matrix
 
