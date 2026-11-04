@@ -379,10 +379,24 @@ RULE_VALUES: list[list[str]] = (
        for v in ("2", "&#50;", "2px", "&#32;2", "+2", "-0", "0x2", "4294967295", "4294967296", "")]
 )
 
+# The option a `<select>` selects by default, which `<selectedcontent>` copies: the first one that is not
+# disabled, where an option is disabled by its own attribute or by the nearest `<optgroup>` around it.
+_SELECT = ["<select{}>", "<button{}>", "<selectedcontent{}>", "</selectedcontent>", "</button>"]
+SELECT_OPTIONS: list[list[str]] = [
+    _SELECT + body + ["<option{}>", "u", "</select>"]
+    for body in (
+        ["<optgroup{} disabled>", "<option{}>", "t", "</optgroup>"],
+        ["<optgroup{} disabled>", "<div{}>", "<option{}>", "t", "</div>", "</optgroup>"],
+        ["<optgroup{} disabled>", "<optgroup{}>", "<option{}>", "t", "</optgroup>", "</optgroup>"],
+        ["<optgroup{} disabled>", "<option{} selected>", "t", "</optgroup>"],
+        ["<optgroup{}>", "<option{} disabled>", "t", "</optgroup>"],
+    )
+]
+
 
 def structured_docs() -> list[Doc]:
     """Every structured family member, as a document."""
-    seqs = [lead + f for f in EOF_FRAMES + FORMATTING + RAW_ENDS + FRAME_MERGES + RULE_VALUES
+    seqs = [lead + f for f in EOF_FRAMES + FORMATTING + RAW_ENDS + FRAME_MERGES + RULE_VALUES + SELECT_OPTIONS
             for lead in ([], [DOCTYPE])]
     seqs += [s[:k] + [COMMENT] + s[k:] for s in COMMENT_SKELETONS for k in range(len(s) + 1)]
     seqs += [[DOCTYPE] + f for f in ARK_FAMILY]
@@ -468,7 +482,7 @@ RULE_SELECTORS: list[str] = [
     '*:last-child::attr(id)', '*:only-child::attr(id)', 'html > :last-child::attr(id)', ':has(> body)::attr(id)',
     ':has(> head)::attr(id)',
     # the attributes of two `<html>` or `<body>` tags together (FRAME_MERGES)
-    'body.a[title="b"] p::text', 'html.a[title="b"] p::text', 'body.a[lang]::attr(title)',
+    'body.a[title="b"] p::text', 'html.a[title="b"] p::text', 'body.a[lang]::attr(title)', 'body.a', 'html.a',
     # two matches of one column at one offset: a formatting element's copy, and the copy inside it
     'b, i', 'b:has(i)', '*:has(> i)::attr(id)', 'b:last-child::attr(id)', 'b i::attr(id)',
 ]

@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+from collections import Counter
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from typing import Any, Callable, Optional
@@ -21,7 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import seq_sweep  # noqa: E402  (which elements the fingerprint names)
 from browser_answers import is_node_query  # noqa: E402
-from browser_docs import Doc, grouped_spec  # noqa: E402
+from browser_docs import Doc, grouped_spec, render  # noqa: E402
 from browser_oracle import css as C  # noqa: E402
 from browser_oracle import tree as T  # noqa: E402
 
@@ -139,13 +140,26 @@ def _in_order(want: str, have: str) -> bool:
     return all(c in rest for c in want)
 
 
+_START_TAG = re.compile(r"<[A-Za-z][^>]*>")
+
+
+def _from_page(r: ValueRepro) -> bool:
+    """Every engine value is assembled from the page's own bytes, so no start tag occurs in it more often
+    than in the page. A raw source, a copy's prefix and a frame's later tag all keep to that; a tag the
+    engine wrote twice does not."""
+    # the page as the engine's raw source reads it: line breaks normalised, NUL as U+FFFD
+    page = render(r.doc).replace("\r\n", "\n").replace("\r", "\n").replace("\0", "\ufffd")
+    page = Counter(_START_TAG.findall(page))
+    return all(not Counter(_START_TAG.findall(v)) - page for v in r.engine)
+
+
 def _raw_source(r: ValueRepro) -> bool:
     """Outer HTML of the SAME elements, whose content differs: the engine returns raw source (documented
     in docs/COMPATIBILITY.md), and where the browser built an element's content differently from its source the two
     parse differently. Same count, each pair starts with the same tag and attributes, and the browser's
     text is in the raw source in order. The source may hold more, which the browser moved elsewhere,
     but a value that lost content the browser has is not raw source."""
-    if not is_node_query(r.sel) or len(r.engine) != len(r.oracle):
+    if not is_node_query(r.sel) or len(r.engine) != len(r.oracle) or not _from_page(r):
         return False
     return all(
         _outer_root(a) is not None and _outer_root(a) == _outer_root(b) and _in_order(_text_of(b, serialised=True), _text_of(a))
@@ -156,7 +170,7 @@ def _raw_source(r: ValueRepro) -> bool:
 def _merged_frame_source(r: ValueRepro) -> bool:
     """Outer HTML of an `<html>` or `<body>` that a later start tag merged attributes into: the raw source
     holds the element's own start tag, so the browser's has every name it has and more."""
-    if not is_node_query(r.sel) or len(r.engine) != len(r.oracle):
+    if not is_node_query(r.sel) or len(r.engine) != len(r.oracle) or not _from_page(r):
         return False
     pairs = [(_outer_root(a), _outer_root(b)) for a, b in zip(r.engine, r.oracle)]
     if any(a is None or b is None for a, b in pairs) or all(a == b for a, b in pairs):

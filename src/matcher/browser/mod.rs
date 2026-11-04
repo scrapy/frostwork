@@ -1160,6 +1160,28 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
         None
     }
 
+    /// Is the option disabled, as Chrome reads it: its own `disabled`, or a `disabled` on the nearest
+    /// `<optgroup>` between it and its `<select>`.
+    fn option_disabled(&self, option: u32) -> bool {
+        if self.has_attr(option, b"disabled") {
+            return true;
+        }
+        let mut a = self.dom.parent(option);
+        while a != dom::NIL {
+            let Some(e) = self.dom.elem(a) else { return false };
+            if e.class == super::HTML_ELEMENT {
+                if e.name.eq_ignore_ascii_case(b"optgroup") {
+                    return self.has_attr(a, b"disabled");
+                }
+                if e.name.eq_ignore_ascii_case(b"select") {
+                    return false;
+                }
+            }
+            a = self.dom.parent(a);
+        }
+        false
+    }
+
     fn has_attr(&self, id: u32, name: &[u8]) -> bool {
         self.dom.elem(id).is_some_and(|e| self.dom.attrs(e).iter().any(|(n, _)| n.eq_ignore_ascii_case(name)))
     }
@@ -1173,7 +1195,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
         let selected = if self.has_attr(option, b"selected") {
             true
         } else {
-            current.is_none() && !self.has_attr(option, b"disabled") && self.shows_one(input, select)
+            current.is_none() && !self.option_disabled(option) && self.shows_one(input, select)
         };
         match (selected, current) {
             (true, Some(k)) => self.selected[k].1 = option,

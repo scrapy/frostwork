@@ -3704,6 +3704,30 @@ mod browser_mode_tests {
         assert_eq!(ex(b"<p>X</p><body class=a><body class=b id=b>", "body.b p::text"), NONE);
     }
 
+    /// A `<select>`'s default option skips a disabled one, and an option is disabled by its own attribute
+    /// or by the nearest `<optgroup>` around it, as in Chrome.
+    #[test]
+    fn a_disabled_optgroup_disables_its_options() {
+        let select = |options: &str| {
+            let h = format!("<select><button><selectedcontent></selectedcontent></button>{options}</select>");
+            ex(h.as_bytes(), "selectedcontent::text")
+        };
+        assert_eq!(select("<optgroup disabled><option>A</option></optgroup><option>B</option>"), v(&["B"]));
+        assert_eq!(select("<optgroup disabled><div><option>A</option></div></optgroup><option>B</option>"), v(&["B"]));
+        assert_eq!(select("<optgroup disabled><option>A</option></optgroup><option disabled>B</option>"), NONE);
+        assert_eq!(select("<optgroup disabled><optgroup><option>A</option></optgroup></optgroup>"), v(&["A"]));
+        assert_eq!(select("<optgroup disabled><option selected>A</option></optgroup><option>B</option>"), v(&["A"]));
+    }
+
+    /// The outer HTML of a frame element the page never wrote starts with the later tag that gave it
+    /// attributes, and that tag appears once.
+    #[test]
+    fn a_merged_frame_element_has_its_later_tag_once() {
+        assert_eq!(ex(b"<p>x</p><body class=late>", "body.late"), v(&["<body class=late><p>x</p>"]));
+        assert_eq!(ex(b"<p>x</p><html class=b>", "html.b"), v(&["<html class=b><p>x</p>"]));
+        assert_eq!(ex(b"<p><b class=k>1</p>2", "b"), v(&["<b class=k>1", "<b class=k>2"]));
+    }
+
     /// The attribute values tree construction reads are compared decoded, so a character reference
     /// builds the tree its literal does.
     #[test]

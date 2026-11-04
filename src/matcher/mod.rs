@@ -3253,12 +3253,18 @@ impl<'a> Matcher<'a> {
         }
     }
 
-    /// An element's outer HTML: its raw source, after its prefix if it has one.
+    /// An element's outer HTML: its raw source, after its prefix if it has one. A prefix inside the
+    /// span, the later tag a frame element the page never wrote takes its start tag from, appears once.
     fn source(&self, prefix: Option<SourcePrefix>, span: std::ops::Range<usize>) -> String {
         let span = self.raw_span(span);
         let Some(SourcePrefix { start, end }) = prefix else { return self.input.raw_source(span) };
         let mut out = self.input.raw_source(start..end.get());
-        out.push_str(&self.input.raw_source(span));
+        if span.start <= start && end.get() <= span.end {
+            out.push_str(&self.input.raw_source(span.start..start));
+            out.push_str(&self.input.raw_source(end.get()..span.end));
+        } else {
+            out.push_str(&self.input.raw_source(span));
+        }
         out
     }
 }

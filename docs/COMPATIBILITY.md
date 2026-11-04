@@ -73,8 +73,8 @@ What remains are not tree divergences:
   browser, and exactly here: `.a` misses `<p class=A>` (deferred, docs/BROWSER_MODE.md section 8).
 - Outer HTML is the raw source, as in lxml mode, so it is not Chrome's serialisation. That includes
   attributes a later `<html>` or `<body>` tag merged into the element: its source has only its own. An
-  `<html>` or `<body>` the page never wrote reads its source from the first later tag that gave it
-  attributes. The same holds for the content a `<select>` copies from its selected option into a
+  `<html>` or `<body>` the page never wrote reads its start tag from the first later tag that gave it
+  attributes, followed by its content without that tag. The same holds for the content a `<select>` copies from its selected option into a
   `<selectedcontent>`: the element's source is empty, so its outer HTML and an ancestor's have it empty,
   while `selectedcontent::text` is the copy, as in Chrome.
 

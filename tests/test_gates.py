@@ -789,7 +789,7 @@ def test_the_merged_frame_allowance_excuses_only_attributes_a_later_tag_added():
     import browser_values as V
 
     def verdict(engine, oracle, sel='[id="3"]'):
-        return V.attribute_value(V.ValueRepro((), sel, [engine], [oracle], ["#d", []]))
+        return V.attribute_value(V.ValueRepro(((0, engine),), sel, [engine], [oracle], ["#d", []]))
 
     merged = "raw-source outer HTML of a merged <html>/<body>"
     assert verdict('<body id=3>x<body class=k>', '<body id="3" class="k">x</body>') == merged
@@ -800,13 +800,29 @@ def test_the_merged_frame_allowance_excuses_only_attributes_a_later_tag_added():
     assert verdict('<body id=3>x', '<html id="3" class="k"></html>') is None
 
 
+def test_a_raw_source_value_is_made_of_the_page_bytes():
+    """A raw-source value is assembled from the page, so no start tag occurs in it more often than in the
+    page: a frame element that repeats the later tag it took its start tag from is not raw source."""
+    import browser_values as V
+
+    def verdict(page, engine, oracle):
+        return V.attribute_value(V.ValueRepro(((0, page),), "body.late", [engine], [oracle], ["#d", []]))
+
+    page = "<p>x</p><body class=late>"
+    oracle = '<body class="late"><p>x</p></body>'
+    assert verdict(page, "<body class=late><p>x</p>", oracle) == "raw-source outer HTML"
+    assert verdict(page, "<body class=late><p>x</p><body class=late>", oracle) is None
+    # the engine's raw source normalises line breaks, as the browser's input stream does
+    assert verdict('<p title="a\r\nb">x</p>', '<p title="a\nb">x</p>', '<p title="a\nb">x</p>') == "raw-source outer HTML"
+
+
 def test_the_selectedcontent_allowance_excuses_only_the_copy():
     """A `<selectedcontent>`'s source is what the page wrote, not the option content a select copies into
     it. The allowance excuses exactly that copy: any other content the engine's value lacks is NOVEL."""
     import browser_values as V
 
     def verdict(engine, oracle):
-        return V.attribute_value(V.ValueRepro((), '[id="1"]', [engine], [oracle], ["#d", []]))
+        return V.attribute_value(V.ValueRepro(((0, engine),), '[id="1"]', [engine], [oracle], ["#d", []]))
 
     copy = "raw-source outer HTML of a <selectedcontent> copy"
     assert verdict('<selectedcontent id="1"></selectedcontent>', '<selectedcontent id="1">t</selectedcontent>') == copy
@@ -952,7 +968,7 @@ def test_value_columns_split_by_the_tree_and_attribute_by_the_oracle_tree():
         return ["#d", ([["#dt", "html", "", ""]] if doctype else []) + frame]
 
     def r(sel, tree, engine=(), oracle=("0",)):
-        return V.ValueRepro((), sel, list(engine), list(oracle), tree)
+        return V.ValueRepro(tuple(enumerate(engine)), sel, list(engine), list(oracle), tree)
 
     p_en = ["p", 0, ["lang", "EN", "id", "0"], []]
     svg_en = ["svg", "http://www.w3.org/2000/svg", ["lang", "EN", "id", "0"], []]

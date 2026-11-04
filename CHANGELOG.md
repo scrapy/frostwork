@@ -9,7 +9,7 @@ first public release.
 
 - **Breaking: browser mode is the default.** Frostwork now answers selectors against the tree a browser
   builds: HTML5 tree construction as Chrome 156 implements it, streamed inside the same one-pass
-  matcher and graded against Chrome and Firefox. `parser="lxml"` keeps the libxml2 tree and the value
+  matcher and graded against Chrome. `parser="lxml"` keeps the libxml2 tree and the value
   parity with Parsel that earlier releases had. A port that must reproduce Parsel's items exactly passes
   `parser="lxml"`. The two modes can build different trees from the same markup: an implied `<tbody>`,
   `<noscript>` read as raw text, inert `<template>` content, foster parenting, the adoption agency,
@@ -17,8 +17,8 @@ first public release.
 - `parser="browser" | "lxml"` on `extract`, `extract_grouped`, `check`, `audit_schema`, `Page` and
   `Plan`, and as a class keyword on `FrostPage` that subclasses inherit. An unknown value raises
   `ValueError`. Rust: `ParseMode`, `CompileOptions`, `Plan::compile_with` and `audit_schema_with`.
-- Browser mode does not strip the input or delete NUL. NUL follows HTML5 instead: kept in names,
-  dropped from body text, U+FFFD in raw text, RCDATA and attribute values.
+- Browser mode does not strip the input or delete NUL. NUL follows HTML5 instead: U+FFFD in tag and
+  attribute names, raw text, RCDATA and attribute values, and dropped from body text.
 - Browser-mode CSS matches the values of the 46 attributes HTML lists case-insensitively on HTML
   elements, as browsers do (`input[type=submit]` matches `type="SUBMIT"`). XPath and lxml mode compare
   exactly.
