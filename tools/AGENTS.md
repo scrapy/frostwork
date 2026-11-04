@@ -172,14 +172,15 @@ token-coverage refusal, plus every `TAIL_CONTEXTS` x `TAIL_BODIES` document: a d
 table, a formatting element reconstruction copies in, an SVG or MathML integration point), which is where
 re-scanning a winner's source alone goes wrong. The basket is `conformant.BASKET`, `RULE_SELECTORS` and
 per-id `::text`/`::attr`/descendant-text columns, minus what the engine refuses in the mode under test.
-`engine_refusals` asks about each selector alone, because one `check` over a whole run is one schema past
-the column ceiling and reports selectors refused that are not; `corpus_browser.py` reads the same helper.
-CSS is answered natively
-and XPath through the bridge, on the tree the fingerprint was read from. A value column that differs where
-the fingerprint already differs is filed under the TREE, which that gate holds. Where the fingerprint
-agrees, it is reduced with the fingerprint still agreeing at every step and attributed to
-`VALUE_CONSTRUCTS` (case-insensitive attribute values, quirks-mode class matching, raw-source outer HTML),
-which read the oracle's tree rather than the page; never add a value construct to `CONSTRUCTS`. A value
+`browser_answers.py` holds what both browser gates share: `Engine` (frostwork in one parse mode), `Answers`
+(every source's answer to every column a run asks), `same_values` (what AGREE means for a value column) and
+`engine_refusals`, which asks about each selector alone because one `check` over a whole run is one schema
+past the column ceiling and reports selectors refused that are not. CSS is answered natively and XPath
+through the bridge, on the tree the fingerprint was read from. A value column that differs where the
+fingerprint already differs is filed under the TREE, which that gate holds. Where the fingerprint agrees,
+it is reduced with the fingerprint still agreeing at every step and attributed to `VALUE_CONSTRUCTS` in
+`browser_values.py` (case-insensitive attribute values, quirks-mode class matching, raw-source outer
+HTML), which read the oracle's tree rather than the page; never add a value construct to `CONSTRUCTS`. A value
 column about an id-less element no fingerprint column can see (the empty `<p>` a stray `</p>` inserts) is
 attributed through `CONSTRUCTS` as a tree difference only the value column found. Anything else is value
 NOVEL and fails the gate. So do: a bridge round trip that changed a tree, bridge XPath that answers a

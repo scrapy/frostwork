@@ -34,11 +34,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import diff_lxml  # noqa: E402
 import seq_sweep  # noqa: E402
+from browser_answers import engine_refusals, same_values  # noqa: E402
 from browser_oracle import bridge as Br  # noqa: E402
 from browser_oracle import css as C  # noqa: E402
 from browser_oracle import tree as T  # noqa: E402
 from browser_oracle.client import BrowserOracle, Refused  # noqa: E402
-from diff_browser import engine_refusals, same_values  # noqa: E402
 
 RESULTS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results", "corpus_browser.json")
 DEFAULT_CTYPE = "text/html"

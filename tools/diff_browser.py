@@ -58,15 +58,13 @@ import sys
 import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
-from html.parser import HTMLParser
 from typing import Any, Callable, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import conformant  # noqa: E402  (its selector basket)
-import diff_lxml  # noqa: E402  (the engine's member budget, and what a bare-element selector is)
-import seq_sweep  # noqa: E402  (the fingerprint and the short-sequence alphabet)
-import webpoet_structure  # noqa: E402  (the one structural comparison for outer HTML)
+import seq_sweep  # noqa: E402  (the fingerprint)
+from browser_answers import Answers, Engine, engine_refusals, is_native, oracle_form  # noqa: E402
 from browser_docs import (  # noqa: E402
     ALPHABET, DOCTYPE, PLAIN_HEAD, RULE_SELECTORS, VALUE_TOKENS, Decorations, Doc, Documents, generate, grouped_spec,
     ids_of, redecorate, render, undecorate, value_selectors)
@@ -74,56 +72,14 @@ from browser_oracle import bridge as Br  # noqa: E402
 from browser_oracle import css as C  # noqa: E402
 from browser_oracle import tree as T  # noqa: E402
 from browser_oracle.client import BrowserOracle, Refused  # noqa: E402
+from browser_values import ValueRepro, attribute_value  # noqa: E402
 
 RESULTS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results", "browserdiff.json")
 # A tree at Chrome's depth cap nests two JSON arrays per element, past Python's default recursion limit.
 sys.setrecursionlimit(max(sys.getrecursionlimit(), 20000))
 
 
-# ---------------------------------------------------------------- which oracle answers a column
-def is_native(col: str) -> bool:
-    """Is the column answered by the browser's own selector engine (CSS and grouped), not the bridge?"""
-    return grouped_spec(col) is not None or C.is_css(col)
-
-
-def oracle_form(col: str) -> Any:
-    """The column as `BrowserOracle.query` takes it."""
-    spec = grouped_spec(col)
-    return (spec[0], spec[1]) if spec else col
-
-
-# ---------------------------------------------------------------- the engine
-class Engine:
-    """`frostwork.extract` in one parse mode. `parser=` is passed only when the installed extension takes it."""
-
-    def __init__(self, parser: str):
-        self.parser = parser
-        self.mode = seq_sweep.parser_kwargs(parser)
-
-    def __call__(self, doc: bytes, sels: list[str], strict: bool = True) -> list[list[str]]:
-        import frostwork
-
-        return frostwork.extract(doc, sels, "utf-8", strict=strict, **self.mode)
-
-    def grouped(self, doc: bytes, cols: list[str]) -> list[Any]:
-        """Each grouped column's rows: per container match, one value list per sub."""
-        import frostwork
-
-        return frostwork.extract_grouped(doc, [], [engine_group(c) for c in cols], "utf-8", **self.mode)[1]
-
-    def describe(self) -> str:
-        if self.mode:
-            return f"frostwork.extract(..., parser={self.parser!r})"
-        note = "" if self.parser == "lxml" else f"; --parser {self.parser} was NOT applied"
-        return f"frostwork.extract without parser= (the installed extension has no such keyword, so lxml mode{note})"
-
-
-def engine_group(col: str) -> tuple[str, list[tuple[str, str]]]:
-    """A grouped column as the engine takes a group: its container, and its subs named s0, s1, ..."""
-    container, subs = grouped_spec(col)  # type: ignore[misc]
-    return container, [(f"s{k}", s) for k, s in enumerate(subs)]
-
-
+# ---------------------------------------------------------------- the debug build
 def debug_panics(differ: str, parser: str, docs: list[tuple[str, list[str]]]) -> list[tuple[str, str]]:
     """The documents on which a DEBUG build of the `differ` bridge panics, with the panic.
 
@@ -153,175 +109,6 @@ def debug_panics(differ: str, parser: str, docs: list[tuple[str, list[str]]]) ->
         while at < len(requests) and requests[at][0] == k:
             at += 1
     return out
-
-
-def engine_refusals(sels: list[str], parser: str) -> dict[str, str]:
-    """The value selectors the engine refuses in this mode, with its reason. A refusal is an empty column
-    by contract (no fallback), so it is reported, not graded as a lost value.
-
-    Each selector is asked ALONE: every selector of a run together is one schema past the engine's column
-    ceiling, where a mixed comma group cannot be routed and would read as refused."""
-    import frostwork
-
-    kw = seq_sweep.parser_kwargs(parser)
-    out = {}
-    for s in sels:
-        if grouped_spec(s):
-            g = frostwork.check([], [engine_group(s)], **kw).groups[0]
-            fields = [g.container] + list(g.subfields)
-        else:
-            fields = [frostwork.check([s], **kw).fields[0]]
-        bad = [f for f in fields if not f.supported]
-        if bad:
-            out[s] = bad[0].reason or "unsupported"
-    return out
-
-
-# ---------------------------------------------------------------- answers, cached per document
-class Answers:
-    """Every source's answer to (document, column), computed on demand and cached.
-
-    Sources are "engine" and the browser names. A fingerprint column's answer is a list of strings. A
-    browser tree that failed to load answers `None`, which never counts as a difference: it is an oracle
-    error, counted separately. A value column's answer is a list of strings, or a `Refused` saying why
-    there is none (css.py could not plan it, the browser rejected it, the bridge cannot hold the document,
-    or the tree failed to load), which is never graded and never reads as an empty column.
-    """
-
-    def __init__(self, engine: Engine, oracles: dict[str, BrowserOracle]):
-        self.engine = engine
-        self.oracles = oracles
-        self.trees: dict[str, dict[str, Any]] = {b: {} for b in oracles}  # browser -> document -> its tree
-        self.columns: dict[tuple[str, str, str], Optional[list[str]]] = {}  # (source, document, fingerprint column)
-        self.values: dict[tuple[str, str, str], Any] = {}                   # (source, document, value column)
-        self.oracle_seconds = 0.0
-        self.oracle_docs = 0
-        self._indexed: dict[tuple[str, str], Any] = {}
-        self._bridges: dict[tuple[str, str], Any] = {}
-
-    @contextlib.contextmanager
-    def _asking(self, docs: int):
-        """Count `docs` documents and the time the block takes toward the oracle's throughput."""
-        t0 = time.perf_counter()
-        yield
-        self.oracle_seconds += time.perf_counter() - t0
-        self.oracle_docs += docs
-
-    def fetch(self, rendered: set[str] | list[str]) -> None:
-        """Every browser's tree of each document it does not have yet."""
-        for b, oracle in self.oracles.items():
-            missing = sorted({r for r in rendered if r not in self.trees[b]})
-            if missing:
-                with self._asking(len(missing)):
-                    self.trees[b].update(zip(missing, oracle.trees(missing)))
-
-    def _run_engine(self, store: dict, rendered: str, sels: list[str] | set[str], strict: bool) -> None:
-        """One engine pass per `MAX_SELECTORS_PER_PASS` of the columns `store` lacks for a document."""
-        need = sorted(s for s in sels if ("engine", rendered, s) not in store)
-        for start in range(0, len(need), diff_lxml.MAX_SELECTORS_PER_PASS):
-            chunk = need[start:start + diff_lxml.MAX_SELECTORS_PER_PASS]
-            for s, v in zip(chunk, self.engine(rendered.encode(), chunk, strict=strict)):
-                store[("engine", rendered, s)] = v
-
-    def prefetch_engine(self, wanted: dict[str, set[str]]) -> None:
-        """The engine's answer to every fingerprint column `wanted` names, one pass per document."""
-        for r, sels in wanted.items():
-            self._run_engine(self.columns, r, sels, strict=True)
-
-    def _tree(self, browser: str, rendered: str) -> Any:
-        if rendered not in self.trees[browser]:
-            self.fetch([rendered])
-        return self.trees[browser][rendered]
-
-    def column(self, source: str, rendered: str, sel: str) -> Optional[list[str]]:
-        key = (source, rendered, sel)
-        if key not in self.columns:
-            if source == "engine":
-                self.prefetch_engine({rendered: {sel}})
-            else:
-                tree = self._tree(source, rendered)
-                if tree is None:
-                    self.columns[key] = None
-                else:
-                    index = self._indexed.get((source, rendered))
-                    if index is None:
-                        index = self._indexed[(source, rendered)] = T.index(T.document_view(tree))
-                    self.columns[key] = T.evaluate(index, sel)
-        return self.columns[key]
-
-    def differs(self, pair: tuple[str, str], rendered: str, sel: str) -> bool:
-        a, b = self.column(pair[0], rendered, sel), self.column(pair[1], rendered, sel)
-        return a is not None and b is not None and a != b
-
-    def fingerprint_differs(self, pair: tuple[str, str], rendered: str, ids: list[str]) -> bool:
-        return any(self.differs(pair, rendered, s) for s in seq_sweep.fingerprint_selectors(ids))
-
-    # ------------------------------------------------------------ value columns
-    def bridge(self, browser: str, rendered: str) -> Any:
-        key = (browser, rendered)
-        if key not in self._bridges:
-            self._bridges[key] = Br.open_bridge(self.trees[browser].get(rendered))
-        return self._bridges[key]
-
-    def fetch_values(self, wanted: dict[str, set[str]]) -> None:
-        """Every engine and oracle value `wanted` names: CSS in one browser request, XPath via the bridge."""
-        for b, oracle in self.oracles.items():
-            need = {r: sorted(s for s in sels if is_native(s) and (b, r, s) not in self.values)
-                    for r, sels in wanted.items()}
-            need = {r: s for r, s in need.items() if s}
-            if need:
-                rs = sorted(need)
-                with self._asking(len(rs)):
-                    trees, got = oracle.query(rs, [[oracle_form(s) for s in need[r]] for r in rs])
-                for r, t, row in zip(rs, trees, got):
-                    self.trees[b].setdefault(r, t)
-                    for k, s in enumerate(need[r]):
-                        self.values[(b, r, s)] = Refused("page load failed", "load") if row is None else row[k]
-            missing = sorted({r for r in wanted if r not in self.trees[b]})
-            if missing:
-                self.fetch(missing)
-        for r, sels in wanted.items():
-            missing = [s for s in sels if ("engine", r, s) not in self.values]
-            self._run_engine(self.values, r, [s for s in missing if not grouped_spec(s)], strict=False)
-            grouped = sorted(s for s in missing if grouped_spec(s))
-            if grouped:
-                for s, v in zip(grouped, self.engine.grouped(r.encode(), grouped)):
-                    self.values[("engine", r, s)] = v
-
-    def value(self, source: str, rendered: str, sel: str) -> Any:
-        key = (source, rendered, sel)
-        if key not in self.values:
-            if source == "engine" or is_native(sel):
-                self.fetch_values({rendered: {sel}})
-            else:
-                self.values[key] = Br.xpath_answer(self.bridge(source, rendered), sel)
-        return self.values[key]
-
-    def value_differs(self, pair: tuple[str, str], rendered: str, sel: str) -> bool:
-        a, b = self.value(pair[0], rendered, sel), self.value(pair[1], rendered, sel)
-        return isinstance(a, list) and isinstance(b, list) and not same_values(a, b, sel)
-
-
-def same_values(mine: list[str], theirs: list[str], sel: str) -> bool:
-    """Do two value columns agree? Exactly, except outer HTML, which is compared by parsed STRUCTURE:
-    the engine returns the element's raw source and the oracle a serialisation of its tree, and the
-    one comparator every outer-HTML gate shares (`webpoet_structure`) says what that allowance means."""
-    if mine == theirs:
-        return True
-    if not is_node_query(sel) or len(mine) != len(theirs):
-        return False
-    try:
-        return all(webpoet_structure.structure_of(a) == webpoet_structure.structure_of(b)
-                   for a, b in zip(mine, theirs))
-    except Exception:  # noqa: BLE001 - a fragment that will not parse agrees with nothing
-        return False
-
-
-def is_node_query(sel: str) -> bool:
-    """A bare-element selector: its value is outer HTML. `diff_lxml`'s rule, and the scalar forms this
-    gate's columns add (`string()`, `count()`, `/@*`)."""
-    s = sel.strip()
-    return diff_lxml.is_node_query(s) and not (s.startswith(("string(", "count(")) or s.endswith("/@*"))
 
 
 # ---------------------------------------------------------------- reduction to the smallest repro
@@ -573,139 +360,6 @@ def attribute_all(items: list[Divergence], answers: Answers, report: Report) -> 
             report.novel.append(d)
         else:
             report.buckets.setdefault(name, []).append(d)
-
-
-# ---------------------------------------------------------------- value attribution
-# A value column that differs on a document whose fingerprint agrees is not explained by the tree, so the
-# section 3 constructs cannot explain it either. These are the value-level ones, each a documented
-# decision or divergence rather than a tree rule. They read the reduced, still-decorated document and the
-# oracle's own tree, never the page it came from.
-@dataclass
-class ValueRepro:
-    doc: Doc                  # the reduced document, decorated
-    sel: str
-    engine: list[str]
-    oracle: list[str]
-    tree: Any                 # the oracle's tree of `doc`
-
-    def quirks(self) -> bool:
-        return T.is_quirks(self.tree)
-
-    def unseen_elements(self) -> list[str]:
-        """Names of the oracle's elements the fingerprint cannot see, and that this value column is about.
-
-        Every generated start tag carries an id, so an element with none was built by the tree builder.
-        The fingerprint sees one only between two id'd elements, or by name when it holds id'd children or
-        text (`seq_sweep.SYNTHESISED`). An EMPTY one, such as the `<p>` a stray `</p>` inserts, answers
-        every fingerprint column identically, and only a value column (its outer HTML, a `:has(> p)`) can
-        show it. It counts here only when the column names it: the selector says the name, or an oracle
-        value holds its tag."""
-        names = set()
-        for el in T.elements(self.tree):
-            attrs = el[2][0::2]
-            if "id" in attrs or el[0] in ("html", "head", "body"):
-                continue
-            sees = el[0] in seq_sweep.SYNTHESISED and any(
-                isinstance(k, str) or (T.is_element(k) and "id" in k[2][0::2]) for k in el[3])
-            if not sees:
-                names.add(el[0])
-        return sorted(n for n in names
-                      if re.search(rf"(?<![\w-]){re.escape(n)}(?![\w-])", self.sel)
-                      or any(isinstance(v, str) and re.search(rf"<{re.escape(n)}[\s/>]", v) for v in self.oracle))
-
-
-_ASCII_WS = re.compile(r"[\t\n\x0c\r ]+")
-_CLASS_OR_ID = re.compile(r"([.#])((?:[\w-]|\\[0-9a-fA-F]{1,6}[ \t\n\r\f]?|\\.)+)")
-
-
-def _quirks_class_or_id(r: ValueRepro) -> bool:
-    """A class or id selector that a quirks-mode document's element passes only case-folded.
-
-    Deferred by decision 2 in docs/BROWSER_MODE.md section 8: browser mode builds the quirks-mode TREE,
-    but matches class and id selectors case-sensitively in every mode."""
-    if not C.is_css(r.sel) or grouped_spec(r.sel) or not r.quirks():
-        return False
-    for kind, raw in _CLASS_OR_ID.findall(C.top_level(r.sel)):
-        want = C.unescape(raw)
-        for el in T.elements(r.tree):
-            attrs = dict(zip(el[2][0::2], el[2][1::2]))
-            have = _ASCII_WS.split(attrs.get("class", "")) if kind == "." else [attrs.get("id", "")]
-            if want not in have and want.lower() in (h.lower() for h in have):
-                return True
-    return False
-
-
-@dataclass(frozen=True)
-class ValueConstruct:
-    name: str
-    test: Callable[[ValueRepro], bool]
-
-
-class _FirstStartTag(HTMLParser):
-    """The first start tag of a value, as `(tag, sorted attribute names, id)`. `<image>` is the `<img>` a
-    browser makes of it: raw source keeps the name the page wrote."""
-
-    root: Optional[tuple] = None
-
-    def handle_starttag(self, tag, attrs):
-        if self.root is not None:
-            return
-        names: list[str] = []
-        ident = None
-        for k, v in attrs:
-            if k not in names:
-                names.append(k)
-                ident = v if k == "id" else ident
-        self.root = ("img" if tag == "image" else tag, tuple(sorted(names)), ident)
-
-
-def _outer_root(html: str) -> Optional[tuple]:
-    """The element an outer-HTML value's start tag names: its tag, its attribute names (the first of a
-    repeated one, as a browser keeps) and its id. Read by a tokenizer rather than by parsing the value
-    as a fragment, which loses an `<html>` (a fragment parse has nowhere to put it), and without the
-    other values, whose raw spelling (`&noti=c`) Python's unescaping does not read as a browser does."""
-    if not html.startswith("<"):
-        return None  # a value that begins with content is not one element's source
-    p = _FirstStartTag(convert_charrefs=False)
-    try:
-        p.feed(html)
-    except Exception:  # noqa: BLE001 - a value the tokenizer cannot read has no root to compare
-        return None
-    return p.root
-
-
-def _raw_source(r: ValueRepro) -> bool:
-    """Outer HTML of the SAME elements, whose content differs: the engine returns raw source (documented
-    in AGENTS.md), and where the browser built an element's content differently from its source the two
-    parse differently. Same count, and each pair starts with the same tag and attributes."""
-    if not is_node_query(r.sel) or len(r.engine) != len(r.oracle):
-        return False
-    return all(_outer_root(a) is not None and _outer_root(a) == _outer_root(b) for a, b in zip(r.engine, r.oracle))
-
-
-def _merged_frame_source(r: ValueRepro) -> bool:
-    """Outer HTML of an `<html>` or `<body>` that a later start tag merged attributes into: the raw source
-    holds the element's own start tag, so the browser's has every name it has and more."""
-    if not is_node_query(r.sel) or len(r.engine) != len(r.oracle):
-        return False
-    pairs = [(_outer_root(a), _outer_root(b)) for a, b in zip(r.engine, r.oracle)]
-    if any(a is None or b is None for a, b in pairs) or all(a == b for a, b in pairs):
-        return False
-    return all(a == b or (a[0] == b[0] in ("html", "body") and set(a[1]) < set(b[1])) for a, b in pairs)
-
-
-VALUE_CONSTRUCTS: list[ValueConstruct] = [
-    ValueConstruct("quirks-mode class and id matching (deferred)", _quirks_class_or_id),
-    ValueConstruct("raw-source outer HTML", _raw_source),
-    ValueConstruct("raw-source outer HTML of a merged <html>/<body>", _merged_frame_source),
-]
-
-
-def attribute_value(r: ValueRepro) -> Optional[str]:
-    for c in VALUE_CONSTRUCTS:
-        if c.test(r):
-            return c.name
-    return None
 
 
 def attribute_values(items: list[Divergence], answers: Answers, report: Report) -> None:

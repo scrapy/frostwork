@@ -717,14 +717,15 @@ def test_the_browser_gate_emits_what_the_first_review_found():
     structured family member, its column is one the gate grades there, and the engine must give Chrome's
     answer as the gate compares it: exactly, or by the raw-source allowance for outer HTML, which still
     needs the same elements in the same order."""
+    import browser_answers as A
     import browser_docs as D
+    import browser_values as V
     import conformant
-    import diff_browser as B
     import frostwork
     import seq_sweep
 
     generated = {D.render(d) for d in D.structured_docs()}
-    run = B.Engine("browser")
+    run = A.Engine("browser")
     no_quirks = ["#d", [["#dt", "html", "", ""]]]
     wrong = []
     for tokens, sel, chrome in REVIEW_FINDINGS:
@@ -734,8 +735,8 @@ def test_the_browser_gate_emits_what_the_first_review_found():
         assert sel in D.value_selectors(doc, True, list(conformant.BASKET)) + seq_sweep.fingerprint_selectors(D.ids_of(doc))
         engine = run.grouped(r.encode(), [sel])[0] if D.grouped_spec(sel) else \
             frostwork.extract(r.encode(), [sel], parser="browser", strict=False)[0]
-        agrees = B.same_values(engine, chrome, sel) or (
-            sel == "b, i" and B.attribute_value(B.ValueRepro(doc, sel, engine, chrome, no_quirks)) is not None)
+        agrees = A.same_values(engine, chrome, sel) or (
+            sel == "b, i" and V.attribute_value(V.ValueRepro(doc, sel, engine, chrome, no_quirks)) is not None)
         if not agrees:
             wrong.append(f"{r}  {sel}: engine {engine}, Chrome {chrome}")
     assert not wrong, "\n".join(wrong)
@@ -747,16 +748,16 @@ def test_the_browser_gates_ask_about_each_selector_alone():
     mixed comma group cannot be routed, and conformant's `p::text, p:contains("alpha")::text` family went
     ungraded in both modes. Both browser gates read the one helper. The deferred tails the value basket
     holds are graded in browser mode, which is the point of their rows."""
+    import browser_answers as A
     import browser_docs as D
     import corpus_browser as CB
-    import diff_browser as B
 
     group = 'p::text, p:contains("alpha")::text'
     padding = [f'[id="{i}"]::text' for i in range(130)]
-    assert B.engine_refusals(padding + [group, "p"], "browser") == {"p": B.engine_refusals(["p"], "browser")["p"]}
-    assert CB.engine_refusals is B.engine_refusals
+    assert A.engine_refusals(padding + [group, "p"], "browser") == {"p": A.engine_refusals(["p"], "browser")["p"]}
+    assert CB.engine_refusals is A.engine_refusals
     tails = [s for s in D.RULE_SELECTORS if re.search(r":last-|:nth-last-|:only-|:has\(|:contains\(|last\(\)|contains\(", s)]
-    assert len(tails) >= 20 and not B.engine_refusals(tails, "browser")
+    assert len(tails) >= 20 and not A.engine_refusals(tails, "browser")
 
 
 def test_browser_attribution_is_by_the_smallest_repro_and_leaves_the_rest_novel():
@@ -782,10 +783,10 @@ def test_the_merged_frame_allowance_excuses_only_attributes_a_later_tag_added():
     """The raw source of a `<body>` or `<html>` that a later tag merged attributes into has only its own
     start tag. The allowance excuses exactly that: the browser's root has the same tag and every name the
     engine's has, plus more. Fewer names, another tag or an element other than the frame is a value NOVEL."""
-    import diff_browser as B
+    import browser_values as V
 
     def verdict(engine, oracle, sel='[id="3"]'):
-        return B.attribute_value(B.ValueRepro((), sel, [engine], [oracle], ["#d", []]))
+        return V.attribute_value(V.ValueRepro((), sel, [engine], [oracle], ["#d", []]))
 
     merged = "raw-source outer HTML of a merged <html>/<body>"
     assert verdict('<body id=3>x<body class=k>', '<body id="3" class="k">x</body>') == merged
@@ -800,7 +801,7 @@ def test_the_browser_gate_reads_the_document_mode_from_the_doctype():
     """Class and id selectors fold case in quirks mode, so the value gate must know the document's mode.
     A doctype is not enough: an HTML 4.01 Transitional one without a system identifier is quirks, and with
     one it is limited quirks, where they do not fold."""
-    import diff_browser as B
+    import browser_values as V
     from browser_oracle import tree as T
 
     assert not T.quirks_doctype("html", "", "")
@@ -809,8 +810,8 @@ def test_the_browser_gate_reads_the_document_mode_from_the_doctype():
     assert not T.quirks_doctype("html", "-//W3C//DTD XHTML 1.0 Transitional//EN", "x")
     assert T.quirks_doctype("html", "-//IETF//DTD HTML 2.0//EN", "") and T.quirks_doctype("svg", "", "")
     tree = ["#d", [["#dt", "html", "-//W3C//DTD HTML 4.01 Transitional//EN", ""], ["html", 0, [], []]]]
-    assert B.ValueRepro((), ".a", [], [], tree).quirks()
-    assert not B.ValueRepro((), ".a", [], [], ["#d", [["#dt", "html", "", ""], ["html", 0, [], []]]]).quirks()
+    assert V.ValueRepro((), ".a", [], [], tree).quirks()
+    assert not V.ValueRepro((), ".a", [], [], ["#d", [["#dt", "html", "", ""], ["html", 0, [], []]]]).quirks()
 
 
 # A browser tree holding what lxml cannot: control characters in text and attribute values, a `p"x` tag
@@ -916,6 +917,7 @@ def test_value_columns_split_by_the_tree_and_attribute_by_the_oracle_tree():
     oracle's own tree: case folding applies to listed attributes on HTML elements and never to XPath, the
     quirks-mode class rule needs a quirks-mode document, and raw-source outer HTML needs the same element."""
     import browser_docs as D
+    import browser_values as V
     import diff_browser as B
     import seq_sweep
     from browser_oracle import tree as T
@@ -932,27 +934,27 @@ def test_value_columns_split_by_the_tree_and_attribute_by_the_oracle_tree():
         return ["#d", ([["#dt", "html", "", ""]] if doctype else []) + frame]
 
     def r(sel, tree, engine=(), oracle=("0",)):
-        return B.ValueRepro((), sel, list(engine), list(oracle), tree)
+        return V.ValueRepro((), sel, list(engine), list(oracle), tree)
 
     p_en = ["p", 0, ["lang", "EN", "id", "0"], []]
     svg_en = ["svg", "http://www.w3.org/2000/svg", ["lang", "EN", "id", "0"], []]
     # browser mode folds HTML's listed attribute values for CSS, so a column that differs there is NOVEL
     for sel, tree in (('[lang="en"]::attr(id)', page([p_en])), ('//*[@lang="en"]/@id', page([p_en])),
                       ('[lang="en"]::attr(id)', page([svg_en]))):
-        assert B.attribute_value(r(sel, tree)) is None, sel
+        assert V.attribute_value(r(sel, tree)) is None, sel
     upper = ["p", 0, ["class", "A", "id", "0"], []]
-    assert B.attribute_value(r(".a::attr(id)", page([upper], doctype=False))) == \
+    assert V.attribute_value(r(".a::attr(id)", page([upper], doctype=False))) == \
         "quirks-mode class and id matching (deferred)"
-    assert B.attribute_value(r(".a::attr(id)", page([upper]))) is None, "no-quirks mode matches exactly"
+    assert V.attribute_value(r(".a::attr(id)", page([upper]))) is None, "no-quirks mode matches exactly"
     raw = ['<table id="0"><tr><td>x</table>']
     serial = ['<table id="0"><tbody><tr><td>x</td></tr></tbody></table>']
-    assert B.attribute_value(r("table", page([]), raw, serial)) == "raw-source outer HTML"
-    assert B.attribute_value(r("table", page([]), ['<table id="1"><tr></table>'], serial)) is None
+    assert V.attribute_value(r("table", page([]), raw, serial)) == "raw-source outer HTML"
+    assert V.attribute_value(r("table", page([]), ['<table id="1"><tr></table>'], serial)) is None
     # an <html> is compared by its start tag too, and <image> is the <img> a browser makes of it
     full = ['<html id="0"><head></head><body></body></html>']
-    assert B.attribute_value(r('[id="0"]', page([]), ['<html id="0">'], full)) == "raw-source outer HTML"
-    assert B.attribute_value(r('[id="0"]', page([]), ['<image id="0">'], ['<img id="0">'])) == "raw-source outer HTML"
-    assert B.attribute_value(r('[id="0"]', page([]), ['x<b id="0">'], ['<b id="0">x</b>'])) is None
+    assert V.attribute_value(r('[id="0"]', page([]), ['<html id="0">'], full)) == "raw-source outer HTML"
+    assert V.attribute_value(r('[id="0"]', page([]), ['<image id="0">'], ['<img id="0">'])) == "raw-source outer HTML"
+    assert V.attribute_value(r('[id="0"]', page([]), ['x<b id="0">'], ['<b id="0">x</b>'])) is None
 
     # an empty id-less element answers every fingerprint column like no element at all, so only a value
     # column that names it can show it
