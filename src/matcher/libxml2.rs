@@ -118,7 +118,7 @@ impl Libxml2 {
             // begins (`<head>`) or ends (`<body>`, real or the one synthesized just above)
             self.frame.note_inserted(slot);
         }
-        m.open_element(name, scid, raw_attrs, span_start);
+        m.open_element_inline(name, scid, raw_attrs, span_start);
         if self_closing || void {
             m.close_top(open_end); // no children; raw source = input[start..open_end]
         }

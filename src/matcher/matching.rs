@@ -334,6 +334,7 @@ pub(super) fn gate_open(seen: u64, prev: u64, bit: usize, adjacent: bool) -> boo
 /// segment's sibling gate is checked at its own first compound (inside [`seg_match_anchored`]), so a
 /// descendant/child step after a sibling combinator (`a + b c`) resolves against the sibling element's
 /// parent, not the subject's.
+#[inline(always)]
 pub(super) fn eval_one(cs: &CSel, stack: &[OpenElem], top: usize) -> (bool, u64) {
     // An over-budget entry never matches and (crucially) has no `seg_bits`, so short-circuit BEFORE
     // any `1 << seg_bits[..]` shift could run — that is the whole point of the DEAD flag.
