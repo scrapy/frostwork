@@ -31,12 +31,12 @@ pub use selector::Selector;
 /// mode.
 ///
 /// `Browser`, the default, is graded against real browsers (Chrome where Chrome and Firefox disagree):
-/// raw input bytes with no stripping, HTML5's NUL rules, `<noscript>` read as raw text (a browser runs
-/// with scripting on) and `<template>` content kept out of the document. Its tree construction is
-/// libxml2's for everything else until the HTML5 insertion modes land, and it refuses the queries whose
-/// answer would need a re-parse without context (see [`audit_schema_with`]). `Lxml` is value parity with
-/// lxml/libxml2 2.15 behind Parsel, the contract docs/COMPATIBILITY.md describes and every lxml gate
-/// proves. docs/BROWSER_MODE.md has the design and the measured browser answers.
+/// raw input bytes with no stripping, HTML5's NUL rules, and HTML5 tree construction as Chrome runs it,
+/// with scripting on (`<noscript>` is raw text) and `<template>` content kept out of the document. It
+/// refuses outer HTML for a query that can match an element the page never wrote, which has no source
+/// of its own (see [`audit_schema_with`]). `Lxml` is value parity with lxml/libxml2 2.15 behind Parsel,
+/// the contract docs/COMPATIBILITY.md describes and every lxml gate proves. docs/BROWSER_MODE.md has the
+/// design and the measured browser answers.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum ParseMode {
     #[default]

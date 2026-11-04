@@ -13,8 +13,9 @@
 //! builder once per document and [`Scan`] is monomorphised over it; nothing on the per-token path asks
 //! which mode it is in.
 
-use super::Matcher;
+use super::{CompiledSchema, EncodedInput, Matcher};
 use crate::tokenizer::{DataMode, TokenSink};
+use crate::{FlatColumns, GroupRows};
 
 /// One parse mode's tree construction. The tokenizer's events arrive here, and the builder answers them
 /// by calling the matcher's primitives; it never evaluates a selector itself.
@@ -66,6 +67,30 @@ pub(super) trait TreeBuilder<'a> {
 pub(super) struct Scan<'a, B> {
     pub(super) m: Matcher<'a>,
     pub(super) builder: B,
+}
+
+impl<'a, B: TreeBuilder<'a>> Scan<'a, B> {
+    /// Tokenize `input` through `builder` until the end or until the builder stops the scan. `marks` are
+    /// the deferred winners a browser-mode tail pass marks (`Matcher::resolve_tail_pass`); every other
+    /// run passes none.
+    pub(super) fn tokenize(
+        schema: &'a CompiledSchema,
+        input: EncodedInput<'a>,
+        builder: B,
+        marks: Vec<(u32, String)>,
+    ) -> Self {
+        let mut m = Matcher::new(schema, input);
+        m.marks = marks;
+        let mut scan = Scan { m, builder };
+        crate::tokenizer::tokenize(input.bytes(), &mut scan);
+        scan
+    }
+
+    /// End of input: the builder's, then the matcher's.
+    pub(super) fn finish(mut self) -> (FlatColumns, Vec<GroupRows>) {
+        self.builder.finish(&mut self.m);
+        self.m.finish_grouped()
+    }
 }
 
 impl<'a, B: TreeBuilder<'a>> TokenSink<'a> for Scan<'a, B> {

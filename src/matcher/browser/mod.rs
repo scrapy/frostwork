@@ -73,17 +73,17 @@ mod lists;
 mod rules;
 mod tags;
 
-use super::tree::TreeBuilder;
+use super::tree::{Scan, TreeBuilder};
 use super::{CompiledSchema, EncodedInput, HeldText, Matcher, Parked};
 use crate::{FlatColumns, GroupRows};
 use crate::implied_close::{
     html5_cat, html5_data_mode, BUTTON_SCOPE, IMPLIED_END, IMPLIED_END_THOROUGH, LIST_ITEM_SCOPE, SCOPE,
     SPECIAL,
 };
-use lists::{Bound, Formatting, OpenStack};
+use lists::{Afe, Bound, Formatting, OpenStack};
 use crate::tokenizer::DataMode;
-use tags::{lower, tag_of, Tag};
-pub(super) use tags::{namespaced_foreign_attr, svg_attr_name, svg_local_name};
+use tags::{tag_of, tag_of_lower, Tag};
+pub(super) use tags::{lower, namespaced_foreign_attr, svg_attr_name, svg_local_name, MAX_NAME};
 
 type Attrs<'a> = [(&'a [u8], Option<&'a [u8]>)];
 
@@ -137,13 +137,18 @@ enum Vis {
     Live,
     /// Template content or a declarative shadow root: never matched.
     Inert,
-    /// An adoption-agency clone with no matcher element yet; the index is its token in `toks`.
+    /// An adoption-agency clone with no matcher element yet, made for the start tag at this index of
+    /// [`Formatting::toks`].
     Pending(u32),
 }
 
+/// An HTML integration point.
 const HTML_IP: u8 = 1 << 0;
+/// A MathML text integration point.
 const MATHML_TEXT_IP: u8 = 1 << 1;
+/// A MathML `<annotation-xml>`, which takes an `<svg>` as foreign content of its own.
 const ANNOTATION_XML: u8 = 1 << 2;
+/// A declarative shadow root has been attached to the element.
 const SHADOW_HOST: u8 = 1 << 3;
 /// An element or text node has been inserted into the element.
 const HAS_CHILD: u8 = 1 << 4;
@@ -151,7 +156,7 @@ const HAS_CHILD: u8 = 1 << 4;
 const SYNTH: u8 = 1 << 5;
 
 /// One entry of the HTML5 stack of open elements.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 struct Node<'a> {
     /// The element's name as the matcher sees it: as written, or the camel-case SVG name.
     name: &'a [u8],
@@ -160,6 +165,8 @@ struct Node<'a> {
     /// `html5_cat` for an HTML element; special and scope for a foreign integration point.
     cat: u16,
     flags: u8,
+    /// How the tokenizer reads the element's content.
+    data: DataMode,
     uid: u32,
     vis: Vis,
     /// While `vis` is `Live`: its depth on the matcher stack when streaming, its node in the replay's
@@ -183,23 +190,6 @@ const RETRO_DEPTH: u8 = 1 << 6;
 const RETRO_RULES: u8 =
     RETRO_MERGE | RETRO_FOSTER | RETRO_FRAMESET | RETRO_ADOPTION | RETRO_SELECTEDCONTENT | RETRO_DEPTH;
 
-/// The start tag a formatting element was created for, kept so a clone can be made from it. `span` is
-/// the tag's source, which a clone's outer HTML begins with; `ark` is what Noah's Ark compares it by
-/// ([`lists::ark_key`]).
-struct FmtTok<'a> {
-    name: &'a [u8],
-    tag: Tag,
-    attrs: Vec<(&'a [u8], Option<&'a [u8]>)>,
-    span: (usize, usize),
-    ark: u64,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Afe {
-    Marker,
-    El { uid: u32, tok: u32 },
-}
-
 /// A parked run of matcher elements: the uids that were `path[base..]`, and the text node the last of
 /// them was buffering. Nothing is inserted into a parked element, so when it is put back that node is
 /// still its last child and the next run continues it, as a browser appends to a trailing text node.
@@ -212,6 +202,8 @@ struct Seg<'a> {
 
 struct StartTok<'a, 't> {
     name: &'a [u8],
+    /// `name` ASCII-lowercased, or `None` when it is longer than any name the tables know.
+    low: Option<&'t [u8]>,
     tag: Tag,
     attrs: &'t Attrs<'a>,
     self_closing: bool,
@@ -243,11 +235,12 @@ enum Loc {
 /// tree (`true`). The rules are the same code either way; only the insertion primitives differ.
 pub(super) struct Browser<'a, const REPLAY: bool> {
     mode: Mode,
+    /// The insertion mode the text mode returns to.
     original: Mode,
+    /// The stack of template insertion modes.
     templates: Vec<Mode>,
     stack: OpenStack<'a>,
-    afe: Formatting,
-    toks: Vec<FmtTok<'a>>,
+    afe: Formatting<'a>,
     /// The head element pointer, as the entry it had on the stack.
     head: Option<Node<'a>>,
     /// The head's matcher element is still open for "after head" to insert into.
@@ -258,14 +251,17 @@ pub(super) struct Browser<'a, const REPLAY: bool> {
     /// Text nodes of `<html>` in "after head" that a comment has ended, held with `html_text`: head
     /// content written after them still precedes them in document order.
     html_done: Vec<HeldText<'a>>,
+    /// The form element pointer, as the element's uid.
     form: Option<u32>,
     frameset_ok: bool,
     quirks: bool,
+    /// Foster parenting is on, for the token being processed.
     foster: bool,
     /// The previous token was `<pre>`, `<listing>` or `<textarea>`: a leading newline is dropped.
     skip_lf: bool,
     /// The uid of every element on the matcher stack, bottom first.
     path: Vec<u32>,
+    /// The parked runs, the most recently parked last.
     parked: Vec<Seg<'a>>,
     next_uid: u32,
     /// The current token changed the matcher stack. A tag that did not is no node, so the text either
@@ -295,7 +291,6 @@ impl<const REPLAY: bool> Default for Browser<'_, REPLAY> {
             templates: Vec::new(),
             stack: OpenStack::default(),
             afe: Formatting::default(),
-            toks: Vec::new(),
             head: None,
             head_live: false,
             html_text: None,
@@ -433,11 +428,9 @@ fn frame_tag_from(b: &[u8], from: usize) -> usize {
 /// Run `schema` over one document in browser mode. One streaming pass answers it unless a retroactive
 /// rule fires; then the pass stops there, and the replay builds the document's tree and walks it.
 pub(super) fn run<'a>(schema: &'a CompiledSchema, input: EncodedInput<'a>) -> (FlatColumns, Vec<GroupRows>) {
-    let mut scan = super::tree::Scan { m: Matcher::new(schema, input), builder: Browser::<'a, false>::default() };
-    crate::tokenizer::tokenize(input.bytes(), &mut scan);
+    let scan = Scan::tokenize(schema, input, Browser::<'a, false>::default(), Vec::new());
     if scan.builder.retro & RETRO_RULES == 0 {
-        scan.builder.finish(&mut scan.m);
-        return scan.m.finish_grouped();
+        return scan.finish();
     }
     replay(schema, input, Vec::new())
 }
@@ -453,13 +446,7 @@ pub(super) fn run_tail<'a>(
     if replayed {
         return replay(schema, input, marks);
     }
-    let mut m = Matcher::new(schema, input);
-    m.marks = marks;
-    let mut scan = super::tree::Scan { m, builder: Browser::<'a, false>::default() };
-    scan.builder.run_through = true;
-    crate::tokenizer::tokenize(input.bytes(), &mut scan);
-    scan.builder.finish(&mut scan.m);
-    scan.m.finish_grouped()
+    Scan::tokenize(schema, input, Browser::<'a, false>::to_the_end(), marks).finish()
 }
 
 /// The replay: the whole tree, built with the DOM operations a browser performs, walked in pre-order.
@@ -468,35 +455,32 @@ fn replay<'a>(
     input: EncodedInput<'a>,
     marks: Vec<(u32, String)>,
 ) -> (FlatColumns, Vec<GroupRows>) {
-    let mut m = Matcher::new(schema, input);
-    m.marks = marks;
-    let mut scan = super::tree::Scan { m, builder: Browser::<'a, true>::default() };
-    crate::tokenizer::tokenize(input.bytes(), &mut scan);
-    scan.builder.finish(&mut scan.m);
-    scan.builder.dom.walk(&mut scan.m);
-    scan.m.finish_grouped()
+    Scan::tokenize(schema, input, Browser::<'a, true>::default(), marks).finish()
 }
 
 /// Which retroactive rules fire on a document (`RETRO_*`, and [`CENSUS_MERGE_ANY`]), over the whole
 /// document. A merge counts only when it adds an attribute `schema` selects on.
 pub(super) fn retro_census(schema: &CompiledSchema, input: EncodedInput<'_>) -> u8 {
-    let mut scan = super::tree::Scan { m: Matcher::new(schema, input), builder: Browser::<'_, false>::default() };
-    scan.builder.run_through = true;
-    crate::tokenizer::tokenize(input.bytes(), &mut scan);
-    scan.builder.retro
+    Scan::tokenize(schema, input, Browser::<'_, false>::to_the_end(), Vec::new()).builder.retro
+}
+
+impl<const REPLAY: bool> Browser<'_, REPLAY> {
+    /// A streaming builder that stays on to the end of input whatever fires (see `run_through`).
+    fn to_the_end() -> Self {
+        Browser { run_through: true, ..Browser::default() }
+    }
 }
 
 impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
     // ------------------------------------------------------------------ nodes
 
-    fn new_node(&mut self, name: &'a [u8], tag: Tag, ns: Ns, attrs: &Attrs<'a>) -> Node<'a> {
+    /// A stack entry for an element named `name`, which is `low` lowercased (see [`StartTok::low`]).
+    fn new_node(&mut self, name: &'a [u8], low: Option<&[u8]>, tag: Tag, ns: Ns, attrs: &Attrs<'a>) -> Node<'a> {
         let uid = self.next_uid;
         self.next_uid += 1;
-        let mut buf = [0; 24];
-        let low = lower(name, &mut buf);
         let ip = SPECIAL | SCOPE | LIST_ITEM_SCOPE | BUTTON_SCOPE;
         let (tag, cat, flags) = match ns {
-            Ns::Html => (tag, low.map_or_else(|| html5_cat(b""), html5_cat), 0),
+            Ns::Html => (tag, html5_cat(low.unwrap_or(b"")), 0),
             Ns::Svg => match low {
                 Some(b"foreignobject" | b"desc" | b"title") => (Tag::Other, ip, HTML_IP),
                 _ => (Tag::Other, 0, 0),
@@ -513,7 +497,11 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
                 _ => (Tag::Other, 0, 0),
             },
         };
-        Node { name, tag, ns, cat, flags, uid, vis: Vis::Live, depth: 0 }
+        let data = match ns {
+            Ns::Html => low.map_or(DataMode::Normal, html5_data_mode),
+            Ns::Svg | Ns::MathMl => DataMode::Normal,
+        };
+        Node { name, tag, ns, cat, flags, data, uid, vis: Vis::Live, depth: 0 }
     }
 
     fn cur(&self) -> &Node<'a> {
@@ -522,10 +510,6 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
 
     fn cur_is(&self, tag: Tag) -> bool {
         self.stack.last().is_some_and(|n| n.tag == tag)
-    }
-
-    fn index_of(&self, uid: u32) -> Option<usize> {
-        self.stack.index_of(uid)
     }
 
     fn has_template(&self) -> bool {
@@ -537,7 +521,14 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
     /// Where the next node goes: the appropriate place for inserting a node, with foster parenting when
     /// it is enabled, and nowhere for template content.
     fn location(&self) -> Loc {
-        let Some(i) = self.stack.len().checked_sub(1) else { return Loc::Document };
+        match self.stack.len().checked_sub(1) {
+            Some(i) => self.location_in(i),
+            None => Loc::Document,
+        }
+    }
+
+    /// [`Self::location`] with the stack entry at `i` as the target instead of the current node.
+    fn location_in(&self, i: usize) -> Loc {
         let t = &self.stack[i];
         if t.vis == Vis::Inert || t.tag == Tag::Template {
             return Loc::Inert;
@@ -561,40 +552,44 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
             Vis::Live => {}
         }
         let (uid, d) = (self.stack[i].uid, self.stack[i].depth as usize);
-        loop {
-            if self.path.get(d) == Some(&uid) {
-                while self.path.len() > d + 1 {
-                    self.drop_top(m, at);
-                }
-                return;
-            }
-            let Some(base) = self.parked.last().map(|s| s.base) else {
+        while self.path.get(d) != Some(&uid) {
+            if self.parked.is_empty() {
                 debug_assert!(false, "a live element is neither open nor parked");
                 return;
-            };
-            while self.path.len() > base {
-                self.drop_top(m, at);
             }
             self.unpark_last(m, at);
+        }
+        self.drop_to(m, d + 1, at);
+    }
+
+    /// Close the matcher's current element, which ends at `at`.
+    fn close_current(&mut self, m: &mut Matcher<'a>, at: usize) {
+        m.flush_text();
+        m.close_top(at);
+        self.path.pop();
+        self.touched = true;
+    }
+
+    /// Drop the matcher's elements above the first `len` (see [`Self::drop_top`]).
+    fn drop_to(&mut self, m: &mut Matcher<'a>, len: usize, at: usize) {
+        while self.path.len() > len {
+            self.drop_top(m, at);
         }
     }
 
     /// The matcher's current element has no builder entry: close it, or park the head while "after
     /// head" may still insert into it.
     fn drop_top(&mut self, m: &mut Matcher<'a>, at: usize) {
-        m.flush_text();
-        self.touched = true;
         let top = *self.path.last().expect("dropping with nothing open");
         if self.head_live && self.head.is_some_and(|h| h.uid == top) {
-            self.park_from(m, self.path.len() - 1);
-            return;
+            m.flush_text();
+            return self.park_from(m, self.path.len() - 1);
         }
         debug_assert!(
-            self.index_of(top).is_none_or(|k| self.stack[k].vis != Vis::Live),
+            self.stack.index_of(top).is_none_or(|k| self.stack[k].vis != Vis::Live),
             "closing an element the builder still has open"
         );
-        m.close_top(at);
-        self.path.pop();
+        self.close_current(m, at);
     }
 
     fn park_from(&mut self, m: &mut Matcher<'a>, base: usize) {
@@ -605,8 +600,11 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
         self.parked.push(Seg { base, uids, parked, held });
     }
 
-    /// Put the last parked run back; its held text node continues to `at`.
+    /// Put the last parked run back, dropping what was opened since it was parked; its held text node
+    /// continues to `at`.
     fn unpark_last(&mut self, m: &mut Matcher<'a>, at: usize) {
+        let base = self.parked.last().expect("unparking with nothing parked").base;
+        self.drop_to(m, base, at);
         m.flush_text();
         self.touched = true;
         let seg = self.parked.pop().expect("unparking with nothing parked");
@@ -623,10 +621,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
     fn foster_place(&mut self, m: &mut Matcher<'a>, t: usize, at: usize) {
         let (tuid, base) = (self.stack[t].uid, self.stack[t].depth as usize);
         if self.parked.last().is_some_and(|s| s.base == base && s.uids.first() == Some(&tuid)) {
-            while self.path.len() > base {
-                self.drop_top(m, at);
-            }
-            return;
+            return self.drop_to(m, base, at);
         }
         let cur = self.stack.len() - 1;
         self.place(m, cur, at);
@@ -642,12 +637,12 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
             return;
         }
         self.place(m, i - 1, at);
-        let attrs = std::mem::take(&mut self.toks[tok as usize].attrs);
+        let attrs = std::mem::take(&mut self.afe.toks[tok as usize].attrs);
         let mut node = self.stack[i];
         self.open(m, &mut node, &attrs, at);
-        m.set_source_prefix(self.toks[tok as usize].span);
+        m.set_source_prefix(self.afe.toks[tok as usize].span);
         self.stack.replace(i, node);
-        self.toks[tok as usize].attrs = attrs;
+        self.afe.toks[tok as usize].attrs = attrs;
     }
 
     /// Open `node` as the matcher's next element, at the current insertion point.
@@ -675,17 +670,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
             return;
         }
         let d = n.depth as usize;
-        loop {
-            if self.path.get(d) == Some(&n.uid) {
-                while self.path.len() > d + 1 {
-                    self.drop_top(m, ghost_end);
-                }
-                m.flush_text();
-                m.close_top(end);
-                self.path.pop();
-                self.touched = true;
-                return;
-            }
+        while self.path.get(d) != Some(&n.uid) {
             // Parked: what was opened after it closes first, segment by segment, as ghosts. Past the
             // depth cap the adoption agency can leave an element open in a later segment, which streaming
             // cannot close before it; only a census pass streams that far, since the cap is a replay.
@@ -693,15 +678,13 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
             let seg = &self.parked[k];
             let above = seg.uids.iter().skip_while(|&&u| u != n.uid).skip(1);
             let mut later = self.path[seg.base..].iter().chain(above).chain(self.parked[k + 1..].iter().flat_map(|s| &s.uids));
-            if later.any(|&u| self.index_of(u).is_some_and(|i| self.stack[i].vis == Vis::Live)) {
+            if later.any(|&u| self.stack.index_of(u).is_some_and(|i| self.stack[i].vis == Vis::Live)) {
                 return;
-            }
-            let base = self.parked.last().expect("a segment holds it").base;
-            while self.path.len() > base {
-                self.drop_top(m, ghost_end);
             }
             self.unpark_last(m, ghost_end);
         }
+        self.drop_to(m, d + 1, ghost_end);
+        self.close_current(m, end);
     }
 
     // ------------------------------------------------------------------ inserting
@@ -750,12 +733,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
                 }
             }
         }
-        if node.ns == Ns::Html {
-            let mut buf = [0; 24];
-            self.data = lower(node.name, &mut buf).map_or(DataMode::Normal, html5_data_mode);
-        } else {
-            self.data = DataMode::Normal;
-        }
+        self.data = node.data;
         self.stack.push(node);
     }
 
@@ -778,7 +756,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
 
     /// Insert an HTML element for a start tag.
     fn insert_html(&mut self, m: &mut Matcher<'a>, t: &StartTok<'a, '_>) {
-        let node = self.new_node(t.name, t.tag, Ns::Html, t.attrs);
+        let node = self.new_node(t.name, t.low, t.tag, Ns::Html, t.attrs);
         self.insert_node(m, node, t.attrs, t.start);
         self.dom_open_end(t.end);
     }
@@ -792,7 +770,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
 
     /// Insert an element the page never wrote (no attributes, no source of its own), at `at`.
     fn insert_synth(&mut self, m: &mut Matcher<'a>, name: &'static [u8], tag: Tag, at: usize) {
-        let mut node = self.new_node(name, tag, Ns::Html, &[]);
+        let mut node = self.new_node(name, Some(name), tag, Ns::Html, &[]);
         node.flags |= SYNTH;
         self.insert_node(m, node, &[], at);
     }
@@ -806,10 +784,10 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
 
     fn insert_foreign(&mut self, m: &mut Matcher<'a>, t: &StartTok<'a, '_>, ns: Ns) {
         let name = match ns {
-            Ns::Svg => tags::svg_local_name(t.name).unwrap_or(t.name),
+            Ns::Svg => t.low.and_then(tags::svg_camel_case).unwrap_or(t.name),
             _ => t.name,
         };
-        let node = self.new_node(name, Tag::Other, ns, t.attrs);
+        let node = self.new_node(name, t.low, Tag::Other, ns, t.attrs);
         self.insert_node(m, node, t.attrs, t.start);
         self.dom_open_end(t.end);
         if t.self_closing {
@@ -823,7 +801,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
             Loc::Inert | Loc::Document => self.absorb(m, s, s + b.len()),
             Loc::Into(i) => {
                 if REPLAY {
-                    if !Self::no_node(m, b, dm) {
+                    if !m.input.is_dropped_nul(b, dm) {
                         self.dom.append_text(self.stack[i].depth, (b, dm, s));
                     }
                 } else {
@@ -835,7 +813,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
             Loc::Foster(t) => {
                 self.retro |= RETRO_FOSTER;
                 if REPLAY {
-                    if !Self::no_node(m, b, dm) {
+                    if !m.input.is_dropped_nul(b, dm) {
                         let table = self.stack[t].depth;
                         if self.dom.parent(table) != dom::NIL {
                             self.dom.text_before(table, (b, dm, s));
@@ -849,11 +827,6 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
                 }
             }
         }
-    }
-
-    /// A run that is no text node: markup-mode NUL, which a browser drops (see [`Matcher::buffer_text`]).
-    fn no_node(m: &Matcher<'a>, b: &[u8], dm: DataMode) -> bool {
-        m.input.keeps_nul() && dm == DataMode::Normal && b.iter().all(|&c| c == 0)
     }
 
     /// Markup over `[from, to)` that leaves no node. Streaming, the text node around it continues
@@ -927,12 +900,18 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
         self.in_scope_of(tag, Bound::Table)
     }
 
-    /// Close a `<p>` element: implied end tags except `p`, then pop through the `<p>`.
-    fn close_p(&mut self, m: &mut Matcher<'a>, ghost_end: usize, end: usize) {
-        self.implied_end(m, Some(Tag::P), ghost_end);
-        if let Some(k) = self.stack.topmost(Tag::P) {
+    /// Generate implied end tags except for `except`, then pop through the topmost element with one of
+    /// `tags`. Entries above it end at `ghost_end`, it at `end`.
+    fn close_element(&mut self, m: &mut Matcher<'a>, tags: &[Tag], except: Option<Tag>, ghost_end: usize, end: usize) {
+        self.implied_end(m, except, ghost_end);
+        if let Some(k) = self.stack.topmost_of(tags) {
             self.pop_to(m, k, ghost_end, end);
         }
+    }
+
+    /// Close a `<p>` element: implied end tags except `p`, then pop through the `<p>`.
+    fn close_p(&mut self, m: &mut Matcher<'a>, ghost_end: usize, end: usize) {
+        self.close_element(m, &[Tag::P], Some(Tag::P), ghost_end, end);
     }
 
     fn close_p_if_in_button_scope(&mut self, m: &mut Matcher<'a>, at: usize) {
@@ -943,83 +922,12 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
 
     // ------------------------------------------------------------------ active formatting elements
 
-    fn afe_last_marker(&self) -> usize {
-        self.afe.after_last_marker()
-    }
-
-    fn afe_index_of(&self, uid: u32) -> Option<usize> {
-        self.afe.index_of(uid)
-    }
-
-    fn clear_afe_to_marker(&mut self) {
-        self.afe.clear_to_marker(&self.toks);
-    }
-
-    fn afe_push(&mut self, e: Afe) {
-        self.afe.push(e, &self.toks);
-    }
-
-    fn afe_remove(&mut self, k: usize) {
-        self.afe.remove(k, &self.toks);
-    }
-
-    /// Do two formatting tokens carry the same attributes, as Noah's Ark compares them: by name, the
-    /// first of a repeated name, in any order, with equal values.
-    fn same_attrs(&self, m: &Matcher<'a>, a: &FmtTok<'a>, b: &FmtTok<'a>) -> bool {
-        let first = |attrs: &[(&'a [u8], Option<&'a [u8]>)], j: usize| {
-            !attrs[..j].iter().any(|(n, _)| n.eq_ignore_ascii_case(attrs[j].0))
-        };
-        let names = |attrs: &[(&'a [u8], Option<&'a [u8]>)]| (0..attrs.len()).filter(|&j| first(attrs, j)).count();
-        names(&a.attrs) == names(&b.attrs) && (0..a.attrs.len()).filter(|&j| first(&a.attrs, j)).all(|j| {
-            let (n, v) = a.attrs[j];
-            b.attrs.iter().find(|(n2, _)| n.eq_ignore_ascii_case(n2)).is_some_and(|&(_, v2)| {
-                let (v, v2) = (v.unwrap_or(b""), v2.unwrap_or(b""));
-                v == v2 || m.input.attr_value(v) == m.input.attr_value(v2)
-            })
-        })
-    }
-
-    /// Push the element `uid`, made for token `tok`, onto the list of active formatting elements. Noah's
-    /// Ark: with three alike after the last marker already, the earliest of them leaves. The list counts
-    /// entries by key, so only then is it searched, from the end, for as many as have the key.
-    fn push_afe(&mut self, m: &Matcher<'a>, uid: u32, tok: u32) {
-        let t = &self.toks[tok as usize];
-        let mut keyed = self.afe.alike(t.ark);
-        if keyed >= 3 {
-            let (mut same, mut earliest) = (0, None);
-            let mut k = self.afe.len();
-            while keyed > 0 && k > self.afe_last_marker() {
-                k -= 1;
-                if let Afe::El { tok: o, .. } = self.afe[k] {
-                    let other = &self.toks[o as usize];
-                    if other.ark == t.ark {
-                        keyed -= 1;
-                        if other.tag == t.tag && self.same_attrs(m, other, t) {
-                            same += 1;
-                            earliest = Some(k);
-                        }
-                    }
-                }
-            }
-            if same >= 3 {
-                self.afe_remove(earliest.expect("three of a kind"));
-            }
-        }
-        self.afe_push(Afe::El { uid, tok });
-    }
-
     /// Insert a formatting element for a start tag and push it onto the list.
     fn insert_formatting(&mut self, m: &mut Matcher<'a>, t: &StartTok<'a, '_>) {
-        let tok = self.toks.len() as u32;
-        let attrs = t.attrs.to_vec();
-        let firsts = (0..attrs.len()).filter(|&j| !attrs[..j].iter().any(|(n, _)| n.eq_ignore_ascii_case(attrs[j].0)));
-        let values: Vec<(&[u8], std::borrow::Cow<'_, str>)> =
-            firsts.map(|j| (attrs[j].0, m.input.attr_value(attrs[j].1.unwrap_or(b"")))).collect();
-        let ark = lists::ark_key(t.tag, values.iter().map(|(n, v)| (*n, v.as_ref())));
-        self.toks.push(FmtTok { name: t.name, tag: t.tag, attrs, span: (t.start, t.end), ark });
+        let tok = self.afe.add_token(m.input, t);
         self.insert_html(m, t);
         let uid = self.cur().uid;
-        self.push_afe(m, uid, tok);
+        self.afe.push_element(m.input, uid, tok);
     }
 
     /// Reconstruct the active formatting elements: reopen, as clones carrying the original's
@@ -1028,7 +936,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
     fn reconstruct(&mut self, m: &mut Matcher<'a>, at: usize) {
         let open = |b: &Self, e: &Afe| match *e {
             Afe::Marker => true,
-            Afe::El { uid, .. } => b.index_of(uid).is_some(),
+            Afe::El { uid, .. } => b.stack.index_of(uid).is_some(),
         };
         let Some(last) = self.afe.last() else { return };
         if open(self, last) {
@@ -1040,12 +948,13 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
         }
         for j in k..self.afe.len() {
             let Afe::El { tok, .. } = self.afe[j] else { unreachable!("a marker is open") };
-            let (name, tag) = (self.toks[tok as usize].name, self.toks[tok as usize].tag);
-            let attrs = std::mem::take(&mut self.toks[tok as usize].attrs);
-            let node = self.new_node(name, tag, Ns::Html, &attrs);
+            let (name, tag) = (self.afe.toks[tok as usize].name, self.afe.toks[tok as usize].tag);
+            let attrs = std::mem::take(&mut self.afe.toks[tok as usize].attrs);
+            let mut buf = [0; MAX_NAME];
+            let node = self.new_node(name, lower(name, &mut buf), tag, Ns::Html, &attrs);
             let uid = node.uid;
             self.insert_node(m, node, &attrs, at);
-            let span = self.toks[tok as usize].span;
+            let span = self.afe.toks[tok as usize].span;
             if REPLAY {
                 let n = *self.cur();
                 if n.vis == Vis::Live {
@@ -1054,12 +963,39 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
             } else if self.path.last() == Some(&uid) {
                 m.set_source_prefix(span);
             }
-            self.toks[tok as usize].attrs = attrs;
+            self.afe.toks[tok as usize].attrs = attrs;
             self.afe.set(j, Afe::El { uid, tok });
         }
     }
 
     // ------------------------------------------------------------------ the frame
+
+    /// A token before any doctype: the document is in quirks mode.
+    fn no_doctype(&mut self) {
+        self.quirks = true;
+        self.mode = Mode::BeforeHtml;
+    }
+
+    /// Insert the `<html>` the page never wrote, at `at`.
+    fn imply_html(&mut self, m: &mut Matcher<'a>, at: usize) {
+        self.insert_synth(m, b"html", Tag::Html, at);
+        self.mode = Mode::BeforeHead;
+    }
+
+    /// Insert the `<head>` the page never wrote, at `at`: the head element pointer.
+    fn imply_head(&mut self, m: &mut Matcher<'a>, at: usize) {
+        self.insert_synth(m, b"head", Tag::Head, at);
+        self.head = self.stack.last().copied();
+        self.mode = Mode::InHead;
+    }
+
+    /// Leave "after head" for a `<body>` the page never wrote, inserted at `at`.
+    fn imply_body(&mut self, m: &mut Matcher<'a>, at: usize) {
+        self.finish_head(m, at);
+        self.insert_synth(m, b"body", Tag::Body, at);
+        self.frameset_ok = true;
+        self.mode = Mode::InBody;
+    }
 
     /// Leave "in head": pop the head off the stack, keeping its matcher element for "after head".
     fn leave_head(&mut self) {
@@ -1165,7 +1101,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
         }
         // A special element open inside a formatting element can still be its furthest block, moved
         // out of it with its content.
-        let formatting = self.stack.iter().position(|n| n.vis != Vis::Inert && self.afe_index_of(n.uid).is_some());
+        let formatting = self.stack.iter().position(|n| n.vis != Vis::Inert && self.afe.index_of(n.uid).is_some());
         if formatting.is_some_and(|k| self.stack.iter().skip(k + 1).any(|n| n.vis != Vis::Inert && n.cat & SPECIAL != 0)) {
             return false;
         }
@@ -1192,7 +1128,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
         while a != dom::NIL {
             let e = self.dom.elem(a)?;
             if e.class == super::HTML_ELEMENT {
-                let mut buf = [0; 24];
+                let mut buf = [0; MAX_NAME];
                 match lower(e.name, &mut buf) {
                     Some(b"select") => return Some(a),
                     Some(b"option") => return None,
@@ -1335,7 +1271,10 @@ impl<'a, const REPLAY: bool> TreeBuilder<'a> for Browser<'a, REPLAY> {
         self.skip_lf = false;
         self.touched = false;
         self.data = DataMode::Normal;
-        let t = StartTok { name, tag: tag_of(name), attrs: raw_attrs, self_closing, start: span_start, end: open_end };
+        let mut buf = [0; MAX_NAME];
+        let low = lower(name, &mut buf);
+        let tag = low.map_or(Tag::Other, tag_of_lower);
+        let t = StartTok { name, low, tag, attrs: raw_attrs, self_closing, start: span_start, end: open_end };
         let before = self.stack.last().map(|n| n.uid);
         self.start(m, &t);
         if !self.touched {
@@ -1370,9 +1309,6 @@ impl<'a, const REPLAY: bool> TreeBuilder<'a> for Browser<'a, REPLAY> {
         }
         if b.is_empty() {
             return;
-        }
-        if self.mode == Mode::Text && mode != DataMode::Normal {
-            return self.insert_text(m, b, mode, s);
         }
         if self.text_in_html() {
             self.html_text(m, b, mode, s)
@@ -1427,24 +1363,17 @@ impl<'a, const REPLAY: bool> TreeBuilder<'a> for Browser<'a, REPLAY> {
             self.eof(m, end);
         }
         if REPLAY {
-            // End of input pops everything, the current node first.
-            for k in (0..self.stack.len()).rev() {
-                let n = self.stack[k];
-                if n.vis == Vis::Live {
-                    self.dom.set_end(n.depth, end);
-                    if n.tag == Tag::Option {
-                        self.option_closed(n.depth);
-                    }
-                }
+            // End of input pops everything, the current node first; then the finished tree is walked.
+            while !self.stack.is_empty() {
+                self.pop(m, end);
             }
-            return;
+            return self.dom.walk(m);
         }
-        m.flush_text();
+        // Streaming, the matcher closes what is open when it finishes, and what is parked is put back
+        // for it first.
         while let Some(base) = self.parked.last().map(|s| s.base) {
             while self.path.len() > base {
-                m.flush_text();
-                m.close_top(end);
-                self.path.pop();
+                self.close_current(m, end);
             }
             self.unpark_last(m, end);
         }
@@ -1467,11 +1396,7 @@ mod tests {
         let (flat, grouped) = crate::compile_schema(&[query.to_string()], &[]);
         let schema = CompiledSchema::compile(&flat, &grouped, crate::ParseMode::Browser);
         let input = EncodedInput::new(html, encoding_rs::UTF_8, true);
-        let mut scan = super::super::tree::Scan { m: Matcher::new(&schema, input), builder: Browser::<'_, false>::default() };
-        scan.builder.run_through = true;
-        crate::tokenizer::tokenize(input.bytes(), &mut scan);
-        scan.builder.finish(&mut scan.m);
-        scan.m.finish_grouped().0.remove(0)
+        run_tail(&schema, input, Vec::new(), false).0.remove(0)
     }
 
     /// Past the depth cap the adoption agency leaves the formatting element's matcher element parked

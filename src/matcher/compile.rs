@@ -177,20 +177,33 @@ pub(super) fn deferrable_reverse(sel: &Selector) -> bool {
 }
 
 /// The three names a tree builder SYNTHESIZES around content the page never framed.
-pub(crate) const FRAME_NAMES: [&str; 3] = ["html", "head", "body"];
+const FRAME_NAMES: [&str; 3] = ["html", "head", "body"];
+
+/// The elements browser mode's tree builder inserts for a token that is not their own start tag, besides
+/// the frame.
+const IMPLIED_NAMES: [&str; 4] = ["tbody", "tr", "colgroup", "p"];
+
+/// The name test of `sel`'s subject compound, if it has one (`*` is none).
+fn subject_name(sel: &Selector) -> Option<&str> {
+    let subject = sel.parts.last().expect("a compiled selector has a subject compound");
+    subject.tag.as_deref().filter(|t| *t != "*")
+}
+
+/// Could a match of `sel` be an element named one of `names` that has no attributes? Not when its
+/// subject compound tests an id, a class or an attribute; always when it has no name test.
+fn admits_bare(sel: &Selector, names: &[&str]) -> bool {
+    let subject = sel.parts.last().expect("a compiled selector has a subject compound");
+    let attribute_bound = subject.id.is_some() || !subject.classes.is_empty() || !subject.attrs.is_empty();
+    let named = subject_name(sel).is_none_or(|name| names.iter().any(|n| n.eq_ignore_ascii_case(name)));
+    named && !attribute_bound
+}
 
 /// Could a match of `sel` be an `<html>`/`<head>`/`<body>` the page never wrote? Two conservative rules:
 /// a synthesized frame carries no attributes (see `frame.rs`), so a subject compound with an
 /// id/class/attribute cannot match one; and `:not()`, positions and `:has()` only NARROW what matches, so
 /// ignoring them over-reports the frame case, which every caller treats as a refusal.
 pub(crate) fn admits_synthesized_frame(sel: &Selector) -> bool {
-    let subject = sel.parts.last().expect("a compiled selector has a subject compound");
-    let attribute_bound = subject.id.is_some() || !subject.classes.is_empty() || !subject.attrs.is_empty();
-    let names_a_frame = match subject.tag.as_deref().filter(|t| *t != "*") {
-        Some(name) => FRAME_NAMES.iter().any(|f| f.eq_ignore_ascii_case(name)),
-        None => true, // no name test: `<html>`/`<head>`/`<body>` are among what it admits
-    };
-    names_a_frame && !attribute_bound
+    admits_bare(sel, &FRAME_NAMES)
 }
 
 /// Could a match of `sel` be one of the other elements browser mode builds with no source of its own:
@@ -198,30 +211,34 @@ pub(crate) fn admits_synthesized_frame(sel: &Selector) -> bool {
 /// attributes, so as with the frame an attribute test rules them out; any container can hold one, so
 /// unlike the frame this is not scoped. A formatting element's copy is not among them: its source is
 /// the start tag it was copied from followed by its own content.
-pub(crate) fn admits_browser_synthesized(sel: &Selector) -> bool {
-    let subject = sel.parts.last().expect("a compiled selector has a subject compound");
-    let attribute_bound = subject.id.is_some() || !subject.classes.is_empty() || !subject.attrs.is_empty();
-    let names_one = match subject.tag.as_deref().filter(|t| *t != "*") {
-        None => true,
-        Some(name) => IMPLIED_NAMES.iter().any(|n| n.eq_ignore_ascii_case(name)),
-    };
-    names_one && !attribute_bound
+fn admits_browser_synthesized(sel: &Selector) -> bool {
+    admits_bare(sel, &IMPLIED_NAMES)
 }
-
-/// The elements browser mode's tree builder inserts for a token that is not their own start tag, besides
-/// the frame.
-const IMPLIED_NAMES: [&str; 4] = ["tbody", "tr", "colgroup", "p"];
 
 /// Could a match of `sel` be, or contain, a synthesized frame element? Its subtree holds one only when the
 /// match is an `<html>` or a `<frameset>` (libxml2 synthesizes a `<body>` inside a frameset for head
 /// content there), written or not and whatever its attributes, so a `<div>` container cannot.
-pub(crate) fn may_hold_synthesized_frame(sel: &Selector) -> bool {
-    let subject = sel.parts.last().expect("a compiled selector has a subject compound");
+fn may_hold_synthesized_frame(sel: &Selector) -> bool {
     admits_synthesized_frame(sel)
-        || match subject.tag.as_deref().filter(|t| *t != "*") {
-            Some(name) => name.eq_ignore_ascii_case("html") || name.eq_ignore_ascii_case("frameset"),
-            None => true,
-        }
+        || subject_name(sel).is_none_or(|name| name.eq_ignore_ascii_case("html") || name.eq_ignore_ascii_case("frameset"))
+}
+
+/// Does browser mode refuse the flat member `sel` ([`Refusal::SynthesizedOuterHtml`])?
+pub(super) fn browser_refuses(sel: &Selector) -> bool {
+    matches!(sel.terminal, Terminal::OuterHtml) && (admits_synthesized_frame(sel) || admits_browser_synthesized(sel))
+}
+
+/// Does browser mode refuse the sub-field `sub` of a group whose container is `container`? A sub-field is
+/// scoped to its container, self included, so it can match a synthesized frame element only where the
+/// container can be or hold one, and `.` (depth 0) is the container itself.
+pub(super) fn browser_refuses_sub(container: Option<&Selector>, sub: &Selector) -> bool {
+    matches!(sub.terminal, Terminal::OuterHtml)
+        && ((container.is_some_and(may_hold_synthesized_frame) && admits_synthesized_frame(sub))
+            || if sub.context_depth == Some(0) {
+                container.is_some_and(admits_browser_synthesized)
+            } else {
+                admits_browser_synthesized(sub)
+            })
 }
 
 /// Why browser mode refuses a selector the lxml contract supports. It rests on a property of libxml2's

@@ -123,14 +123,6 @@ pub(crate) fn carries_deferred(sel: &Selector) -> bool {
     compile::any_reverse(sel) || compile::any_has(sel) || compile::any_text_pred(sel)
 }
 
-/// Do all of a comma group's members select the same KIND of node, so that a value's document offset
-/// identifies the node it came from?
-///
-/// True for an all-`::text` group (a text node IS its offset) and for an all-`::attr(NAME)` group naming
-/// ONE attribute (that attribute node is the element's offset). False as soon as two members could
-/// produce distinct nodes at the same offset — two different attributes of one element, or an attribute
-/// alongside text — because the mixed-column merge dedupes on `(column, offset)` and would drop one of
-/// them. lxml returns both, in source order.
 /// Is this deferred member's value its OWN element's, rather than one recovered by re-scanning the
 /// element's subtree? Exactly `split_deferred`'s `Tail::Streamed` case, asked before the split so the
 /// router can decide without registering a tail.
@@ -149,6 +141,14 @@ fn deferred_value_is_own(sel: &Selector, k: usize) -> bool {
         )
 }
 
+/// Do all of a comma group's members select the same KIND of node, so that a value's document offset
+/// identifies the node it came from?
+///
+/// True for an all-`::text` group (a text node IS its offset) and for an all-`::attr(NAME)` group naming
+/// ONE attribute (that attribute node is the element's offset). False as soon as two members could
+/// produce distinct nodes at the same offset — two different attributes of one element, or an attribute
+/// alongside text — because the mixed-column merge dedupes on `(column, offset)` and would drop one of
+/// them. lxml returns both, in source order.
 fn uniform_node_terminal(members: &[Selector]) -> bool {
     let mut attr: Option<&str> = None;
     let mut text = false;
@@ -179,12 +179,9 @@ pub(super) const MATHML_ELEMENT: u8 = u8::MAX - 2;
 /// name is the lowercased one, except on an SVG element whose attribute HTML5 camel-cases (`viewBox`)
 /// and on MathML's `definitionURL`. Exact, as `::attr()` and XPath's `@` compare it.
 fn dom_name_is(scid: u8, raw: &[u8], want: &str) -> bool {
-    let mut buf = [0u8; 24];
+    let mut buf = [0; browser::MAX_NAME];
     if scid != HTML_ELEMENT {
-        if let Some(low) = buf.get_mut(..raw.len()) {
-            for (o, &c) in low.iter_mut().zip(raw) {
-                *o = c.to_ascii_lowercase();
-            }
+        if let Some(low) = browser::lower(raw, &mut buf) {
             let adjusted = match scid {
                 SVG_ELEMENT => browser::svg_attr_name(low),
                 _ if low == b"definitionurl" => Some(&b"definitionURL"[..]),
@@ -265,9 +262,7 @@ pub struct OpenElem<'a> {
 #[derive(Default)]
 struct ColdState {
     gcaps: Vec<(u64, usize)>, // grouped outer-HTML captures: (instance seq, sub) this element feeds
-    /// Raw source read before the element's own: a clone's original start tag (see
-    /// [`Matcher::set_source_prefix`]); `(0, 0)` for none.
-    prefix: (usize, usize),
+    prefix: Option<SourcePrefix>,
     rev_buf: Vec<(u32, usize, String)>, // (rev-entry, offset, value) captured while this el is a subject
     rev_pending: Vec<RevPend>, // candidates promoted from this element's children, resolved at its close
     has_buf: Vec<(u32, usize, String)>, // (has-entry, offset, value) captured while this el is a subject
@@ -281,13 +276,31 @@ struct ColdState {
 /// no allocation and lets [`OpenElem::cold`] be infallible without the box existing.
 static NO_COLD: ColdState = ColdState {
     gcaps: Vec::new(),
-    prefix: (0, 0),
+    prefix: None,
     rev_buf: Vec::new(),
     rev_pending: Vec::new(),
     has_buf: Vec::new(),
     txt_states: Vec::new(),
     txt_emit: Vec::new(),
 };
+
+/// Raw source read before an element's own: the start tag a browser-mode copy of a formatting element
+/// was made from (see [`Matcher::set_source_prefix`]). A start tag is never empty, so its end is never 0
+/// and an `Option<SourcePrefix>` is no larger than the two offsets.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) struct SourcePrefix {
+    start: usize,
+    end: std::num::NonZeroUsize,
+}
+
+impl SourcePrefix {
+    /// The start tag at `start..end`.
+    pub(super) fn new(start: usize, end: usize) -> Self {
+        SourcePrefix { start, end: std::num::NonZeroUsize::new(end).expect("a start tag is never empty") }
+    }
+}
+
+const _: () = assert!(std::mem::size_of::<Option<SourcePrefix>>() == std::mem::size_of::<(usize, usize)>());
 
 /// Where a value sits in document order: the offset of its node (in a browser-mode replay, the node's
 /// rank), then, for an element's own value (an attribute, its outer HTML), the order the element opened
@@ -1093,9 +1106,8 @@ pub struct Matcher<'a> {
     // Raw-source outer-HTML fragments are sliced out of it; emitted values are decoded with it.
     input: EncodedInput<'a>,
     /// `(pos, end, dest, prefix)` raw-source spans, sorted by `pos` at finish: the span is
-    /// `pos.0..end`, and `prefix` is a span read before it, the start tag of the element a browser-mode
-    /// clone was made from (`(0, 0)`: none).
-    captures: Vec<(DocPos, usize, Dest, (usize, usize))>,
+    /// `pos.0..end`, read after the element's `prefix` if it has one.
+    captures: Vec<(DocPos, usize, Dest, Option<SourcePrefix>)>,
     // Must a non-ASCII attribute NAME be decoded before it is compared? Only when the schema spells one
     // that way and the page is byte-scanned under a legacy encoding — see `interesting_name`.
     decode_names: bool,
@@ -1154,14 +1166,6 @@ pub struct Matcher<'a> {
     replay_spans: Vec<(usize, usize)>,
 }
 
-/// A buffered text node. In the common case it is ONE borrowed run (`joined` empty, no allocation).
-///
-/// When dropped end tags join several runs into one node, each run is decoded on its own and the
-/// STRINGS are concatenated into `joined` — never the raw bytes. The oracle decodes entities and
-/// characters while tokenizing, i.e. before tree construction, so a construct split across a discarded
-/// tag must NOT reassemble: `<div>A&am</p>p;B</div>` is `A&amp;B` in lxml (the unterminated `&am` stays
-/// literal), and the bytes `C3 </p> A9` are two replacement characters, not `é`. Joining bytes first
-/// manufactured both.
 /// One text node handed to the consumers: either a raw run still to be decoded (the common case, so
 /// unselected text costs nothing) or a value already decoded run-by-run because dropped end tags joined
 /// it. `finalize` is called only where a consumer actually wants the value.
@@ -1180,6 +1184,14 @@ impl TextVal<'_> {
     }
 }
 
+/// A buffered text node. In the common case it is ONE borrowed run (`joined` empty, no allocation).
+///
+/// When dropped end tags join several runs into one node, each run is decoded on its own and the
+/// STRINGS are concatenated into `joined` — never the raw bytes. The oracle decodes entities and
+/// characters while tokenizing, i.e. before tree construction, so a construct split across a discarded
+/// tag must NOT reassemble: `<div>A&am</p>p;B</div>` is `A&amp;B` in lxml (the unterminated `&am` stays
+/// literal), and the bytes `C3 </p> A9` are two replacement characters, not `é`. Joining bytes first
+/// manufactured both.
 struct PendingText<'a> {
     /// The FIRST run's bytes, borrowed from the document. A joined node's later runs live in `joined`
     /// instead, decoded — nothing ever owns bytes here.
@@ -1292,14 +1304,7 @@ impl CompiledSchema {
         // sibling combinator whose LEFT compound (`parts[k]`) carries the deferred predicate.
         let mut sibling_pending: Vec<(usize, &Selector, usize)> = Vec::new();
         for (i, members) in queries.iter().enumerate() {
-            if browser
-                && members
-                    .iter()
-                    .any(|m| {
-                        matches!(m.terminal, Terminal::OuterHtml)
-                            && (admits_synthesized_frame(m) || compile::admits_browser_synthesized(m))
-                    })
-            {
+            if browser && members.iter().any(compile::browser_refuses) {
                 refusals.push((Slot::Flat(i), Refusal::SynthesizedOuterHtml));
                 continue;
             }
@@ -1425,25 +1430,12 @@ impl CompiledSchema {
                 container_entries.push((entries.len(), g));
                 push_entry(container, usize::MAX, false, &mut entries, &mut n_sib);
             }
-            // A sub-field is scoped to its container, self included, so it can match a synthesized frame
-            // element only where the container can be or hold one.
-            let frame_scope = container.as_ref().is_some_and(compile::may_hold_synthesized_frame);
             let mut subsels = Vec::with_capacity(subs.len());
             for sub in subs {
                 // MVP: sub-selectors are single-segment (no sibling `+`/`~`). Unsupported or
                 // multi-segment subs -> `seg = None`, which never matches (empty column, no fallback).
                 let (seg, terminal) = match sub {
-                    Some(s)
-                        if browser
-                            && matches!(s.terminal, Terminal::OuterHtml)
-                            && ((frame_scope && admits_synthesized_frame(s))
-                                // `.` (depth 0) is the container itself
-                                || if s.context_depth == Some(0) {
-                                    container.as_ref().is_some_and(compile::admits_browser_synthesized)
-                                } else {
-                                    compile::admits_browser_synthesized(s)
-                                }) =>
-                    {
+                    Some(s) if browser && compile::browser_refuses_sub(container.as_ref(), s) => {
                         refusals.push((Slot::Sub { group: g, sub: subsels.len() }, Refusal::SynthesizedOuterHtml));
                         (None, Terminal::Text { subtree: false })
                     }
@@ -1794,7 +1786,7 @@ impl CompiledSchema {
     /// `(flat_columns, grouped)` — see [`Matcher::finish_grouped`].
     pub fn run(&self, input: EncodedInput) -> (FlatColumns, Vec<GroupRows>) {
         match self.mode {
-            ParseMode::Lxml => self.run_with(input, libxml2::Libxml2::default(), Vec::new()),
+            ParseMode::Lxml => tree::Scan::tokenize(self, input, libxml2::Libxml2::default(), Vec::new()).finish(),
             ParseMode::Browser => browser::run(self, input),
         }
     }
@@ -1803,22 +1795,6 @@ impl CompiledSchema {
     /// `browser::retro_census`). For measuring how often each does; nothing else reads it.
     pub(crate) fn retro_census(&self, input: EncodedInput) -> u8 {
         browser::retro_census(self, input)
-    }
-
-    /// One document under one tree builder. Generic so each mode's per-token path is its own code, with
-    /// the mode decided once per document above. `marks` is empty except in browser mode's tail pass.
-    fn run_with<'a, B: tree::TreeBuilder<'a>>(
-        &'a self,
-        input: EncodedInput<'a>,
-        builder: B,
-        marks: Vec<(u32, String)>,
-    ) -> (FlatColumns, Vec<GroupRows>) {
-        let mut m = Matcher::new(self, input);
-        m.marks = marks;
-        let mut scan = tree::Scan { m, builder };
-        crate::tokenizer::tokenize(input.bytes(), &mut scan);
-        scan.builder.finish(&mut scan.m);
-        scan.m.finish_grouped()
     }
 
     /// The mode this schema was compiled for.
@@ -2385,6 +2361,16 @@ impl<'a> Matcher<'a> {
             .then_some(name)
     }
 
+    /// [`Self::materialize_attrs`] under this page's `decode_names`.
+    #[inline]
+    fn interesting_attrs(&self, raw_attrs: &[(&'a [u8], Option<&'a [u8]>)]) -> Vec<(&'a [u8], Cow<'a, str>)> {
+        if self.decode_names {
+            self.materialize_attrs::<true>(raw_attrs)
+        } else {
+            self.materialize_attrs::<false>(raw_attrs)
+        }
+    }
+
     /// Materialize the attributes some selector references, decoding values lazily (borrowed `Cow` when
     /// the value is clean valid UTF-8 — the common case, so usually zero allocation).
     ///
@@ -2856,11 +2842,7 @@ impl<'a> Matcher<'a> {
         raw_attrs: &[(&'a [u8], Option<&'a [u8]>)],
         span_start: usize,
     ) {
-        let mut attrs = if self.decode_names {
-            self.materialize_attrs::<true>(raw_attrs)
-        } else {
-            self.materialize_attrs::<false>(raw_attrs)
-        };
+        let mut attrs = self.interesting_attrs(raw_attrs);
         let elem = self.next_elem;
         self.next_elem = elem.wrapping_add(1);
         // Browser mode's tail pass: a deferred winner of the first pass carries the mark its tail
@@ -3050,11 +3032,7 @@ impl<'a> Matcher<'a> {
     /// Would a second `<html>` or `<body>` start tag with `raw_attrs` give the open element at `depth`
     /// an attribute a selector asks about that it does not have yet? A browser adds those to it.
     pub(super) fn merge_adds(&self, depth: usize, raw_attrs: &[(&'a [u8], Option<&'a [u8]>)]) -> bool {
-        let attrs = if self.decode_names {
-            self.materialize_attrs::<true>(raw_attrs)
-        } else {
-            self.materialize_attrs::<false>(raw_attrs)
-        };
+        let attrs = self.interesting_attrs(raw_attrs);
         let el = &self.stack[depth];
         attrs.iter().any(|(name, _)| !el.attrs.iter().any(|(n, _)| n.eq_ignore_ascii_case(name)))
     }
@@ -3083,25 +3061,21 @@ impl<'a> Matcher<'a> {
         let (s, e) = self.replay_spans[span.start];
         s..e
     }
-}
 
-impl<'a> Matcher<'a> {
     /// Give the current element raw source that begins before its own: a browser-mode copy of a
     /// formatting element has no start tag in the page, and its outer HTML is the start tag it was
     /// copied from followed by its own content, the raw-source reading of `<b class=k>2</b>`.
-    pub(super) fn set_source_prefix(&mut self, prefix: (usize, usize)) {
+    pub(super) fn set_source_prefix(&mut self, prefix: SourcePrefix) {
         if let Some(top) = self.stack.last_mut() {
-            top.cold_mut().prefix = prefix;
+            top.cold_mut().prefix = Some(prefix);
         }
     }
 
     /// An element's outer HTML: its raw source, after its prefix if it has one.
-    fn source(&self, prefix: (usize, usize), span: std::ops::Range<usize>) -> String {
+    fn source(&self, prefix: Option<SourcePrefix>, span: std::ops::Range<usize>) -> String {
         let span = self.raw_span(span);
-        if prefix == (0, 0) {
-            return self.input.raw_source(span);
-        }
-        let mut out = self.input.raw_source(prefix.0..prefix.1);
+        let Some(SourcePrefix { start, end }) = prefix else { return self.input.raw_source(span) };
+        let mut out = self.input.raw_source(start..end.get());
         out.push_str(&self.input.raw_source(span));
         out
     }
@@ -3129,11 +3103,10 @@ impl<'a> Matcher<'a> {
     /// they all see the same single node lxml does. Comments/CDATA/PIs also split a run, but they split
     /// it in lxml too, so only source-ADJACENCY across the dropped tag may be re-joined.
     ///
-    /// A markup-mode run of nothing but NUL is no node at all: browsers drop NUL from body text (`<p>\0`
-    /// has no text node), so it is absorbed like markup that leaves none. Only browser mode keeps NUL in
-    /// the buffer; lxml mode deleted it before tokenizing.
+    /// A markup-mode run of nothing but NUL is no node at all ([`EncodedInput::is_dropped_nul`]), so it
+    /// is absorbed like markup that leaves none.
     pub(super) fn buffer_text(&mut self, text: &'a [u8], mode: DataMode, start: usize) {
-        if self.input.keeps_nul() && mode == DataMode::Normal && text.iter().all(|&b| b == 0) {
+        if self.input.is_dropped_nul(text, mode) {
             return self.absorb_into_text_gap(start, start + text.len());
         }
         // A run starting exactly at the buffered node's gap end continues it: everything between the two

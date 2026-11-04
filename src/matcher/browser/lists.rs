@@ -11,8 +11,9 @@
 use std::collections::HashMap;
 
 use super::tags::Tag;
-use super::{Afe, FmtTok, Node, Ns};
+use super::{Node, Ns, StartTok};
 use crate::implied_close::{BUTTON_SCOPE, LIST_ITEM_SCOPE, SCOPE, SPECIAL, TABLE_SCOPE};
+use crate::matcher::{EncodedInput, SourcePrefix};
 
 #[cfg(test)]
 thread_local! {
@@ -91,6 +92,10 @@ impl<'a> OpenStack<'a> {
         self.nodes.len()
     }
 
+    pub(super) fn is_empty(&self) -> bool {
+        self.nodes.is_empty()
+    }
+
     pub(super) fn last(&self) -> Option<&Node<'a>> {
         read(1);
         self.nodes.last()
@@ -149,76 +154,51 @@ impl<'a> OpenStack<'a> {
         }
     }
 
-    fn index(&mut self, node: &Node<'a>) {
+    /// Make room in the indexes for `node`, which is about to enter the stack at `k`.
+    fn make_room(&mut self, node: &Node<'a>, k: usize) {
         let uid = node.uid as usize;
         if self.at.len() <= uid {
             self.at.resize(uid + 1, NOT_OPEN);
         }
+        self.at[uid] = k as u32;
+        if node.tag != Tag::Other && self.by_tag.len() <= node.tag as usize {
+            self.by_tag.resize_with(node.tag as usize + 1, Vec::new);
+        }
+    }
+
+    /// Apply `f`, with the stack index of every uid, to each index list `node` is filed in: its tag's
+    /// (or its name's), and that of every [`Bound`] it is one of. A name's list leaves the map once empty.
+    fn each_list(&mut self, node: &Node<'a>, mut f: impl FnMut(&mut Vec<u32>, &[u32])) {
         if node.tag != Tag::Other {
-            let t = node.tag as usize;
-            if self.by_tag.len() <= t {
-                self.by_tag.resize_with(t + 1, Vec::new);
+            f(&mut self.by_tag[node.tag as usize], &self.at);
+        }
+        if let Some(h) = other_name(node) {
+            let list = self.by_name.entry(h).or_default();
+            f(list, &self.at);
+            if list.is_empty() {
+                self.by_name.remove(&h);
             }
         }
-    }
-
-    /// Put `uid` into `list` (uids in stack order) where its stack index `k` goes.
-    fn file(&self, list: &mut Vec<u32>, uid: u32, k: usize) {
-        let mut j = list.len();
-        while j > 0 && self.at[list[j - 1] as usize] as usize > k {
-            read(1);
-            j -= 1;
-        }
-        list.insert(j, uid);
-    }
-
-    fn unfile(list: &mut Vec<u32>, uid: u32) {
-        if let Some(j) = list.iter().rposition(|&u| {
-            read(1);
-            u == uid
-        }) {
-            list.remove(j);
+        for (b, is) in bounds_of(node).into_iter().enumerate() {
+            if is {
+                f(&mut self.bounds[b], &self.at);
+            }
         }
     }
 
     pub(super) fn push(&mut self, node: Node<'a>) {
-        self.index(&node);
-        self.at[node.uid as usize] = self.nodes.len() as u32;
-        if node.tag != Tag::Other {
-            self.by_tag[node.tag as usize].push(node.uid);
-        }
-        if let Some(h) = other_name(&node) {
-            self.by_name.entry(h).or_default().push(node.uid);
-        }
-        for (b, is) in bounds_of(&node).into_iter().enumerate() {
-            if is {
-                self.bounds[b].push(node.uid);
-            }
-        }
+        self.make_room(&node, self.nodes.len());
+        self.each_list(&node, |list, _| list.push(node.uid));
         self.nodes.push(node);
     }
 
     pub(super) fn pop(&mut self) -> Option<Node<'a>> {
         let node = self.nodes.pop()?;
         self.at[node.uid as usize] = NOT_OPEN;
-        if node.tag != Tag::Other {
-            let popped = self.by_tag[node.tag as usize].pop();
-            debug_assert_eq!(popped, Some(node.uid), "the stack's tag index is out of order");
-        }
-        if let Some(h) = other_name(&node) {
-            let list = self.by_name.get_mut(&h).expect("an open element's name is indexed");
+        self.each_list(&node, |list, _| {
             let popped = list.pop();
-            debug_assert_eq!(popped, Some(node.uid), "the stack's name index is out of order");
-            if list.is_empty() {
-                self.by_name.remove(&h);
-            }
-        }
-        for (b, is) in bounds_of(&node).into_iter().enumerate() {
-            if is {
-                let popped = self.bounds[b].pop();
-                debug_assert_eq!(popped, Some(node.uid), "the stack's boundary index is out of order");
-            }
-        }
+            debug_assert_eq!(popped, Some(node.uid), "the stack's indexes are out of order");
+        });
         Some(node)
     }
 
@@ -230,50 +210,34 @@ impl<'a> OpenStack<'a> {
             read(1);
             self.at[n.uid as usize] -= 1;
         }
-        if node.tag != Tag::Other {
-            Self::unfile(&mut self.by_tag[node.tag as usize], node.uid);
-        }
-        if let Some(h) = other_name(&node) {
-            let list = self.by_name.get_mut(&h).expect("an open element's name is indexed");
-            Self::unfile(list, node.uid);
-            if list.is_empty() {
-                self.by_name.remove(&h);
+        self.each_list(&node, |list, _| {
+            if let Some(j) = list.iter().rposition(|&u| {
+                read(1);
+                u == node.uid
+            }) {
+                list.remove(j);
             }
-        }
-        for (b, is) in bounds_of(&node).into_iter().enumerate() {
-            if is {
-                Self::unfile(&mut self.bounds[b], node.uid);
-            }
-        }
+        });
         node
     }
 
     /// Put `node` into the stack at `k`.
     pub(super) fn insert(&mut self, k: usize, node: Node<'a>) {
-        self.index(&node);
         for n in &self.nodes[k..] {
             read(1);
             self.at[n.uid as usize] += 1;
         }
-        self.at[node.uid as usize] = k as u32;
+        self.make_room(&node, k);
         self.nodes.insert(k, node);
-        if node.tag != Tag::Other {
-            let mut list = std::mem::take(&mut self.by_tag[node.tag as usize]);
-            self.file(&mut list, node.uid, k);
-            self.by_tag[node.tag as usize] = list;
-        }
-        if let Some(h) = other_name(&node) {
-            let mut list = self.by_name.remove(&h).unwrap_or_default();
-            self.file(&mut list, node.uid, k);
-            self.by_name.insert(h, list);
-        }
-        for (b, is) in bounds_of(&node).into_iter().enumerate() {
-            if is {
-                let mut list = std::mem::take(&mut self.bounds[b]);
-                self.file(&mut list, node.uid, k);
-                self.bounds[b] = list;
+        // A list holds uids in stack order, so the new one goes after every uid below `k`.
+        self.each_list(&node, |list, at| {
+            let mut j = list.len();
+            while j > 0 && at[list[j - 1] as usize] as usize > k {
+                read(1);
+                j -= 1;
             }
-        }
+            list.insert(j, node.uid);
+        });
     }
 
     /// Make `node` the entry at `k`, in place of what was there.
@@ -307,10 +271,29 @@ impl<'a> std::ops::IndexMut<usize> for OpenStack<'a> {
     }
 }
 
+/// The start tag a formatting element was created for, kept so a clone can be made from it. `span` is
+/// the tag's source, which a clone's outer HTML begins with; `ark` is what Noah's Ark compares it by
+/// ([`ark_key`]).
+pub(super) struct FmtTok<'a> {
+    pub(super) name: &'a [u8],
+    pub(super) tag: Tag,
+    pub(super) attrs: Vec<(&'a [u8], Option<&'a [u8]>)>,
+    pub(super) span: SourcePrefix,
+    ark: u64,
+}
+
+/// An entry of the list: a marker, or the element `uid` made for the start tag `tok` (an index into
+/// [`Formatting::toks`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Afe {
+    Marker,
+    El { uid: u32, tok: u32 },
+}
+
 /// The key Noah's Ark compares two formatting elements by: their tag, and their attributes as a set of
 /// (lowercased name, decoded value) pairs, the first of a repeated name. Equal elements have equal keys;
-/// [`super::Browser::same_attrs`] settles a collision.
-pub(super) fn ark_key<'x>(tag: Tag, attrs: impl Iterator<Item = (&'x [u8], &'x str)>) -> u64 {
+/// [`same_attrs`] settles a collision.
+fn ark_key<'x>(tag: Tag, attrs: impl Iterator<Item = (&'x [u8], &'x str)>) -> u64 {
     // splitmix64's finalizer: each pair's hash is spread over all 64 bits before the order-free sum
     fn mix(mut h: u64) -> u64 {
         h = (h ^ (h >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
@@ -327,6 +310,22 @@ pub(super) fn ark_key<'x>(tag: Tag, attrs: impl Iterator<Item = (&'x [u8], &'x s
     mix(sum ^ mix(n << 8 | tag as u64))
 }
 
+/// Do two formatting tokens carry the same attributes, as Noah's Ark compares them: by name, the first
+/// of a repeated name, in any order, with equal values.
+fn same_attrs<'a>(input: EncodedInput<'a>, a: &FmtTok<'a>, b: &FmtTok<'a>) -> bool {
+    let first = |attrs: &[(&'a [u8], Option<&'a [u8]>)], j: usize| {
+        !attrs[..j].iter().any(|(n, _)| n.eq_ignore_ascii_case(attrs[j].0))
+    };
+    let names = |attrs: &[(&'a [u8], Option<&'a [u8]>)]| (0..attrs.len()).filter(|&j| first(attrs, j)).count();
+    names(&a.attrs) == names(&b.attrs) && (0..a.attrs.len()).filter(|&j| first(&a.attrs, j)).all(|j| {
+        let (n, v) = a.attrs[j];
+        b.attrs.iter().find(|(n2, _)| n.eq_ignore_ascii_case(n2)).is_some_and(|&(_, v2)| {
+            let (v, v2) = (v.unwrap_or(b""), v2.unwrap_or(b""));
+            v == v2 || input.attr_value(v) == input.attr_value(v2)
+        })
+    })
+}
+
 /// The two kinds of count the list keeps per segment (the entries after a marker, or all of them before
 /// the first): entries by [`ark_key`], and entries by tag.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -335,17 +334,20 @@ enum Key {
     Tag(u8),
 }
 
-/// The list of active formatting elements. Besides the entries it keeps where each marker is and, per
-/// segment, how many entries it holds of each tag and of each [`ark_key`], so Noah's Ark and "is there an
-/// `<a>` after the last marker" are counts rather than scans.
+/// The list of active formatting elements, and the start tags its elements were made for. Besides the
+/// entries it keeps where each marker is and, per segment, how many entries it holds of each tag and of
+/// each [`ark_key`], so Noah's Ark and "is there an `<a>` after the last marker" are counts rather than
+/// scans.
 #[derive(Default)]
-pub(super) struct Formatting {
+pub(super) struct Formatting<'a> {
     list: Vec<Afe>,
     markers: Vec<usize>,
     counts: HashMap<(u32, Key), u32>,
+    /// Every formatting element's start tag, in document order; an element and its copies share one.
+    pub(super) toks: Vec<FmtTok<'a>>,
 }
 
-impl Formatting {
+impl<'a> Formatting<'a> {
     pub(super) fn len(&self) -> usize {
         self.list.len()
     }
@@ -356,17 +358,17 @@ impl Formatting {
     }
 
     /// The index of the first entry after the last marker.
-    pub(super) fn after_last_marker(&self) -> usize {
+    fn after_last_marker(&self) -> usize {
         self.markers.last().map_or(0, |&k| k + 1)
     }
 
     /// How many entries after the last marker have the key `ark`.
-    pub(super) fn alike(&self, ark: u64) -> u32 {
+    fn alike(&self, ark: u64) -> u32 {
         self.counts.get(&(self.markers.len() as u32, Key::Ark(ark))).copied().unwrap_or(0)
     }
 
     /// Is there an entry with `tag` after the last marker?
-    pub(super) fn has_tag(&self, tag: Tag) -> bool {
+    fn has_tag(&self, tag: Tag) -> bool {
         self.counts.contains_key(&(self.markers.len() as u32, Key::Tag(tag as u8)))
     }
 
@@ -375,9 +377,9 @@ impl Formatting {
         self.markers.partition_point(|&m| m < k) as u32
     }
 
-    fn count(&mut self, seg: u32, e: Afe, toks: &[FmtTok<'_>], up: bool) {
+    fn count(&mut self, seg: u32, e: Afe, up: bool) {
         let Afe::El { tok, .. } = e else { return };
-        let t = &toks[tok as usize];
+        let t = &self.toks[tok as usize];
         for key in [Key::Ark(t.ark), Key::Tag(t.tag as u8)] {
             let c = self.counts.entry((seg, key)).or_insert(0);
             if up {
@@ -391,33 +393,74 @@ impl Formatting {
         }
     }
 
-    pub(super) fn push(&mut self, e: Afe, toks: &[FmtTok<'_>]) {
+    /// Keep the start tag `t` of a formatting element, and return its index in [`Self::toks`].
+    pub(super) fn add_token(&mut self, input: EncodedInput<'a>, t: &StartTok<'a, '_>) -> u32 {
+        let tok = self.toks.len() as u32;
+        let attrs = t.attrs.to_vec();
+        let firsts = (0..attrs.len()).filter(|&j| !attrs[..j].iter().any(|(n, _)| n.eq_ignore_ascii_case(attrs[j].0)));
+        let values: Vec<(&[u8], std::borrow::Cow<'_, str>)> =
+            firsts.map(|j| (attrs[j].0, input.attr_value(attrs[j].1.unwrap_or(b"")))).collect();
+        let ark = ark_key(t.tag, values.iter().map(|(n, v)| (*n, v.as_ref())));
+        self.toks.push(FmtTok { name: t.name, tag: t.tag, attrs, span: SourcePrefix::new(t.start, t.end), ark });
+        tok
+    }
+
+    /// Push the element `uid`, made for token `tok`. Noah's Ark: with three alike after the last marker
+    /// already, the earliest of them leaves. The list counts entries by key, so only then is it searched,
+    /// from the end, for as many as have the key.
+    pub(super) fn push_element(&mut self, input: EncodedInput<'a>, uid: u32, tok: u32) {
+        let t = &self.toks[tok as usize];
+        let mut keyed = self.alike(t.ark);
+        if keyed >= 3 {
+            let (mut same, mut earliest) = (0, None);
+            let mut k = self.len();
+            while keyed > 0 && k > self.after_last_marker() {
+                k -= 1;
+                if let Afe::El { tok: o, .. } = self[k] {
+                    let other = &self.toks[o as usize];
+                    if other.ark == t.ark {
+                        keyed -= 1;
+                        if other.tag == t.tag && same_attrs(input, other, t) {
+                            same += 1;
+                            earliest = Some(k);
+                        }
+                    }
+                }
+            }
+            if same >= 3 {
+                self.remove(earliest.expect("three of a kind"));
+            }
+        }
+        self.push(Afe::El { uid, tok });
+    }
+
+    pub(super) fn push(&mut self, e: Afe) {
         if e == Afe::Marker {
             self.markers.push(self.list.len());
         } else {
-            self.count(self.markers.len() as u32, e, toks, true);
+            self.count(self.markers.len() as u32, e, true);
         }
         self.list.push(e);
     }
 
     /// Clear the list up to the last marker.
-    pub(super) fn clear_to_marker(&mut self, toks: &[FmtTok<'_>]) {
+    pub(super) fn clear_to_marker(&mut self) {
         while let Some(e) = self.list.pop() {
             read(1);
             if e == Afe::Marker {
                 self.markers.pop();
                 break;
             }
-            self.count(self.markers.len() as u32, e, toks, false);
+            self.count(self.markers.len() as u32, e, false);
         }
     }
 
     /// Take the element entry at `k` out of the list (a marker leaves only by [`Self::clear_to_marker`]).
-    pub(super) fn remove(&mut self, k: usize, toks: &[FmtTok<'_>]) -> Afe {
+    pub(super) fn remove(&mut self, k: usize) -> Afe {
         let e = self.list.remove(k);
         debug_assert!(e != Afe::Marker, "a marker leaves only by clearing to it");
         let seg = self.segment(k);
-        self.count(seg, e, toks, false);
+        self.count(seg, e, false);
         for m in self.markers.iter_mut().filter(|m| **m > k) {
             *m -= 1;
         }
@@ -425,13 +468,13 @@ impl Formatting {
     }
 
     /// Put an element entry into the list at `k`.
-    pub(super) fn insert(&mut self, k: usize, e: Afe, toks: &[FmtTok<'_>]) {
+    pub(super) fn insert(&mut self, k: usize, e: Afe) {
         debug_assert!(e != Afe::Marker, "a marker is only ever pushed");
         for m in self.markers.iter_mut().filter(|m| **m >= k) {
             *m += 1;
         }
         let seg = self.segment(k);
-        self.count(seg, e, toks, true);
+        self.count(seg, e, true);
         self.list.insert(k, e);
     }
 
@@ -452,13 +495,21 @@ impl Formatting {
         })
     }
 
-    /// The entries from `from`, in order.
-    pub(super) fn from(&self, from: usize) -> impl DoubleEndedIterator<Item = &Afe> + ExactSizeIterator {
-        self.list[from..].iter().inspect(|_| read(1))
+    /// The index of the last entry after the last marker that was made for a `tag` start tag.
+    pub(super) fn last_of(&self, tag: Tag) -> Option<usize> {
+        if !self.has_tag(tag) {
+            return None;
+        }
+        let from = self.after_last_marker();
+        let found = self.list[from..].iter().rposition(|e| {
+            read(1);
+            matches!(*e, Afe::El { tok, .. } if self.toks[tok as usize].tag == tag)
+        });
+        found.map(|k| k + from)
     }
 }
 
-impl std::ops::Index<usize> for Formatting {
+impl std::ops::Index<usize> for Formatting<'_> {
     type Output = Afe;
 
     fn index(&self, k: usize) -> &Afe {

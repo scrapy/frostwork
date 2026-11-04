@@ -3,22 +3,24 @@
 //! is on. Each function is one section of the spec; "process using the rules for X" is a call, and
 //! "reprocess" a call after switching modes.
 
-use super::tags::{breaks_out, font_breaks_out, Tag};
+use super::tags::{breaks_out, font_breaks_out, lower, Tag, MAX_NAME};
 use super::lists::Bound;
 use super::{
-    ends_frameset_ok, has_content, ws_at, ws_prefix, Afe, Browser, EndTok, Mode, Node, Ns, StartTok, Vis, CENSUS_MERGE_ANY, HAS_CHILD,
+    ends_frameset_ok, has_content, ws_at, ws_prefix, Afe, Browser, EndTok, Loc, Mode, Node, Ns, StartTok, Vis, CENSUS_MERGE_ANY, HAS_CHILD,
     RETRO_ADOPTION, RETRO_FRAMESET, RETRO_MERGE, RETRO_SELECTEDCONTENT, SHADOW_HOST, SYNTH,
 };
 use crate::implied_close::SPECIAL;
+use crate::matcher::{Matcher, SourcePrefix};
+use crate::tokenizer::DataMode;
 
 const HEADINGS: [Tag; 6] = [Tag::H1, Tag::H2, Tag::H3, Tag::H4, Tag::H5, Tag::H6];
-use crate::tokenizer::DataMode;
-use crate::matcher::Matcher;
+const TABLE_SECTIONS: [Tag; 3] = [Tag::Tbody, Tag::Tfoot, Tag::Thead];
+const CELLS: [Tag; 2] = [Tag::Td, Tag::Th];
 
 /// The names `attachShadow()` accepts as a host, besides a custom element.
 fn valid_shadow_host(name: &[u8]) -> bool {
-    let mut buf = [0; 24];
-    let Some(low) = super::tags::lower(name, &mut buf) else { return custom_element_name(name) };
+    let mut buf = [0; MAX_NAME];
+    let Some(low) = lower(name, &mut buf) else { return custom_element_name(name) };
     matches!(
         low,
         b"article" | b"aside" | b"blockquote" | b"body" | b"div" | b"footer" | b"h1" | b"h2" | b"h3" | b"h4"
@@ -49,19 +51,17 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
     pub(super) fn html_start(&mut self, m: &mut Matcher<'a>, t: &StartTok<'a, '_>) {
         match self.mode {
             Mode::Initial => {
-                self.quirks = true;
-                self.mode = Mode::BeforeHtml;
+                self.no_doctype();
                 self.html_start(m, t)
             }
             Mode::BeforeHtml => {
                 if t.tag == Tag::Html {
                     self.insert_html(m, t);
-                } else {
-                    self.insert_synth(m, b"html", Tag::Html, t.start);
                     self.mode = Mode::BeforeHead;
-                    return self.html_start(m, t);
+                } else {
+                    self.imply_html(m, t.start);
+                    self.html_start(m, t)
                 }
-                self.mode = Mode::BeforeHead;
             }
             Mode::BeforeHead => match t.tag {
                 Tag::Html => self.in_body_start(m, t),
@@ -71,9 +71,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
                     self.mode = Mode::InHead;
                 }
                 _ => {
-                    self.insert_synth(m, b"head", Tag::Head, t.start);
-                    self.head = self.stack.last().copied();
-                    self.mode = Mode::InHead;
+                    self.imply_head(m, t.start);
                     self.html_start(m, t)
                 }
             },
@@ -99,16 +97,13 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
                     }
                     self.stack.push(head);
                     self.in_head_start(m, t);
-                    if let Some(k) = self.index_of(head.uid) {
+                    if let Some(k) = self.stack.index_of(head.uid) {
                         self.stack.remove(k);
                     }
                 }
                 Tag::Head => {}
                 _ => {
-                    self.finish_head(m, t.start);
-                    self.insert_synth(m, b"body", Tag::Body, t.start);
-                    self.frameset_ok = true;
-                    self.mode = Mode::InBody;
+                    self.imply_body(m, t.start);
                     self.html_start(m, t)
                 }
             },
@@ -139,12 +134,12 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
             },
             Mode::InTableBody => match t.tag {
                 Tag::Tr => {
-                    self.clear_to(m, &[Tag::Tbody, Tag::Tfoot, Tag::Thead], t.start);
+                    self.clear_to(m, &TABLE_SECTIONS, t.start);
                     self.insert_html(m, t);
                     self.mode = Mode::InRow;
                 }
                 Tag::Th | Tag::Td => {
-                    self.clear_to(m, &[Tag::Tbody, Tag::Tfoot, Tag::Thead], t.start);
+                    self.clear_to(m, &TABLE_SECTIONS, t.start);
                     self.insert_synth(m, b"tr", Tag::Tr, t.start);
                     self.mode = Mode::InRow;
                     self.html_start(m, t)
@@ -161,7 +156,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
                     self.clear_to(m, &[Tag::Tr], t.start);
                     self.insert_html(m, t);
                     self.mode = Mode::InCell;
-                    self.afe_push(Afe::Marker);
+                    self.afe.push(Afe::Marker);
                 }
                 Tag::Caption | Tag::Col | Tag::Colgroup | Tag::Tbody | Tag::Tfoot | Tag::Thead | Tag::Tr => {
                     if self.end_row(m, t.start, t.start) {
@@ -174,7 +169,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
                 Tag::Caption | Tag::Col | Tag::Colgroup | Tag::Tbody | Tag::Td | Tag::Tfoot | Tag::Th
                 | Tag::Thead | Tag::Tr => {
                     if self.in_table_scope(Tag::Td).is_some() || self.in_table_scope(Tag::Th).is_some() {
-                        self.close_cell(m, t.start, t.start);
+                        self.close_cell(m, &CELLS, t.start, t.start);
                         self.html_start(m, t)
                     }
                 }
@@ -244,7 +239,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
     /// A `<template>` start tag, in the in-head rules. One that declares a shadow root on a host that
     /// can take one is not inserted at all: it and its content leave the document tree.
     fn template_start(&mut self, m: &mut Matcher<'a>, t: &StartTok<'a, '_>) {
-        self.afe_push(Afe::Marker);
+        self.afe.push(Afe::Marker);
         self.frameset_ok = false;
         self.mode = Mode::InTemplate;
         self.templates.push(Mode::InTemplate);
@@ -256,11 +251,10 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
             && host > 0
             && h.ns == Ns::Html
             && h.flags & SHADOW_HOST == 0
-            && valid_shadow_host(h.name)
-            && !matches!(self.location(), super::Loc::Foster(_));
+            && valid_shadow_host(h.name);
         if attaches {
             self.stack[host].flags |= SHADOW_HOST;
-            let mut node = self.new_node(t.name, t.tag, Ns::Html, t.attrs);
+            let mut node = self.new_node(t.name, t.low, t.tag, Ns::Html, t.attrs);
             node.vis = Vis::Inert;
             self.stack.push(node);
         } else {
@@ -277,12 +271,12 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
         if let Some(k) = self.stack.topmost(Tag::Template) {
             self.pop_to(m, k, t.start, t.end);
         }
-        self.clear_afe_to_marker();
+        self.afe.clear_to_marker();
         self.templates.pop();
         self.reset_mode();
     }
 
-    pub(super) fn in_body_start(&mut self, m: &mut Matcher<'a>, t: &StartTok<'a, '_>) {
+    fn in_body_start(&mut self, m: &mut Matcher<'a>, t: &StartTok<'a, '_>) {
         let at = t.start;
         match t.tag {
             Tag::Html => {
@@ -319,7 +313,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
             }
             Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6 => {
                 self.close_p_if_in_button_scope(m, at);
-                if self.stack.last().is_some_and(|n| is_heading(n.tag)) {
+                if self.stack.last().is_some_and(|n| HEADINGS.contains(&n.tag)) {
                     self.pop(m, at);
                 }
                 self.insert_html(m, t);
@@ -331,14 +325,9 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
                 self.frameset_ok = false;
             }
             Tag::Form => {
-                let in_template = self.has_template();
-                if self.form.is_some() && !in_template {
-                    return;
-                }
-                self.close_p_if_in_button_scope(m, at);
-                self.insert_html(m, t);
-                if !in_template {
-                    self.form = Some(self.cur().uid);
+                if !self.form_ignored() {
+                    self.close_p_if_in_button_scope(m, at);
+                    self.insert_form(m, t);
                 }
             }
             Tag::Li | Tag::Dd | Tag::Dt => {
@@ -350,10 +339,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
                 };
                 if let Some(i) = self.stack.scoped(nearest, Bound::ListItemStart) {
                     let tag = self.stack[i].tag;
-                    self.implied_end(m, Some(tag), at);
-                    if let Some(k) = self.stack.topmost(tag) {
-                        self.pop_to(m, k, at, at);
-                    }
+                    self.close_element(m, &[tag], Some(tag), at, at);
                 }
                 self.close_p_if_in_button_scope(m, at);
                 self.insert_html(m, t);
@@ -364,31 +350,19 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
             }
             Tag::Button => {
                 if self.in_scope(Tag::Button).is_some() {
-                    self.implied_end(m, None, at);
-                    if let Some(k) = self.stack.topmost(Tag::Button) {
-                        self.pop_to(m, k, at, at);
-                    }
+                    self.close_element(m, &[Tag::Button], None, at, at);
                 }
                 self.reconstruct(m, at);
                 self.insert_html(m, t);
                 self.frameset_ok = false;
             }
             Tag::A => {
-                let from = self.afe_last_marker();
-                let open_a = if self.afe.has_tag(Tag::A) {
-                    self.afe.from(from).rev().find_map(|e| match *e {
-                        Afe::El { uid, tok } if self.toks[tok as usize].tag == Tag::A => Some(uid),
-                        _ => None,
-                    })
-                } else {
-                    None
-                };
-                if let Some(uid) = open_a {
+                if let Some(Afe::El { uid, .. }) = self.afe.last_of(Tag::A).map(|k| self.afe[k]) {
                     self.adoption_agency(m, EndTok { name: t.name, tag: Tag::A, start: at, end: at });
-                    if let Some(k) = self.afe_index_of(uid) {
-                        self.afe_remove(k);
+                    if let Some(k) = self.afe.index_of(uid) {
+                        self.afe.remove(k);
                     }
-                    if let Some(k) = self.index_of(uid) {
+                    if let Some(k) = self.stack.index_of(uid) {
                         self.stack.remove(k);
                     }
                 }
@@ -411,7 +385,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
             Tag::Applet | Tag::Marquee | Tag::Object => {
                 self.reconstruct(m, at);
                 self.insert_html(m, t);
-                self.afe_push(Afe::Marker);
+                self.afe.push(Afe::Marker);
                 self.frameset_ok = false;
             }
             Tag::Table => {
@@ -447,7 +421,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
                 self.frameset_ok = false;
             }
             Tag::Image => {
-                let img = StartTok { name: b"img", tag: Tag::Img, ..*t };
+                let img = StartTok { name: b"img", low: Some(b"img"), tag: Tag::Img, ..*t };
                 self.in_body_start(m, &img)
             }
             Tag::Textarea => {
@@ -537,7 +511,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
         if REPLAY {
             // An element the page never wrote reads its source from the first tag that gave it any.
             if n.flags & SYNTH != 0 && !self.dom.has_prefix(n.depth) {
-                self.dom.set_prefix(n.depth, (t.start, t.end));
+                self.dom.set_prefix(n.depth, SourcePrefix::new(t.start, t.end));
             }
             self.dom.merge(n.depth, t.attrs);
         } else if self.path.get(n.depth as usize) != Some(&n.uid) || m.merge_adds(n.depth as usize, t.attrs) {
@@ -551,7 +525,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
         match t.tag {
             Tag::Caption => {
                 self.clear_to(m, &table_ctx, at);
-                self.afe_push(Afe::Marker);
+                self.afe.push(Afe::Marker);
                 self.insert_html(m, t);
                 self.mode = Mode::InCaption;
             }
@@ -589,15 +563,10 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
                 self.insert_void(m, t)
             }
             Tag::Form => {
-                let in_template = self.has_template();
-                if self.form.is_some() && !in_template {
-                    return;
+                if !self.form_ignored() {
+                    self.insert_form(m, t);
+                    self.pop(m, t.end);
                 }
-                self.insert_html(m, t);
-                if !in_template {
-                    self.form = Some(self.cur().uid);
-                }
-                self.pop(m, t.end);
             }
             _ => {
                 self.foster = true;
@@ -617,23 +586,36 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
         }
     }
 
+    /// Is a `<form>` start tag ignored: the form element pointer is set, and no template is open?
+    fn form_ignored(&self) -> bool {
+        self.form.is_some() && !self.has_template()
+    }
+
+    /// Insert a `<form>`, which outside a template becomes the form element pointer.
+    fn insert_form(&mut self, m: &mut Matcher<'a>, t: &StartTok<'a, '_>) {
+        self.insert_html(m, t);
+        if !self.has_template() {
+            self.form = Some(self.cur().uid);
+        }
+    }
+
     /// End the caption, if one is in table scope. `false` when the token is to be ignored.
     fn end_caption(&mut self, m: &mut Matcher<'a>, ghost_end: usize, end: usize) -> bool {
-        let Some(k) = self.in_table_scope(Tag::Caption) else { return false };
-        self.implied_end(m, None, ghost_end);
-        let k = self.stack.topmost(Tag::Caption).unwrap_or(k);
-        self.pop_to(m, k, ghost_end, end);
-        self.clear_afe_to_marker();
+        if self.in_table_scope(Tag::Caption).is_none() {
+            return false;
+        }
+        self.close_element(m, &[Tag::Caption], None, ghost_end, end);
+        self.afe.clear_to_marker();
         self.mode = Mode::InTable;
         true
     }
 
     /// End the open `<tbody>`, `<thead>` or `<tfoot>`. `false` when there is none in table scope.
     fn end_table_body(&mut self, m: &mut Matcher<'a>, at: usize) -> bool {
-        if [Tag::Tbody, Tag::Thead, Tag::Tfoot].iter().all(|&g| self.in_table_scope(g).is_none()) {
+        if TABLE_SECTIONS.iter().all(|&g| self.in_table_scope(g).is_none()) {
             return false;
         }
-        self.clear_to(m, &[Tag::Tbody, Tag::Tfoot, Tag::Thead], at);
+        self.clear_to(m, &TABLE_SECTIONS, at);
         self.pop(m, at);
         self.mode = Mode::InTable;
         true
@@ -650,12 +632,10 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
         true
     }
 
-    fn close_cell(&mut self, m: &mut Matcher<'a>, ghost_end: usize, end: usize) {
-        self.implied_end(m, None, ghost_end);
-        if let Some(k) = self.stack.topmost_of(&[Tag::Td, Tag::Th]) {
-            self.pop_to(m, k, ghost_end, end);
-        }
-        self.clear_afe_to_marker();
+    /// Close the cell: through the topmost of `tags`, the `<td>` or `<th>` in table scope.
+    fn close_cell(&mut self, m: &mut Matcher<'a>, tags: &[Tag], ghost_end: usize, end: usize) {
+        self.close_element(m, tags, None, ghost_end, end);
+        self.afe.clear_to_marker();
         self.mode = Mode::InRow;
     }
 
@@ -664,22 +644,18 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
     pub(super) fn html_end(&mut self, m: &mut Matcher<'a>, t: EndTok<'a>) {
         match self.mode {
             Mode::Initial => {
-                self.quirks = true;
-                self.mode = Mode::BeforeHtml;
+                self.no_doctype();
                 self.html_end(m, t)
             }
             Mode::BeforeHtml => {
                 if matches!(t.tag, Tag::Head | Tag::Body | Tag::Html | Tag::Br) {
-                    self.insert_synth(m, b"html", Tag::Html, t.start);
-                    self.mode = Mode::BeforeHead;
+                    self.imply_html(m, t.start);
                     self.html_end(m, t)
                 }
             }
             Mode::BeforeHead => {
                 if matches!(t.tag, Tag::Head | Tag::Body | Tag::Html | Tag::Br) {
-                    self.insert_synth(m, b"head", Tag::Head, t.start);
-                    self.head = self.stack.last().copied();
-                    self.mode = Mode::InHead;
+                    self.imply_head(m, t.start);
                     self.html_end(m, t)
                 }
             }
@@ -695,10 +671,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
             Mode::AfterHead => match t.tag {
                 Tag::Template => self.template_end(m, t),
                 Tag::Body | Tag::Html | Tag::Br => {
-                    self.finish_head(m, t.start);
-                    self.insert_synth(m, b"body", Tag::Body, t.start);
-                    self.frameset_ok = true;
-                    self.mode = Mode::InBody;
+                    self.imply_body(m, t.start);
                     self.html_end(m, t)
                 }
                 _ => {}
@@ -742,7 +715,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
             Mode::InTableBody => match t.tag {
                 Tag::Tbody | Tag::Tfoot | Tag::Thead => {
                     if self.in_table_scope(t.tag).is_some() {
-                        self.clear_to(m, &[Tag::Tbody, Tag::Tfoot, Tag::Thead], t.start);
+                        self.clear_to(m, &TABLE_SECTIONS, t.start);
                         self.pop(m, t.end);
                         self.mode = Mode::InTable;
                     }
@@ -775,18 +748,13 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
             Mode::InCell => match t.tag {
                 Tag::Td | Tag::Th => {
                     if self.in_table_scope(t.tag).is_some() {
-                        self.implied_end(m, None, t.start);
-                        if let Some(k) = self.stack.topmost(t.tag) {
-                            self.pop_to(m, k, t.start, t.end);
-                        }
-                        self.clear_afe_to_marker();
-                        self.mode = Mode::InRow;
+                        self.close_cell(m, &[t.tag], t.start, t.end);
                     }
                 }
                 Tag::Body | Tag::Caption | Tag::Col | Tag::Colgroup | Tag::Html => {}
                 Tag::Table | Tag::Tbody | Tag::Tfoot | Tag::Thead | Tag::Tr => {
                     if self.in_table_scope(t.tag).is_some() {
-                        self.close_cell(m, t.start, t.start);
+                        self.close_cell(m, &CELLS, t.start, t.start);
                         self.html_end(m, t)
                     }
                 }
@@ -864,20 +832,17 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
             | Tag::Footer | Tag::Header | Tag::Hgroup | Tag::Listing | Tag::Main | Tag::Menu | Tag::Nav | Tag::Ol
             | Tag::Pre | Tag::Search | Tag::Section | Tag::Select | Tag::Summary | Tag::Ul => {
                 if self.in_scope(t.tag).is_some() {
-                    self.implied_end(m, None, t.start);
-                    if let Some(k) = self.stack.topmost(t.tag) {
-                        self.pop_to(m, k, t.start, t.end);
-                    }
+                    self.close_element(m, &[t.tag], None, t.start, t.end);
                 }
             }
             Tag::Form => {
                 if !self.has_template() {
                     let node = self.form.take();
-                    let Some(k) = self.stack.scoped(node.and_then(|uid| self.index_of(uid)), Bound::Scope) else {
+                    let Some(k) = self.stack.scoped(node.and_then(|uid| self.stack.index_of(uid)), Bound::Scope) else {
                         return;
                     };
                     self.implied_end(m, None, t.start);
-                    let k = node.and_then(|uid| self.index_of(uid)).unwrap_or(k);
+                    let k = node.and_then(|uid| self.stack.index_of(uid)).unwrap_or(k);
                     if k == self.stack.len() - 1 {
                         self.pop(m, t.end);
                     } else {
@@ -885,10 +850,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
                         self.stack.remove(k);
                     }
                 } else if self.in_scope(Tag::Form).is_some() {
-                    self.implied_end(m, None, t.start);
-                    if let Some(k) = self.stack.topmost(Tag::Form) {
-                        self.pop_to(m, k, t.start, t.end);
-                    }
+                    self.close_element(m, &[Tag::Form], None, t.start, t.end);
                 }
             }
             Tag::P => {
@@ -899,42 +861,38 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
             }
             Tag::Li => {
                 if self.in_list_scope(Tag::Li).is_some() {
-                    self.implied_end(m, Some(Tag::Li), t.start);
-                    if let Some(k) = self.stack.topmost(Tag::Li) {
-                        self.pop_to(m, k, t.start, t.end);
-                    }
+                    self.close_element(m, &[Tag::Li], Some(Tag::Li), t.start, t.end);
                 }
             }
             Tag::Dd | Tag::Dt => {
                 if self.in_scope(t.tag).is_some() {
-                    self.implied_end(m, Some(t.tag), t.start);
-                    if let Some(k) = self.stack.topmost(t.tag) {
-                        self.pop_to(m, k, t.start, t.end);
-                    }
+                    self.close_element(m, &[t.tag], Some(t.tag), t.start, t.end);
                 }
             }
             Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6 => {
                 if self.stack.scoped(self.stack.topmost_of(&HEADINGS), Bound::Scope).is_some() {
-                    self.implied_end(m, None, t.start);
-                    if let Some(k) = self.stack.topmost_of(&HEADINGS) {
-                        self.pop_to(m, k, t.start, t.end);
-                    }
+                    self.close_element(m, &HEADINGS, None, t.start, t.end);
                 }
             }
             Tag::A | Tag::B | Tag::Big | Tag::Code | Tag::Em | Tag::Font | Tag::I | Tag::Nobr | Tag::S
             | Tag::Small | Tag::Strike | Tag::Strong | Tag::Tt | Tag::U => self.adoption_agency(m, t),
             Tag::Applet | Tag::Marquee | Tag::Object => {
                 if self.in_scope(t.tag).is_some() {
-                    self.implied_end(m, None, t.start);
-                    if let Some(k) = self.stack.topmost(t.tag) {
-                        self.pop_to(m, k, t.start, t.end);
-                    }
-                    self.clear_afe_to_marker();
+                    self.close_element(m, &[t.tag], None, t.start, t.end);
+                    self.afe.clear_to_marker();
                 }
             }
             Tag::Br => {
                 // `</br>` is a `<br>` with no attributes.
-                let br = StartTok { name: b"br", tag: Tag::Br, attrs: &[], self_closing: false, start: t.start, end: t.end };
+                let br = StartTok {
+                    name: b"br",
+                    low: Some(b"br"),
+                    tag: Tag::Br,
+                    attrs: &[],
+                    self_closing: false,
+                    start: t.start,
+                    end: t.end,
+                };
                 self.reconstruct(m, t.start);
                 self.insert_void(m, &br);
                 self.frameset_ok = false;
@@ -964,24 +922,15 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
     /// clone): streaming, that is a retroactive rule, and the replay's tree performs the moves.
     fn adoption_agency(&mut self, m: &mut Matcher<'a>, t: EndTok<'a>) {
         if let Some(c) = self.stack.last() {
-            if c.ns == Ns::Html && c.tag == t.tag && self.afe_index_of(c.uid).is_none() {
+            if c.ns == Ns::Html && c.tag == t.tag && self.afe.index_of(c.uid).is_none() {
                 return self.pop(m, t.end);
             }
         }
         for _ in 0..8 {
-            let from = self.afe_last_marker();
-            let found = if self.afe.has_tag(t.tag) {
-                self.afe.from(from).rposition(|e| match *e {
-                    Afe::El { tok, .. } => self.toks[tok as usize].tag == t.tag,
-                    Afe::Marker => false,
-                })
-            } else {
-                None
-            };
-            let Some(fi) = found.map(|k| k + from) else { return self.any_other_end(m, t) };
+            let Some(fi) = self.afe.last_of(t.tag) else { return self.any_other_end(m, t) };
             let Afe::El { uid: fuid, tok: ftok } = self.afe[fi] else { unreachable!() };
-            let Some(si) = self.index_of(fuid) else {
-                self.afe_remove(fi);
+            let Some(si) = self.stack.index_of(fuid) else {
+                self.afe.remove(fi);
                 return;
             };
             if self.stack.scoped(Some(si), Bound::Scope).is_none() {
@@ -989,8 +938,8 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
             }
             let Some(bi) = (si + 1..self.stack.len()).find(|&k| self.stack[k].cat & SPECIAL != 0) else {
                 self.pop_to(m, si, t.start, t.end);
-                if let Some(k) = self.afe_index_of(fuid) {
-                    self.afe_remove(k);
+                if let Some(k) = self.afe.index_of(fuid) {
+                    self.afe.remove(k);
                 }
                 return;
             };
@@ -1012,9 +961,10 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
     /// them. A clone made at `at` reads its source from the start tag it copies. Returns the stack index
     /// of the formatting element's clone, which the furthest block now holds.
     fn furthest_block(&mut self, si: usize, fi: usize, bi: usize, ftok: u32, at: usize) -> usize {
-        let common = self.stack[si - 1];
+        // The common ancestor's index: the loop below changes only entries above it.
+        let common = si - 1;
         // The block's world is inert when the formatting element is template content.
-        let inert = common.vis == Vis::Inert || self.stack[bi].vis == Vis::Inert;
+        let inert = self.stack[common].vis == Vis::Inert || self.stack[bi].vis == Vis::Inert;
         let fuid = self.stack[si].uid;
         let block = self.stack[bi];
         let mut bookmark = fi;
@@ -1029,10 +979,10 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
             if n.uid == fuid {
                 break;
             }
-            let mut ai = self.afe_index_of(n.uid);
+            let mut ai = self.afe.index_of(n.uid);
             if inner > 3 {
                 if let Some(k) = ai {
-                    self.afe_remove(k);
+                    self.afe.remove(k);
                     if k < bookmark {
                         bookmark -= 1;
                     }
@@ -1067,48 +1017,40 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
             self.dom.move_children(block.depth, clone.depth);
             self.dom.append(block.depth, clone.depth);
         }
-        let fi = self.afe_index_of(fuid).expect("the formatting element is on the list");
-        self.afe_remove(fi);
+        let fi = self.afe.index_of(fuid).expect("the formatting element is on the list");
+        self.afe.remove(fi);
         let bookmark = if fi < bookmark { bookmark - 1 } else { bookmark };
-        self.afe.insert(bookmark.min(self.afe.len()), Afe::El { uid: clone.uid, tok: ftok }, &self.toks);
-        let si = self.index_of(fuid).expect("the formatting element is open");
+        self.afe.insert(bookmark.min(self.afe.len()), Afe::El { uid: clone.uid, tok: ftok });
+        let si = self.stack.index_of(fuid).expect("the formatting element is open");
         self.stack.remove(si);
-        let bi = self.index_of(block.uid).expect("the furthest block is open");
+        let bi = self.stack.index_of(block.uid).expect("the furthest block is open");
         self.stack.insert(bi + 1, clone);
         bi + 1
     }
 
-    /// Insert the replay's node `last` at the appropriate place with `common` as the override target:
-    /// at its end, before the last table when foster parenting is on and it is a table part, and out of
-    /// the document when it is a template.
-    fn adopt_into_common(&mut self, common: Node<'a>, last: u32) {
-        if common.tag == Tag::Template {
-            self.dom.detach(last);
-            return;
+    /// Insert the replay's node `last` at the appropriate place with the stack entry at `common` as the
+    /// override target.
+    fn adopt_into_common(&mut self, common: usize, last: u32) {
+        match self.location_in(common) {
+            Loc::Into(i) => self.dom.append(self.stack[i].depth, last),
+            Loc::Foster(t) => self.dom_foster(t, last),
+            Loc::Inert => self.dom.detach(last),
+            Loc::Document => unreachable!("an override target is on the stack"),
         }
-        if self.foster && matches!(common.tag, Tag::Table | Tag::Tbody | Tag::Tfoot | Tag::Thead | Tag::Tr) {
-            match self.stack.topmost_of(&[Tag::Table, Tag::Template]) {
-                Some(k) if self.stack[k].tag == Tag::Table && self.stack[k].vis == Vis::Live => {
-                    return self.dom_foster(k, last);
-                }
-                Some(_) => return self.dom.detach(last),
-                None => return self.dom.append(self.stack[0].depth, last),
-            }
-        }
-        self.dom.append(common.depth, last);
     }
 
     /// A copy of the formatting element made for token `tok`: pending while streaming, a node of the
     /// replay's tree when replaying.
     fn clone_node(&mut self, tok: u32, inert: bool, at: usize) -> Node<'a> {
-        let (name, tag) = (self.toks[tok as usize].name, self.toks[tok as usize].tag);
-        let mut node = self.new_node(name, tag, Ns::Html, &[]);
+        let (name, tag) = (self.afe.toks[tok as usize].name, self.afe.toks[tok as usize].tag);
+        let mut buf = [0; MAX_NAME];
+        let mut node = self.new_node(name, lower(name, &mut buf), tag, Ns::Html, &[]);
         if inert {
             node.vis = Vis::Inert;
         } else if REPLAY {
-            let attrs = self.toks[tok as usize].attrs.clone();
+            let attrs = self.afe.toks[tok as usize].attrs.clone();
             node.depth = self.dom.element(name, super::super::HTML_ELEMENT, attrs, at);
-            self.dom.set_prefix(node.depth, self.toks[tok as usize].span);
+            self.dom.set_prefix(node.depth, self.afe.toks[tok as usize].span);
         } else {
             node.vis = Vis::Pending(tok);
         }
@@ -1162,9 +1104,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
         // Foreign content keeps a NUL as U+FFFD, which is how RCDATA text decodes.
         let dm = if dm == DataMode::Normal { DataMode::Rcdata } else { dm };
         self.insert_text(m, b, dm, s);
-        if self.frameset_ok && ends_frameset_ok(b, m.input.encoding() == encoding_rs::UTF_8) {
-            self.frameset_ok = false;
-        }
+        self.clear_frameset_ok(m, b);
     }
 
     pub(super) fn html_text(&mut self, m: &mut Matcher<'a>, mut b: &'a [u8], dm: DataMode, mut s: usize) {
@@ -1172,33 +1112,22 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
             if b.is_empty() {
                 return;
             }
-            let lead = |b: &[u8], nul: bool| ws_prefix(b, nul);
             match self.mode {
                 Mode::Initial | Mode::BeforeHtml | Mode::BeforeHead => {
-                    let k = lead(b, true);
+                    let k = ws_prefix(b, true);
                     if k > 0 {
                         self.absorb(m, s, s + k);
                         (b, s) = (&b[k..], s + k);
                         continue;
                     }
                     match self.mode {
-                        Mode::Initial => {
-                            self.quirks = true;
-                            self.mode = Mode::BeforeHtml;
-                        }
-                        Mode::BeforeHtml => {
-                            self.insert_synth(m, b"html", Tag::Html, s);
-                            self.mode = Mode::BeforeHead;
-                        }
-                        _ => {
-                            self.insert_synth(m, b"head", Tag::Head, s);
-                            self.head = self.stack.last().copied();
-                            self.mode = Mode::InHead;
-                        }
+                        Mode::Initial => self.no_doctype(),
+                        Mode::BeforeHtml => self.imply_html(m, s),
+                        _ => self.imply_head(m, s),
                     }
                 }
                 Mode::InHead | Mode::AfterHead => {
-                    let k = lead(b, true);
+                    let k = ws_prefix(b, true);
                     if k > 0 {
                         if self.mode == Mode::AfterHead {
                             self.continue_html_text(m, s);
@@ -1210,16 +1139,13 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
                     if self.mode == Mode::InHead {
                         self.leave_head();
                     } else {
-                        self.finish_head(m, s);
-                        self.insert_synth(m, b"body", Tag::Body, s);
-                        self.frameset_ok = true;
-                        self.mode = Mode::InBody;
+                        self.imply_body(m, s);
                     }
                 }
                 Mode::InBody | Mode::InCaption | Mode::InCell | Mode::InTemplate => return self.body_text(m, b, dm, s),
                 Mode::InTable | Mode::InTableBody | Mode::InRow => return self.table_text(m, b, dm, s),
                 Mode::InColumnGroup => {
-                    let k = lead(b, false);
+                    let k = ws_prefix(b, false);
                     if k > 0 {
                         self.insert_text(m, &b[..k], dm, s);
                         (b, s) = (&b[k..], s + k);
@@ -1232,7 +1158,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
                     self.mode = Mode::InTable;
                 }
                 Mode::AfterBody | Mode::AfterAfterBody => {
-                    let k = lead(b, false);
+                    let k = ws_prefix(b, false);
                     if k > 0 {
                         self.body_text(m, &b[..k], dm, s);
                         (b, s) = (&b[k..], s + k);
@@ -1243,7 +1169,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
                 Mode::InFrameset | Mode::AfterFrameset | Mode::AfterAfterFrameset => {
                     // Whitespace is inserted and everything else ignored, character by character.
                     while !b.is_empty() {
-                        let k = lead(b, false);
+                        let k = ws_prefix(b, false);
                         if k > 0 {
                             if self.mode == Mode::AfterAfterFrameset {
                                 self.body_text(m, &b[..k], dm, s);
@@ -1270,25 +1196,11 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
     pub(super) fn eof(&mut self, m: &mut Matcher<'a>, at: usize) {
         loop {
             match self.mode {
-                Mode::Initial => {
-                    self.quirks = true;
-                    self.mode = Mode::BeforeHtml;
-                }
-                Mode::BeforeHtml => {
-                    self.insert_synth(m, b"html", Tag::Html, at);
-                    self.mode = Mode::BeforeHead;
-                }
-                Mode::BeforeHead => {
-                    self.insert_synth(m, b"head", Tag::Head, at);
-                    self.head = self.stack.last().copied();
-                    self.mode = Mode::InHead;
-                }
+                Mode::Initial => self.no_doctype(),
+                Mode::BeforeHtml => self.imply_html(m, at),
+                Mode::BeforeHead => self.imply_head(m, at),
                 Mode::InHead => self.leave_head(),
-                Mode::AfterHead => {
-                    self.finish_head(m, at);
-                    self.insert_synth(m, b"body", Tag::Body, at);
-                    self.mode = Mode::InBody;
-                }
+                Mode::AfterHead => self.imply_body(m, at),
                 Mode::Text => {
                     self.pop(m, at);
                     self.mode = self.original;
@@ -1297,7 +1209,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
                 | Mode::InRow | Mode::InCell | Mode::InTemplate => {
                     let Some(k) = self.stack.topmost(Tag::Template) else { return };
                     self.pop_to(m, k, at, at);
-                    self.clear_afe_to_marker();
+                    self.afe.clear_to_marker();
                     self.templates.pop();
                     self.reset_mode();
                 }
@@ -1314,6 +1226,11 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
         }
         self.reconstruct(m, s);
         self.insert_text(m, b, dm, s);
+        self.clear_frameset_ok(m, b);
+    }
+
+    /// Inserting the run `b` clears frameset-ok, unless it holds only what Chrome keeps it set for.
+    fn clear_frameset_ok(&mut self, m: &Matcher<'a>, b: &[u8]) {
         if self.frameset_ok && ends_frameset_ok(b, m.input.encoding() == encoding_rs::UTF_8) {
             self.frameset_ok = false;
         }
@@ -1336,8 +1253,4 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
         self.body_text(m, b, dm, s);
         self.foster = false;
     }
-}
-
-fn is_heading(tag: Tag) -> bool {
-    matches!(tag, Tag::H1 | Tag::H2 | Tag::H3 | Tag::H4 | Tag::H5 | Tag::H6)
 }
