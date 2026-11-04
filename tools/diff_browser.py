@@ -91,6 +91,24 @@ ALPHABET: list[str] = [
     '<annotation-xml{} encoding="text/html">', "<template{} shadowrootmode=open>",
     "<template{} shadowrootmode=closed>", "<selectedcontent{}>",
     "<noscript{}>", "<section{}>", "\n", "\x0b", "\x00", "<col{}>",
+    # Phase 2's rules, each token one a rule reads: the frame and text modes, headings and lists, ruby,
+    # <select>, table parts and their end tags, the adoption agency's triggers and markers, Noah's Ark
+    # (three alike), the foreign-content breakouts and integration points, declarative shadow hosts,
+    # the leading newline in all three spellings, and the doctypes that set quirks and limited quirks.
+    "</head>", "</p>", "</li>", "</dd>", "</h1>", "<h2{}>", "</h2>", "</button>", "</option>", "</ul>",
+    "</pre>", "</tr>", "</tbody>", "</th>", "</caption>", "</colgroup>", "</frameset>", "</nobr>",
+    "</object>", "</marquee>", "</math>", "</foreignObject>", "</title>", "</span>", "</dl>",
+    "<listing{}>", "<plaintext{}>", "<xmp{}>", "<iframe{}>", "<noembed{}>", "<noframes{}>",
+    "<ruby{}>", "<rt{}>", "<rp{}>", "<rb{}>", "<rtc{}>", "<optgroup{}>", "<ol{}>", "<span{}>",
+    "<thead{}>", "<tfoot{}>", "<applet{}>", "<em{}>", "<s{}>", "<font{}>", '<font{} color=red>',
+    '<b{} class=k>', '<input{} type=hidden>', '<input{} type=HIDDEN>', "<img{}>", "<wbr{}>", "<keygen{}>",
+    "<meta{}>", "<link{}>", "<base{}>", "<address{}>", "<center{}>", "<details{}>", "<dialog{}>",
+    "<search{}>", "<summary{}>", "<fieldset{}>", "<menu{}>", "<x-y{}>", "<clipPath{}>", "<mtext{}>",
+    "<mo{}>", "<mglyph{}>", "<malignmark{}>", "<annotation-xml{}>",
+    '<annotation-xml{} encoding="application/xhtml+xml">', "<svg{}/>", "<math{}/>", "<script{}/>",
+    "<template{} shadowrootmode=OPEN>", " ", "\r\n", "&#10;",
+    '<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">',
+    '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "x">',
 ]
 MAX_TOKENS = 7
 
@@ -508,18 +526,9 @@ def tag_name(token: str) -> str:
 
 
 FORMATTING = {"a", "b", "big", "code", "em", "font", "i", "nobr", "s", "small", "strike", "strong", "tt", "u"}
-HEADINGS = {"h1", "h2", "h3", "h4", "h5", "h6"}
-# Start tags that close an open <p> in HTML5 ("close a p element" in the in-body rules).
-P_CLOSERS = {"address", "article", "aside", "blockquote", "center", "details", "dialog", "dir", "div", "dl",
-             "fieldset", "figcaption", "figure", "footer", "header", "hgroup", "main", "menu", "nav", "ol",
-             "p", "search", "section", "summary", "ul", "pre", "listing", "form", "plaintext", "table",
-             "hr", "xmp", "li", "dd", "dt", *HEADINGS}
 # What a table can hold without fostering it out ("in table" and its sub-modes).
 TABLE_CONTENT = {"table", "caption", "colgroup", "col", "tbody", "thead", "tfoot", "tr", "td", "th",
                  "template", "script", "style", "form"}
-# HTML integration points and MathML text integration points, by the foreign root they belong to.
-INTEGRATION_POINTS = {"svg": {"title", "desc", "foreignobject"},
-                      "math": {"mi", "mo", "mn", "ms", "mtext", "annotation-xml"}}
 # Tokens that leave the frame where it is: they can come before an explicit <body> without opening one.
 FRAME_NEUTRAL = {"<!--c-->", "\n", "</%>", "</>", "<?pi?>"}
 
@@ -566,43 +575,6 @@ class Repro:
         return sum(n in names for n in self.starts())
 
 
-def _strip(r: Repro) -> bool:
-    edges = {r.tokens[0], r.tokens[-1]}
-    return bool(edges & {"\x0b", "\n"})
-
-
-def _foreign_integration(r: Repro) -> bool:
-    """An integration point as the very next token after its own foreign root, with content after it."""
-    toks = r.tokens
-    return any(_start_tag(t) and tag_name(t) in INTEGRATION_POINTS and _start_tag(toks[k + 1])
-               and tag_name(toks[k + 1]) in INTEGRATION_POINTS[tag_name(t)] and k + 2 < len(toks)
-               for k, t in enumerate(toks[:-1]))
-
-
-def _cdata(r: Repro) -> bool:
-    toks = r.tokens
-    return any(t == "<![CDATA[x]]>" and any(tag_name(u) in ("svg", "math") for u in toks[:k] if _start_tag(u))
-               for k, t in enumerate(toks))
-
-
-def _leading_newline(r: Repro) -> bool:
-    toks = r.tokens
-    return any(tag_name(t) in ("pre", "textarea", "listing") and _start_tag(t) and toks[k + 1].startswith("\n")
-               for k, t in enumerate(toks[:-1]))
-
-
-def _form_pointer(r: Repro) -> bool:
-    s = r.starts()
-    if "form" not in s:
-        return False
-    return s.count("form") > 1 or "form" in r.ends() or ("table" in s and s.index("table") < s.index("form"))
-
-
-def _after_frame_end(r: Repro) -> bool:
-    toks = r.tokens
-    return any(t in ("</body>", "</html>") for t in toks[:-1])
-
-
 def _second_frame_tag(r: Repro) -> bool:
     """A `<body>` after body content, or an `<html>` after anything: the browser merges its attributes."""
     toks = r.tokens
@@ -618,33 +590,16 @@ def _second_frame_tag(r: Repro) -> bool:
     return False
 
 
-def _implied_tbody(r: Repro) -> bool:
-    s = r.starts()
-    for k, n in enumerate(s):
-        if n == "table":
-            rest = s[k + 1:]
-            for m in rest:
-                if m == "tbody":
-                    break
-                if m in ("tr", "td", "th"):
-                    return True
-    return False
-
-
-def _clone(r: Repro) -> bool:
-    return len(set(r.browser_ids)) < len(r.browser_ids)
-
-
 def _misnested_end(r: Repro) -> bool:
-    """A formatting element's end tag with a non-formatting element opened inside it, or a second `<a>`."""
+    """A formatting element ended with an element that is not a formatting element opened inside it: by
+    its end tag, or by a second `<a>` or `<nobr>`, which run the adoption agency for the first one."""
     toks = r.tokens
-    if r.starts().count("a") > 1:
-        return True
     for k, t in enumerate(toks):
         if _start_tag(t) and tag_name(t) in FORMATTING:
+            name = tag_name(t)
             for j in range(k + 1, len(toks)):
                 u = toks[j]
-                if u == f"</{tag_name(t)}>":
+                if u == f"</{name}>" or (name in ("a", "nobr") and _start_tag(u) and tag_name(u) == name):
                     if any(_start_tag(v) and tag_name(v) not in FORMATTING for v in toks[k + 1:j]):
                         return True
                     break
@@ -664,62 +619,29 @@ def _foster(r: Repro) -> bool:
     return False
 
 
-def _stray_end_p(r: Repro) -> bool:
-    """A `</p>` with no `<p>` before it, in HTML content (in foreign content it breaks out instead)."""
-    toks = r.tokens
-    return any(t == "</p>" and not any(_start_tag(u) and tag_name(u) in ("p", "svg", "math") for u in toks[:k])
-               for k, t in enumerate(toks))
-
-
-def _deep_p(r: Repro) -> bool:
-    s = r.starts()
-    return any(n == "p" and any(m not in P_CLOSERS for m in s[k + 1:j]) and s[j] in P_CLOSERS
-               for k, n in enumerate(s) for j in range(k + 2, len(s)))
-
-
-def _p_closer(r: Repro) -> bool:
-    s = r.starts()
-    return any(n == "p" and s[k + 1] in P_CLOSERS for k, n in enumerate(s[:-1]))
-
-
 @dataclass(frozen=True)
 class Construct:
     name: str                       # the section 3 row it stands for
     test: Callable[[Repro], bool]   # does this smallest repro exhibit it?
 
 
-# Section 3's table, in the order the rules are tried. Rules triggered by a token nothing else reads
-# come first. The counterfactual rules come next, because they are decided by the oracle rather than by
-# a shape: if an explicit `<head></head>` makes the column agree, the missing head is the cause whatever
-# else the repro holds. The shape rules follow, and foster parenting and the <p> rules, whose shapes are
-# the loosest, come last.
+# What browser mode does not stream: section 3's constructs whose rule changes a decision the one-pass
+# matcher has already made, so only the forward state (what is open, where later content goes) is the
+# browser's. Every other section 3 row is implemented, so its divergences are NOVEL and the gate holds it
+# at zero.
 CONSTRUCTS: list[Construct] = [
-    Construct("NUL", lambda r: "\x00" in r.tokens),
-    Construct("leading strip", _strip),
-    Construct("<noscript>", lambda r: "noscript" in r.starts()),
-    Construct("declarative shadow root", lambda r: any("shadowrootmode" in t for t in r.tokens)),
-    Construct("HTML <template>", lambda r: "template" in r.starts()),
+    # The body leaves the document with everything in it; the matches made there stand.
     Construct("frameset replacing the body", lambda r: "frameset" in r.starts()),
-    Construct("CDATA in foreign content", _cdata),
-    Construct("SVG <title> (integration point)", _foreign_integration),
-    Construct("quirks-mode tree", lambda r: not r.has_doctype() and not r.differs(r.with_doctype())),
-    Construct("<head>", lambda r: "head" not in r.starts() and not r.differs(r.with_head())),
-    Construct("/> on a non-void tag", lambda r: any("{}/>" in t for t in r.tokens) and not r.differs(r.deslashed())),
-    Construct("renames", lambda r: "</br>" in r.tokens or "image" in r.starts()),
-    Construct("leading newline", _leading_newline),
-    Construct("form pointer", _form_pointer),
-    Construct("dt/dd repeat", lambda r: r.counts({"dt", "dd"}) > 1),
-    Construct("nested button/h1/nobr", lambda r: r.counts({"button"}) > 1 or r.counts(HEADINGS) > 1
-              or r.counts({"nobr"}) > 1),
-    Construct("after </html>", _after_frame_end),
+    # The attributes reach the elements matched after the tag, not the frame element's own match.
     Construct("second <html>/<body> tag", _second_frame_tag),
-    Construct("implied <tbody>", _implied_tbody),
-    Construct("adoption agency", lambda r: _misnested_end(r)),
-    Construct("formatting reconstruction", _clone),
+    # The furthest block moves out of the formatting element, and its content into a clone, after both
+    # were matched.
+    Construct("adoption agency", _misnested_end),
+    # A fostered node comes before its table in document order, and counts as following it here.
     Construct("foster parenting", _foster),
-    Construct("stray </p>", _stray_end_p),
-    Construct("deep <p>", _deep_p),
-    Construct("<p> closers", _p_closer),
+    # When an <option> is popped, a copy of its content replaces the children of the <selectedcontent> in
+    # its <select>, which has usually closed by then.
+    Construct("<selectedcontent> clone", lambda r: {"select", "selectedcontent", "option"} <= set(r.starts())),
 ]
 
 

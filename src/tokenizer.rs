@@ -43,6 +43,21 @@ pub trait TokenSink<'a> {
         let _ = (from, to);
     }
 
+    /// A `<!DOCTYPE …>` over `[from, to)`, whose bytes the sink may parse: HTML5 decides the document's
+    /// quirks mode from it. It leaves no node and does not end a text node, so by default it is
+    /// [`Self::invisible_markup`].
+    fn doctype(&mut self, raw: &'a [u8], from: usize, to: usize) {
+        let _ = raw;
+        self.invisible_markup(from, to)
+    }
+
+    /// A comment node over `[from, to)`: `<!--…-->`, or a bogus comment (`<!x>`, `<?x>`, `</%>`, and
+    /// a CDATA section where it is not character data). It ends the text node before it unless the
+    /// sink puts it somewhere else, so the default does nothing.
+    fn comment(&mut self, from: usize, to: usize) {
+        let _ = (from, to);
+    }
+
     /// May [`tokenize`] stop? Asked once per markup token, and answered `false` by every sink that has
     /// no notion of "enough" — including this default, which the optimizer folds away.
     ///
@@ -427,7 +442,9 @@ fn handle_markup<'a, S: TokenSink<'a>>(
     match kind {
         Markup::Decl => {
             if b[p..].starts_with(b"<!--") {
-                scan_comment(b, p)
+                let after = scan_comment(b, p);
+                sink.comment(p, after);
+                after
             } else if b[p..].starts_with(b"<![CDATA[") && sink.cdata_is_text() {
                 scan_cdata(b, p, sink)
             } else {
@@ -436,12 +453,18 @@ fn handle_markup<'a, S: TokenSink<'a>>(
                 // oracle: `<!foo>`, `<![CDATA[…]]>`, `<?x?>` and `<!>` all break the run, a doctype
                 // does not). Case-insensitive, and the name has to be complete.
                 if b[p..].len() > 9 && b[p + 2..p + 9].eq_ignore_ascii_case(b"doctype") {
-                    sink.invisible_markup(p, after);
+                    sink.doctype(&b[p..after], p, after);
+                } else {
+                    sink.comment(p, after);
                 }
                 after
             }
         }
-        Markup::Bogus => skip_to_gt(b, p),
+        Markup::Bogus => {
+            let after = skip_to_gt(b, p);
+            sink.comment(p, after);
+            after
+        }
         Markup::End => {
             // HTML5's end-tag-open state, which libxml2 follows exactly (verified case by case). Only
             // an ASCII ALPHA starts an end tag; the other two branches are not end tags at all, and
@@ -482,7 +505,11 @@ fn handle_markup<'a, S: TokenSink<'a>>(
                     sink.text(&b[p..], DataMode::Normal, p);
                     b.len()
                 }
-                _ => skip_to_gt(b, p),
+                _ => {
+                    let after = skip_to_gt(b, p);
+                    sink.comment(p, after);
+                    after
+                }
             }
         }
         Markup::Start => handle_start(b, p, sink, attr_buf),

@@ -484,9 +484,12 @@ def test_the_element_universe_sees_every_engine_owned_name():
 
     # ...and that is not a formality: names live outside the rule tables. Derived, not listed, so the
     # test keeps discriminating as code moves.
-    tables = [p for p in every if "implied_close" in p or p.endswith("tokenizer.rs")]
-    elsewhere = [p for p in every if p not in tables]
-    only_elsewhere = (G.names_in(elsewhere) & set(G.ELEMENTS)) - G.names_in(tables)
+    # `generated_html5.rs` is left out of both sides: it lists the whole universe, so it cannot show where
+    # a name lives.
+    scanned = [p for p in every if not p.endswith("generated_html5.rs")]
+    tables = [p for p in scanned if "implied_close" in p or p.endswith("tokenizer.rs")]
+    elsewhere = [p for p in scanned if p not in tables]
+    only_elsewhere = (G.names_in(elsewhere, skip_tests=True) & set(G.ELEMENTS)) - G.names_in(tables, skip_tests=True)
     assert only_elsewhere, "every element name is in the rule tables — this test no longer discriminates"
     assert only_elsewhere <= G.engine_names(), f"unscanned engine names: {only_elsewhere}"
 
@@ -683,32 +686,29 @@ def test_the_browser_gate_fails_on_novel_and_on_coverage():
 
 
 def test_browser_attribution_is_by_the_smallest_repro_and_leaves_the_rest_novel():
-    """A divergence is filed under a section 3 construct only when its REDUCED document exhibits it.
-
-    A stray `<td>` outside any table is not in section 3's table, so it must reach NOVEL rather than be
-    absorbed by the `<tbody>` rule, which needs a table. The counterfactual rules must consult the
-    oracle: `<p><table>` is the quirks-mode row only if a doctype makes it agree. And the formatting
-    row is decided by the browser's tree (a repeated id), not by the tokens.
+    """A divergence is filed under a construct only when its REDUCED document exhibits it, and only the
+    constructs browser mode cannot stream have one. Everything else is implemented, so a divergence there
+    must reach NOVEL and fail the gate: a stray `<td>`, an implied `<tbody>`, a `<p>` closed by a table.
+    The adoption-agency row needs a furthest block, because without one the algorithm only pops.
     """
     import diff_browser as B
 
-    def repro(tokens, differs=lambda doc: True, ids=()):
-        return B.Repro(tuple(enumerate(tokens)), "//*/@id", differs, list(ids))
+    def repro(tokens):
+        return B.Repro(tuple(enumerate(tokens)), "//*/@id", lambda doc: True, [])
 
-    assert B.attribute(repro(["<td{}>"])) is None
-    assert B.attribute(repro(["<table{}>", "<tr{}>"])) == "implied <tbody>"
-
-    no_doctype_needed = repro(["<p{}>", "<table{}>"], differs=lambda doc: not any("DOCTYPE" in t for _, t in doc))
-    assert B.attribute(no_doctype_needed) == "quirks-mode tree"
-    assert B.attribute(repro(["<p{}>", "<table{}>"])) == "<p> closers"
-
-    head = repro(["<div{}>"], differs=lambda doc: not any(t == "<head></head>" for _, t in doc))
-    assert B.attribute(head) == "<head>"
-    assert B.attribute(repro(["<div{}>"])) is None
-
-    tokens = ["<p{}>", "<b{}>", "t", "</p>", "t"]
-    assert B.attribute(repro(tokens, ids=["0", "1", "1"])) == "formatting reconstruction"
-    assert B.attribute(repro(tokens, ids=["0", "1"])) is None
+    for implemented in (["<td{}>"], ["<table{}>", "<tr{}>"], ["<p{}>", "<table{}>"], ["<div{}>"],
+                        ["<p{}>", "<b{}>", "t", "</p>", "t"], ["<b{}>", "<i{}>", "</b>"], ["<a{} href=x>", "<a{} href=x>"]):
+        assert B.attribute(repro(implemented)) is None, implemented
+    assert B.attribute(repro(["<table{}>", "<div{}>"])) == "foster parenting"
+    assert B.attribute(repro(["<div{}>", "<body{}>"])) == "second <html>/<body> tag"
+    assert B.attribute(repro(["<b{}>", "<p{}>", "</b>"])) == "adoption agency"
+    assert B.attribute(repro(["<nobr{}>", "<div{}>", "<nobr{}>"])) == "adoption agency"
+    assert B.attribute(repro(["<div{}>", "<frameset{}>"])) == "frameset replacing the body"
+    selected = ["<select{}>", "<selectedcontent{}>", "</selectedcontent>", "<option{}>", "t", "</option>"]
+    assert B.attribute(repro(selected)) == "<selectedcontent> clone"
+    assert B.attribute(repro(["<select{}>", "<option{}>", "t", "</option>"])) is None
+    assert [c.name for c in B.CONSTRUCTS] == ["frameset replacing the body", "second <html>/<body> tag",
+                                              "adoption agency", "foster parenting", "<selectedcontent> clone"]
 
 
 # A browser tree holding what lxml cannot: control characters in text and attribute values, a `p"x` tag
@@ -1527,3 +1527,145 @@ def test_the_competitive_benchmark_translates_parsel_text_pseudos_faithfully():
     assert bench_engines.css_plan("h1::text, h2::text") == ("h1, h2", CHILD, None)
     assert bench_engines.css_translate("h1::text, img::attr(src)")[1].startswith("comma list")
     assert bench_engines.css_translate("//div/text()")[1].startswith("xpath")
+
+
+# ------------------------------------------------------- HTML5 categories (tools/gen_html5_rules.py)
+class _Libxml2AsAnOracle:
+    """The same probes against a parser that does NOT implement the HTML5 tree builder: libxml2 through
+    lxml, with the interface `derive` needs from a `BrowserOracle`."""
+
+    browser, build = "libxml2", "libxml2 (lxml)"
+    errors: list = []
+    selfcheck_checked, selfcheck_differ = 0, []
+
+    def trees(self, docs, *, selfcheck=False):
+        from browser_oracle.tree import from_lxml
+        from lxml import etree
+
+        return [from_lxml(etree.fromstring(d.encode(), etree.HTMLParser())) for d in docs]
+
+
+def _html5_snapshot():
+    import gen_html5_rules as H
+
+    return H, H.load_snapshot()
+
+
+def test_the_html5_probes_read_the_parser_and_not_the_document():
+    """A probe that answers the same whatever parser it is given measures its own document. Run against
+    libxml2, which has no adoption agency, no scope lists and no ruby rules, the derivation must come out
+    visibly different from Chrome's, and its controls must fail."""
+    H, snap = _html5_snapshot()
+    chrome = H.Derivation.from_json(snap["browsers"]["chrome"])
+    libxml2 = H.derive(_Libxml2AsAnOracle())
+    assert H.control_failures(chrome) == []
+    failed = H.control_failures(libxml2)
+    assert failed, "libxml2 must fail the HTML5 controls"
+    # the formatting probe in particular reads reconstruction, which libxml2 never does
+    assert not H.resolve(libxml2, "formatting") & set(H.SPEC["formatting"])
+    assert any(f.startswith("formatting:") for f in failed)
+    # and a category can come out differently without the others moving: libxml2's `</div>` is not
+    # ignored for any element in scope, so the default scope loses names Chrome keeps
+    assert H.resolve(chrome, "scope") != H.resolve(libxml2, "scope")
+
+
+def test_every_html5_category_reads_both_ways_and_agrees_with_its_witness():
+    H, snap = _html5_snapshot()
+    chrome = H.Derivation.from_json(snap["browsers"]["chrome"])
+    for cat in H.CATEGORIES:
+        seen = {v for v in chrome.answers[cat].values() if v is not None}
+        assert seen == {True, False}, f"{cat} answered {seen} over the whole universe"
+    for cat, wit in H.WITNESS.items():
+        both = [n for n in H.PROBE_NAMES
+                if chrome.answers[cat][n] is not None and chrome.answers[wit][n] is not None]
+        assert len(both) > 20, f"the {wit} witness reads too few of {cat}'s names to be a check"
+    assert H.witness_disagreements(chrome) == []
+    assert set(H.WITNESS) <= set(H.CATEGORIES)
+    # every name the spec lists is in the universe, or its cell could never be probed
+    for cat, names in H.SPEC.items():
+        assert names <= set(H.PROBE_NAMES), f"{cat}: spec names outside the universe: {names - set(H.PROBE_NAMES)}"
+
+
+def test_the_html5_decision_functions_answer_from_the_tree():
+    """Each reader is run on hand-built trees, one per outcome, so a probe that always says True or always
+    says False cannot pass."""
+    H = pytest.importorskip("gen_html5_rules")
+
+    def doc(*body):
+        return H.load(["#d", [["html", 0, [], [["body", 0, [], list(body)]]]]])
+
+    def el(name, ident, *kids):
+        return [name, 0, ["id", ident], list(kids)]
+
+    # formatting: a clone with the same id means the element was reconstructed
+    popped = doc(el("div", "d", el("b", "x", "t")), el("b", "x", "u"))
+    single = doc(el("div", "d", el("b", "x", "t")), "u")
+    not_popped = doc(el("div", "d", el("b", "x", "t", "u")))
+    assert H.read_formatting("b", {H.formatting_doc("b"): popped}, None).value is True
+    assert H.read_formatting("b", {H.formatting_doc("b"): single}, None).value is False
+    assert H.read_formatting("b", {H.formatting_doc("b"): not_popped}, None).value is None
+    assert H.read_formatting("b", {H.formatting_doc("b"): popped}, "void").value is None
+
+    # end-tag probes: equal marker ancestry with and without the end tag means the end tag was ignored
+    with_end, without = H.end_tag_docs("scope", "x", H.DOCTYPE)
+    inside = doc(el("div", "d", el("x", "x", "t", el("zmark", "Z"))))
+    outside = doc(el("div", "d", el("x", "x", "t")), el("zmark", "Z"))
+    ignored = {with_end: inside, without: inside}
+    honoured = {with_end: outside, without: inside}
+    assert H.read_end_tag("scope", "x", ignored, None).value is True
+    assert H.read_end_tag("scope", "x", honoured, None).value is False
+    # a name that is not a direct child of the wrapper cannot be read, in either compat mode
+    stray = doc(el("div", "d"), el("x", "x"), el("zmark", "Z"))
+    both = {d: stray for pair in (H.end_tag_docs("scope", "x", p) for p in H.PREFIXES) for d in pair}
+    assert H.read_end_tag("scope", "x", both, None).value is None
+
+    # void: no child, and the whitespace written after it is its next sibling
+    void_tree = doc(el("x", "x"), " ")
+    open_tree = doc(el("x", "x", " "))
+    trees = {H.place_doc("x", c): H.load(["#d", []]) for c in H.CONTEXTS}
+    trees[H.place_doc("x", "<body>")] = void_tree
+    assert H.read_place("x", trees)[1].value is True
+    trees[H.place_doc("x", "<body>")] = open_tree
+    assert H.read_place("x", trees)[1].value is False
+    trees[H.place_doc("x", "<body>")] = H.load(["#d", []])
+    assert H.read_place("x", trees)[1].value is None
+
+
+def test_the_html5_check_fails_on_a_wrong_cell_a_stale_probe_and_a_moved_browser():
+    """`--check` is the gate on the generated file, so each way it can be wrong is seeded."""
+    H, snap = _html5_snapshot()
+    rust = open(H.RUST_SRC).read()
+    assert H.check_generated(snap, rust) == [], "the committed file must match its stored derivation"
+
+    # a wrong category cell in the Rust file: a name dropped from the formatting arm, and a flag swapped
+    assert 'b"nobr" | ' in rust
+    assert H.check_generated(snap, rust.replace('b"nobr" | ', "", 1)), "a dropped member must fail"
+    assert H.check_generated(snap, rust.replace("SPECIAL | LIST_ITEM_SCOPE", "SPECIAL", 1)), \
+        "a dropped flag must fail"
+
+    # a wrong stored answer: the file no longer renders from it
+    import copy
+
+    wrong = copy.deepcopy(snap)
+    wrong["browsers"]["chrome"]["answers"]["formatting"]["span"] = True
+    failures = H.check_generated(wrong, rust)
+    assert failures, "a flipped stored answer must fail"
+    assert any("formatting" in f for f in failures), "...and the control for it must be named"
+
+    # a probe edited without re-deriving
+    stale = copy.deepcopy(snap)
+    stale["fingerprint"] = "0" * 64
+    assert any("probe documents changed" in f for f in H.check_generated(stale, rust))
+
+    # a universe name added without re-deriving
+    grown = copy.deepcopy(snap)
+    grown["universe"] = grown["universe"][:-1]
+    assert any("universe" in f for f in H.check_generated(grown, rust))
+
+    # --live: the same answers pass, a moved browser does not
+    stored = H.Derivation.from_json(snap["browsers"]["chrome"])
+    assert H.compare_live(stored, H.Derivation.from_json(snap["browsers"]["chrome"])) == []
+    moved = H.Derivation.from_json(copy.deepcopy(snap["browsers"]["chrome"]))
+    moved.answers["scope"]["div"] = True
+    moved.modes["div"] = "rcdata"
+    assert len(H.compare_live(stored, moved)) == 2

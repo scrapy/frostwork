@@ -627,11 +627,14 @@ def rule_sources() -> list[str]:
     return sources
 
 
-def names_in(sources: list[str]) -> set[str]:
-    """Every lowercase ASCII string literal in `sources` that could be an element name."""
+def names_in(sources: list[str], *, skip_tests: bool = False) -> set[str]:
+    """Every lowercase ASCII string literal in `sources` that could be an element name. With `skip_tests`,
+    only what comes before a file's first `#[cfg(test)]`: unit tests name elements too."""
     names: set[str] = set()
     for rel in sources:
         src = open(rel).read()
+        if skip_tests:
+            src = src.split("#[cfg(test)]")[0]
         names |= {m.lower() for m in re.findall(r'"([a-z][a-z0-9]{0,10})"', src)}
         names |= {m.lower() for m in re.findall(r'b"([a-z][a-z0-9]{0,10})"', src)}
     return names

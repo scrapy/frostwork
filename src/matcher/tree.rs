@@ -38,6 +38,22 @@ pub(super) trait TreeBuilder<'a> {
 
     /// Is a `<![CDATA[` section character data at this point? See [`TokenSink::cdata_is_text`].
     fn cdata_is_text(&self, m: &Matcher<'a>) -> bool;
+
+    /// A `<!DOCTYPE …>`: no node, and the text either side of it stays one node.
+    fn doctype(&mut self, m: &mut Matcher<'a>, raw: &'a [u8], from: usize, to: usize) {
+        let _ = raw;
+        m.absorb_into_text_gap(from, to)
+    }
+
+    /// A comment node, which ends the text node before it unless the builder puts it elsewhere.
+    fn comment(&mut self, m: &mut Matcher<'a>, from: usize, to: usize) {
+        let _ = (m, from, to);
+    }
+
+    /// End of input, before the matcher closes what is still open.
+    fn finish(&mut self, m: &mut Matcher<'a>) {
+        let _ = m;
+    }
 }
 
 /// One document's scan: the matcher's state plus the tree builder of the schema's mode.
@@ -69,12 +85,22 @@ impl<'a, B: TreeBuilder<'a>> TokenSink<'a> for Scan<'a, B> {
         self.builder.text(&mut self.m, text, mode, start)
     }
 
-    /// A doctype (and `</>`) leaves no node AND does not end the surrounding text node in either
-    /// parser, so it is absorbed into the pending node's gap the way a dropped end tag is: the runs
-    /// either side of it are ONE node.
+    /// `</>` and a CDATA section's delimiters leave no node AND do not end the surrounding text node in
+    /// either parser, so they are absorbed into the pending node's gap the way a dropped end tag is: the
+    /// runs either side of them are ONE node.
     #[inline]
     fn invisible_markup(&mut self, from: usize, to: usize) {
         self.m.absorb_into_text_gap(from, to)
+    }
+
+    #[inline]
+    fn doctype(&mut self, raw: &'a [u8], from: usize, to: usize) {
+        self.builder.doctype(&mut self.m, raw, from, to)
+    }
+
+    #[inline]
+    fn comment(&mut self, from: usize, to: usize) {
+        self.builder.comment(&mut self.m, from, to)
     }
 
     #[inline]

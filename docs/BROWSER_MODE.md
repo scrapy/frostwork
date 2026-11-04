@@ -390,7 +390,7 @@ rule is written.
 
 ### The rest of the engine
 
-- **A second generated file**, `implied_close/generated_html5.rs`, written by `tools/gen_tree_rules.py`
+- **A second generated file**, `implied_close/generated_html5.rs`, written by `tools/gen_html5_rules.py`
   from the HTML5 oracle over the same `ELEMENTS` universe. HTML5's rules are not an (open x incoming)
   table, though. They are element categories (special, formatting, the four scope sets, implied end
   tags, void, data modes) plus algorithms that walk the stack. Derive the categories from the oracle,

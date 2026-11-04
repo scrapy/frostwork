@@ -1002,6 +1002,9 @@ struct PendingText<'a> {
 struct NsState {
     pending: Option<(usize, String)>, // (element depth, accumulated subtree text) — Element mode only
     value: Option<String>,            // finalized normalized string of the first matched node
+    /// The pending element is parked (see [`Matcher::park`]): it is still open, but text arriving
+    /// meanwhile is outside it, and an element closing at its depth is not it.
+    parked: bool,
 }
 
 // A subject-tag dispatch index measures NEUTRAL here (`bench_matrix.py`). Class-led selectors cannot be
@@ -1088,7 +1091,10 @@ impl CompiledSchema {
             if browser
                 && members
                     .iter()
-                    .any(|m| matches!(m.terminal, Terminal::OuterHtml) && admits_synthesized_frame(m))
+                    .any(|m| {
+                        matches!(m.terminal, Terminal::OuterHtml)
+                            && (admits_synthesized_frame(m) || compile::admits_browser_synthesized(m))
+                    })
             {
                 refusals.push((Slot::Flat(i), Refusal::SynthesizedOuterHtml));
                 continue;
@@ -1225,9 +1231,14 @@ impl CompiledSchema {
                 let (seg, terminal) = match sub {
                     Some(s)
                         if browser
-                            && frame_scope
                             && matches!(s.terminal, Terminal::OuterHtml)
-                            && admits_synthesized_frame(s) =>
+                            && ((frame_scope && admits_synthesized_frame(s))
+                                // `.` (depth 0) is the container itself
+                                || if s.context_depth == Some(0) {
+                                    container.as_ref().is_some_and(compile::admits_browser_synthesized)
+                                } else {
+                                    compile::admits_browser_synthesized(s)
+                                }) =>
                     {
                         refusals.push((Slot::Sub { group: g, sub: subsels.len() }, Refusal::SynthesizedOuterHtml));
                         (None, Terminal::Text { subtree: false })
@@ -1597,6 +1608,7 @@ impl CompiledSchema {
     ) -> (FlatColumns, Vec<GroupRows>) {
         let mut scan = tree::Scan { m: Matcher::new(self, input), builder };
         crate::tokenizer::tokenize(input.bytes(), &mut scan);
+        scan.builder.finish(&mut scan.m);
         scan.m.finish_grouped()
     }
 
@@ -1926,7 +1938,7 @@ impl<'a> Matcher<'a> {
         if self.schema.has_ns_element {
             let depth = self.stack.len();
             for st in &mut self.ns {
-                if matches!(&st.pending, Some((d, _)) if *d == depth) {
+                if !st.parked && matches!(&st.pending, Some((d, _)) if *d == depth) {
                     let buf = st.pending.take().unwrap().1;
                     st.value = Some(decode::normalize_space(&buf));
                 }
@@ -2490,7 +2502,8 @@ impl<'a> Matcher<'a> {
             match inner {
                 // element string-value: all text while the first matched element is open is its subtree
                 Terminal::OuterHtml => {
-                    if let Some((_d, buf)) = &mut self.ns[k].pending {
+                    let st = &mut self.ns[k];
+                    if let (Some((_d, buf)), false) = (&mut st.pending, st.parked) {
                         buf.push_str(&val.finalize(input));
                     }
                 }
@@ -2711,6 +2724,84 @@ impl<'a> Matcher<'a> {
         let e = self.stack.pop().expect("close_top with nothing open");
         self.close_elem(e, end);
     }
+
+    /// Take the open elements from depth `base` up off the stack WITHOUT closing them, with everything
+    /// the matcher keeps per depth for them: their children's position counters, the group instances
+    /// they opened and a `normalize-space` element they are accumulating. The element at `base - 1`
+    /// becomes the current one, so content inserted meanwhile is its child and outside the parked ones,
+    /// which is how a browser-mode builder inserts beside an element that stays open (a fostered
+    /// element goes before its table, and the table is still open for its next row). [`Self::unpark`]
+    /// puts them back at the same depth, once everything opened meanwhile has closed.
+    ///
+    /// The caller has flushed the buffered text, which belongs to the parked elements.
+    pub(super) fn park(&mut self, base: usize) -> Parked<'a> {
+        debug_assert!(self.pending_text.is_none(), "text must be delivered before its element parks");
+        let elems = self.stack.split_off(base);
+        let pos = if self.schema.has_positional {
+            let stride = 1 + self.schema.positional_tags.len();
+            self.pos.split_off((base + 1) * stride)
+        } else {
+            Vec::new()
+        };
+        let k = self.open_instances.iter().position(|oi| oi.depth >= base).unwrap_or(self.open_instances.len());
+        let instances = self.open_instances.split_off(k);
+        let mut ns = Vec::new();
+        for (k, st) in self.ns.iter_mut().enumerate() {
+            if !st.parked && matches!(&st.pending, Some((d, _)) if *d >= base) {
+                st.parked = true;
+                ns.push(k);
+            }
+        }
+        Parked { elems, pos, instances, ns }
+    }
+
+    /// Put back elements [`Self::park`] took off, at the depth they were taken from.
+    pub(super) fn unpark(&mut self, parked: Parked<'a>) {
+        debug_assert!(self.pending_text.is_none(), "text must be delivered before the stack changes");
+        if self.schema.has_positional {
+            let stride = 1 + self.schema.positional_tags.len();
+            debug_assert_eq!(self.pos.len(), (self.stack.len() + 1) * stride, "unparked at another depth");
+        }
+        self.stack.extend(parked.elems);
+        self.pos.extend(parked.pos);
+        self.open_instances.extend(parked.instances);
+        for k in parked.ns {
+            self.ns[k].parked = false;
+        }
+    }
+
+    /// Add the attributes of `raw_attrs` that the open element at `depth` does not already have, the
+    /// way a second `<html>` or `<body>` start tag does in a browser. Later elements see them, since
+    /// matching reads an ancestor's attributes when it runs; the element's own match was decided when
+    /// it opened and stays as it was.
+    pub(super) fn merge_attrs(&mut self, depth: usize, raw_attrs: &[(&'a [u8], Option<&'a [u8]>)]) {
+        let attrs = if self.decode_names {
+            self.materialize_attrs::<true>(raw_attrs)
+        } else {
+            self.materialize_attrs::<false>(raw_attrs)
+        };
+        if attrs.is_empty() {
+            return;
+        }
+        let wants = self.schema.wants;
+        let el = &mut self.stack[depth];
+        for (name, value) in attrs {
+            if !el.attrs.iter().any(|(n, _)| n.eq_ignore_ascii_case(name)) {
+                el.attrs.push((name, value));
+            }
+        }
+        if wants.any() {
+            el.sig = el.signature(wants);
+        }
+    }
+}
+
+/// Open elements taken off the matcher stack by [`Matcher::park`], with their per-depth state.
+pub(super) struct Parked<'a> {
+    elems: Vec<OpenElem<'a>>,
+    pos: Vec<u32>,
+    instances: Vec<OpenInstance>,
+    ns: Vec<usize>,
 }
 
 impl<'a> Matcher<'a> {
@@ -2735,8 +2826,10 @@ impl<'a> Matcher<'a> {
         // is dropped end tags, which libxml2 discards. Any real node in the gap shifts `start` past
         // `gap_end` and so breaks the join.
         if let Some(p) = &mut self.pending_text {
-            if p.gap_end == start && p.mode == mode {
-                // decode this run on its own and append the STRING — see `PendingText`
+            if p.gap_end == start {
+                // decode this run on its own, in its own mode, and append the STRING — see
+                // `PendingText`. Runs of different modes join only in browser mode, where a CDATA
+                // section in foreign content is character data like the text either side of it.
                 if p.joined.is_empty() {
                     p.joined = self.input.text_value(p.bytes, p.mode);
                 }

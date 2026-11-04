@@ -14,8 +14,10 @@
 #   make gate-seq    every tag SEQUENCE up to depth 4, compared on the whole tree
 #   make gate-browser  the same whole-tree fingerprint against real Chrome (BROWSERS=chrome,firefox for
 #                    both), each divergence reduced and filed under a docs/BROWSER_MODE.md construct,
-#                    plus value columns (native CSS, XPath through the lxml bridge);
-#                    fails on NOVEL or on coverage. Needs Node 22+ and the browsers (FROSTWORK_CHROME=…)
+#                    plus value columns (native CSS, XPath through the lxml bridge); fails on NOVEL or
+#                    on coverage; then re-measures the HTML5 categories in Chrome and fails if they moved
+#                    (tools/gen_html5_rules.py --check --live). Needs Node 22+ and the browsers
+#                    (FROSTWORK_CHROME=…)
 #   make gate-corpus-browser [CORPUS=<dir>]  browser mode vs Chrome page loads over a page corpus,
 #                    per selector, split tree vs value (report-only)
 #   make corpus-real fetch REAL pages into fixtures/realweb (gitignored), then gate over them
@@ -24,7 +26,9 @@
 #   make gate-mutate-full  every rule cell, with the fast gates only (hours; SHARD=K/N splits it) — weekly
 #   make soak        multi-million differential/fuzz soak across independent seeds
 #   make py          rebuild the extension (maturin --release), Python suite + tree-rule audit +
-#                    the generated start-close table vs the oracle (tools/gen_tree_rules.py --check)
+#                    the generated start-close table vs the oracle (tools/gen_tree_rules.py --check) +
+#                    the generated HTML5 categories vs their stored derivation, no browser needed
+#                    (tools/gen_html5_rules.py --check)
 #   make release-check  build the sdist and validate the exact metadata/README PyPI will render
 #   make gate-webpoet  web-poet integration differential vs parsel, compared on the WHOLE item,
 #                    plus the upstream surface snapshot (docs/WEBPOET_SURFACE.md) vs the real libraries
@@ -173,6 +177,7 @@ BROWSER_VALUES ?= 1000
 gate-browser: ext
 	$(PY) tools/diff_browser.py --browsers $(BROWSERS) --seq-depth $(BROWSER_SEQ_DEPTH) \
 		--random $(BROWSER_RANDOM) --values $(BROWSER_VALUES) --gate
+	$(PY) tools/gen_html5_rules.py --check --live
 
 # "Is every rule cell RIGHT?" is what tools/audit_tree_rules.py answers. This answers "if a cell were
 # WRONG, would any gate notice?" — the only check here that finds blind spots without a human guessing
@@ -204,6 +209,7 @@ py: ext
 	$(PY) -m pytest tests/ -q
 	$(PY) tools/support_snapshot.py --check
 	$(PY) tools/gen_tree_rules.py --check
+	$(PY) tools/gen_html5_rules.py --check
 	$(PY) tools/audit_tree_rules.py --gate
 	$(PY) -m mypy python/frostwork tests/typing_fixture.py
 

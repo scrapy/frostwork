@@ -193,6 +193,27 @@ pub(crate) fn admits_synthesized_frame(sel: &Selector) -> bool {
     names_a_frame && !attribute_bound
 }
 
+/// Could a match of `sel` be one of the other elements browser mode builds with no source of its own:
+/// an implied `<tbody>`, `<tr>` or `<colgroup>`, the `<p>` a stray `</p>` inserts (none of which has
+/// attributes), or a formatting element reopened as a clone, which carries the original's attributes?
+/// Any container can hold one, so unlike the frame this is not scoped.
+pub(crate) fn admits_browser_synthesized(sel: &Selector) -> bool {
+    let subject = sel.parts.last().expect("a compiled selector has a subject compound");
+    let attribute_bound = subject.id.is_some() || !subject.classes.is_empty() || !subject.attrs.is_empty();
+    match subject.tag.as_deref().filter(|t| *t != "*") {
+        None => true, // a clone of any formatting element, with whatever attributes it was written with
+        Some(name) => {
+            let low = name.to_ascii_lowercase();
+            crate::implied_close::html5_cat(low.as_bytes()) & crate::implied_close::FORMATTING != 0
+                || (!attribute_bound && IMPLIED_NAMES.contains(&low.as_str()))
+        }
+    }
+}
+
+/// The elements browser mode's tree builder inserts for a token that is not their own start tag, besides
+/// the frame.
+const IMPLIED_NAMES: [&str; 4] = ["tbody", "tr", "colgroup", "p"];
+
 /// Could a match of `sel` be, or contain, a synthesized frame element? Its subtree holds one only when the
 /// match is an `<html>` or a `<frameset>` (libxml2 synthesizes a `<body>` inside a frameset for head
 /// content there), written or not and whatever its attributes, so a `<div>` container cannot.
@@ -212,8 +233,8 @@ pub(crate) enum Refusal {
     /// The value is read from a deferred winner's subtree by re-scanning its raw source as a standalone
     /// document (`Matcher::resolve_tail_spans`). A libxml2 span is self-contained; an HTML5 one is not.
     TailRescan,
-    /// The value is outer HTML, and a match can be a document-frame element the page never wrote, which
-    /// has no source of its own (see [`admits_synthesized_frame`]).
+    /// The value is outer HTML, and a match can be an element the page never wrote, which has no source
+    /// of its own (see [`admits_synthesized_frame`] and [`admits_browser_synthesized`]).
     SynthesizedOuterHtml,
 }
 
@@ -228,9 +249,11 @@ impl Refusal {
                  or use parser=\"lxml\""
             }
             Refusal::SynthesizedOuterHtml => {
-                "unsupported in browser mode: the selector can match an <html>, <head> or <body> the page \
-                 never wrote, which has no source of its own to return as outer HTML. Constrain it with an \
-                 attribute (body.page), select its content, or use parser=\"lxml\""
+                "unsupported in browser mode: the selector can match an element the page never wrote (an \
+                 <html>, <head> or <body>, an implied <tbody>, <tr> or <colgroup>, the <p> a stray </p> \
+                 inserts, or a formatting element such as <b> or <a> reopened as a copy), which has no \
+                 source of its own to return as outer HTML. Name a non-formatting element and constrain it \
+                 with an attribute (div.page), select its content, or use parser=\"lxml\""
             }
         }
     }
