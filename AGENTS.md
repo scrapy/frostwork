@@ -288,9 +288,11 @@ a way it has read 100% while the engine was wrong:
   `matcher/` — **the real logic**: `mod.rs` (corrected-stack matcher: `CompiledSchema` compile +
   `Matcher` streaming execute, and the primitives a tree builder drives it with), `tree.rs` (the seam:
   the `TreeBuilder` trait each parse mode implements, which also picks the tokenizer's next state),
-  `libxml2.rs` (lxml mode's tree decisions), `browser.rs` (browser mode's: libxml2's rules plus the
-  browser behaviours that need no HTML5 insertion modes, until the HTML5 builder replaces its
-  internals), `compile.rs` (routing eligibility: which selector shapes execute
+  `libxml2.rs` (lxml mode's tree decisions), `browser/` (browser mode's: HTML5 tree construction as
+  Chrome runs it. `mod.rs` holds the builder's state and how it drives the matcher, and its header says
+  how the parser stack differs from the DOM path; `rules.rs` the insertion modes, `lists.rs` the stack of
+  open elements and the active formatting list with their indexes, `dom.rs` the replay's tree, `tags.rs`
+  and `doctype.rs` names and the document mode), `compile.rs` (routing eligibility: which selector shapes execute
   faithfully vs. stay unsupported, and what browser mode refuses), `matching.rs` (pure read-only match
   predicates), `deferred.rs`
   (bounded state machines for deferred-close predicates), `frame.rs` (the libxml2 builder's document-frame

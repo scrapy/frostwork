@@ -113,7 +113,7 @@ answers of both paths are compared as well as the trees.
 `browser_oracle/css.py` plans parsel's CSS for `querySelectorAll`. The browser decides what matches,
 attribute case folding and quirks-mode class matching included; what the browser has no syntax for is
 parsel's and is mirrored from parsel's own translator: `::text` is the matched element's text-node
-children, `::attr(name)` the attribute named exactly `name`, a pseudo-element after a descendant
+children, `::attr(name)` the attribute `getAttribute(name)` returns, a pseudo-element after a descendant
 combinator and a bare universal (`p ::text`, `div *::text`) is the subtree form, a comma group is a union
 in document order, and `:contains()` becomes a marker attribute for the duration of one query. Every plan
 is checked against parsel before it is sent: the native CSS with the pseudo-element put back must

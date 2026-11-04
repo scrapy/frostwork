@@ -30,9 +30,14 @@ first public release.
   implied `<tbody>`, `<tr>` or `<colgroup>`, the `<p>` a stray `</p>` inserts) and `.as_node()` handoffs.
   Deferred selectors with a tail (`li:last-child b::text`, `div:has(a) ::text`) are supported, read by a
   second pass over the page.
+- `::attr()` reads an attribute as `getAttribute()` does in browser mode: the name is lowercased on an
+  HTML element (`div::attr(ID)` answers) and compared exactly on an SVG or MathML one
+  (`svg::attr(viewBox)` answers, `svg::attr(viewbox)` does not).
 
 ### Correctness
 
+- Lxml mode compares an `::attr()` name exactly with libxml2's lowercased attribute name, as Parsel
+  does, so `div::attr(ID)` is `[]` where it returned the id.
 - `FrostPage` and `Page.extract_response` give the engine the response's raw `Content-Type` header, its
   URL and any encoding the user forced (the framework's `_encoding`), instead of the framework's resolved
   `response.encoding`. Frostwork's own prescan and autodetection now run behind a web-poet or Scrapy
