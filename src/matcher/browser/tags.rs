@@ -122,6 +122,9 @@ pub(super) enum Tag {
     Other,
 }
 
+/// How many [`Tag`]s there are, [`Tag::Other`] included.
+pub(super) const TAGS: usize = Tag::Other as usize + 1;
+
 /// The longest name [`lower`] keeps: longer than every name a table here is keyed by.
 pub(in crate::matcher) const MAX_NAME: usize = 24;
 

@@ -8,9 +8,11 @@
 //! In a test build every entry either list hands out is counted ([`reads`]), so a test can bound the
 //! work a document costs rather than its wall time.
 
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::hash::{BuildHasher, Hasher};
 
-use super::tags::Tag;
+use super::tags::{Tag, TAGS};
 use super::{Node, Ns, StartTok};
 use crate::implied_close::{BUTTON_SCOPE, LIST_ITEM_SCOPE, SCOPE, SPECIAL, TABLE_SCOPE};
 use crate::matcher::{EncodedInput, SourcePrefix};
@@ -70,6 +72,48 @@ fn fnv(h: u64, bytes: impl Iterator<Item = u8>) -> u64 {
 
 const FNV_SEED: u64 = 0xcbf2_9ce4_8422_2325;
 
+/// The hasher of the two lists' maps, whose keys are hashes already. Each word is mixed into a key drawn
+/// once per list from the standard library's random state, so a page cannot aim its keys at one bucket,
+/// for a few multiplications per lookup where SipHash takes several rounds.
+#[derive(Clone, Copy)]
+struct Keyed(u64);
+
+impl Default for Keyed {
+    fn default() -> Self {
+        Keyed(std::hash::RandomState::new().hash_one(0u8))
+    }
+}
+
+impl BuildHasher for Keyed {
+    type Hasher = Mixer;
+
+    fn build_hasher(&self) -> Mixer {
+        Mixer(self.0)
+    }
+}
+
+struct Mixer(u64);
+
+impl Hasher for Mixer {
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.write_u64(u64::from(b));
+        }
+    }
+
+    fn write_u32(&mut self, n: u32) {
+        self.write_u64(u64::from(n));
+    }
+
+    fn write_u64(&mut self, n: u64) {
+        self.0 = mix(self.0 ^ n);
+    }
+
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
 /// An HTML element no [`Tag`] names is indexed by a hash of its lowercased name.
 fn other_name(n: &Node<'_>) -> Option<u64> {
     (n.tag == Tag::Other && n.ns == Ns::Html).then(|| fnv(FNV_SEED, n.name.iter().map(u8::to_ascii_lowercase)))
@@ -83,7 +127,7 @@ pub(super) struct OpenStack<'a> {
     nodes: Vec<Node<'a>>,
     at: Vec<u32>,
     by_tag: Vec<Vec<u32>>,
-    by_name: HashMap<u64, Vec<u32>>,
+    by_name: HashMap<u64, Vec<u32>, Keyed>,
     bounds: [Vec<u32>; BOUNDS],
 }
 
@@ -352,23 +396,18 @@ fn same_attrs<'a>(input: EncodedInput<'a>, a: &FmtTok<'a>, b: &FmtTok<'a>) -> bo
     })
 }
 
-/// The two kinds of count the list keeps per segment (the entries after a marker, or all of them before
-/// the first): entries by [`ark_key`], and entries by tag.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-enum Key {
-    Ark(u64),
-    Tag(u8),
-}
-
 /// The list of active formatting elements, and the start tags its elements were made for. Besides the
-/// entries it keeps where each marker is and, per segment, how many entries it holds of each tag and of
-/// each [`ark_key`], so Noah's Ark and "is there an `<a>` after the last marker" are counts rather than
-/// scans.
+/// entries it keeps where each marker is and, per segment (the entries after a marker, or all of them
+/// before the first), how many entries it holds of each tag and of each [`ark_key`], so Noah's Ark and
+/// "is there an `<a>` after the last marker" are counts rather than scans.
 #[derive(Default)]
 pub(super) struct Formatting<'a> {
     list: Vec<Afe>,
     markers: Vec<usize>,
-    counts: HashMap<(u32, Key), u32>,
+    /// Entries by tag, `TAGS` counts per segment: `tags[segment * TAGS + tag]`.
+    tags: Vec<u32>,
+    /// Entries by segment and Noah's Ark key.
+    arks: HashMap<(u32, u64), u32, Keyed>,
     /// Every formatting element's start tag, in document order; an element and its copies share one.
     pub(super) toks: Vec<FmtTok<'a>>,
 }
@@ -390,12 +429,17 @@ impl<'a> Formatting<'a> {
 
     /// How many entries after the last marker have the key `ark`.
     fn alike(&self, ark: u64) -> u32 {
-        self.counts.get(&(self.markers.len() as u32, Key::Ark(ark))).copied().unwrap_or(0)
+        self.arks.get(&(self.markers.len() as u32, ark)).copied().unwrap_or(0)
+    }
+
+    /// How many entries of segment `seg` were made for a `tag` start tag.
+    fn tagged(&self, seg: u32, tag: Tag) -> u32 {
+        self.tags.get(seg as usize * TAGS + tag as usize).copied().unwrap_or(0)
     }
 
     /// Is there an entry with `tag` after the last marker?
     fn has_tag(&self, tag: Tag) -> bool {
-        self.counts.contains_key(&(self.markers.len() as u32, Key::Tag(tag as u8)))
+        self.tagged(self.markers.len() as u32, tag) > 0
     }
 
     /// The segment the entry at `k` is in: the number of markers before it.
@@ -405,16 +449,22 @@ impl<'a> Formatting<'a> {
 
     fn count(&mut self, seg: u32, e: Afe, up: bool) {
         let Afe::El { tok, .. } = e else { return };
-        let t = &self.toks[tok as usize];
-        for key in [Key::Ark(t.ark), Key::Tag(t.tag as u8)] {
-            let c = self.counts.entry((seg, key)).or_insert(0);
-            if up {
-                *c += 1;
+        let (ark, tag) = (self.toks[tok as usize].ark, self.toks[tok as usize].tag);
+        let i = seg as usize * TAGS + tag as usize;
+        if self.tags.len() <= i {
+            self.tags.resize((seg as usize + 1) * TAGS, 0);
+        }
+        if up {
+            self.tags[i] += 1;
+            *self.arks.entry((seg, ark)).or_insert(0) += 1;
+            return;
+        }
+        self.tags[i] -= 1;
+        if let Entry::Occupied(mut c) = self.arks.entry((seg, ark)) {
+            if *c.get() == 1 {
+                c.remove();
             } else {
-                *c -= 1;
-                if *c == 0 {
-                    self.counts.remove(&(seg, key));
-                }
+                *c.get_mut() -= 1;
             }
         }
     }
@@ -434,7 +484,8 @@ impl<'a> Formatting<'a> {
     /// from the end, for as many as have the key.
     pub(super) fn push_element(&mut self, input: EncodedInput<'a>, uid: u32, tok: u32) {
         let t = &self.toks[tok as usize];
-        let mut keyed = self.alike(t.ark);
+        // Three alike are three of the tag, which the tag count answers without hashing the key.
+        let mut keyed = if self.tagged(self.markers.len() as u32, t.tag) >= 3 { self.alike(t.ark) } else { 0 };
         if keyed >= 3 {
             let (mut same, mut earliest) = (0, None);
             let mut k = self.len();
@@ -472,6 +523,9 @@ impl<'a> Formatting<'a> {
         while let Some(e) = self.list.pop() {
             read(1);
             if e == Afe::Marker {
+                // The segment's counts are all back to zero, ready for the next segment at its depth.
+                let seg = self.markers.len();
+                debug_assert!(self.tags.iter().skip(seg * TAGS).take(TAGS).all(|&c| c == 0));
                 self.markers.pop();
                 break;
             }
