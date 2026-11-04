@@ -22,6 +22,7 @@ import json
 import os
 import subprocess
 import sys
+from collections import Counter
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DIFFER = os.path.join(HERE, "..", "target", "release", "differ")
@@ -37,6 +38,7 @@ RULES = [
     ("past the depth cap", 1 << 6),
 ]
 ANY_REPLAY = sum(bit for name, bit in RULES if name != "second <html>/<body> with any attribute")
+BITS = [bit for _name, bit in RULES] + [ANY_REPLAY]
 
 
 def pages_of(corpus: str, limit: int) -> list[tuple[str, list[str]]]:
@@ -55,24 +57,21 @@ def pages_of(corpus: str, limit: int) -> list[tuple[str, list[str]]]:
     return out
 
 
-def census(pages: list[tuple[str, list[str]]]) -> tuple[int, dict[int, int]]:
+def census(pages: list[tuple[str, list[str]]]) -> tuple[int, Counter]:
     """`(pages read, pages per rule bit)`. The differ answers a whole batch at once (it does not flush
     per line), so the batch is written before anything is read."""
     batch = "".join("\t".join(["R", path, *sels]) + "\n" for path, sels in pages)
     out = subprocess.run([DIFFER, "--parser", "browser"], input=batch, capture_output=True, text=True,
                          check=True).stdout.splitlines()
     assert len(out) == len(pages), "the differ answered a different number of pages"
-    counts = {bit: 0 for _, bit in RULES}
-    counts[ANY_REPLAY] = 0
+    counts: Counter = Counter()
     read = 0
     for line in out:
         answer = json.loads(line)
         if answer is None:
             continue
         read += 1
-        for _, bit in RULES:
-            counts[bit] += bool(answer & bit)
-        counts[ANY_REPLAY] += bool(answer & ANY_REPLAY)
+        counts.update(bit for bit in BITS if answer & bit)
     return read, counts
 
 
@@ -84,14 +83,11 @@ def main() -> int:
     if not os.path.exists(DIFFER):
         print("build the differ first: cargo build --release", file=sys.stderr)
         return 2
-    total_pages, total = 0, {bit: 0 for _, bit in RULES}
-    total[ANY_REPLAY] = 0
+    total_pages, total = 0, Counter()
     for corpus in args.corpora:
-        pages = pages_of(corpus, args.limit)
-        n, counts = census(pages)
+        n, counts = census(pages_of(corpus, args.limit))
         total_pages += n
-        for k, v in counts.items():
-            total[k] += v
+        total.update(counts)
         print(f"{corpus}: {n} pages, replayed {counts[ANY_REPLAY]} ({100 * counts[ANY_REPLAY] / max(n, 1):.2f}%)")
     print(f"\n{total_pages} pages")
     for name, bit in RULES:
