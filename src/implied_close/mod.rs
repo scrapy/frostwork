@@ -14,14 +14,10 @@
 mod generated;
 mod html5;
 
-// Browser mode's categories. Hand-written from the spec; a table derived from the browser replaces the
-// module behind the same names.
-pub(crate) use html5::*;
-
 // The HTML5 element categories for browser mode: a second whole generated file, measured from Chrome by
-// `tools/gen_html5_rules.py`. The tree builder that reads it is not wired in yet.
-#[allow(dead_code)]
+// `tools/gen_html5_rules.py`, read through `html5`.
 mod generated_html5;
+pub(crate) use html5::*;
 
 // The derived tables live in `generated.rs` — a whole file, written by `tools/gen_tree_rules.py` from
 // libxml2 itself. They are re-exported here so callers see one `implied_close` module: the split is about
