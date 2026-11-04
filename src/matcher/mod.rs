@@ -2863,14 +2863,15 @@ impl<'a> Matcher<'a> {
         raw_attrs: &[(&'a [u8], Option<&'a [u8]>)],
         span_start: usize,
     ) {
-        self.push_element(name, scid, raw_attrs, span_start);
+        self.push_element::<true>(name, scid, raw_attrs, span_start);
         self.evaluate_opened_inline(name);
     }
 
-    /// [`Self::open_element`] with the push inlined into the caller and the selector work out of line.
-    /// Lxml mode opens every element from one call site in its start-tag path, where this measures
-    /// fewer instructions than a call to `open_element`. Browser mode opens elements from inside large
-    /// functions, where inlining the push measures more.
+    /// [`Self::open_element`] for lxml mode, which runs no marked tail pass: the push is inlined into
+    /// the caller and the selector work stays out of line. Lxml mode opens every element from one call
+    /// site in its start-tag path, where this measures fewer instructions than a call to
+    /// `open_element`. Browser mode opens elements from inside large functions, where inlining the push
+    /// measures more.
     #[inline(always)]
     pub(super) fn open_element_inline(
         &mut self,
@@ -2879,13 +2880,15 @@ impl<'a> Matcher<'a> {
         raw_attrs: &[(&'a [u8], Option<&'a [u8]>)],
         span_start: usize,
     ) {
-        self.push_element(name, scid, raw_attrs, span_start);
+        debug_assert!(self.marks.is_empty(), "lxml mode re-scans a winner's span instead of marking it");
+        self.push_element::<false>(name, scid, raw_attrs, span_start);
         self.evaluate_opened(name);
     }
 
-    /// Push the element with the attributes the schema asks about.
+    /// Push the element with the attributes the schema asks about, and with the winner mark when
+    /// `MARKS` says the scan may be a marked tail pass.
     #[inline(always)]
-    fn push_element(
+    fn push_element<const MARKS: bool>(
         &mut self,
         name: &'a [u8],
         scid: u8,
@@ -2897,7 +2900,7 @@ impl<'a> Matcher<'a> {
         self.next_elem = elem.wrapping_add(1);
         // Browser mode's tail pass: a deferred winner of the first pass carries the mark its tail
         // selectors are rooted at (see `marked_tail`). Elements open in `elem` order, so one cursor does.
-        if self.mark_at < self.marks.len() && self.marks[self.mark_at].0 == elem {
+        if MARKS && self.mark_at < self.marks.len() && self.marks[self.mark_at].0 == elem {
             let slots = std::mem::take(&mut self.marks[self.mark_at].1);
             attrs.push((WINNER_MARK.as_bytes(), Cow::Owned(slots)));
             self.mark_at += 1;
