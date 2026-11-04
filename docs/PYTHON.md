@@ -105,10 +105,10 @@ integration that hands Frostwork a response passes these and nothing else:
   `_encoding`. Never pass `response.encoding`: it is the framework's own decision, and at this rank it
   overrides the document's declarations and the autodetection, so the browser rules w3lib lacks never run.
 
-Measured over the 48 cases of the encoding lab (`tools/browser_oracle/lab_compare.py`), the raw header
-gives 9 differences from Chrome, a charset extracted by w3lib gives 10, and web-poet's
-`response.encoding` gives 21. `Page.extract_response`
-and `FrostPage` pass the three inputs for you.
+Measured over the 48 cases of the encoding lab (`tools/browser_oracle/lab_compare.py`, browser mode),
+the raw header gives 2 differences from Chrome, both deliberate (COMPATIBILITY.md), a charset extracted
+by w3lib gives 3, because w3lib drops `x-user-defined`, and web-poet's `response.encoding` gives 14.
+`Page.extract_response` and `FrostPage` pass the three inputs for you.
 
 The precedence is the same for every entry point:
 
