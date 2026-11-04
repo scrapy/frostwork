@@ -123,14 +123,6 @@ pub(crate) fn carries_deferred(sel: &Selector) -> bool {
     compile::any_reverse(sel) || compile::any_has(sel) || compile::any_text_pred(sel)
 }
 
-/// Do all of a comma group's members select the same KIND of node, so that a value's document offset
-/// identifies the node it came from?
-///
-/// True for an all-`::text` group (a text node IS its offset) and for an all-`::attr(NAME)` group naming
-/// ONE attribute (that attribute node is the element's offset). False as soon as two members could
-/// produce distinct nodes at the same offset — two different attributes of one element, or an attribute
-/// alongside text — because the mixed-column merge dedupes on `(column, offset)` and would drop one of
-/// them. lxml returns both, in source order.
 /// Is this deferred member's value its OWN element's, rather than one recovered by re-scanning the
 /// element's subtree? Exactly `split_deferred`'s `Tail::Streamed` case, asked before the split so the
 /// router can decide without registering a tail.
@@ -149,6 +141,14 @@ fn deferred_value_is_own(sel: &Selector, k: usize) -> bool {
         )
 }
 
+/// Do all of a comma group's members select the same KIND of node, so that a value's document offset
+/// identifies the node it came from?
+///
+/// True for an all-`::text` group (a text node IS its offset) and for an all-`::attr(NAME)` group naming
+/// ONE attribute (that attribute node is the element's offset). False as soon as two members could
+/// produce distinct nodes at the same offset — two different attributes of one element, or an attribute
+/// alongside text — because the mixed-column merge dedupes on `(column, offset)` and would drop one of
+/// them. lxml returns both, in source order.
 fn uniform_node_terminal(members: &[Selector]) -> bool {
     let mut attr: Option<&str> = None;
     let mut text = false;
@@ -1154,14 +1154,6 @@ pub struct Matcher<'a> {
     replay_spans: Vec<(usize, usize)>,
 }
 
-/// A buffered text node. In the common case it is ONE borrowed run (`joined` empty, no allocation).
-///
-/// When dropped end tags join several runs into one node, each run is decoded on its own and the
-/// STRINGS are concatenated into `joined` — never the raw bytes. The oracle decodes entities and
-/// characters while tokenizing, i.e. before tree construction, so a construct split across a discarded
-/// tag must NOT reassemble: `<div>A&am</p>p;B</div>` is `A&amp;B` in lxml (the unterminated `&am` stays
-/// literal), and the bytes `C3 </p> A9` are two replacement characters, not `é`. Joining bytes first
-/// manufactured both.
 /// One text node handed to the consumers: either a raw run still to be decoded (the common case, so
 /// unselected text costs nothing) or a value already decoded run-by-run because dropped end tags joined
 /// it. `finalize` is called only where a consumer actually wants the value.
@@ -1180,6 +1172,14 @@ impl TextVal<'_> {
     }
 }
 
+/// A buffered text node. In the common case it is ONE borrowed run (`joined` empty, no allocation).
+///
+/// When dropped end tags join several runs into one node, each run is decoded on its own and the
+/// STRINGS are concatenated into `joined` — never the raw bytes. The oracle decodes entities and
+/// characters while tokenizing, i.e. before tree construction, so a construct split across a discarded
+/// tag must NOT reassemble: `<div>A&am</p>p;B</div>` is `A&amp;B` in lxml (the unterminated `&am` stays
+/// literal), and the bytes `C3 </p> A9` are two replacement characters, not `é`. Joining bytes first
+/// manufactured both.
 struct PendingText<'a> {
     /// The FIRST run's bytes, borrowed from the document. A joined node's later runs live in `joined`
     /// instead, decoded — nothing ever owns bytes here.
