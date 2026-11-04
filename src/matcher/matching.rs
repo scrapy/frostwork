@@ -3,7 +3,7 @@
 //! (stack maintenance, value emission, group routing) lives in the parent module and calls into these.
 //! Keeping the predicates separate makes the matcher's *logic* legible apart from its *bookkeeping*.
 
-use crate::selector::{AttrOp, Comb, Compound, Nth, ReversePos};
+use crate::selector::{AttrOp, AttrPred, Comb, Compound, Nth, ReversePos};
 
 use super::{CSel, OpenElem, Segment};
 
@@ -42,6 +42,32 @@ fn substr(a: &str, v: &str, ci: bool) -> bool {
     }
     let (a, v) = (a.as_bytes(), v.as_bytes());
     a.len() >= v.len() && (0..=a.len() - v.len()).any(|i| a[i..i + v.len()].eq_ignore_ascii_case(v))
+}
+
+/// Does attribute predicate `p` hold, given the lookup of the attribute it names and whether its value
+/// compares ASCII-case-insensitively? `found` runs inside each arm, so an existence test never reads
+/// the value.
+///
+/// Substring/prefix/suffix ops with an EMPTY operand match nothing (CSS spec, verified vs lxml); `~=`
+/// with an empty/whitespace operand also never matches (no empty token).
+#[inline(always)]
+fn pred_holds<'e>(p: &AttrPred, ci: bool, found: impl Fn() -> Option<&'e str>) -> bool {
+    let v = p.value.as_str();
+    match p.op {
+        AttrOp::Exists => found().is_some(),
+        AttrOp::Eq => found().is_some_and(|a| eq(a, v, ci)),
+        AttrOp::Prefix => !v.is_empty() && found().is_some_and(|a| starts(a, v, ci)),
+        AttrOp::Suffix => !v.is_empty() && found().is_some_and(|a| ends(a, v, ci)),
+        AttrOp::Substr => !v.is_empty() && found().is_some_and(|a| substr(a, v, ci)),
+        // ASCII whitespace only, for the reason spelled out on `OpenElem::has_class`: `[rel~=x]`
+        // tokenizes the same way `.x` does, so a U+3000 in the value must not separate tokens.
+        AttrOp::Includes => {
+            !v.is_empty() && found().is_some_and(|a| a.split_ascii_whitespace().any(|t| eq(t, v, ci)))
+        }
+        AttrOp::DashMatch => found().is_some_and(|a| {
+            eq(a, v, ci) || (a.len() > v.len() && starts(a, v, ci) && a.as_bytes()[v.len()] == b'-')
+        }),
+    }
 }
 
 /// Does 1-based position `p` satisfy `∃k ≥ 0: a·k + b == p`? (the `An+B` membership test)
@@ -125,29 +151,24 @@ fn compound_compare<const FILTER: bool>(c: &Compound, el: &OpenElem) -> bool {
             return false;
         }
     }
-    for p in &c.attrs {
-        // Substring/prefix/suffix ops with an EMPTY operand match nothing (CSS spec, verified vs
-        // lxml); `~=` with an empty/whitespace operand also never matches (no empty token).
-        let ci = p.ci || (p.html_ci && el.scid == super::HTML_ELEMENT);
-        let (n, v) = (p.name.as_str(), p.value.as_str());
-        let found = if p.exact { el.named_attr(n) } else { el.css_attr(n) };
-        let ok = match p.op {
-            AttrOp::Exists => found.is_some(),
-            AttrOp::Eq => found.is_some_and(|a| eq(a, v, ci)),
-            AttrOp::Prefix => !v.is_empty() && found.is_some_and(|a| starts(a, v, ci)),
-            AttrOp::Suffix => !v.is_empty() && found.is_some_and(|a| ends(a, v, ci)),
-            AttrOp::Substr => !v.is_empty() && found.is_some_and(|a| substr(a, v, ci)),
-            // ASCII whitespace only, for the reason spelled out on `OpenElem::has_class` — `[rel~=x]`
-            // tokenizes the same way `.x` does, so a U+3000 in the value must not separate tokens.
-            AttrOp::Includes => {
-                !v.is_empty() && found.is_some_and(|a| a.split_ascii_whitespace().any(|t| eq(t, v, ci)))
+    // Browser mode's DOM names and HTML value fold apply only to the elements its builder made. On an
+    // lxml-mode element both name lookups are `attr` (an XPath name is lowercase, see
+    // `xpath::valid_attr_name`) and no value folds, so that path asks neither question.
+    if c.attrs.is_empty() {
+        // nothing to look up
+    } else if el.is_browser_element() {
+        for p in &c.attrs {
+            let ci = p.ci || (p.html_ci && el.scid == super::HTML_ELEMENT);
+            let found = || if p.exact { el.named_attr(&p.name) } else { el.css_attr(&p.name) };
+            if !pred_holds(p, ci, found) {
+                return false;
             }
-            AttrOp::DashMatch => found.is_some_and(|a| {
-                eq(a, v, ci) || (a.len() > v.len() && starts(a, v, ci) && a.as_bytes()[v.len()] == b'-')
-            }),
-        };
-        if !ok {
-            return false;
+        }
+    } else {
+        for p in &c.attrs {
+            if !pred_holds(p, p.ci, || el.attr(&p.name)) {
+                return false;
+            }
         }
     }
     // `:not(<compound>)` — excluded if the element matches any negation arg

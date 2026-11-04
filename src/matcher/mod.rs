@@ -460,6 +460,12 @@ impl<'a> OpenElem<'a> {
         }
     }
 
+    /// Did browser mode's tree builder make this element? Only its elements carry the DOM's attribute
+    /// names and HTML's value fold; every class id from [`MATHML_ELEMENT`] up is one of its three.
+    pub(super) fn is_browser_element(&self) -> bool {
+        self.scid >= MATHML_ELEMENT
+    }
+
     /// Is this an SVG element whose name HTML5 camel-cases (`clipPath`, `foreignObject`)?
     pub(super) fn camel_cased_svg(&self) -> bool {
         self.scid == SVG_ELEMENT
