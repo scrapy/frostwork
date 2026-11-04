@@ -22,7 +22,8 @@ pub(super) struct Elem<'a> {
     pub(super) attrs: RawAttrs<'a>,
     /// Raw source: from the start tag, or the token that inserted an element the page never wrote, to
     /// where it was popped. An element that leaves the stack another way ends with its content, and no
-    /// earlier than its own start tag (`open_end`).
+    /// earlier than its own start tag (`open_end`). A copy begins where its content does when that is
+    /// earlier ([`Dom::source_start`]).
     start: usize,
     end: usize,
     open_end: usize,
@@ -283,6 +284,28 @@ impl<'a> Dom<'a> {
         }
     }
 
+    /// Where `id`'s raw source begins. A copy the adoption agency makes is inserted at the end tag, after
+    /// the content it is given, so its source begins at its first child's when that is earlier.
+    fn source_start(&self, id: u32) -> usize {
+        let Kind::Element(e) = &self.kinds[id as usize] else { unreachable!("not an element") };
+        if e.prefix.is_none() {
+            return e.start;
+        }
+        let mut c = self.links[id as usize].first;
+        while c != NIL {
+            let start = match &self.kinds[c as usize] {
+                Kind::Element(_) => Some(self.source_start(c)),
+                Kind::Text(runs) => runs.first().map(|&(_, _, at)| at),
+                Kind::Comment => None,
+            };
+            if let Some(start) = start {
+                return start.min(e.start);
+            }
+            c = self.links[c as usize].next;
+        }
+        e.start
+    }
+
     // ------------------------------------------------------------------ the walk
 
     /// Drive the matcher over the tree in pre-order, as the streaming builder drives it over the token
@@ -338,7 +361,7 @@ impl<'a> Dom<'a> {
                         top.1 = top.1.max(end);
                     }
                     m.flush_text();
-                    m.register_span(r, e.start, end);
+                    m.register_span(r, self.source_start(cur), end);
                     m.close_top(end);
                 }
                 if m.done() || cur == self.root {

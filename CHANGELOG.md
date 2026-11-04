@@ -38,6 +38,8 @@ first public release.
 
 - Lxml mode compares an `::attr()` name exactly with libxml2's lowercased attribute name, as Parsel
   does, so `div::attr(ID)` is `[]` where it returned the id.
+- In both modes, a raw-text, RCDATA or script end tag that the input ends on right after its name is
+  text, as in libxml2 and browsers: `<title>a</title` is the title `a</title`, where it was `a`.
 - `FrostPage` and `Page.extract_response` give the engine the response's raw `Content-Type` header, its
   URL and any encoding the user forced (the framework's `_encoding`), instead of the framework's resolved
   `response.encoding`. Frostwork's own prescan and autodetection now run behind a web-poet or Scrapy

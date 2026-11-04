@@ -375,27 +375,11 @@ fn has_content(b: &[u8]) -> bool {
     ws_prefix(b, true) < b.len()
 }
 
-/// Does inserting the run clear frameset-ok? Chrome keeps it set for whitespace, NUL and U+FFFD, the
-/// replacement character spelled as its UTF-8 bytes (`utf8`) or as a reference that resolves to it:
-/// `&#0;`, a surrogate, a code point past U+10FFFF.
-fn ends_frameset_ok(b: &[u8], utf8: bool) -> bool {
-    let mut i = 0;
-    while i < b.len() {
-        let rest = &b[i..];
-        let k = ws_at(rest, true);
-        if k > 0 {
-            i += k;
-        } else if utf8 && rest.starts_with("\u{FFFD}".as_bytes()) {
-            i += 3;
-        } else if let Some((_, len)) =
-            numeric_ref(rest).filter(|&(v, _)| v == 0 || v == 0xFFFD || (0xD800..=0xDFFF).contains(&v) || v > 0x10FFFF)
-        {
-            i += len;
-        } else {
-            return true;
-        }
-    }
-    false
+/// Does inserting the run, decoded, clear frameset-ok? Chrome keeps it set for whitespace, NUL and
+/// U+FFFD however the run spells it: as the character, as a reference that resolves to it (`&#0;`, a
+/// surrogate, a code point past U+10FFFF), or as bytes the page's encoding does not map.
+fn ends_frameset_ok(text: &str) -> bool {
+    !text.chars().all(|c| matches!(c, '\t' | '\n' | '\x0c' | '\r' | ' ' | '\0' | '\u{FFFD}'))
 }
 
 /// The leading newline `<pre>`, `<listing>` and `<textarea>` drop: a LF, a CR or CRLF (the input stream

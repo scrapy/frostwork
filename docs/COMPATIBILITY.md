@@ -75,10 +75,6 @@ What remains are not tree divergences:
   attributes a later `<html>` or `<body>` tag merged into the element: its source has only its own. An
   `<html>` or `<body>` the page never wrote reads its source from the first later tag that gave it
   attributes.
-- Chrome leaves the frameset-ok flag set for U+FFFD, which follows it here when the page spells the
-  character as UTF-8 or as a reference (`&#0;`, a surrogate, a code point past U+10FFFF). A U+FFFD that
-  a legacy encoding's decoder produces from an invalid byte counts here as a character, so a
-  `<frameset>` after it is ignored.
 
 Where Chrome and Firefox build different trees, browser mode follows Chrome. The gate's
 `--browsers chrome,firefox` table lists them; the ones it finds are Firefox making `<search>` and

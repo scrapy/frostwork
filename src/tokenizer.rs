@@ -234,7 +234,8 @@ fn skip_to_gt(b: &[u8], from: usize) -> usize {
 }
 
 /// Scan RAWTEXT/RCDATA content for the matching `</name` end tag (case-insensitive). Returns
-/// (text_end, after_end_tag).
+/// (text_end, after_end_tag). A name the input ends right after is text, as in HTML5's end tag name
+/// states and libxml2: `<title>a</title` is the title `a</title`.
 ///
 /// The end tag has a start tag's ATTRIBUTE states here too (see `scan_attrs`), so a quoted value can
 /// carry the `>`. Ending the tag at the first `>` instead would keep markup libxml2 discards: in
@@ -265,7 +266,7 @@ fn find_raw_end<'a>(
                             q += 1;
                         }
                     }
-                    if ok && (q >= n || is_ws(b[q]) || b[q] == b'>' || b[q] == b'/') {
+                    if ok && q < n && (is_ws(b[q]) || b[q] == b'>' || b[q] == b'/') {
                         return (p, scan_attrs(b, q, attr_buf).0);
                     }
                 }
@@ -275,7 +276,8 @@ fn find_raw_end<'a>(
     }
 }
 
-/// Case-insensitive tag-name match at `p`, including the delimiter required after the name.
+/// Case-insensitive tag-name match at `p`, including the delimiter required after the name: a name the
+/// input ends right after is not a tag (see [`find_raw_end`]).
 fn tag_name_at(b: &[u8], p: usize, prefix: &[u8], name: &[u8]) -> Option<usize> {
     if p + prefix.len() + name.len() > b.len()
         || !b[p..].starts_with(prefix)
@@ -289,7 +291,7 @@ fn tag_name_at(b: &[u8], p: usize, prefix: &[u8], name: &[u8]) -> Option<usize> 
         }
         q += 1;
     }
-    (q >= b.len() || is_ws(b[q]) || b[q] == b'>' || b[q] == b'/').then_some(q)
+    (q < b.len() && (is_ws(b[q]) || b[q] == b'>' || b[q] == b'/')).then_some(q)
 }
 
 /// libxml2-compatible SCRIPT scan, including the legacy escaped/double-escaped states used by old IE
@@ -801,6 +803,31 @@ src="http:></a><div id='HTML3'><i>" >y"#),
         // element anyway. Pinned so the shared scanner's `terminated` flag can't quietly change it.
         assert_eq!(toks(br#"a</p x="y"#), ["T:a", "E:p"]);
         assert_eq!(toks(b"a</p"), ["T:a", "E:p"]);
+    }
+
+    /// In RAWTEXT, RCDATA and script data an end tag needs a byte after its name, so one the input ends
+    /// right after is text; past the name it is dropped, as in the data state. Chrome and libxml2 agree
+    /// on every row.
+    #[test]
+    fn a_raw_end_tag_the_input_ends_on_is_text() {
+        for (doc, text) in [
+            ("<title>a</title", "a</title"),
+            ("<textarea>a</TEXTAREA", "a</TEXTAREA"),
+            ("<style>a</style", "a</style"),
+            ("<xmp>a<b>b</xmp", "a<b>b</xmp"),
+            ("<iframe>a</iframe", "a</iframe"),
+            ("<noembed>a</noembed", "a</noembed"),
+            ("<script>a</script", "a</script"),
+            ("<script><!--a</script", "<!--a</script"),
+        ] {
+            let got = toks(doc.as_bytes());
+            assert_eq!(got.len(), 2, "{doc}: {got:?}");
+            assert!(got[1].ends_with(&format!(":{text}")), "{doc}: {got:?}");
+        }
+        for doc in ["<title>a</title ", "<style>a</style/", "<xmp>a</xmp x", "<script>a</script x="] {
+            let got = toks(doc.as_bytes());
+            assert!(got[1].ends_with(":a"), "{doc}: {got:?}");
+        }
     }
 
     /// ...and the RAWTEXT/RCDATA and SCRIPT closers use the same attribute states.

@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from html.parser import HTMLParser
 from typing import Any, Callable, Optional
 
+import frostwork
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import seq_sweep  # noqa: E402  (which elements the fingerprint names)
@@ -118,13 +120,37 @@ def _outer_root(html: str) -> Optional[tuple]:
     return p.root
 
 
+_TRAILING_END_TAGS = re.compile(r"(?:</[^<>]*>)+$")
+
+
+def _text_of(html: str, serialised: bool = False) -> str:
+    """The text an outer-HTML value holds: the value parsed as a document in browser mode, which reads
+    raw text, RCDATA, `<noscript>` and `<plaintext>` as Chrome does. Both sides of a pair are read this
+    way, and the text itself is graded against Chrome by the per-id text columns. A serialisation's
+    trailing end tags hold no text and are dropped first, since a `</plaintext>` would parse back as text."""
+    if serialised:
+        html = _TRAILING_END_TAGS.sub("", html)
+    return "".join(frostwork.extract(html.encode("utf-8", "surrogatepass"), ["html ::text"], parser="browser")[0])
+
+
+def _in_order(want: str, have: str) -> bool:
+    """Is every character of `want` in `have`, in the same order?"""
+    rest = iter(have)
+    return all(c in rest for c in want)
+
+
 def _raw_source(r: ValueRepro) -> bool:
     """Outer HTML of the SAME elements, whose content differs: the engine returns raw source (documented
     in AGENTS.md), and where the browser built an element's content differently from its source the two
-    parse differently. Same count, and each pair starts with the same tag and attributes."""
+    parse differently. Same count, each pair starts with the same tag and attributes, and the browser's
+    text is in the raw source in order. The source may hold more, which the browser moved elsewhere,
+    but a value that lost content the browser has is not raw source."""
     if not is_node_query(r.sel) or len(r.engine) != len(r.oracle):
         return False
-    return all(_outer_root(a) is not None and _outer_root(a) == _outer_root(b) for a, b in zip(r.engine, r.oracle))
+    return all(
+        _outer_root(a) is not None and _outer_root(a) == _outer_root(b) and _in_order(_text_of(b, serialised=True), _text_of(a))
+        for a, b in zip(r.engine, r.oracle)
+    )
 
 
 def _merged_frame_source(r: ValueRepro) -> bool:

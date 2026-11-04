@@ -1104,7 +1104,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
         // Foreign content keeps a NUL as U+FFFD, which is how RCDATA text decodes.
         let dm = if dm == DataMode::Normal { DataMode::Rcdata } else { dm };
         self.insert_text(m, b, dm, s);
-        self.clear_frameset_ok(m, b);
+        self.clear_frameset_ok(m, b, dm);
     }
 
     pub(super) fn html_text(&mut self, m: &mut Matcher<'a>, mut b: &'a [u8], dm: DataMode, mut s: usize) {
@@ -1226,12 +1226,13 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
         }
         self.reconstruct(m, s);
         self.insert_text(m, b, dm, s);
-        self.clear_frameset_ok(m, b);
+        self.clear_frameset_ok(m, b, dm);
     }
 
-    /// Inserting the run `b` clears frameset-ok, unless it holds only what Chrome keeps it set for.
-    fn clear_frameset_ok(&mut self, m: &Matcher<'a>, b: &[u8]) {
-        if self.frameset_ok && ends_frameset_ok(b, m.input.encoding() == encoding_rs::UTF_8) {
+    /// Inserting the run `b` clears frameset-ok, unless it holds only what Chrome keeps it set for. The
+    /// run is decoded only while the flag is still set, which ends at the first character of content.
+    fn clear_frameset_ok(&mut self, m: &Matcher<'a>, b: &[u8], dm: DataMode) {
+        if self.frameset_ok && ends_frameset_ok(&m.input.text_value(b, dm)) {
             self.frameset_ok = false;
         }
     }

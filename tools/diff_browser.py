@@ -66,8 +66,8 @@ import conformant  # noqa: E402  (its selector basket)
 import seq_sweep  # noqa: E402  (the fingerprint)
 from browser_answers import Answers, Engine, engine_refusals, is_native, oracle_form  # noqa: E402
 from browser_docs import (  # noqa: E402
-    ALPHABET, DOCTYPE, PLAIN_HEAD, RULE_SELECTORS, VALUE_TOKENS, Decorations, Doc, Documents, generate, grouped_spec,
-    ids_of, redecorate, render, undecorate, value_selectors)
+    ALPHABET, BASKET_ORACLE_EMPTY, DOCTYPE, PLAIN_HEAD, RULE_SELECTORS, VALUE_TOKENS, Decorations, Doc, Documents,
+    generate, grouped_spec, ids_of, redecorate, render, undecorate, value_selectors)
 from browser_oracle import bridge as Br  # noqa: E402
 from browser_oracle import css as C  # noqa: E402
 from browser_oracle import tree as T  # noqa: E402
@@ -199,7 +199,8 @@ class Report:
     selfcheck_css_differ: list[str] = field(default_factory=list)
     rule_never_answered: list[str] = field(default_factory=list)
     rule_refused: list[str] = field(default_factory=list)   # value-rule selectors the engine refuses
-    unplanned: list[str] = field(default_factory=list)      # columns the planner or the browser cannot ask
+    unplanned: list[str] = field(default_factory=list)      # columns the planner, browser or bridge cannot ask
+    basket_unlisted: list[str] = field(default_factory=list)  # basket selectors newly answered nowhere
     css_mirror_checked: int = 0                             # native CSS against parsel over the bridge
     css_mirror_differ: list[tuple[str, str]] = field(default_factory=list)
     value_on_tree: list[Divergence] = field(default_factory=list)
@@ -255,8 +256,12 @@ def gate_failures(report: Report) -> list[str]:
     if report.rule_refused:
         fails.append(f"{len(report.rule_refused)} value-rule selector(s) the engine refuses in this mode, so "
                      f"they grade nothing: {report.rule_refused}")
+    if report.basket_unlisted:
+        fails.append(f"{len(report.basket_unlisted)} basket selector(s) the oracle answered nowhere that "
+                     f"BASKET_ORACLE_EMPTY does not list, so they can only catch an over-match: "
+                     f"{report.basket_unlisted[:5]}")
     if report.unplanned:
-        fails.append(f"{len(report.unplanned)} value column(s) the CSS planner or the browser cannot ask, so "
+        fails.append(f"{len(report.unplanned)} value column(s) the CSS planner, the browser or the XPath bridge cannot ask, so "
                      f"they grade nothing: {report.unplanned[:5]}")
     if report.css_mirror_checked == 0:
         fails.append("native CSS was checked against parsel on no column")
@@ -574,7 +579,7 @@ def grade_values(run: Run, report: Report, graded: list[tuple[Doc, str]]) -> Non
             want = answers.value("chrome", r, s)
             if isinstance(want, Refused):
                 run.oracle_refused[(want.by, want.reason[:90])] += 1
-                if want.by in ("plan", "browser") and s not in report.unplanned:
+                if want.by in ("plan", "browser", "xpath") and s not in report.unplanned:
                     report.unplanned.append(s)
                 continue
             report.value_graded += 1
@@ -586,6 +591,7 @@ def grade_values(run: Run, report: Report, graded: list[tuple[Doc, str]]) -> Non
             if C.is_css(s) and not grouped_spec(s):
                 mirror_check(answers, r, s, want, report)
     report.rule_never_answered = [s for s in RULE_SELECTORS if s not in run.refused and not run.oracle_answered[s]]
+    report.basket_unlisted = [s for s in run.basket_oracle_empty if s not in BASKET_ORACLE_EMPTY]
     report.rule_refused = [s for s in RULE_SELECTORS if s in run.refused]
 
 
@@ -713,6 +719,9 @@ def print_value_report(run: Run, report: Report) -> None:
     if run.basket_oracle_empty:
         print(f"  basket selectors the oracle answered nowhere (they can only catch an over-match): "
               f"{len(run.basket_oracle_empty)}")
+        answered = sorted(BASKET_ORACLE_EMPTY & set(run.basket) - set(run.basket_oracle_empty))
+        if answered:
+            print(f"    answered now, so BASKET_ORACLE_EMPTY can drop them: {answered}")
     on_tree: Counter = Counter()
     doc_buckets: dict[str, set[str]] = defaultdict(set)
     for name, items in report.buckets.items():

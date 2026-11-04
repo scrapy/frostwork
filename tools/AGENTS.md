@@ -184,25 +184,29 @@ through the bridge, on the tree the fingerprint was read from. A value column th
 fingerprint already differs is filed under the TREE, which that gate holds. Where the fingerprint agrees,
 it is reduced with the fingerprint still agreeing at every step and attributed to `VALUE_CONSTRUCTS` in
 `browser_values.py` (case-insensitive attribute values, quirks-mode class matching, raw-source outer
-HTML), which read the oracle's tree rather than the page; never add a value construct to `CONSTRUCTS`. A value
+HTML), which read the oracle's tree rather than the page; never add a value construct to `CONSTRUCTS`.
+Raw-source outer HTML needs the same start tag and the browser's text, in order, inside the engine's: the
+source may hold text the browser moved elsewhere, but a value that lost content is not raw source. Both
+values' text is read by parsing them in browser mode, since libxml2 reads a serialised `<plaintext>`,
+`<noscript>` or `<script/>` differently from Chrome. A value
 column about an id-less element no fingerprint column can see (the empty `<p>` a stray `</p>` inserts) is
 attributed through `CONSTRUCTS` as a tree difference only the value column found. Anything else is value
 NOVEL and fails the gate. So do: a bridge round trip that changed a tree, bridge XPath that answers a
 fingerprint column differently from the native evaluator, native CSS that answers differently from
 parsel's `.css()` over the bridged tree where the two semantics coincide (the planner's standing check:
 no-quirks documents, no folded attribute, no form feed in a class), a CSS self-check difference, a
-value-rule selector the oracle answered nowhere or the engine refuses, and a value column the CSS planner
-or the browser cannot ask. Decorations go before the id slot
+value-rule selector the oracle answered nowhere or the engine refuses, and a value column the CSS planner,
+the browser or the XPath bridge cannot ask. Decorations go before the id slot
 and are undone by id for tree attribution (`undecorate`/`redecorate`), so the construct rules see
 ALPHABET tokens and a counterfactual edit keeps its decorations.
 
-The random alphabet also holds mixed-case tag names, the end tags of every formatting and special
-element, text with references and an inner NUL, the markup declarations the tokenizer special-cases, and
+The random alphabet also holds mixed-case tag names, the end tags of every formatting element and of
+the special elements nothing else in it closes, text with references and an inner NUL, the markup declarations the tokenizer special-cases, and
 `ARK` tokens: formatting tags that all carry the id `k`, the only way two generated elements can have
 the same attribute set, which Noah's Ark compares. Every fourth random document is up to `LONG_TOKENS`
 long. `structured_docs` adds what a random run of a few tokens almost never assembles: documents that
-end before the body, a comment in every position of three skeletons, formatting copies that share an
-offset, Noah's Ark families and `DEEP` runs of nested divs at Chrome's depth cap (one token each, with no
+end before the body or inside a raw-text, RCDATA or script end tag, a comment in every position of three
+skeletons, formatting copies that share an offset, Noah's Ark families and `DEEP` runs of nested divs at Chrome's depth cap (one token each, with no
 ids, so reduction drops a run whole). A flat column cannot see an element with no attribute and no text,
 such as the empty `<body>` a document that ends in its head still gets, so `GROUPED_COLUMNS`
 (`grouped:<container> -> <sub> | <sub>`) grade grouped rows too; the frame's outer HTML is listed but

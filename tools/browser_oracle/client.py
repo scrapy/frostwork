@@ -46,8 +46,10 @@ class OracleError(RuntimeError):
 
 @dataclass(frozen=True)
 class Refused:
-    """A CSS column the oracle cannot answer: `css.py` could not plan it ("plan"), or the browser's
-    selector parser rejected it ("browser"). Never a value, so it can never read as an empty column."""
+    """A column the oracle cannot answer: `css.py` could not plan it ("plan"), the browser's selector
+    parser rejected it ("browser"), or, for XPath through the bridge, the page did not load ("load"),
+    lxml cannot hold its tree ("bridge") or lxml rejects the query ("xpath"). Never a value, so it can
+    never read as an empty column."""
 
     reason: str
     by: str

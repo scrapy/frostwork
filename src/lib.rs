@@ -3559,6 +3559,24 @@ mod browser_mode_tests {
         }
     }
 
+    /// A raw-text, RCDATA or script end tag the input ends on right after its name is text in both
+    /// modes, as in Chrome and libxml2. `<noscript>` is raw text in browser mode only.
+    #[test]
+    fn a_raw_end_tag_the_input_ends_on_stays_text() {
+        for (doc, q, want) in [
+            (&b"<title>a</title"[..], "title::text", "a</title"),
+            (b"<textarea>a</textarea", "textarea::text", "a</textarea"),
+            (b"<xmp>a<b>b</xmp", "xmp::text", "a<b>b</xmp"),
+            (b"<script>a</script", "script::text", "a</script"),
+        ] {
+            assert_eq!(ex(doc, q), v(&[want]), "{q}");
+            assert_eq!(lxml(doc, q), v(&[want]), "{q}");
+        }
+        assert_eq!(ex(b"<noscript>a</noscript", "noscript::text"), v(&["a</noscript"]));
+        assert_eq!(lxml(b"<noscript>a</noscript", "noscript::text"), v(&["a"]));
+        assert_eq!(ex(b"<title>a</title x", "title::text"), v(&["a"]));
+    }
+
     /// Attribute names as Chrome's DOM has them: lowercased, SVG's camel case and MathML's
     /// `definitionURL` restored, and `xlink:`/`xml:`/`xmlns` attributes of a foreign element in a
     /// namespace. `::attr()` reads an attribute as `getAttribute()` does (the name lowercased on an HTML
@@ -3679,6 +3697,12 @@ mod browser_mode_tests {
             let h = format!("{lead}<frameset id=f>");
             assert_eq!(ex(h.as_bytes(), "html > frameset::attr(id)"), v(&["f"]), "{lead}");
         }
+        // ...and so does the one the decoder makes of bytes the page's encoding does not map
+        for (lead, label) in [(&b"\xff"[..], "utf-8"), (b"\x81 ", "shift_jis"), (b"\xa4", "euc-jp")] {
+            let h = [lead, b"<frameset id=f>"].concat();
+            let got = Plan::compile(&["html > frameset::attr(id)"], &[]).extract(&h, Some(label), None).0;
+            assert_eq!(got, vec![v(&["f"])], "{label}");
+        }
         // any other character ends frameset-ok, and the frameset is ignored
         assert_eq!(ex(b"&#x80;<frameset id=f>", "frameset"), NONE);
     }
@@ -3702,6 +3726,9 @@ mod browser_mode_tests {
         assert_eq!(ex(a, "#d > a::text"), v(&["2", "3"]));
         assert_eq!(ex(a, "a div::attr(id)"), NONE);
         assert_eq!(ex(a, "body > *::attr(id)"), v(&["a", "d"]));
+        // a copy's outer HTML is the start tag it was copied from, then its own content's source
+        assert_eq!(ex(h, "b"), v(&["<b id=b>1", "<b id=b>2<i id=i>3</b>"]));
+        assert_eq!(ex(a, "a"), v(&["<a id=a href=x>1", "<a id=a href=x>2", "<a id=e href=y>3</a>"]));
     }
 
     /// Chrome copies the selected option's content into its select's `<selectedcontent>` elements: when
@@ -3850,11 +3877,12 @@ mod browser_mode_tests {
     }
 
     /// The adoption agency can move all of a formatting element's content into its copy; the replay
-    /// still gives the element its own start tag as its outer HTML (Chrome: `<a id="a" href="x"></a>`).
+    /// still gives the element its own start tag as its outer HTML, and the copy the content it was given
+    /// (Chrome: `<a id="a" href="x"></a>`, `<a id="a" href="x">t</a>`).
     #[test]
     fn an_element_the_adoption_agency_empties_keeps_its_start_tag() {
         let a = b"<!DOCTYPE html><a id=a href=x><div id=d>t</a>t";
-        assert_eq!(ex(a, "#a"), v(&["<a id=a href=x>", "<a id=a href=x></a>"]));
+        assert_eq!(ex(a, "#a"), v(&["<a id=a href=x>", "<a id=a href=x>t</a>"]));
         assert_eq!(ex(a, "#a::text"), v(&["t"]));
         let b = b"<!DOCTYPE html><b id=b><div id=d></b>";
         assert_eq!(ex(b, "#b"), v(&["<b id=b>", "<b id=b></b>"]));

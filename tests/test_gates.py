@@ -680,6 +680,7 @@ def test_the_browser_gate_fails_on_novel_and_on_coverage():
         "a value-rule selector answered nowhere": B.Report(**clean, rule_never_answered=['[lang="en"]::attr(id)']),
         "a value-rule selector the engine refuses": B.Report(**clean, rule_refused=["//text()"]),
         "a value column the planner cannot ask": B.Report(**clean, unplanned=["p:nth-child(2n of .a)"]),
+        "a basket selector newly answered nowhere": B.Report(**clean, basket_unlisted=["p::text"]),
         "native CSS checked against parsel nowhere": B.Report(**{**clean, "css_mirror_checked": 0}),
         "native CSS disagrees with parsel": B.Report(**clean, css_mirror_differ=[("<p>", "p ::text")]),
         # the debug build's invariants
@@ -949,6 +950,11 @@ def test_value_columns_split_by_the_tree_and_attribute_by_the_oracle_tree():
     serial = ['<table id="0"><tbody><tr><td>x</td></tr></tbody></table>']
     assert V.attribute_value(r("table", page([]), raw, serial)) == "raw-source outer HTML"
     assert V.attribute_value(r("table", page([]), ['<table id="1"><tr></table>'], serial)) is None
+    # the source may hold text the browser moved out, but must hold the browser's text, in order
+    fostered = ['<table id="0">y<tr><td>x</table>']
+    assert V.attribute_value(r("table", page([]), fostered, serial)) == "raw-source outer HTML"
+    assert V.attribute_value(r("b", page([]), ['<b id="0"></b>'], ['<b id="0">2</b>'])) is None
+    assert V.attribute_value(r("b", page([]), ['<b id="0">ba</b>'], ['<b id="0">ab</b>'])) is None
     # an <html> is compared by its start tag too, and <image> is the <img> a browser makes of it
     full = ['<html id="0"><head></head><body></body></html>']
     assert V.attribute_value(r('[id="0"]', page([]), ['<html id="0">'], full)) == "raw-source outer HTML"

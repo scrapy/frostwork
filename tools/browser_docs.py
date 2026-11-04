@@ -73,7 +73,7 @@ ALPHABET: list[str] = [
     # formatting elements past b/i/a/nobr/em/s/font, and the end tags of elements nothing above closes.
     "<DIV{}>", "</DIV>", "<B{}>", "</B>", "<TABLE{}>", "<SVG{}>", "</SVG>", "<MATH{}>", "<FOREIGNOBJECT{}>",
     "<u{}>", "<code{}>", "<strong{}>", "<small{}>", "<big{}>", "<tt{}>", "<strike{}>",
-    "</em>", "</s>", "</font>", "</u>", "</code>", "</applet>", "</optgroup>", "</ruby>", "</rtc>", "</rt>",
+    "</em>", "</s>", "</font>", "</u>", "</code>", "</strong>", "</small>", "</big>", "</tt>", "</strike>", "</applet>", "</optgroup>", "</ruby>", "</rtc>", "</rt>",
     "</mi>", "</xmp>", "</iframe>", "</noembed>", "</textarea>", "</noscript>",
     # attributes besides the id, for the attribute sets the adoption agency and reconstruction copy
     "<a{} href=y>", "<a{} href=x title=t>", "<b{} CLASS=k>", '<b{} class="k">', "<b{} class=k class=j>",
@@ -290,6 +290,13 @@ EOF_FRAMES: list[list[str]] = [
     ["<template{}>"], ["<template{}>", "t"], ["<head{}>", "</head>", "<template{}>", "t"], ["</head>"], ["</html>"],
     ["<head{}>", "</head>", "</html>"], ["<frameset{}>"], ["<head{}>", "<title{}>"], ["<plaintext{}>"],
 ]
+# A raw-text, RCDATA or script element whose end tag the input ends inside: right after the name the
+# `</name` is text, and past it the tag is dropped.
+RAW_ENDS: list[list[str]] = [
+    [f"<{name}{{}}>", f"t{end}"]
+    for name in ("title", "textarea", "style", "xmp", "iframe", "noembed", "noframes", "noscript", "script")
+    for end in (f"</{name}", f"</{name.upper()}", f"</{name} ", f"</{name}/", f"</{name} x")
+] + [["<script{}>", "<!--t</script"]]
 # Comments in every position: each skeleton once per place a comment can go, so one lands in the
 # document, the head, "after head" (where `<html>`'s whitespace is held around head content), template
 # content written after `</head>`, a table, a select, foreign content, a frameset and after the body.
@@ -348,7 +355,7 @@ DEEP_TAILS: list[list[str]] = [
 
 def structured_docs() -> list[Doc]:
     """Every structured family member, as a document."""
-    seqs = [lead + f for f in EOF_FRAMES + FORMATTING for lead in ([], [DOCTYPE])]
+    seqs = [lead + f for f in EOF_FRAMES + FORMATTING + RAW_ENDS for lead in ([], [DOCTYPE])]
     seqs += [s[:k] + [COMMENT] + s[k:] for s in COMMENT_SKELETONS for k in range(len(s) + 1)]
     seqs += [[DOCTYPE] + f for f in ARK_FAMILY]
     seqs += [[DOCTYPE, deep] + tail for deep in DEEP for tail in DEEP_TAILS]
@@ -365,6 +372,33 @@ def id_value_selectors(ids: list[str], decorated: bool) -> list[str]:
             out += [f'[id="{i}"]', f'[id="{i}"]::attr(title)', f'[id="{i}"]::attr(class)',
                     f'//*[@id="{i}"]/@title', f'//*[@id="{i}"]/@class']
     return out
+
+
+# The basket selectors Chrome answers nowhere on these documents, as recorded. Each can only catch an
+# over-match: most need markup the alphabet does not emit (an `<img src>`, a `<thead>` with a `<th>`, two
+# `<li>` siblings, the `alpha`/`beta` words), and the table-section and optgroup `::text` rows are empty by
+# the tree rules. `diff_browser --gate` fails on a selector that joins them, which is a column that has
+# stopped grading anything.
+BASKET_ORACLE_EMPTY: frozenset[str] = frozenset({
+    '#\\69 1::attr(id)', 'th::text', 'ol > li::text', 'div > p::text', 'ruby > rt::text', 'ruby > rp::text',
+    'dl > dt + dt::text', 'dl > dd + dd::text', 'dt dt::text', 'table > thead::text', 'table > tbody::text',
+    'table > tfoot::text', 'table > caption::text', 'thead > tr::text', 'tbody > tr::text', 'thead th::text',
+    'table > colgroup::attr(id)', 'table > thead th::text', 'table > tfoot td::text',
+    'colgroup + thead th::text', 'table > colgroup > col::attr(class)', 'select > optgroup::text',
+    'optgroup > option::text', 'optgroup + optgroup::text', 'thead + tbody::text', 'caption + thead::text',
+    'table > tr::text', 'tr > th::text', 'img::attr(src)', 'img::attr(Src)', 'section p::text',
+    'dt + dd::text', 'option + option::text', 'h1 ~ p::text', 'ul li ~ li::text', 'span + span::text',
+    'section ~ *::text', 'li + *::attr(class)', 'td > *::attr(data-k)', 'section ~ * ::text',
+    'img[src$=".png"]::attr(src)', 'input[value|="v"]::text', 'li:not([id])::text', 'li:last-child span::text',
+    'div:last-child p::text', 'li:only-child a::text', '//div[last()]//span/text()', 'div:has(a) p::text',
+    'div:has(p) span::text', 'li:has(a) span::text', "//div[contains(.,'alpha')]//a/@href",
+    "//li[contains(.,'beta')]//span/text()", 'div:contains("alpha") a::attr(href)',
+    'li:contains("beta") span::text', 'dt:contains("alpha") + dd::text', 'dt:contains("alpha") ~ dd::text',
+    'div:contains(alpha)::attr(class)', 'div.shared:contains("alpha")::attr(class)', 'dt + ::text',
+    'dt ~ ::text', 'dt + *::text', 'dt ~ *::text', 'dt:contains("alpha") + ::text',
+    'div:has(> p)::attr(class)', '//img/@src', '//td[@class]/text()', '//dt/following-sibling::dd/text()',
+    '//dt[contains(.,"alpha")]/following-sibling::dd/text()',
+})
 
 
 # Selectors aimed at the value rules, graded on every value document. Each must be answered non-empty

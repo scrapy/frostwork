@@ -240,6 +240,8 @@ BASKET = [
     # these answer nothing in lxml mode; a browser's getAttribute() lowercases it on an HTML element
     "a::attr(HREF)", "[data-k]::attr(Data-K)", "[id]::attr(ID)", "img::attr(Src)",
     "[title]::attr(title)",  # exercises CR/CRLF-in-attribute normalization (T4)
+    # raw-text, RCDATA and script content, which `diff_lxml` also grades with the page cut inside an end tag
+    "title::text", "script::text", "style::text", "textarea::text",
     ".shared::text", ".shared ::text", "section p::text", "div div ::text",
     # sibling combinators (+ / ~), incl. chains and a descendant base
     "li + li::text", "li ~ li::text", "dt + dd::text", "td + td::text", "option + option::text",

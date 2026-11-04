@@ -426,8 +426,9 @@ page.
   `div`; body text drops it; raw text, RCDATA and attribute values turn it into U+FFFD.
 - **Names.** Attribute names follow Chrome's DOM: lowercased, SVG camel case, MathML `definitionURL`, and
   `xlink:`/`xml:`/`xmlns` namespaced on foreign elements. `::attr()` reads a name as `getAttribute()`
-  does: lowercased on an HTML element, compared exactly on an SVG or MathML one. XPath `@` compares it
-  exactly. CSS `[attr]` compares it case-insensitively and never matches a namespaced attribute.
+  does: lowercased on an HTML element, compared exactly on an SVG or MathML one. An XPath `@name` must be
+  lowercase, so it reaches no camel-cased foreign name (section 7). CSS `[attr]` compares it
+  case-insensitively and never matches a namespaced attribute.
 
 ### Rescans and node handoffs
 
