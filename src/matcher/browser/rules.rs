@@ -6,7 +6,7 @@
 use super::tags::{breaks_out, font_breaks_out, lower, Tag, MAX_NAME};
 use super::lists::Bound;
 use super::{
-    ends_frameset_ok, has_content, ws_at, ws_prefix, Afe, Browser, EndTok, Mode, Node, Ns, StartTok, Vis, CENSUS_MERGE_ANY, HAS_CHILD,
+    ends_frameset_ok, has_content, ws_at, ws_prefix, Afe, Browser, EndTok, Loc, Mode, Node, Ns, StartTok, Vis, CENSUS_MERGE_ANY, HAS_CHILD,
     RETRO_ADOPTION, RETRO_FRAMESET, RETRO_MERGE, RETRO_SELECTEDCONTENT, SHADOW_HOST, SYNTH,
 };
 use crate::implied_close::SPECIAL;
@@ -961,9 +961,10 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
     /// them. A clone made at `at` reads its source from the start tag it copies. Returns the stack index
     /// of the formatting element's clone, which the furthest block now holds.
     fn furthest_block(&mut self, si: usize, fi: usize, bi: usize, ftok: u32, at: usize) -> usize {
-        let common = self.stack[si - 1];
+        // The common ancestor's index: the loop below changes only entries above it.
+        let common = si - 1;
         // The block's world is inert when the formatting element is template content.
-        let inert = common.vis == Vis::Inert || self.stack[bi].vis == Vis::Inert;
+        let inert = self.stack[common].vis == Vis::Inert || self.stack[bi].vis == Vis::Inert;
         let fuid = self.stack[si].uid;
         let block = self.stack[bi];
         let mut bookmark = fi;
@@ -1027,24 +1028,15 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
         bi + 1
     }
 
-    /// Insert the replay's node `last` at the appropriate place with `common` as the override target:
-    /// at its end, before the last table when foster parenting is on and it is a table part, and out of
-    /// the document when it is a template.
-    fn adopt_into_common(&mut self, common: Node<'a>, last: u32) {
-        if common.tag == Tag::Template {
-            self.dom.detach(last);
-            return;
+    /// Insert the replay's node `last` at the appropriate place with the stack entry at `common` as the
+    /// override target.
+    fn adopt_into_common(&mut self, common: usize, last: u32) {
+        match self.location_in(common) {
+            Loc::Into(i) => self.dom.append(self.stack[i].depth, last),
+            Loc::Foster(t) => self.dom_foster(t, last),
+            Loc::Inert => self.dom.detach(last),
+            Loc::Document => unreachable!("an override target is on the stack"),
         }
-        if self.foster && matches!(common.tag, Tag::Table | Tag::Tbody | Tag::Tfoot | Tag::Thead | Tag::Tr) {
-            match self.stack.topmost_of(&[Tag::Table, Tag::Template]) {
-                Some(k) if self.stack[k].tag == Tag::Table && self.stack[k].vis == Vis::Live => {
-                    return self.dom_foster(k, last);
-                }
-                Some(_) => return self.dom.detach(last),
-                None => return self.dom.append(self.stack[0].depth, last),
-            }
-        }
-        self.dom.append(common.depth, last);
     }
 
     /// A copy of the formatting element made for token `tok`: pending while streaming, a node of the

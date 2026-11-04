@@ -521,7 +521,14 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
     /// Where the next node goes: the appropriate place for inserting a node, with foster parenting when
     /// it is enabled, and nowhere for template content.
     fn location(&self) -> Loc {
-        let Some(i) = self.stack.len().checked_sub(1) else { return Loc::Document };
+        match self.stack.len().checked_sub(1) {
+            Some(i) => self.location_in(i),
+            None => Loc::Document,
+        }
+    }
+
+    /// [`Self::location`] with the stack entry at `i` as the target instead of the current node.
+    fn location_in(&self, i: usize) -> Loc {
         let t = &self.stack[i];
         if t.vis == Vis::Inert || t.tag == Tag::Template {
             return Loc::Inert;
