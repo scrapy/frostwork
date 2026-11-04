@@ -15,7 +15,7 @@ families. The run refuses to grade unless every token was emitted.
 Every differing column is REDUCED to the smallest token subsequence that still differs on that column (ids
 are kept, so the column still names the same element), and the reduced document, not the page it came from,
 is attributed to a row of CONSTRUCTS: a section 3 construct browser mode does not build as the browser does.
-Page-scoped attribution over-credits (AGENTS.md, the truncated-tag lesson); a two-token repro has nowhere to
+Page-scoped attribution over-credits (AGENTS.md); a two-token repro has nowhere to
 hide. Anything no construct explains is NOVEL, and today that is every tree divergence.
 
 VALUE COLUMNS grade what a selector returns: conformant.py's basket, RULE_SELECTORS (case folding, class

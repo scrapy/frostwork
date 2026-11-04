@@ -141,7 +141,7 @@ def _in_order(want: str, have: str) -> bool:
 
 def _raw_source(r: ValueRepro) -> bool:
     """Outer HTML of the SAME elements, whose content differs: the engine returns raw source (documented
-    in AGENTS.md), and where the browser built an element's content differently from its source the two
+    in docs/COMPATIBILITY.md), and where the browser built an element's content differently from its source the two
     parse differently. Same count, each pair starts with the same tag and attributes, and the browser's
     text is in the raw source in order. The source may hold more, which the browser moved elsewhere,
     but a value that lost content the browser has is not raw source."""

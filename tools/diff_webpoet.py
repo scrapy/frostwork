@@ -531,8 +531,7 @@ def build_page(schema, shape, *, frost: bool, kind: str = "http"):
     It is applied to BOTH sides, and that symmetry is load-bearing. `attrs.frozen` breaks the parsel
     oracle too (web-poet's `cached_method` writes to the instance, which a frozen class forbids), so
     decorating only the Frostwork side would file a web-poet/attrs incompatibility as a Frostwork CRASH
-    and leave a bucket that never empties — the over-attribution mistake AGENTS.md records for the
-    truncated-tag bug. With both sides decorated, a shape that fails on both is ORACLE-SKIP and a shape
+    and leave a bucket that never empties (page-scoped attribution over-credits, AGENTS.md). With both sides decorated, a shape that fails on both is ORACLE-SKIP and a shape
     that fails only here is a real defect."""
     ns_maker = _frost_ns if frost else _parsel_ns
     # The response type picks the BASE on both sides, so the browser column compares like with like:

@@ -1,265 +1,189 @@
-# tools/ — the differential/benchmark harness
+# tools/: the differential and benchmark harness
 
-Python harness (needs `parsel`). `oracle.py` guards the oracle toolchain (libxml2 ≥ 2.15 — a pinned
-lxml does *not* pin its vendored libxml2); `diff_lxml.py` is the gate; `conformant.py`/`families.py`/
-`foreign.py` generate test pages; `enc_check.py` (encoding parity) with `enc_cases.py` (every document it
-grades, which `tests/test_encoding_inputs.py` also runs through each Python entry point) and `decoder_sweep.py`
-as its importable halves — the two-byte
-enumeration and the four disagreement classes live there because `enc_check` runs its gate at module
-level, so nothing in it could be exercised by a test, and a sweep that quietly narrows reads exactly
-like a clean run; `sel_fuzz.py`/`diff_fuzz.py`
-(selector + malformed-HTML fuzz), `soak.py` (multi-seed soak), `support_snapshot.py`
-(regenerates/checks `docs/SUPPORT_SNAPSHOT.md`), `abi3_smoke.py` (stdlib-only check that the
-extension works with no dependencies present), `ab_bench.py` (A/B two `bench` builds by
-**interleaving** them inside each cell, min-of-reps, reporting each cell's own jitter; aborts if the two
-builds disagree on the VALUE COUNT — and `--corpus <dir>` runs the same comparison over REAL pages with
-their own production selectors, which is the mode that matters: the generated tables scored the
-signature filter at −13% to −55% and the corpus scored it at zero, while the tokenizer fix the tables
-could not see was worth −75% on a real page),
-`bench_matrix.py`/`bench_corpus.py`/`bench_mem.py`/
-`bench_webpoet.py` (benchmarks; the last one times `to_item()` at the PAGE-OBJECT level and verifies both
-items are identical before timing either; `--boundaries` measures the three shapes where the healthy-path
-curve does not hold, one of which Parsel wins outright, because a benchmark that only reports its good cases
-is a brochure).
+Python, needing the pinned toolchain in `requirements-test.txt`. The root AGENTS.md has the testing rules
+these tools enforce; docs/TESTING.md has what each gate proves. A tool whose verdict decides a gate or a
+published number keeps that decision in a function `tests/test_gates.py` can seed with a regression.
 
-**Every benchmark compiles the schema ONCE, outside the timed loop** — `src/bin/bench.rs` included. A page
-object is a class and its selectors are compiled at class-definition time, so timing a per-response re-parse
-measures a program nobody writes, and its cost falls hardest on the schemas with the most fields. Do not
-add a second "pessimistic" row beside it: publishing a configuration nobody runs reads as honesty and does
-the opposite, inviting the real number to be discounted as the optimistic case. One Frostwork row, compiled.
+## Lxml-mode gates
 
-Three decision functions across these tools exist because they decide a PUBLISHED number, so
-`tests/test_gates.py` can seed each one: `bench_engines.coverage_gap` (a refusal the oracle shares is not a
-coverage gap — two independent percentages only bound the set difference), `bench_matrix.assert_cell_extracts`
-(a timed cell with selectors must extract values; six published cells extracted none) and
-`diff_lxml.oracle_empty_basket` (a pair the oracle answers nowhere can only catch an over-match).
+- `oracle.py` guards the oracle toolchain: libxml2 2.15 or later, which a pinned lxml does not pin.
+- `diff_lxml.py` is the gate (`make gate`). `conformant.py`, `families.py`, `foreign.py` and
+  `encpages.py` generate its pages, the last one family per encoding label with selector literals in
+  every position that crosses the raw-bytes boundary. `oracle_empty_basket` records the selectors the
+  oracle answers nowhere.
+- `seq_sweep.py` is `make gate-seq`, every tag sequence compared on the whole tree.
+  `seq_sweep.parser_kwargs` is the one probe for the `parser=` keyword, so lxml-mode gates pin
+  `parser="lxml"` whatever the default is.
+- `sel_fuzz.py` and `diff_fuzz.py` are the selector and malformed-HTML fuzzers, `soak.py` the multi-seed
+  soak.
+- `gen_tree_rules.py` derives libxml2's tree-construction rules over the one element universe
+  (`ELEMENTS`) and generates `src/implied_close/generated.rs` (`--check` gates on drift, `--report`
+  prints the derivation). `audit_tree_rules.py` asks lxml whether every rule cell is right, by value,
+  through the real engine. `mutate_rules.py` asks whether a wrong one would be noticed, flipping a cell
+  through the `mutate` cargo feature and rerunning the gates.
+- `corpus_fetch.py` fetches real pages into a gitignored corpus.
 
-`bench_engines.py` is the COMPETITIVE benchmark (`make bench-engines CORPUS=<dir>`, competitors pinned in
-`requirements-bench.txt`): the same corpus against selectolax/lexbor, raw lxml+cssselect and bs4+soupsieve,
-because everything else here measures Frostwork against the incumbent rather than against the fast end of
-the field. Three things it does that a speed table normally does not, each because the alternative reads as
-a win that was not measured. **Nothing is timed before its values are checked** — every column goes through
-`diff_lxml.verdict`, imported, so AGREE means what it means in the gate. **An engine that cannot express a
-selector does not get a cheaper workload**: `workload_columns` is the one decision function behind both
-timed scopes (`W-all`, and `W-common` = the columns every engine expresses AND gets right), and
-`assert_same_work` re-checks the invariant per page. **Coverage and its reasons are reported separately**,
-since "expresses 73% of production selectors" is the other half of "can I use this?". The CSS-only engines
-are driven the way their users drive them — match, then read text off each match — which is NOT lxml's
-node-set semantics; where that differs the column diverges out of the shared workload rather than being
-quietly reproduced, because no scraper writes the document-order merge. `tests/test_gates.py` seeds a wrong
-column, a mismatched workload and an absent competitor into those three functions. `bench_mem.py --engines`
-runs the peak-RSS side over the same registry: lexbor's DOM is much leaner than libxml2's, which is exactly
-the kind of thing a throughput-only comparison hides.
+## Encoding
 
-Five files own the **web-poet integration**: `webpoet_cases.py` is the shared registry (which processors
-are covered, how a page object reaches each, which gate proves it — read by the two gates below so they
-cannot drift), `webpoet_structure.py` is the one structural signature everything compares parsed HTML with
-(the differential's raw-source allowance, the benchmark's parity check and the node-handoff sweep all read
-it: a second comparator is a second standard, and the benchmark's collapsed whitespace), and the other three
-mirror the engine's derive/audit/mutate trio
-because the integration made the same mistake the engine's rule tables did — hand-written lists that
-omitted something. `diff_webpoet.py` is the gate (build a `FrostPage` and an equivalent parsel `WebPage`
-per generated schema, diff `to_item()` on the WHOLE item, across the class-shape × response-type matrix);
-`webpoet_surface.py` DERIVES the four upstream surfaces from the installed libraries by introspection —
-page bases, `web_poet.field` keywords, zyte processors, processor input types — and regenerates/checks
-`docs/WEBPOET_SURFACE.md`, failing on any name that is upstream and in neither the covered nor the declined
-list; `mutate_webpoet.py` breaks one load-bearing line at a time and asks whether the gate notices. That
-last one earns its keep: its first run found two holes in `diff_webpoet` (no generated field carried a
-`.map()`, and no bare-element field was `all=True` with a processor), because a mutation the differential
-misses is a hole in the differential. It also NAMES the logic it cannot reach — everything inline in
-`__init_subclass__` — so "0 survivors" is not read as "the module is covered".
+`enc_check.py` is encoding parity. Its importable halves are `enc_cases.py` (every document it grades,
+which `tests/test_encoding_inputs.py` also runs through each Python entry point) and `decoder_sweep.py`
+(the two-byte enumeration and its four disagreement classes). They are separate modules because
+`enc_check` runs its gate at import, where a test cannot reach it.
 
-Two things a later review round added to that trio, both about the gates rather than the code.
-`diff_webpoet` now ends in COVERAGE FAILURES as well as divergences (`coverage_failures`): a green run means
-either everything agreed or nothing ran, and a class shape that graded 0 pairs, a processor row whose
-expected value was empty everywhere, and a `REQUIRED_COLUMNS` combination the generator stopped emitting
-were all reported rather than gated. And `mutate_webpoet` runs THREE detectors (`diff`, `unit`, `surface`)
-and prints which mutations the differential missed — because one of them genuinely cannot be seen there: the
-real zyte processors are too lenient to notice a wrong node (clear-html renders the same text from a
-`<title>` as from the `<html>` around it), so the element-universe sweep in `tests/test_python.py` is that
-contract's gate, and a single-detector survivor list would have called it dead code.
+## Benchmarks
 
-`browser_oracle/` is the prototype oracle for the proposed browser mode (`docs/BROWSER_MODE.md`,
-section 5), and the one Node tool here (Node 22 or later, no packages). `probe.cjs` drives stock Chrome
-over CDP and Firefox over WebDriver BiDi, headless from throwaway profiles, and serves exact bytes with
-`Content-Security-Policy: script-src 'none'`, the one way of blocking page scripts that leaves the
-parser's scripting flag on. Its `equiv` mode compares a page load with `DOMParser`, `parseHTMLUnsafe` and
-`srcdoc` node for node over a seeded generator that refuses to run unless every token is emitted (a float
-LCG silently emitted 28 of its 60), and its `claims` mode evaluates `claims.json` on all three.
-`lab_compare.py` grades the engine against the encoding-hacks browser column with three encoding labels,
-and once through `Page.extract_response` on a web-poet `HttpResponse`.
-`evidence/<date>/` holds the outputs the proposal quotes, each stamped with its browser build.
+`bench_matrix.py`, `bench_corpus.py`, `bench_mem.py` and `bench_webpoet.py` are the benchmarks.
+`bench_webpoet.py` times `to_item()` at the page-object level after checking both items are identical,
+and `--boundaries` measures the shapes where the usual curve does not hold, one of which Parsel wins.
 
-`probe.cjs serve` is the oracle the gates call. It keeps one browser running, reads one JSON request per
-line on stdin (`{"id", "docs", "selfcheck"}`) and answers each with one line carrying a lossless tree per
-document and the path it took. `FAST_PATH_ELIGIBLE` is the only routing rule: a document with neither
-`noscript` nor `shadowrootmode` goes through `DOMParser`, and everything else is page-loaded from the
-in-process CSP server across a pool of tabs. With `selfcheck`, each eligible document is page-loaded too
-and any tree that differs is reported, so the fast path is trusted only as far as the run re-measures it.
-`browser_oracle/client.py` wraps it as `BrowserOracle("chrome" | "firefox")`, a context manager that
-batches documents, records the browser build and kills the process (and through it the browser) on exit;
-the binaries come from `FROSTWORK_CHROME`/`FROSTWORK_FIREFOX`, else the macOS install paths. A null tree
-is an oracle error and is kept in `errors`, never dropped.
+**Every benchmark compiles the schema once, outside the timed loop**, `src/bin/bench.rs` included,
+because a page object compiles its selectors at class definition. There is one Frostwork row, compiled; a
+"selectors re-parsed per call" row would time a program nobody writes.
 
-A `serve` request may also carry CSS: `plans` (a table of `css.py` plans) and `queries` (per document,
-indexes into it), answered as `css` on the same document the tree was serialised from. `bodies` (base64)
-with `ctypes` serves exact bytes with that Content-Type and always page-loads, and every reply carries
-`charsets`, the `document.characterSet` each document was decoded with. `BrowserOracle.query(docs,
-selectors)` is the client side: it plans each selector once, sends the table, and returns `(trees,
-answers)`, where an answer is a list of values or a `Refused` naming who could not answer (the planner or
-the browser). A `Refused` is never graded and never reads as an empty column. With `selfcheck`, the CSS
-answers of both paths are compared as well as the trees.
+`ab_bench.py` compares two `bench` builds by interleaving them inside each cell (min of reps) and reports
+each cell's own jitter. It aborts if the builds disagree on the value count. `--corpus <dir>` runs the
+comparison over real pages with their own production selectors, which is the mode that decides: generated
+tables and real pages have disagreed on the sign of a change.
 
-`browser_oracle/css.py` plans parsel's CSS for `querySelectorAll`. The browser decides what matches,
-attribute case folding and quirks-mode class matching included; what the browser has no syntax for is
-parsel's and is mirrored from parsel's own translator: `::text` is the matched element's text-node
-children, `::attr(name)` the attribute `getAttribute(name)` returns, a pseudo-element after a descendant
-combinator and a bare universal (`p ::text`, `div *::text`) is the subtree form, a comma group is a union
-in document order, and `:contains()` becomes a marker attribute for the duration of one query. Every plan
-is checked against parsel before it is sent: the native CSS with the pseudo-element put back must
-translate to parsel's exact XPath, or the selector is `Unplannable`. `grouped` plans answer parsel's
-`node.css()` relative to each container match.
+`bench_engines.py` is the competitive benchmark (`make bench-engines CORPUS=<dir>`, competitors pinned in
+`requirements-bench.txt`) against selectolax/lexbor, raw lxml with cssselect, and bs4 with soupsieve.
 
-`browser_oracle/bridge.py` is the lossless XPath bridge: the browser's JSON tree as an lxml tree, so
-browser-mode XPath is lxml's XPath over the browser's tree (`//svg` finds SVG, `//P` finds no `<p>`). What
-lxml refuses (C0 controls, U+FFFE/U+FFFF, surrogates; `"&'/<>`, whitespace or a leading `{` in an element
-name; `--` in a comment) maps one character for one character into a private-use plane the document never
-uses, and XPath queries pass through the same map, so literals still match and `string-length()` stays
-exact. Every answer is decoded back, and an element is answered with the browser's own `outerHTML`
-serialisation of its JSON node, because the lxml tree is the document view and lxml would serialise a
-`<template>` empty. Namespaces, doctypes, template content and shadow roots live beside the lxml tree, so
-`to_json()` rebuilds the browser's tree exactly. What no map can hold (two adjacent text nodes, which lxml
-would merge) raises `Unrepresentable` and is counted, never graded through lxml. `round_trip_failures` is
-the round-trip gate's decision function, seeded in `tests/test_gates.py` with lossy bridges. The gates ask
-through `open_bridge` and `xpath_answer`, so a page that failed to load, a tree lxml cannot hold and a query
-lxml rejects each come back as a `Refused` with its reason, never as an empty column.
+- Nothing is timed before its values are checked: every column goes through `diff_lxml.verdict`.
+- An engine that cannot express a selector does not get a cheaper workload. `workload_columns` decides
+  both timed scopes (`W-all`, and `W-common`, the columns every engine expresses and gets right), and
+  `assert_same_work` rechecks it per page.
+- Coverage and its reasons are reported separately, and `coverage_gap` excludes refusals the oracle
+  shares.
+- The CSS-only engines are driven as their users drive them (match, then read text off each match). Where
+  that differs from lxml's node-set semantics the column leaves the shared workload.
 
-`browser_oracle/tree.py` evaluates the fingerprint's XPath columns over the browser's JSON tree itself,
-with lxml's XPath semantics. `document_view` drops HTML template content and shadow roots, which no
-selector reaches. The evaluator implements only the shapes `seq_sweep.fingerprint_selectors` emits and
-raises on any other, and `from_lxml` converts lxml's own tree to the same format so
-`tests/test_gates.py` can prove the evaluator returns parsel's answers on lxml's trees. Widen the
-evaluator and that test together whenever the fingerprint gains a shape. Every other XPath column goes
-through the bridge, and `diff_browser` checks on every run that the two agree on the fingerprint. The
-same module reads a tree's document mode from its doctype (`is_quirks`) and lists its elements
-(`elements`), which the value constructs and the CSS mirror check use. `chrome_build.py` prints the Chrome build
-`html5_derivation.json` was derived from, which hosted CI installs from Chrome for Testing.
+`bench_mem.py --engines` measures peak RSS over the same registry.
 
-`diff_browser.py` is the browser differential (`make gate-browser`). It grades the engine on
-`seq_sweep`'s fingerprint against Chrome's tree, over `seq_sweep`'s short sequences plus seeded random
-documents from an HTML5-heavy alphabet in which every start tag carries an id, and it refuses to grade
-unless every token is emitted. `browser_docs.py` generates those documents and holds the column lists
-asked of them: `ALPHABET`, `VALUE_ATTRS`, `VALUE_TEXTS`, `TAIL_CONTEXTS`, `structured_docs`, `RULE_SELECTORS`,
-`GROUPED_COLUMNS` and `value_selectors` below are its names. Each differing column is reduced to the
-smallest token subsequence that still differs on it (ids survive the reduction, so the column names the
-same element) and the reduced document is attributed to a row of `CONSTRUCTS`. Attribute by the repro,
-never by the page it came from. It has no rows: the retroactive rules that used to fill it (the adoption agency's moves, fostered content's
-document order, a second `<html>`/`<body>`, a `<frameset>` replacing a body, `<selectedcontent>`) are exact
-through the replay, so every tree divergence is NOVEL. `--gate` fails on NOVEL and on coverage: nothing graded,
-a token never emitted, an oracle error, or a self-check difference. `gate_failures` and `attribute` are
-its decision functions, seeded in `tests/test_gates.py`. With `--browsers chrome,firefox` the columns
-where the two browsers disagree go into their own reduced table and the engine is graded against
-Chrome there. `--parser` (default `browser`) is passed to `frostwork.extract` only when the installed
-extension accepts it, and the run prints which mode it graded. `seq_sweep.parser_kwargs` is the one probe
-for that keyword: `seq_sweep` and the engine calls in `tests/test_gates.py` pass `parser="lxml"` through
-it, so lxml mode's gates keep grading libxml2 behaviour whatever the default mode is. A construct that
-cannot be made exact gets a row, with its divergence in docs/COMPATIBILITY.md; when it becomes exact, delete
-the row in the same change, so the gate holds it at zero.
+Other tools: `support_snapshot.py` regenerates and checks `docs/SUPPORT_SNAPSHOT.md`; `abi3_smoke.py`
+checks the extension works with no dependencies installed; `retro_census.py` counts, per retroactive rule,
+the share of a corpus's pages where browser mode replays (through the `differ`'s `R` op).
 
-`retro_census.py` counts, per retroactive rule, the fraction of a corpus's pages where it fires (through the
-differ's `R` op, reading the pages where they lie), which is the share of pages browser mode replays.
+## The web-poet integration
 
-`diff_browser.py` also grades VALUE columns, over the same documents plus `--values` decorated ones:
-ALPHABET tokens carrying `VALUE_ATTRS` and `VALUE_TEXTS` (case variants of the attributes HTML folds,
-class lists with form feed and Unicode whitespace, NUL, entities, control characters), under the same
-token-coverage refusal, plus every `TAIL_CONTEXTS` x `TAIL_BODIES` document: a deferred winner
-(`li:last-child b::text`, `tr:has(b) td::attr(id)`) whose content depends on what is open outside it (a
-table, a formatting element reconstruction copies in, an SVG or MathML integration point), which is where
-re-scanning a winner's source alone goes wrong. The basket is `conformant.BASKET`, `RULE_SELECTORS` and
-per-id `::text`/`::attr`/descendant-text columns, minus what the engine refuses in the mode under test.
-`browser_answers.py` holds what both browser gates share: `Engine` (frostwork in one parse mode), `Answers`
-(every source's answer to every column a run asks), `same_values` (what AGREE means for a value column) and
-`engine_refusals`, which asks about each selector alone because one `check` over a whole run is one schema
-past the column ceiling and reports selectors refused that are not. CSS is answered natively and XPath
-through the bridge, on the tree the fingerprint was read from. A value column that differs where the
-fingerprint already differs is filed under the TREE, which that gate holds. Where the fingerprint agrees,
-it is reduced with the fingerprint still agreeing at every step and attributed to `VALUE_CONSTRUCTS` in
-`browser_values.py` (case-insensitive attribute values, quirks-mode class matching, raw-source outer
-HTML), which read the oracle's tree rather than the page; never add a value construct to `CONSTRUCTS`.
-Raw-source outer HTML needs the same start tag and the browser's text, in order, inside the engine's: the
-source may hold text the browser moved elsewhere, but a value that lost content is not raw source. Both
-values' text is read by parsing them in browser mode, since libxml2 reads a serialised `<plaintext>`,
-`<noscript>` or `<script/>` differently from Chrome. A value
-column about an id-less element no fingerprint column can see (the empty `<p>` a stray `</p>` inserts) is
-attributed through `CONSTRUCTS` as a tree difference only the value column found. Anything else is value
-NOVEL and fails the gate. So do: a bridge round trip that changed a tree, bridge XPath that answers a
-fingerprint column differently from the native evaluator, native CSS that answers differently from
-parsel's `.css()` over the bridged tree where the two semantics coincide (the planner's standing check:
-no-quirks documents, no folded attribute, no form feed in a class), a CSS self-check difference, a
-value-rule selector the oracle answered nowhere or the engine refuses, and a value column the CSS planner,
-the browser or the XPath bridge cannot ask. Decorations go before the id slot
-and are undone by id for tree attribution (`undecorate`/`redecorate`), so the construct rules see
-ALPHABET tokens and a counterfactual edit keeps its decorations.
+- `webpoet_cases.py` is the shared registry: which processors are covered, how a page object reaches
+  each, and which gate proves it.
+- `webpoet_structure.py` is the one structural signature for comparing parsed HTML, read by the
+  differential, the benchmark and the node-handoff sweep.
+- `diff_webpoet.py` is the gate (`make gate-webpoet`): a `FrostPage` and an equivalent parsel `WebPage`
+  per generated schema, `to_item()` compared on the whole item, across the class-shape by response-type
+  matrix. It fails on coverage as well as divergence (`coverage_failures`): a class shape that graded
+  nothing, a processor row whose expected value was empty everywhere, a `REQUIRED_COLUMNS` combination
+  the generator stopped emitting.
+- `webpoet_surface.py` derives the upstream surfaces by introspecting the installed libraries (page bases,
+  `web_poet.field` keywords, zyte processors, processor input types) and regenerates and checks
+  `docs/WEBPOET_SURFACE.md`. It fails on any upstream name that is neither covered nor declined.
+- `mutate_webpoet.py` breaks one load-bearing line at a time and runs three detectors (`diff`, `unit`,
+  `surface`), printing which mutations the differential missed. One contract is visible only to
+  `tests/test_python.py`'s element-universe sweep, because the real zyte processors render the same text
+  from a wrong node. The sweep names what it cannot reach: everything inline in `__init_subclass__`.
 
-The random alphabet also holds mixed-case tag names, the end tags of every formatting element and of
-the special elements nothing else in it closes, text with references and an inner NUL, the markup declarations the tokenizer special-cases, and
-`ARK` tokens: formatting tags that all carry the id `k`, the only way two generated elements can have
-the same attribute set, which Noah's Ark compares. Every fourth random document is up to `LONG_TOKENS`
-long. `structured_docs` adds what a random run of a few tokens almost never assembles: documents that
-end before the body or inside a raw-text, RCDATA or script end tag, a comment in every position of three
-skeletons, formatting copies that share an offset, Noah's Ark families, `DEEP` runs of nested divs at Chrome's depth cap (one token each, with no
-ids, so reduction drops a run whole), successive `<html>` and `<body>` tags whose attributes only together
-match a rule selector (`FRAME_MERGES`), and every attribute value a tree rule reads spelled both literally
-and with a character reference (`RULE_VALUES`). A flat column cannot see an element with no attribute and no text,
-such as the empty `<body>` a document that ends in its head still gets, so `GROUPED_COLUMNS`
-(`grouped:<container> -> <sub> | <sub>`) grade grouped rows too; the frame's outer HTML is listed but
-browser mode refuses it. `--debug-differ` runs every graded document through a DEBUG `differ` and fails
-on a panic: the builder's `debug_assert!`s are invariants a release build can break while every value
-still passes the raw-source allowance (`make gate-browser` passes it).
+`diff_webpoet.py --parser browser` is `make gate-webpoet-browser`. The expected item comes from Chrome:
+the parsel page objects keep their getters, `Processors` and `out=`, and take their values from native
+CSS or the XPath bridge. Browser mode must refuse `.as_node()` at class definition, so a schema with a
+node-taking processor is checked for that refusal and graded without those fields; a refusal no run
+provoked is a coverage failure (`required_refusals`). A field whose engine column already differs from
+Chrome's is ENGINE, which is `gate-browser`'s to hold.
 
-Every value column of a decorated document is also asked of the engine ALONE and compared with its answer
-beside the run's other columns (`check_alone`). Which columns share a schema decides what the engine
-tracks, an attribute merged into `<body>` mattering only to a schema that reads it, so the basket can be
-right where the column alone is wrong.
+## The browser oracle (`browser_oracle/`)
 
-`diff_webpoet.py --parser browser` (`make gate-webpoet-browser`, in `ci`) builds browser-mode page
-objects and takes the expected item from Chrome: the parsel page objects keep their getters, `Processors`
-and `out=`, and their values come from native CSS or the bridge. `.as_node()` must be refused at class
-definition in browser mode, so a schema with a node-taking processor is checked for that refusal and then
-graded without those fields; an accepted one fails the gate, and a refusal no run provoked is a coverage
-failure (`required_refusals`). A field whose engine column already differs from the browser's is ENGINE,
-not DIVERGE: that divergence is gate-browser's, and this gate grades the page-object layer.
+The one Node tool here (Node 22 or later, no packages).
 
-`corpus_browser.py` (`make gate-corpus-browser [CORPUS=<dir>]`) is the report-only corpus view of browser
-mode: each page of a `bench_corpus.py`-layout corpus is served as exact bytes with its Content-Type (a
-`<page>.content-type` sidecar, else `text/html`) and page-loaded, and every selector is graded against the
-engine given the same header. A page Chrome and the engine decoded differently is reported as such and
-graded on Chrome's decoding, since encoding has its own gates. A differing column is TREE where the page's
-fingerprint over its own ids differs, VALUE where it agrees over at least one id, and UNSPLIT on a page
-with no ids. Nothing is reduced or attributed: a corpus page is not a token sequence. `column_verdict` is
-its decision function, seeded in `tests/test_gates.py`.
+- `probe.cjs` drives stock Chrome over CDP and Firefox over WebDriver BiDi, headless, from throwaway
+  profiles. It serves exact bytes with `Content-Security-Policy: script-src 'none'`, the one way of
+  blocking page scripts that leaves the parser's scripting flag on. `equiv` mode compares a page load with
+  `DOMParser`, `parseHTMLUnsafe` and `srcdoc` node for node, and `claims` mode evaluates `claims.json`.
+  `evidence/<date>/` holds the outputs the design quotes, each stamped with its browser build.
+- `probe.cjs serve` is what the gates call: one browser, one JSON request per line on stdin, one line back
+  with a lossless tree per document. A document with neither `noscript` nor `shadowrootmode` goes through
+  `DOMParser` (`FAST_PATH_ELIGIBLE`, the only routing rule); everything else is page-loaded across a pool
+  of tabs. With `selfcheck`, eligible documents are page-loaded too and any difference is reported. A
+  request may carry CSS (`plans` and per-document `queries`) and exact bytes with a Content-Type
+  (`bodies`, `ctypes`); every reply carries `charsets`.
+- `client.py` wraps it as `BrowserOracle("chrome" | "firefox")`, a context manager that batches
+  documents, records the build and kills the browser on exit. Binaries come from `FROSTWORK_CHROME` and
+  `FROSTWORK_FIREFOX`, else the macOS install paths. A null tree is an oracle error, kept in `errors`.
+  `query(docs, selectors)` returns `(trees, answers)`, where an answer is a list of values or a `Refused`
+  naming who could not answer. A `Refused` is never graded and never reads as an empty column.
+- `css.py` plans parsel's CSS for `querySelectorAll`. The browser decides what matches; what it has no
+  syntax for (`::text`, `::attr()`, the subtree form, comma groups, `:contains()`) is mirrored from
+  parsel's translator, and every plan must translate back to parsel's exact XPath or it is `Unplannable`.
+- `bridge.py` is the lossless XPath bridge: the browser's tree as an lxml tree, so browser-mode XPath is
+  lxml's XPath over Chrome's tree. Characters lxml refuses map one for one into an unused private-use
+  plane, queries pass through the same map, and answers are mapped back; elements are answered with the
+  browser's own `outerHTML`. What no map can hold (two adjacent text nodes) raises `Unrepresentable`.
+  `round_trip_failures` is the round-trip gate. `open_bridge` and `xpath_answer` return a `Refused` for a
+  failed load, a tree lxml cannot hold or a query lxml rejects.
+- `tree.py` evaluates the fingerprint's XPath columns over the browser's JSON tree with lxml's semantics,
+  and only the shapes `seq_sweep.fingerprint_selectors` emits. `from_lxml` lets `tests/test_gates.py`
+  prove it returns parsel's answers on lxml's trees; widen the evaluator and that test together. It also
+  reads a tree's document mode (`is_quirks`) and lists its elements.
+- `lab_compare.py` grades the engine against the encoding-hacks browser column with three encoding labels,
+  and once through `Page.extract_response` on a web-poet `HttpResponse`.
+- `chrome_build.py` prints the Chrome build `html5_derivation.json` was derived from, which hosted CI
+  installs from Chrome for Testing.
 
-`gen_html5_rules.py` is browser mode's counterpart of `gen_tree_rules.py`. It derives the HTML5 element
-categories (special, formatting, the five scope lists, the two implied-end sets, void, data mode) from
-Chrome over the same `ELEMENTS` universe and generates `src/implied_close/generated_html5.rs` whole. Each
-category is read off one tree difference. A cell no tree can show is not guessed: a void element is never
-on the stack, a table part exists only inside a `<table>` that is itself special and a scope boundary, and
-a raw-text element has no end tag token. Those cells come from the WHATWG list, and the generated header
-names each one with its reason. `</b>` and `<rb>` reach an element only through a scope check, so the scope
-answers are read first and a default-scope boundary is reported unreadable for them. Three categories also
-carry a witness, a second probe over a different algorithm (the adoption agency, `<button>` and `<p>`
-start tags), and the two must agree wherever both read a name. Every category must read both ways on its
-controls. `tests/test_gates.py` runs the same probes against libxml2, which has none of these rules, to
-show the answers move with the parser. Firefox runs the same documents. Chrome is what gets generated, and
-`--report` prints every difference from the spec and from Firefox. `--check` is offline: it compares the
-Rust file with `browser_oracle/html5_derivation.json` (the stored per-cell answers) and checks a hash of
-the probe documents, so `make py` needs no browser. `--check --live` re-measures in Chrome and runs in
-`make gate-browser`. `--write` re-measures both browsers with the DOMParser fast path self-checked, and
-refuses to write on a failed control or a fast-path difference.
+## Browser-mode gates
 
-Three tools own the tree-construction rules and share ONE element universe: `gen_tree_rules.py`
-derives the rules from libxml2 and GENERATES the Rust table (`--check` gates on drift, `--report`
-prints the derivation); `audit_tree_rules.py` asks lxml whether every rule cell is RIGHT, by value,
-through the real engine; `mutate_rules.py` asks whether a WRONG one would be noticed (flips a cell
-via the `mutate` cargo feature and reruns the gates). `corpus_fetch.py` fetches real pages into a
-gitignored corpus.
+`diff_browser.py` is `make gate-browser`. It grades the engine on `seq_sweep`'s fingerprint against
+Chrome's tree, over short sequences, seeded random documents and structured documents, and refuses to
+grade unless every token is emitted. Each differing column is reduced to the smallest token subsequence
+that still differs (ids survive reduction) and attributed by that repro. `CONSTRUCTS` has no rows: every
+tree divergence is NOVEL and fails the gate. A construct that cannot be made exact gets a row and a
+COMPATIBILITY.md entry; delete the row when it becomes exact. `gate_failures` and `attribute` are the
+decision functions. With `--browsers chrome,firefox` the columns where the browsers disagree get their
+own table, and the engine is graded against Chrome there. `--debug-differ` runs every graded document
+through a debug `differ` and fails on a panic, since the builder's `debug_assert!`s are invariants a
+release build can break silently.
+
+`browser_docs.py` generates the documents and holds the column lists: `ALPHABET` (with mixed-case names,
+formatting and special end tags, references and NUL in text, the markup declarations the tokenizer
+special-cases, and `ARK` tokens sharing the id `k` so Noah's Ark has equal attribute sets to compare),
+`VALUE_ATTRS`, `VALUE_TEXTS`, `TAIL_CONTEXTS`, `RULE_SELECTORS`, `GROUPED_COLUMNS` and `value_selectors`.
+`structured_docs` adds what random runs rarely assemble: documents ending before the body or inside a
+raw-text end tag, a comment in every position of three skeletons, formatting copies that share an
+offset, Noah's Ark families, runs of divs at Chrome's depth cap, successive `<html>` and `<body>` tags
+(`FRAME_MERGES`), and every attribute value a tree rule reads spelled literally and with a character
+reference (`RULE_VALUES`).
+
+The same run grades value columns: the `conformant.BASKET`, `RULE_SELECTORS` and per-id columns, over the
+documents plus `--values` decorated ones and every `TAIL_CONTEXTS` by `TAIL_BODIES` document (a deferred
+winner whose content depends on what is open outside it). CSS is answered natively and XPath through the
+bridge.
+
+- A value column that differs where the fingerprint already differs is filed under the tree. Otherwise
+  it is reduced with the fingerprint agreeing at every step and attributed to `VALUE_CONSTRUCTS` in
+  `browser_values.py`, which read the oracle's tree. Never add a value construct to `CONSTRUCTS`.
+- Raw-source outer HTML must have the browser's start tag and the browser's text, in order, inside the
+  engine's value; a value that lost content is not raw source. The allowances for a merged `<html>`/`<body>`
+  and for a `<selectedcontent>` copy each excuse exactly that difference.
+- Every value column is also asked of the engine alone and compared with its batch answer (`check_alone`),
+  because which columns share a schema decides what the engine tracks.
+- Also fatal: a bridge round trip that changed a tree, bridge XPath that disagrees with the native
+  evaluator, native CSS that disagrees with parsel over the bridged tree where the semantics coincide, a
+  self-check difference, a rule selector the oracle answered nowhere or the engine refuses, and a column
+  nothing can ask.
+- Decorations go before the id slot and are undone by id for tree attribution (`undecorate`,
+  `redecorate`).
+
+`browser_answers.py` holds what the browser gates share: `Engine` (frostwork in one parse mode), `Answers`
+(every source's answer to every column), `same_values` (what AGREE means) and `engine_refusals`, which
+asks about each selector alone.
+
+`corpus_browser.py` is `make gate-corpus-browser [CORPUS=<dir>]`, a report-only view: each page is
+page-loaded as exact bytes with its Content-Type (a `<page>.content-type` sidecar, else `text/html`) and
+every selector graded against the engine given the same header. A differing column is TREE, VALUE or
+UNSPLIT by whether the page's own ids show a tree difference. `column_verdict` is its decision function.
+
+`gen_html5_rules.py` derives browser mode's element categories (special, formatting, the five scopes, the
+implied-end sets, void, data mode) from Chrome over the same `ELEMENTS` universe and generates
+`src/implied_close/generated_html5.rs`. Each category is read off one tree difference, three carry a
+second witness probe that must agree, and every category must read both ways on its controls. Cells no
+tree can show come from the WHATWG list, named with their reason in the generated header. `--check`
+compares the file with the stored answers in `html5_derivation.json` offline (`make py`); `--check --live`
+re-measures in Chrome (`make gate-browser`); `--write` re-measures both browsers and refuses on a failed
+control or a fast-path difference; `--report` prints every difference from the spec and from Firefox.
