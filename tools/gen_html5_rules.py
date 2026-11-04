@@ -179,13 +179,13 @@ def walk(root: El) -> Iterator[El]:
             yield from walk(k)
 
 
-def html(root: El, name: str, ident: str) -> list[El]:
+def html_elements(root: El, name: str, ident: str) -> list[El]:
     """The HTML elements called `name` with `id=ident`, in document order."""
     return [e for e in walk(root) if e.name == name and e.ns == 0 and e.id == ident]
 
 
 def first(root: El, name: str, ident: str = "x") -> Optional[El]:
-    found = html(root, name, ident)
+    found = html_elements(root, name, ident)
     return found[0] if found else None
 
 
@@ -387,7 +387,7 @@ def read_formatting(n: str, trees: dict[str, El], reason: Optional[str]) -> Answ
     if reason:
         return Answer(None, reason)
     root = trees[formatting_doc(n)]
-    found = html(root, n, "x")
+    found = html_elements(root, n, "x")
     d = by_id(root, "d")
     if not found or d is None or found[0].parent is not d:
         return Answer(None, NOT_DIRECT)
@@ -739,6 +739,42 @@ def measure(browsers: list[str], *, selfcheck: bool) -> dict[str, Derivation]:
     return out
 
 
+def write(browsers: list[str]) -> int:
+    """Re-derive from `browsers` and rewrite the stored answers and the Rust file, unless the derivation is
+    not trustworthy."""
+    got = measure(browsers, selfcheck=True)
+    if "chrome" not in got:
+        raise SystemExit("--write needs chrome: it is the oracle the file is generated from")
+    failures = control_failures(got["chrome"]) + witness_disagreements(got["chrome"])
+    if got["chrome"].selfcheck[1]:
+        failures.append(f"{got['chrome'].selfcheck[1]} documents build a different tree by page load than by DOMParser")
+    if failures:
+        print("REFUSING to write: the derivation is not trustworthy\n  " + "\n  ".join(failures))
+        return 1
+    with open(SNAPSHOT, "w") as f:
+        f.write(snapshot_json(got))
+    with open(RUST_SRC, "w") as f:
+        f.write(render_rust(got["chrome"]))
+    print(f"wrote {os.path.relpath(SNAPSHOT, ROOT)} and {os.path.relpath(RUST_SRC, ROOT)} from {got['chrome'].build}")
+    return 0
+
+
+def check(snap: dict, stored: dict[str, Derivation], live: bool) -> int:
+    """The gate: the Rust file is what the stored answers render to, and with `live` the browser still gives them."""
+    bad = check_generated(snap, open(RUST_SRC).read())
+    if live:
+        now = measure(["chrome"], selfcheck=False)["chrome"]
+        bad += compare_live(stored["chrome"], now)
+        note = f" (live {now.build}, stored {stored['chrome'].build})"
+    else:
+        note = f" (stored answers from {stored['chrome'].build}; --live re-measures)"
+    if bad:
+        print("GATE: generated_html5.rs is NOT what the browser says -> FAIL\n  " + "\n  ".join(bad))
+        return 1
+    print(f"GATE: {os.path.relpath(RUST_SRC, ROOT)} matches the derivation over {len(PROBE_NAMES)} names -> PASS{note}")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--check", action="store_true", help="exit nonzero if the Rust file has drifted")
@@ -752,50 +788,22 @@ def main() -> int:
     args = ap.parse_args()
 
     if args.write:
-        got = measure(args.browsers.split(","), selfcheck=True)
-        if "chrome" not in got:
-            raise SystemExit("--write needs chrome: it is the oracle the file is generated from")
-        failures = control_failures(got["chrome"]) + witness_disagreements(got["chrome"])
-        if got["chrome"].selfcheck[1]:
-            failures.append(f"{got['chrome'].selfcheck[1]} documents build a different tree by page load than by DOMParser")
-        if failures:
-            print("REFUSING to write: the derivation is not trustworthy\n  " + "\n  ".join(failures))
-            return 1
-        with open(SNAPSHOT, "w") as f:
-            f.write(snapshot_json(got))
-        with open(RUST_SRC, "w") as f:
-            f.write(render_rust(got["chrome"]))
-        print(f"wrote {os.path.relpath(SNAPSHOT, ROOT)} and {os.path.relpath(RUST_SRC, ROOT)} from {got['chrome'].build}")
-        return 0
-
+        return write(args.browsers.split(","))
     snap = load_snapshot()
     stored = {k: Derivation.from_json(v) for k, v in snap["browsers"].items()}
     if args.report:
         live = measure(args.browsers.split(","), selfcheck=False) if args.live else stored
         report(live["chrome"], live.get("firefox"))
-        return 0
-    if args.show:
+    elif args.show:
         print(render_rust(stored["chrome"]), end="")
-        return 0
-    if args.render:
+    elif args.render:
         with open(RUST_SRC, "w") as f:
             f.write(render_rust(stored["chrome"]))
         print(f"rendered {os.path.relpath(RUST_SRC, ROOT)} from the stored answers ({stored['chrome'].build})")
-        return 0
-    if args.check:
-        bad = check_generated(snap, open(RUST_SRC).read())
-        if args.live:
-            live = measure(["chrome"], selfcheck=False)["chrome"]
-            bad += compare_live(stored["chrome"], live)
-            note = f" (live {live.build}, stored {stored['chrome'].build})"
-        else:
-            note = f" (stored answers from {stored['chrome'].build}; --live re-measures)"
-        if bad:
-            print("GATE: generated_html5.rs is NOT what the browser says -> FAIL\n  " + "\n  ".join(bad))
-            return 1
-        print(f"GATE: {os.path.relpath(RUST_SRC, ROOT)} matches the derivation over {len(PROBE_NAMES)} names -> PASS{note}")
-        return 0
-    ap.print_help()
+    elif args.check:
+        return check(snap, stored, args.live)
+    else:
+        ap.print_help()
     return 0
 
 
