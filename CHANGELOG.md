@@ -22,7 +22,8 @@ first public release.
 - In browser mode a valueless attribute is `""`, as in Chrome; lxml mode keeps libxml2's rule that a
   minimized boolean such as `<input disabled>` has its own name as its value.
 - Browser mode follows Chrome where it departs from the spec: whitespace after `</body>` reconstructs no
-  formatting element, and a NUL right after a `<` read as text is U+FFFD rather than dropped.
+  formatting element, a NUL right after a `<` read as text is U+FFFD rather than dropped, and a tag whose
+  whitespace before `>` has a CR second swallows the LF after it.
 - Browser-mode CSS matches the values of the 46 attributes HTML lists case-insensitively on HTML
   elements, as browsers do (`input[type=submit]` matches `type="SUBMIT"`). XPath and lxml mode compare
   exactly.

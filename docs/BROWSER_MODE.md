@@ -161,11 +161,16 @@ Tree rules that read an attribute value (`input type`, `template shadowrootmode`
 encoding`, `select size`) read it with its character references decoded, and `size` is parsed as an HTML
 non-negative integer into 32 bits, as Chrome does.
 
-Two Chrome rules depart from the spec, and browser mode follows Chrome in both; Firefox follows the spec.
-Whitespace after `</body>` or `</html>` goes into the current node without reconstructing the active
-formatting elements (`<div><b></div></body>\n` leaves the LF in the body, not in a new `<b>`), and the rest
-of that text reconstructs them as usual. In body text, the one NUL right after a `<` read as text is
-U+FFFD, while every other NUL is dropped (`x<\0\0y` is `x<�y`).
+Three Chrome rules depart from the spec, and browser mode follows Chrome in each; Firefox follows the spec.
+
+- Whitespace after `</body>` or `</html>` goes into the current node without reconstructing the active
+  formatting elements (`<div><b></div></body>\n` leaves the LF in the body, not in a new `<b>`), and the
+  rest of that text reconstructs them as usual.
+- In body text, the one NUL right after a `<` read as text is U+FFFD, while every other NUL is dropped:
+  `x<\0\0y` is `x<`, U+FFFD, `y`.
+- A tag whose run of whitespace before the `>` has a CR as its second character swallows an LF right after
+  the `>` (`<span \r>\nx` holds `x`). A CR elsewhere in the run does not (`<span\r>`, `<span  \r>`), and
+  a CRLF counts as one character. The swallowed LF is not the one `<pre>` drops, so `<pre \r>\n\nx` is `x`.
 
 `<select>` content is not a departure: Chrome 156 and Firefox 159 keep a `<div>` written inside a
 `<select>` since the customisable-`<select>` parser change, and so does lxml, while html5lib and parse5
