@@ -958,8 +958,13 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
 
     // ------------------------------------------------------------------ active formatting elements
 
-    /// Insert a formatting element for a start tag and push it onto the list.
+    /// Insert a formatting element for a start tag and push it onto the list. Chrome pushes none that
+    /// carries an `is` attribute, so such an element is never reconstructed and the adoption agency
+    /// treats its end tag as any other end tag.
     fn insert_formatting(&mut self, m: &mut Matcher<'a>, t: &StartTok<'a, '_>) {
+        if t.attrs.iter().any(|&(name, _)| name.eq_ignore_ascii_case(b"is")) {
+            return self.insert_html(m, t);
+        }
         let tok = self.afe.add_token(m.input, t);
         self.insert_html(m, t);
         let uid = self.cur().uid;

@@ -408,6 +408,16 @@ CR_IN_TAGS: list[list[str]] = [
     for tag in ("<span{}{ws}>", "<span{} a=1{ws}>", "</b{ws}>", "<pre{}{ws}>", "<title{}{ws}>")
     for ws in (" \r", "\r", "  \r", "\r\r", " \r\n", "\n\r ")
 ]
+# Formatting elements with an `is` attribute, which Chrome keeps off the list of active formatting
+# elements: closed by a parent's end tag, ended by their own end tag past a block, nested in themselves.
+IS_ATTR: list[list[str]] = [
+    ["<div{}>", f"<{tag}{{}} {attr}>", "</div>", "t"]
+    for tag in ("b", "a", "nobr") for attr in ("is", "IS=x", "iss")
+] + [
+    ["<b{} is>", "t", "<p{}>", "t", "</b>", "t"],
+    ["<a{} is>", "t", "<a{}>", "t"],
+    ["<b{}>", "t", "<b{} is>", "t", "<b{}>", "t", "<b{}>", "t", "</div>", "t"],
+]
 SELECT_OPTIONS: list[list[str]] = [
     _SELECT + body + ["<option{}>", "u", "</select>"]
     for body in (
@@ -422,7 +432,7 @@ SELECT_OPTIONS: list[list[str]] = [
 
 def structured_docs() -> list[Doc]:
     """Every structured family member, as a document."""
-    seqs = [lead + f for f in EOF_FRAMES + FORMATTING + RAW_ENDS + FRAME_MERGES + RULE_VALUES + SELECT_OPTIONS + PAGE_LOADS + AFTER_BODY + CR_IN_TAGS
+    seqs = [lead + f for f in EOF_FRAMES + FORMATTING + RAW_ENDS + FRAME_MERGES + RULE_VALUES + SELECT_OPTIONS + PAGE_LOADS + AFTER_BODY + CR_IN_TAGS + IS_ATTR
             for lead in ([], [DOCTYPE])]
     seqs += [s[:k] + [COMMENT] + s[k:] for s in COMMENT_SKELETONS for k in range(len(s) + 1)]
     seqs += [[DOCTYPE] + f for f in ARK_FAMILY]

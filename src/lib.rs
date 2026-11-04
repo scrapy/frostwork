@@ -3730,6 +3730,16 @@ mod browser_mode_tests {
         assert_eq!(lxml(b"<p><span \r>\nx", "span::text"), v(&["\nx"]));
     }
 
+    /// A formatting element with an `is` attribute is never on the list of active formatting elements in
+    /// Chrome: it is not reconstructed, and its end tag is any other end tag.
+    #[test]
+    fn a_formatting_element_with_is_is_not_an_active_formatting_element() {
+        assert_eq!(ex(b"<div><b is></div>x", "b::text"), NONE);
+        assert_eq!(ex(b"<div><b iss></div>x", "b::text"), v(&["x"]));
+        assert_eq!(ex(b"<b is>1<p>2</b>3", "p::text"), v(&["23"]));
+        assert_eq!(ex(b"<a is>1<a>2", "a a::text"), v(&["2"]));
+    }
+
     /// Whitespace after `</body>` goes into the current node without reconstructing the active formatting
     /// elements, as in Chrome; other text after it reconstructs them, as in the body.
     #[test]

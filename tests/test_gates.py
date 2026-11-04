@@ -1892,3 +1892,19 @@ def test_chromes_big5_bug_is_excused_only_where_it_is_the_whole_difference():
     assert verdict("xÊ̄", "x\x93\udf04") == "Chrome's Big5 decoder bug (not followed)"
     assert verdict("xQy", "x\xb3\udf0cy") is None
     assert verdict("xê̌z", "x\xb3\udf0cy") is None
+
+
+def test_unlabelled_utf8_is_excused_only_as_its_exact_windows_1252_reading():
+    """A value Chrome decoded as windows-1252 where Frostwork read unlabelled UTF-8 is the documented
+    exception; a value that differs any other way is not."""
+    import browser_values as V
+
+    def verdict(engine, oracle):
+        return V.attribute_value(V.ValueRepro(((0, "x"),), "title::text", engine, oracle, ["#d", []]))
+
+    name = "unlabelled UTF-8 Chrome reads as windows-1252 (documented)"
+    assert verdict(["Madden® Česko", "same"], ["MaddenÂ® ÄŒesko", "same"]) == name
+    assert verdict(["café"], ["cafÃ©"]) == name
+    assert verdict(["café"], ["cafÃ¨"]) is None
+    assert verdict(["café", "x"], ["cafÃ©", "y"]) is None
+    assert verdict(["a"], ["a", "b"]) is None

@@ -161,7 +161,11 @@ Tree rules that read an attribute value (`input type`, `template shadowrootmode`
 encoding`, `select size`) read it with its character references decoded, and `size` is parsed as an HTML
 non-negative integer into 32 bits, as Chrome does.
 
-Three Chrome rules depart from the spec, and browser mode follows Chrome in each; Firefox follows the spec.
+Four Chrome rules depart from the spec, and browser mode follows Chrome in each; Firefox follows the spec.
+
+- A formatting element with an `is` attribute, whatever its value, is never put on the list of active
+  formatting elements. It is not reconstructed (`<div><b is></div>x` leaves `x` in the body), and its end
+  tag is any other end tag, so `<b is>1<p>2</b>3` ignores the `</b>`.
 
 - Whitespace after `</body>` or `</html>` goes into the current node without reconstructing the active
   formatting elements (`<div><b></div></body>\n` leaves the LF in the body, not in a new `<b>`), and the

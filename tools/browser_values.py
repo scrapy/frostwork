@@ -248,12 +248,35 @@ def _chrome_big5(r: ValueRepro) -> bool:
     return fixed == r.engine or any(c.test(rest) for c in VALUE_CONSTRUCTS if c.test is not _chrome_big5)
 
 
+def _as_windows_1252(text: str) -> str:
+    """`text`'s UTF-8 bytes read as windows-1252, as WHATWG decodes it: the five bytes Python's codec
+    leaves unassigned are their C1 controls."""
+    out = []
+    for byte in text.encode("utf-8", "surrogatepass"):
+        try:
+            out.append(bytes([byte]).decode("cp1252"))
+        except UnicodeDecodeError:
+            out.append(chr(byte))
+    return "".join(out)
+
+
+def _unlabelled_utf8(r: ValueRepro) -> bool:
+    """Chrome's windows-1252 reading of text Frostwork reads as UTF-8: every differing value is the
+    engine's UTF-8 read as windows-1252. On a page with no label, Chrome decodes UTF-8 as windows-1252, or
+    switches to UTF-8 partway, while Frostwork reads unlabelled valid UTF-8 as UTF-8 (docs/COMPATIBILITY.md,
+    "Deliberate differences from browsers")."""
+    pairs = [(a, b) for a, b in zip(r.engine, r.oracle) if a != b]
+    return (len(r.engine) == len(r.oracle) and bool(pairs)
+            and all(b == _as_windows_1252(a) for a, b in pairs))
+
+
 VALUE_CONSTRUCTS: list[ValueConstruct] = [
     ValueConstruct("quirks-mode class and id matching (deferred)", _quirks_class_or_id),
     ValueConstruct("raw-source outer HTML", _raw_source),
     ValueConstruct("raw-source outer HTML of a merged <html>/<body>", _merged_frame_source),
     ValueConstruct("raw-source outer HTML of a <selectedcontent> copy", _selectedcontent_copy),
     ValueConstruct("Chrome's Big5 decoder bug (not followed)", _chrome_big5),
+    ValueConstruct("unlabelled UTF-8 Chrome reads as windows-1252 (documented)", _unlabelled_utf8),
 ]
 
 

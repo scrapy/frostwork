@@ -738,7 +738,10 @@ because the browser's answer is text nobody intended: a scraper that stores `caf
 any standard. A page cannot exploit this either, since every multi-byte UTF-8 sequence starts with a
 byte from 0xC2 to 0xF4, which windows-1252 shows as `Â` to `ô` followed by junk, so a page relying on the
 browser's reading would look broken to its own users. `tools/enc_check.py` asserts the exception against
-the recorded Chrome answer and fails if Frostwork ever starts agreeing with it.
+the recorded Chrome answer and fails if Frostwork ever starts agreeing with it. Chrome can also switch
+partway through a page: on a 4 MB page whose only declaration came 3 MB in, Chrome 156 decoded the first
+few hundred text nodes as windows-1252 and the rest as UTF-8, while Firefox and Frostwork read it all as
+UTF-8.
 
 **Autodetection follows Firefox.** When the bytes are not valid UTF-8 and nothing declares an encoding,
 Frostwork asks chardetng, the detector Firefox runs, with the top-level domain of the response URL as its
