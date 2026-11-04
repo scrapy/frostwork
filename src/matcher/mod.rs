@@ -2987,6 +2987,7 @@ impl<'a> Matcher<'a> {
 
     /// Close the current element, whose raw source ends at `end`: finalize its captures, resolve the
     /// deferred predicates waiting on it and pop the group instances it opened.
+    #[inline]
     pub(super) fn close_top(&mut self, end: usize) {
         let e = self.stack.pop().expect("close_top with nothing open");
         self.close_elem(e, end);
