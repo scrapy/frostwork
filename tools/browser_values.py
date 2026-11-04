@@ -8,6 +8,7 @@ oracle's own tree, never the page it came from, and `attribute_value` names the 
 """
 from __future__ import annotations
 
+import functools
 import os
 import re
 import sys
@@ -225,11 +226,32 @@ def _selectedcontent_copy(r: ValueRepro) -> bool:
     return emptied != r.oracle and _raw_source(ValueRepro(r.doc, r.sel, r.engine, emptied, r.tree))
 
 
+@functools.cache
+def _chrome_big5_fixes() -> dict[str, str]:
+    """Chrome's line for each Big5 pointer in `browser_decoders.BROWSER_BUGS` -> WHATWG's characters."""
+    import browser_decoders as D
+    return {line: "".join(frostwork.extract(bytes.fromhex(s), ["html ::text"], content_type="text/html; charset=Big5")[0])
+            for (b, enc, s), line in D.BROWSER_BUGS.items() if b == "chrome" and enc == "Big5"}
+
+
+def _chrome_big5(r: ValueRepro) -> bool:
+    """A value holding Chrome's reading of one of the four Big5 pointers WHATWG maps to a letter and a
+    combining mark: the engine's value, or one another construct explains, once those are WHATWG's."""
+    fixed = list(r.oracle)
+    for chrome, whatwg in _chrome_big5_fixes().items():
+        fixed = [v.replace(chrome, whatwg) for v in fixed]
+    if fixed == r.oracle:
+        return False
+    rest = ValueRepro(r.doc, r.sel, r.engine, fixed, r.tree)
+    return fixed == r.engine or any(c.test(rest) for c in VALUE_CONSTRUCTS if c.test is not _chrome_big5)
+
+
 VALUE_CONSTRUCTS: list[ValueConstruct] = [
     ValueConstruct("quirks-mode class and id matching (deferred)", _quirks_class_or_id),
     ValueConstruct("raw-source outer HTML", _raw_source),
     ValueConstruct("raw-source outer HTML of a merged <html>/<body>", _merged_frame_source),
     ValueConstruct("raw-source outer HTML of a <selectedcontent> copy", _selectedcontent_copy),
+    ValueConstruct("Chrome's Big5 decoder bug (not followed)", _chrome_big5),
 ]
 
 

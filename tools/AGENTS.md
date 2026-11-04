@@ -30,6 +30,11 @@ which `tests/test_encoding_inputs.py` also runs through each Python entry point)
 (the two-byte enumeration and its four disagreement classes). They are separate modules because
 `enc_check` runs its gate at import, where a test cannot reach it.
 
+`browser_decoders.py` is the same space against the browser, in `make gate-browser`: every legacy
+decoder's lines compared with Chrome's (and Firefox's with `--browsers`). `BROWSER_BUGS` lists Chrome's
+decoder bugs with Chrome's answer, where the engine keeps WHATWG's; `gate_failures` is its decision
+function. It names what it cannot reach: ISO-2022-JP, gb18030's four-byte sequences, UTF-16.
+
 ## Benchmarks
 
 `bench_matrix.py`, `bench_corpus.py`, `bench_mem.py` and `bench_webpoet.py` are the benchmarks.

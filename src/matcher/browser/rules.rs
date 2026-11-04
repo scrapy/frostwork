@@ -1163,9 +1163,11 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
                     self.mode = Mode::InTable;
                 }
                 Mode::AfterBody | Mode::AfterAfterBody => {
+                    // Chrome inserts the whitespace into the current node without reconstructing the
+                    // active formatting elements, where the spec processes it as "in body" does.
                     let k = ws_prefix(b, false);
                     if k > 0 {
-                        self.body_text(m, &b[..k], dm, s);
+                        self.insert_text(m, &b[..k], dm, s);
                         (b, s) = (&b[k..], s + k);
                         continue;
                     }

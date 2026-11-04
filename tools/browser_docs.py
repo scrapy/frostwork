@@ -165,7 +165,7 @@ VALUE_ATTRS: list[str] = [
     ' VIEWBOX="0 0 1 1"', ' textlength="5"', ' definitionurl="d"', ' xlink:href="u"', ' xmlns="q"', ' FILL="red"',
 ]
 VALUE_TEXTS: list[str] = ["alpha", " beta ", "g&amp;h", "x&lt;y", "café", "a&nbsp;b", "&notin;x", "&copy x",
-                          "&#0;", "&#x80;", "x\x01y", "a\N{IDEOGRAPHIC SPACE}b", "a&#13;b"]
+                          "&#0;", "&#x80;", "x\x01y", "a\N{IDEOGRAPHIC SPACE}b", "a&#13;b", "a<\x00b", "<\x00\x00"]
 # The structure of half the value documents: ordinary containers, taken from ALPHABET by value, plus
 # elements no tree rule treats specially, which conformant.py's basket asks about and ALPHABET does not hold.
 # These documents open with an explicit `<head></head>`, so their value columns do not depend on how the
@@ -394,6 +394,13 @@ RULE_VALUES: list[list[str]] = (
 # The option a `<select>` selects by default, which `<selectedcontent>` copies: the first one that is not
 # disabled, where an option is disabled by its own attribute or by the nearest `<optgroup>` around it.
 _SELECT = ["<select{}>", "<button{}>", "<selectedcontent{}>", "</selectedcontent>", "</button>"]
+# Text after `</body>` and `</html>` while a formatting element waits in the active formatting list: Chrome
+# inserts the whitespace without reconstructing it, and the rest of the text reconstructs it.
+AFTER_BODY: list[list[str]] = [
+    ["<div{}>", "<b{}>", "</div>", *end, *tail]
+    for end in (["</body>"], ["</body>", "</html>"], ["</html>"])
+    for tail in (["\n"], ["\n", "t"], [" ", "<p{}>"], ["\n", "<!--c-->", "t"])
+]
 SELECT_OPTIONS: list[list[str]] = [
     _SELECT + body + ["<option{}>", "u", "</select>"]
     for body in (
@@ -408,7 +415,7 @@ SELECT_OPTIONS: list[list[str]] = [
 
 def structured_docs() -> list[Doc]:
     """Every structured family member, as a document."""
-    seqs = [lead + f for f in EOF_FRAMES + FORMATTING + RAW_ENDS + FRAME_MERGES + RULE_VALUES + SELECT_OPTIONS + PAGE_LOADS
+    seqs = [lead + f for f in EOF_FRAMES + FORMATTING + RAW_ENDS + FRAME_MERGES + RULE_VALUES + SELECT_OPTIONS + PAGE_LOADS + AFTER_BODY
             for lead in ([], [DOCTYPE])]
     seqs += [s[:k] + [COMMENT] + s[k:] for s in COMMENT_SKELETONS for k in range(len(s) + 1)]
     seqs += [[DOCTYPE] + f for f in ARK_FAMILY]
@@ -437,19 +444,17 @@ BASKET_ORACLE_EMPTY: frozenset[str] = frozenset({
     '#\\69 1::attr(id)', 'th::text', 'ol > li::text', 'ruby > rt::text', 'ruby > rp::text',
     'dl > dt + dt::text', 'dl > dd + dd::text', 'table > thead::text', 'table > tbody::text',
     'table > tfoot::text', 'table > caption::text', 'thead > tr::text', 'tbody > tr::text', 'thead th::text',
-    'table > colgroup::attr(id)', 'table > thead th::text', 'table > tfoot td::text',
-    'colgroup + thead th::text', 'table > colgroup > col::attr(class)', 'select > optgroup::text',
-    'optgroup + optgroup::text', 'thead + tbody::text', 'caption + thead::text', 'table > tr::text',
-    'tr > th::text', 'dt + dd::text', 'option + option::text', 'h1 ~ p::text', 'ul li ~ li::text',
-    'span + span::text', 'section ~ *::text', 'li + *::attr(class)', 'td > *::attr(data-k)',
-    'section ~ * ::text', 'input[value|="v"]::text', 'li:not([id])::text', '//div[last()]//span/text()',
-    'div:has(a) p::text', 'div:has(p) span::text', 'li:has(a) span::text',
-    "//div[contains(.,'alpha')]//a/@href", "//li[contains(.,'beta')]//span/text()",
-    'div:contains("alpha") a::attr(href)', 'li:contains("beta") span::text',
+    'table > thead th::text', 'table > tfoot td::text', 'colgroup + thead th::text',
+    'table > colgroup > col::attr(class)', 'select > optgroup::text', 'optgroup + optgroup::text',
+    'thead + tbody::text', 'caption + thead::text', 'table > tr::text', 'tr > th::text', 'dt + dd::text',
+    'option + option::text', 'h1 ~ p::text', 'ul li ~ li::text', 'span + span::text', 'section ~ *::text',
+    'li + *::attr(class)', 'td > *::attr(data-k)', 'section ~ * ::text', 'input[value|="v"]::text',
+    'li:not([id])::text', 'div:has(a) p::text', 'div:has(p) span::text', 'li:has(a) span::text',
+    "//li[contains(.,'beta')]//span/text()", 'li:contains("beta") span::text',
     'dt:contains("alpha") + dd::text', 'dt:contains("alpha") ~ dd::text', 'div:contains(alpha)::attr(class)',
     'div.shared:contains("alpha")::attr(class)', 'dt:contains("alpha") + ::text', 'div:has(> p)::attr(class)',
-    '//td[@class]/text()', '//dt/following-sibling::dd/text()',
-    '//dt[contains(.,"alpha")]/following-sibling::dd/text()', 'p + p::text',
+    '//dt/following-sibling::dd/text()', '//dt[contains(.,"alpha")]/following-sibling::dd/text()',
+    'dt + *::text', 'dt + ::text', 'dt dt::text', 'dt ~ *::text', 'dt ~ ::text',
 })
 
 

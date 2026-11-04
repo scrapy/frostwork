@@ -1849,3 +1849,43 @@ def test_the_html5_check_fails_on_a_wrong_cell_a_stale_probe_and_a_moved_browser
     moved.answers["scope"]["div"] = True
     moved.modes["div"] = "rcdata"
     assert len(H.compare_live(stored, moved)) == 2
+
+
+def test_the_browser_decoder_gate_fails_on_a_new_difference_and_on_a_stale_bug():
+    """`browser_decoders.gate_failures`: a difference BROWSER_BUGS does not list fails, as does a listed one
+    with another answer and a listed one for a browser that ran which no longer occurs. A browser that did
+    not run leaves its entries alone, and a page decoded with another encoding, or a label the engine does
+    not resolve to itself, fails."""
+    import browser_decoders as D
+
+    bugs = dict(D.BROWSER_BUGS)
+    ok = {"Big5": "Big5"}
+    assert D.gate_failures(bugs, ["chrome"], {}, ok) == []
+    assert D.gate_failures({}, ["firefox"], {}, ok) == []
+    assert D.gate_failures({**bugs, ("chrome", "GBK", "8140"): "�"}, ["chrome"], {}, ok)
+    assert D.gate_failures({**bugs, ("chrome", "EUC-JP", "a1a1"): "、"}, ["chrome"], {}, ok)
+    stale = {k: v for k, v in bugs.items() if k[2] != "a1a1"}
+    assert any("stale" in f for f in D.gate_failures(stale, ["chrome"], {}, ok))
+    assert D.gate_failures(bugs, ["chrome"], {("chrome", "Big5"): "windows-1252"}, ok)
+    assert D.gate_failures(bugs, ["chrome"], {}, {"Big5": "Big5-HKSCS"})
+    # the comparison itself: one changed line is one difference, keyed by its sequence
+    seqs = D.sequences("windows-1252")
+    engine = [chr(b) for b in range(0x80, 0x100)]
+    browser = list(engine)
+    browser[1] = "�"
+    assert D.differences("windows-1252", browser, engine) == {seqs[1].hex(): "�"}
+    assert "lines" in D.differences("windows-1252", browser[:-1], engine)
+
+
+def test_chromes_big5_bug_is_excused_only_where_it_is_the_whole_difference():
+    """A value that differs from Chrome's only by Chrome's reading of the four two-code-point Big5
+    pointers is that bug; any other difference beside it is not."""
+    import browser_values as V
+
+    def verdict(engine, oracle):
+        return V.attribute_value(V.ValueRepro(((0, "x"),), "p::text", [engine], [oracle], ["#d", []]))
+
+    assert verdict("xê̌y", "x\xb3\udf0cy") == "Chrome's Big5 decoder bug (not followed)"
+    assert verdict("xÊ̄", "x\x93\udf04") == "Chrome's Big5 decoder bug (not followed)"
+    assert verdict("xQy", "x\xb3\udf0cy") is None
+    assert verdict("xê̌z", "x\xb3\udf0cy") is None

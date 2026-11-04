@@ -239,6 +239,10 @@ Browser mode is graded against Chrome, and against Firefox as well with `BROWSER
     `differ`, whose `debug_assert!`s are the builder's invariants.
   - It then re-measures the HTML5 element categories in Chrome (`gen_html5_rules.py --check --live`);
     `make py` checks the generated file against the stored answers without a browser.
+  - Last, it sweeps every legacy decoder against the browser (`browser_decoders.py`): each single-byte
+    encoding's high half and each multi-byte encoding's two-byte space, in sequence, so a decoder state one
+    malformed sequence leaves reaches the next. Chrome's decoder bugs are listed with Chrome's answer, and
+    the sweep fails on any other difference and on a listed one that stops occurring.
 - **`make gate-webpoet-browser`** grades browser-mode page objects against parsel page objects whose
   values come from Chrome, and checks that `.as_node()` is refused at class definition.
 - **`make gate-corpus-browser`** is report-only and outside `make ci`. It page-loads each corpus page as

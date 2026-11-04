@@ -3704,6 +3704,30 @@ mod browser_mode_tests {
         assert_eq!(ex(b"<p>X</p><body class=a><body class=b id=b>", "body.b p::text"), NONE);
     }
 
+    /// Body text drops NUL, except a NUL right after a `<` read as text, which Chrome makes U+FFFD.
+    #[test]
+    fn a_nul_after_a_text_lt_is_replaced_in_browser_mode() {
+        assert_eq!(ex(b"<p>x<\0y", "p::text"), v(&["x<\u{FFFD}y"]));
+        assert_eq!(ex(b"<p>x<\0\0y", "p::text"), v(&["x<\u{FFFD}y"]));
+        assert_eq!(ex(b"<p>x<<\0y", "p::text"), v(&["x<<\u{FFFD}y"]));
+        assert_eq!(ex(b"<p>x&lt;\0y", "p::text"), v(&["x<y"]));
+        assert_eq!(ex(b"<p>x\0y", "p::text"), v(&["xy"]));
+        assert_eq!(ex(b"<p><b>x<\0</b>y", "b::text"), v(&["x<\u{FFFD}"]));
+        assert_eq!(lxml(b"<p>x<\0y", "p::text"), v(&["x"])); // NUL deleted first, so `<y` is a tag
+    }
+
+    /// Whitespace after `</body>` goes into the current node without reconstructing the active formatting
+    /// elements, as in Chrome; other text after it reconstructs them, as in the body.
+    #[test]
+    fn whitespace_after_body_reconstructs_nothing() {
+        let h = b"<div><font></div></body>\n";
+        assert_eq!(ex(h, "font::text"), NONE);
+        let h = b"<div><font></div></body>\nX";
+        assert_eq!(ex(h, "font::text"), v(&["X"]));
+        assert_eq!(ex(b"<div><font></div></body></html> ", "font::text"), NONE);
+        assert_eq!(ex(b"<div><font></div><span></body>\n", "span::text"), v(&["\n"]));
+    }
+
     /// A valueless attribute is `""` in browser mode, as in Chrome, where lxml mode gives libxml2's
     /// minimized booleans their own name.
     #[test]

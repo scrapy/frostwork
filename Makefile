@@ -177,6 +177,7 @@ gate-browser: ext
 	$(PY) tools/diff_browser.py --browsers $(BROWSERS) --seq-depth $(BROWSER_SEQ_DEPTH) \
 		--random $(BROWSER_RANDOM) --values $(BROWSER_VALUES) --debug-differ target/debug/differ --gate
 	$(PY) tools/gen_html5_rules.py --check --live
+	$(PY) tools/browser_decoders.py --browsers $(BROWSERS) --gate
 
 # "Is every rule cell RIGHT?" is what tools/audit_tree_rules.py answers. This answers "if a cell were
 # WRONG, would any gate notice?" — the only check here that finds blind spots without a human guessing

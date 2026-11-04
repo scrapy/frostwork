@@ -51,7 +51,17 @@ impl<'a> EncodedInput<'a> {
     /// Is a run read in `mode` no text node at all? Markup-mode text that is nothing but NUL is dropped
     /// by a browser (`<p>\0` has no text node), and only browser mode keeps NUL in the buffer.
     pub(super) fn is_dropped_nul(self, text: &[u8], mode: DataMode) -> bool {
-        self.keeps_nul && mode == DataMode::Normal && text.iter().all(|&b| b == 0)
+        self.keeps_nul && mode == DataMode::Normal && text.iter().all(|&b| b == 0) && !self.follows_lt(text, 0)
+    }
+
+    /// Does the byte at `i` of `run`, a slice of this buffer, follow a `<`? A NUL there follows a `<` the
+    /// tokenizer read as text, and Chrome makes that one NUL U+FFFD where body text drops every other.
+    fn follows_lt(self, run: &[u8], i: usize) -> bool {
+        if i > 0 {
+            return run[i - 1] == b'<';
+        }
+        let at = (run.as_ptr() as usize).wrapping_sub(self.bytes.as_ptr() as usize);
+        at > 0 && at <= self.bytes.len() && self.bytes[at - 1] == b'<'
     }
 
     /// The whole buffer — for the tokenizer, which reads bytes and never decodes.
@@ -85,9 +95,25 @@ impl<'a> EncodedInput<'a> {
 
     /// One text node's value from a run read in `mode` (see [`finalize`]).
     pub(super) fn text_value(self, bytes: &[u8], mode: DataMode) -> String {
-        if self.keeps_nul && mode != DataMode::Normal && bytes.contains(&0) {
-            let t = replace_nul(normalize_crlf(decode_bytes(bytes, self.encoding)));
-            return if mode.decodes_entities() { entities::decode(&t, false).into_owned() } else { t.into_owned() };
+        if self.keeps_nul && bytes.contains(&0) {
+            if mode != DataMode::Normal {
+                let t = replace_nul(normalize_crlf(decode_bytes(bytes, self.encoding)));
+                return if mode.decodes_entities() { entities::decode(&t, false).into_owned() } else { t.into_owned() };
+            }
+            // Markup-mode text drops NUL, except one after a `<` (see `follows_lt`). A reference never
+            // spans a `<`, so the text either side of that NUL decodes on its own.
+            let kept: Vec<usize> = memchr::memchr_iter(0, bytes).filter(|&i| self.follows_lt(bytes, i)).collect();
+            if !kept.is_empty() {
+                let mut out = String::new();
+                let mut from = 0;
+                for i in kept {
+                    out.push_str(&finalize(&bytes[from..i], true, self.encoding));
+                    out.push('\u{FFFD}');
+                    from = i + 1;
+                }
+                out.push_str(&finalize(&bytes[from..], true, self.encoding));
+                return out;
+            }
         }
         finalize(bytes, mode.decodes_entities(), self.encoding)
     }
