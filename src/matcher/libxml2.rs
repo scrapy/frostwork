@@ -210,6 +210,47 @@ impl Libxml2 {
         }
         first_content_byte(text)
     }
+
+    /// A text run where the document frame may still be decided: it can start the body or end the head.
+    #[inline(never)]
+    fn frame_text<'a>(&mut self, m: &mut Matcher<'a>, text: &'a [u8], mode: DataMode, start: usize) {
+        // Character data can START THE BODY, and it does so MID-RUN: the leading whitespace stays where
+        // it was (the head's, or dropped if no frame exists yet) and the first non-space character opens
+        // the body. Both oracles split it exactly there. The tokenizer hands us one run, so split it
+        // here and let each half take the ordinary path.
+        if let Some(k) = self.body_text_split(m, text) {
+            if k > 0 {
+                m.buffer_text(&text[..k], mode, start);
+            }
+            // `<body>` closes an open `<head>` through the start-close relation, so opening one here
+            // pops the head as well — no separate unwind — and `ensure_frame` supplies the `<html>`
+            // above it when the document never wrote one.
+            self.ensure_frame(m, b"body", None, start + k);
+            self.insert(m, b"body", &[], false, start + k, start + k);
+            m.buffer_text(&text[k..], mode, start + k);
+            return;
+        }
+        // ...and with a body already established the head still ends here, it just has nowhere to move
+        // the text to. Popped directly rather than through `end_tag`, which would spend a `</head>`
+        // phantom left by an ignored duplicate instead of closing the real element.
+        if let Some(k) = self.late_head_text_split(m, text) {
+            if k > 0 {
+                m.buffer_text(&text[..k], mode, start);
+            }
+            m.flush_text();
+            m.close_top(start + k);
+            m.buffer_text(&text[k..], mode, start + k);
+            return;
+        }
+        // Character data after `</html>` needs the same second root a START TAG gets there, or it is
+        // lost outright: with the stack empty `emit_text` has nothing to attach it to and returns. The
+        // start-tag path builds that root in `ensure_frame`; the text path reaches neither split above
+        // once a body exists, so it has to ask for itself.
+        if nothing_open(&m.stack) && self.frame.body_established() && first_content_byte(text).is_some() {
+            self.insert(m, b"html", &[], false, start, start);
+        }
+        m.buffer_text(text, mode, start);
+    }
 }
 
 impl<'a> TreeBuilder<'a> for Libxml2 {
@@ -273,42 +314,12 @@ impl<'a> TreeBuilder<'a> for Libxml2 {
     /// data either side of it becomes ONE text node (`AB`); [`Matcher::buffer_text`] re-joins the runs.
     /// What this adds is the frame: character data can start the body or end the head.
     fn text(&mut self, m: &mut Matcher<'a>, text: &'a [u8], mode: DataMode, start: usize) {
-        // Character data can START THE BODY, and it does so MID-RUN: the leading whitespace stays where
-        // it was (the head's, or dropped if no frame exists yet) and the first non-space character opens
-        // the body. Both oracles split it exactly there. The tokenizer hands us one run, so split it
-        // here and let each half take the ordinary path.
-        if let Some(k) = self.body_text_split(m, text) {
-            if k > 0 {
-                m.buffer_text(&text[..k], mode, start);
-            }
-            // `<body>` closes an open `<head>` through the start-close relation, so opening one here
-            // pops the head as well — no separate unwind — and `ensure_frame` supplies the `<html>`
-            // above it when the document never wrote one.
-            self.ensure_frame(m, b"body", None, start + k);
-            self.insert(m, b"body", &[], false, start + k, start + k);
-            m.buffer_text(&text[k..], mode, start + k);
-            return;
+        // Past the frame, a run in any element but a head is that element's text, which is every run
+        // of a page once its body has started.
+        if self.frame.body_established() && matches!(m.stack.last(), Some(e) if !e.tag.eq_ignore_ascii_case(b"head")) {
+            return m.buffer_text(text, mode, start);
         }
-        // ...and with a body already established the head still ends here, it just has nowhere to move
-        // the text to. Popped directly rather than through `end_tag`, which would spend a `</head>`
-        // phantom left by an ignored duplicate instead of closing the real element.
-        if let Some(k) = self.late_head_text_split(m, text) {
-            if k > 0 {
-                m.buffer_text(&text[..k], mode, start);
-            }
-            m.flush_text();
-            m.close_top(start + k);
-            m.buffer_text(&text[k..], mode, start + k);
-            return;
-        }
-        // Character data after `</html>` needs the same second root a START TAG gets there, or it is
-        // lost outright: with the stack empty `emit_text` has nothing to attach it to and returns. The
-        // start-tag path builds that root in `ensure_frame`; the text path reaches neither split above
-        // once a body exists, so it has to ask for itself.
-        if nothing_open(&m.stack) && self.frame.body_established() && first_content_byte(text).is_some() {
-            self.insert(m, b"html", &[], false, start, start);
-        }
-        m.buffer_text(text, mode, start);
+        self.frame_text(m, text, mode, start)
     }
 
     fn cdata_is_text(&self, _m: &Matcher<'a>) -> bool {
