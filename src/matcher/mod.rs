@@ -2796,6 +2796,9 @@ impl<'a> Matcher<'a> {
     }
 }
 
+/// A buffered text node taken out by [`Matcher::take_text`].
+pub(super) struct HeldText<'a>(PendingText<'a>);
+
 /// Open elements taken off the matcher stack by [`Matcher::park`], with their per-depth state.
 pub(super) struct Parked<'a> {
     elems: Vec<OpenElem<'a>>,
@@ -2850,6 +2853,22 @@ impl<'a> Matcher<'a> {
 }
 
 impl<'a> Matcher<'a> {
+    /// Take the buffered text node out, undelivered, for a builder that inserts elsewhere before the
+    /// node can continue: browser mode's head content written after `</head>` goes into the head while
+    /// the whitespace either side of it is one text node of `<html>`.
+    pub(super) fn take_text(&mut self) -> Option<HeldText<'a>> {
+        self.pending_text.take().map(HeldText)
+    }
+
+    /// Buffer a node [`Self::take_text`] took out again, in the current element, as if everything up to
+    /// `gap_end` had been absorbed into it.
+    pub(super) fn restore_text(&mut self, held: HeldText<'a>, gap_end: usize) {
+        debug_assert!(self.pending_text.is_none(), "restoring over a buffered text node");
+        let mut p = held.0;
+        p.gap_end = gap_end;
+        self.pending_text = Some(p);
+    }
+
     /// Deliver the buffered text node (if any) to every consumer. Called before any event that could
     /// observe it out of order, and at EOF.
     pub(super) fn flush_text(&mut self) {

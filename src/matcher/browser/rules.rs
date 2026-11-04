@@ -88,6 +88,9 @@ impl<'a> Browser<'a> {
                 Tag::Base | Tag::Basefont | Tag::Bgsound | Tag::Link | Tag::Meta | Tag::Noframes | Tag::Script
                 | Tag::Style | Tag::Template | Tag::Title => {
                     let Some(head) = self.head else { return };
+                    if self.path.len() == 1 && self.html_text.is_none() {
+                        self.html_text = m.take_text();
+                    }
                     self.stack.push(head);
                     self.in_head_start(m, t);
                     if let Some(k) = self.index_of(head.uid) {
@@ -1113,6 +1116,9 @@ impl<'a> Browser<'a> {
                 Mode::InHead | Mode::AfterHead => {
                     let k = lead(b, true);
                     if k > 0 {
+                        if self.mode == Mode::AfterHead {
+                            self.release_html_text(m, s);
+                        }
                         self.insert_text(m, &b[..k], dm, s);
                         (b, s) = (&b[k..], s + k);
                         continue;

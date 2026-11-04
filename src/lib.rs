@@ -3286,6 +3286,7 @@ mod browser_mode_tests {
         // head > [title, script#s > "1"], "\n\n", body > p > "a"
         let late = b"<title>T</title></head>\n<script id=s>1</script>\n<body><p>a";
         assert_eq!(ex(late, "head > title + #s::text"), v(&["1"]));
+        assert_eq!(ex(late, "//html/text()"), v(&["\n\n"])); // one node: the script is in the head
         assert_eq!(ex(late, "body > p::text"), v(&["a"]));
         // body > [p > "a", div#a > "late"]
         let after = b"<p>a</p></body></html><div id=a>late</div>";

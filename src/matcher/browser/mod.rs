@@ -43,7 +43,7 @@ mod rules;
 mod tags;
 
 use super::tree::TreeBuilder;
-use super::{Matcher, Parked};
+use super::{HeldText, Matcher, Parked};
 use crate::implied_close::{
     html5_cat, html5_data_mode, BUTTON_SCOPE, IMPLIED_END, IMPLIED_END_THOROUGH, LIST_ITEM_SCOPE, SCOPE,
     SPECIAL, TABLE_SCOPE,
@@ -179,6 +179,9 @@ pub(super) struct Browser<'a> {
     head: Option<Node<'a>>,
     /// The head's matcher element is still open for "after head" to insert into.
     head_live: bool,
+    /// Whitespace of `<html>` in "after head", held while head content goes into the head: the
+    /// whitespace either side of it is one text node.
+    html_text: Option<HeldText<'a>>,
     form: Option<u32>,
     frameset_ok: bool,
     quirks: bool,
@@ -207,6 +210,7 @@ impl Default for Browser<'_> {
             toks: Vec::new(),
             head: None,
             head_live: false,
+            html_text: None,
             form: None,
             frameset_ok: true,
             quirks: false,
@@ -762,6 +766,15 @@ impl<'a> Browser<'a> {
         if let Some(h) = self.head {
             self.close_node(m, h, at, at);
         }
+        self.release_html_text(m, at);
+    }
+
+    /// Put the held `<html>` whitespace back, continuing to `at`, with `<html>` the current element.
+    fn release_html_text(&mut self, m: &mut Matcher<'a>, at: usize) {
+        if let Some(held) = self.html_text.take() {
+            self.place(m, 0, at);
+            m.restore_text(held, at);
+        }
     }
 
     fn reset_mode(&mut self) {
@@ -895,6 +908,7 @@ impl<'a> TreeBuilder<'a> for Browser<'a> {
 
     fn comment(&mut self, m: &mut Matcher<'a>, from: usize, to: usize) {
         self.skip_lf = false;
+        self.release_html_text(m, from);
         // A comment is a node of whatever it is inserted into. It ends the text node there; inserted
         // anywhere else (the document, the `<html>` after the body, a table whose text is fostered out
         // of it, template content) it leaves the pending text node open.
@@ -912,6 +926,14 @@ impl<'a> TreeBuilder<'a> for Browser<'a> {
 
     fn finish(&mut self, m: &mut Matcher<'a>) {
         let end = m.input.len();
+        if let Some(held) = self.html_text.take() {
+            m.flush_text();
+            while self.path.len() > 1 {
+                m.close_top(end);
+                self.path.pop();
+            }
+            m.restore_text(held, end);
+        }
         m.flush_text();
         while let Some(base) = self.parked.last().map(|s| s.base) {
             while self.path.len() > base {
