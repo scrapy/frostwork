@@ -24,6 +24,7 @@ import base64
 import json
 import os
 import signal
+import sys
 import subprocess
 from collections import Counter
 from dataclasses import dataclass
@@ -33,6 +34,9 @@ from . import css
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROBE = os.path.join(HERE, "probe.cjs")
+# A tree at Chrome's depth cap nests two JSON arrays per element, past Python's default recursion limit,
+# both to decode and to walk.
+sys.setrecursionlimit(max(sys.getrecursionlimit(), 20000))
 
 DEFAULT_BINARIES = {
     "chrome": ("FROSTWORK_CHROME", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),

@@ -75,8 +75,6 @@ from browser_oracle.client import BrowserOracle, Refused  # noqa: E402
 from browser_values import ValueRepro, attribute_value  # noqa: E402
 
 RESULTS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results", "browserdiff.json")
-# A tree at Chrome's depth cap nests two JSON arrays per element, past Python's default recursion limit.
-sys.setrecursionlimit(max(sys.getrecursionlimit(), 20000))
 
 
 # ---------------------------------------------------------------- the debug build
