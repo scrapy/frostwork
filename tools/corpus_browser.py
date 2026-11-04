@@ -207,9 +207,15 @@ def main() -> int:
     with open(RESULTS, "w", encoding="utf-8") as f:
         json.dump({"browser": build, "corpus": args.corpus, "verdicts": verdicts,
                    "pages": [{**r, "verdicts": dict(r["verdicts"])} for r in page_rows],
-                   "examples": examples, "refused": refused, "oracle_errors": oracle_errors}, f, indent=1)
+                   "examples": examples, "refused": refused, "oracle_errors": oracle_errors}, f, indent=1,
+                  default=_jsonable)
     print(f"\n  wrote {os.path.relpath(RESULTS)}  (report-only: no gate yet)")
     return 1 if oracle_errors else 0
+
+
+def _jsonable(o):
+    """Values the report holds that JSON has no type for: raw bytes and refusal records."""
+    return o.decode("utf-8", "replace") if isinstance(o, bytes) else repr(o)
 
 
 if __name__ == "__main__":
