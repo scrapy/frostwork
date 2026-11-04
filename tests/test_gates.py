@@ -847,6 +847,10 @@ def test_a_raw_source_pair_is_read_as_the_browser_read_it():
     assert verdict(page, "td", page, '<td><meta charset="gb2312">\N{MIDDLE DOT}</td>', doc()) == raw
 
     assert verdict("<p>a</br>b", "br", "</br>", "<br>", doc()) == raw
+    # the id is compared decoded, as a browser serialises it, and a valueless one is ""
+    page = '<div id="v&#xE5;re">t</div>'
+    assert verdict(page, "div", page, '<div id="v\u00e5re">t</div>', doc()) == raw
+    assert verdict("<div id>t</div>", "div", "<div id>t</div>", '<div id="">t</div>', doc()) == raw
     assert verdict("<p>a</br>b", "br", "</p>", "<br>", doc()) is None
 
 

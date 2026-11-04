@@ -121,8 +121,9 @@ _WS = "\t\n\x0c\r "
 
 def _start_tag(html: str) -> Optional[tuple]:
     """The start tag at the head of `html`, read with HTML5's tokenizer states: `(tag, attribute names
-    in order with the first of a repeated one kept, id as written)`, or None for anything else or a tag
-    the input ends inside. Names are ASCII-lowercased. Values are raw: no reference is decoded."""
+    in order with the first of a repeated one kept, id decoded)`, or None for anything else or a tag the
+    input ends inside. Names are ASCII-lowercased. The id is decoded by the engine from its own quoting,
+    since a browser serialises it decoded and HTML5's attribute-value reference rule is not Python's."""
     if len(html) < 2 or html[0] != "<" or not ("a" <= html[1].lower() <= "z"):
         return None
     n, k = len(html), 1
@@ -143,13 +144,13 @@ def _start_tag(html: str) -> Optional[tuple]:
         name = html[start:k].lower()
         while k < n and html[k] in _WS:
             k += 1
-        value = None
+        value, quote = None, ""
         if k < n and html[k] == "=":
             k += 1
             while k < n and html[k] in _WS:
                 k += 1
             if k < n and html[k] in "\"'":
-                close = html.find(html[k], k + 1)
+                quote, close = html[k], html.find(html[k], k + 1)
                 if close < 0:
                     return None
                 value, k = html[k + 1:close], close + 1
@@ -160,8 +161,14 @@ def _start_tag(html: str) -> Optional[tuple]:
                 value = html[start:k]
         if name not in names:
             names.append(name)
-            ident = value if name == "id" else ident
+            ident = ("" if value is None else _decoded_attr(value, quote)) if name == "id" else ident
     return None
+
+
+def _decoded_attr(value: str, quote: str) -> str:
+    """An attribute value as the engine decodes it, read back with the quoting it was written with."""
+    tag = f"<p x={quote}{value}{quote}>".encode("utf-8", "surrogatepass")
+    return frostwork.extract(tag, ["p::attr(x)"], parser="browser", encoding="utf-8")[0][0]
 
 
 _BR_END_TAG = re.compile(r"</br[\t\n\x0c\r /][^>]*>|</br>", re.I)
