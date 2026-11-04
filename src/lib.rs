@@ -3438,6 +3438,46 @@ mod browser_mode_tests {
         assert_eq!(ex(merged, "body.late #d::text"), v(&["y"]));
     }
 
+    /// CSS matches the values of HTML's listed attributes ASCII-case-insensitively on an HTML element;
+    /// XPath, an SVG element and an unlisted attribute compare exactly.
+    #[test]
+    fn css_folds_htmls_listed_attribute_values() {
+        let h = b"<!DOCTYPE html><input id=a type=SUBMIT><a id=b rel=\"NoFollow External\" hreflang=EN-us href=x>l</a>\
+                  <div id=c lang=EN title=Up></div><svg><g id=g type=SUBMIT/></svg>";
+        // Chrome: a; b; b; c; [] for each
+        assert_eq!(ex(h, "[type=\"submit\"]::attr(id)"), v(&["a"]));
+        assert_eq!(ex(h, "[rel~=\"nofollow\"]::attr(id)"), v(&["b"]));
+        assert_eq!(ex(h, "[hreflang|=\"en\"]::attr(id)"), v(&["b"]));
+        assert_eq!(ex(h, "[lang^=\"e\"]::attr(id)"), v(&["c"]));
+        assert_eq!(ex(h, "[title=\"up\"]::attr(id)"), NONE);
+        assert_eq!(ex(h, "//*[@type='submit']/@id"), NONE);
+        assert_eq!(lxml(h, "[type=\"submit\"]::attr(id)"), NONE, "lxml mode compares exactly");
+    }
+
+    /// Past 512 open elements Chrome makes a new element the current node's sibling; text still goes
+    /// into the current node.
+    #[test]
+    fn the_tree_is_at_most_as_deep_as_chromes() {
+        let mut h = b"<!DOCTYPE html>".to_vec();
+        for i in 0..515 {
+            h.extend(format!("<div id=d{i}>").bytes());
+        }
+        h.extend(b"x<p id=p>y</p>z</div>w");
+        // d509 > [d510, d511, d512, d513 > "w", d514 > "xz", p > "y"]
+        assert_eq!(ex(&h, "#d509 > *::attr(id)"), v(&["d510", "d511", "d512", "d513", "d514", "p"]));
+        assert_eq!(ex(&h, "#d514::text"), v(&["xz"]));
+        assert_eq!(ex(&h, "#d513::text"), v(&["w"]));
+        assert_eq!(ex(&h, "#d508 > *::attr(id)"), v(&["d509"]));
+    }
+
+    /// The class lxml mode's builder gives an element never collides with browser mode's HTML mark.
+    #[test]
+    fn libxml2_classes_leave_the_html_mark_free() {
+        for name in ["a", "p", "div", "table", "td", "tr", "body", "html", "head", "li", "dd", "x-y", "option"] {
+            assert!(implied_close::classify(name.as_bytes()).1 < u8::MAX, "{name}");
+        }
+    }
+
     /// A declarative shadow root takes the `<template>` and its content out of the document, on a host
     /// that can have one.
     #[test]

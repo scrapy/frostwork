@@ -736,24 +736,6 @@ def _op(op: str, value: str, want: str) -> bool:
     return {"^=": value.startswith, "$=": value.endswith, "*=": value.__contains__}[op](want)
 
 
-def _case_folded_attr(r: ValueRepro) -> bool:
-    """A CSS attribute test on a listed attribute that an HTML element's value passes only case-folded."""
-    if not C.is_css(r.sel):
-        return False
-    els = r.elements(html_only=True)
-    for name, op, raw in _ATTR_TEST.findall(r.sel):
-        if name.lower() not in CASE_INSENSITIVE_ATTRS:
-            continue
-        want = C._unescape(raw[1:-1] if raw[:1] in "\"'" else raw)
-        for el in els:
-            for k in range(0, len(el[2]), 2):
-                if el[2][k] == name.lower():
-                    v = el[2][k + 1]
-                    if _op(op, v.lower(), want.lower()) and not _op(op, v, want):
-                        return True
-    return False
-
-
 _CLASS_OR_ID = re.compile(r"([.#])((?:[\w-]|\\[0-9a-fA-F]{1,6}[ \t\n\r\f]?|\\.)+)")
 
 
@@ -801,7 +783,6 @@ def _raw_source(r: ValueRepro) -> bool:
 
 
 VALUE_CONSTRUCTS: list[ValueConstruct] = [
-    ValueConstruct("case-insensitive attribute values (CSS)", _case_folded_attr),
     ValueConstruct("quirks-mode class and id matching (deferred)", _quirks_class_or_id),
     ValueConstruct("raw-source outer HTML", _raw_source),
 ]

@@ -833,11 +833,10 @@ def test_value_columns_split_by_the_tree_and_attribute_by_the_oracle_tree():
 
     p_en = ["p", 0, ["lang", "EN", "id", "0"], []]
     svg_en = ["svg", "http://www.w3.org/2000/svg", ["lang", "EN", "id", "0"], []]
-    assert B.attribute_value(r('[lang="en"]::attr(id)', page([p_en]))) == "case-insensitive attribute values (CSS)"
-    assert B.attribute_value(r('//*[@lang="en"]/@id', page([p_en]))) is None, "XPath never folds"
-    assert B.attribute_value(r('[lang="en"]::attr(id)', page([svg_en]))) is None, "SVG matches exactly"
-    mixed = ["p", 0, ["data-case", "Mixed", "id", "0"], []]
-    assert B.attribute_value(r('[data-case="mixed"]::attr(id)', page([mixed]))) is None, "not a listed attribute"
+    # browser mode folds HTML's listed attribute values for CSS, so a column that differs there is NOVEL
+    for sel, tree in (('[lang="en"]::attr(id)', page([p_en])), ('//*[@lang="en"]/@id', page([p_en])),
+                      ('[lang="en"]::attr(id)', page([svg_en]))):
+        assert B.attribute_value(r(sel, tree)) is None, sel
     upper = ["p", 0, ["class", "A", "id", "0"], []]
     assert B.attribute_value(r(".a::attr(id)", page([upper], doctype=False))) == \
         "quirks-mode class and id matching (deferred)"

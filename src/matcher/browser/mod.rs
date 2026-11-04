@@ -17,7 +17,8 @@
 //!   while the table and its rows stay open. The table's matcher elements are [`Matcher::park`]ed, so
 //!   fostered content is a child of the table's parent and not a descendant of the table, and they are
 //!   put back when the next insertion targets them. The head is parked the same way in "after head",
-//!   where whitespace goes to `<html>` but a later `<script>` still goes into the head.
+//!   where whitespace goes to `<html>` but a later `<script>` still goes into the head, and so is the
+//!   current node past Chrome's depth cap, where a new element becomes its sibling.
 //! * **Inert elements.** Template content and a declarative shadow root are parsed with the full rules
 //!   but never reach the matcher; their tokens are absorbed into the text gap, so the text either side
 //!   of a shadow-root `<template>` is one node, as in the browser.
@@ -132,11 +133,14 @@ enum Afe {
     El { uid: u32, tok: u32 },
 }
 
-/// A parked run of matcher elements: the uids that were `path[base..]`.
+/// A parked run of matcher elements: the uids that were `path[base..]`, and the text node the last of
+/// them was buffering. Nothing is inserted into a parked element, so when it is put back that node is
+/// still its last child and the next run continues it, as a browser appends to a trailing text node.
 struct Seg<'a> {
     base: usize,
     uids: Vec<u32>,
     parked: Parked<'a>,
+    held: Option<HeldText<'a>>,
 }
 
 struct StartTok<'a, 't> {
@@ -224,6 +228,10 @@ impl Default for Browser<'_> {
         }
     }
 }
+
+/// How many open elements Chrome nests an element under (`kMaximumHTMLParserDOMTreeDepth`): with more
+/// open, a new element goes into the current node's parent instead.
+const MAX_DEPTH: usize = 512;
 
 fn is_ws(c: u8) -> bool {
     matches!(c, b'\t' | b'\n' | 0x0c | b'\r' | b' ')
@@ -383,7 +391,7 @@ impl<'a> Browser<'a> {
             while self.path.len() > base {
                 self.drop_top(m, at);
             }
-            self.unpark_last(m);
+            self.unpark_last(m, at);
         }
     }
 
@@ -406,20 +414,24 @@ impl<'a> Browser<'a> {
     }
 
     fn park_from(&mut self, m: &mut Matcher<'a>, base: usize) {
-        m.flush_text();
         self.touched = true;
+        let held = m.take_text();
         let uids = self.path.split_off(base);
         let parked = m.park(base);
-        self.parked.push(Seg { base, uids, parked });
+        self.parked.push(Seg { base, uids, parked, held });
     }
 
-    fn unpark_last(&mut self, m: &mut Matcher<'a>) {
+    /// Put the last parked run back; its held text node continues to `at`.
+    fn unpark_last(&mut self, m: &mut Matcher<'a>, at: usize) {
         m.flush_text();
         self.touched = true;
         let seg = self.parked.pop().expect("unparking with nothing parked");
         debug_assert_eq!(self.path.len(), seg.base);
         m.unpark(seg.parked);
         self.path.extend(seg.uids);
+        if let Some(held) = seg.held {
+            m.restore_text(held, at);
+        }
     }
 
     /// Make the DOM parent of the table at stack index `t` the matcher's current element, parking the
@@ -456,7 +468,8 @@ impl<'a> Browser<'a> {
     /// Open `node` as the matcher's next element, at the current insertion point.
     fn open(&mut self, m: &mut Matcher<'a>, node: &mut Node<'a>, attrs: &Attrs<'a>, at: usize) {
         m.flush_text();
-        m.open_element(node.name, 0, attrs, at);
+        let class = if node.ns == Ns::Html { super::HTML_ELEMENT } else { 0 };
+        m.open_element(node.name, class, attrs, at);
         node.vis = Vis::Live;
         node.depth = (m.stack.len() - 1) as u32;
         self.path.push(node.uid);
@@ -487,7 +500,7 @@ impl<'a> Browser<'a> {
                     while self.path.len() > base {
                         self.drop_top(m, ghost_end);
                     }
-                    self.unpark_last(m);
+                    self.unpark_last(m, ghost_end);
                 }
                 _ => return,
             }
@@ -503,8 +516,15 @@ impl<'a> Browser<'a> {
             Loc::Document => self.open(m, &mut node, attrs, at),
             Loc::Into(i) => {
                 self.place(m, i, at);
+                if self.stack.len() > MAX_DEPTH && i > 0 && self.stack[i].vis == Vis::Live {
+                    // Past Chrome's depth cap the element is the current node's sibling: the current node
+                    // stays open, so it parks like a fostered table.
+                    let d = self.stack[i].depth as usize;
+                    self.park_from(m, d);
+                } else {
+                    self.stack[i].flags |= HAS_CHILD;
+                }
                 self.open(m, &mut node, attrs, at);
-                self.stack[i].flags |= HAS_CHILD;
             }
             Loc::Foster(t) => {
                 self.foster_place(m, t, at);
@@ -937,10 +957,11 @@ impl<'a> TreeBuilder<'a> for Browser<'a> {
         m.flush_text();
         while let Some(base) = self.parked.last().map(|s| s.base) {
             while self.path.len() > base {
+                m.flush_text();
                 m.close_top(end);
                 self.path.pop();
             }
-            self.unpark_last(m);
+            self.unpark_last(m, end);
         }
     }
 }

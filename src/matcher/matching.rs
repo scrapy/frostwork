@@ -118,7 +118,8 @@ fn compound_matches_impl<const FILTER: bool>(c: &Compound, el: &OpenElem) -> boo
     for p in &c.attrs {
         // Substring/prefix/suffix ops with an EMPTY operand match nothing (CSS spec, verified vs
         // lxml); `~=` with an empty/whitespace operand also never matches (no empty token).
-        let (n, v, ci) = (p.name.as_str(), p.value.as_str(), p.ci);
+        let ci = p.ci || (p.html_ci && el.scid == super::HTML_ELEMENT);
+        let (n, v) = (p.name.as_str(), p.value.as_str());
         let ok = match p.op {
             AttrOp::Exists => el.attr(n).is_some(),
             AttrOp::Eq => el.attr(n).is_some_and(|a| eq(a, v, ci)),

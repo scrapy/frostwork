@@ -167,13 +167,18 @@ fn uniform_node_terminal(members: &[Selector]) -> bool {
     !(text && attr.is_some())
 }
 
+/// The class id browser mode's tree builder gives an HTML-namespace element. No libxml2 start-close class
+/// takes it, so in lxml mode no element carries it and CSS's HTML attribute-value fold never applies.
+pub(super) const HTML_ELEMENT: u8 = u8::MAX;
+
 pub struct OpenElem<'a> {
     // `pub(super)` fields are the ones the read-only matching kernel (`matching`) reads.
     pub(super) tag: &'a [u8], // raw bytes (possibly mixed-case); matched case-insensitively
-    /// Start-close class (`implied_close::sc`), the id space libxml2's `htmlStartClose` pair table
-    /// actually needs: it distinguishes names a coarser one lumps together — `<td>` closes an open
-    /// `<b>` but not an open `<em>`.
-    scid: u8,
+    /// The tree builder's class for the element. Lxml mode: the start-close class
+    /// (`implied_close::sc`), the id space libxml2's `htmlStartClose` pair table actually needs (it
+    /// distinguishes names a coarser one lumps together: `<td>` closes an open `<b>` but not an open
+    /// `<em>`). Browser mode: [`HTML_ELEMENT`] for an HTML-namespace element, 0 for a foreign one.
+    pub(super) scid: u8,
     attrs: Vec<(&'a [u8], Cow<'a, str>)>, // only "interesting" attrs; value entity-decoded (lazy Cow)
     /// This element's identity signature: the Bloom bits of its tag, `id`, and class tokens, built
     /// once at open and ANDed against each compound's `req` before any string comparison (see [`sig`]).
