@@ -3,6 +3,51 @@
 All notable user-facing changes will be recorded here. Frostwork will follow semantic versioning after its
 first public release.
 
+## 0.2.0 (unreleased)
+
+### Backward-incompatible changes
+
+- A document with no BOM, label or declaration is no longer assumed to be UTF-8: it is UTF-8 if it is
+  valid UTF-8, and otherwise its encoding is autodetected, as Firefox does. Pass the response URL as
+  `url` to `extract`, `extract_grouped`, `detect_encoding`, `Plan`, `Page.extract` and
+  `frostwork.encoding.autodetect_encoding` so that its top-level domain informs the guess (`.jp`
+  favours Shift_JIS, `.ru` windows-1251, …), as it does in browsers.
+
+- In Rust, `extract`, `extract_grouped`, `detect_encoding`, `Plan::extract`,
+  `Page::extract_with_encoding` and `CompiledPage::extract_with_encoding` take the response URL as a new
+  `url: Option<&str>` argument after the encoding. Pass `None` when there is no URL.
+
+- `bgsound`, `embed`, `keygen`, `source`, `track` and `wbr` are now void elements, matching libxml2
+  2.15, the oracle Frostwork now targets. Markup after one of them is no longer its child, e.g.
+  `<div><source><span>x</span></div>` matches `div > span` instead of `source span`.
+
+### Python API and tooling
+
+- `frostwork.encoding` exposes each step of `detect_encoding()` (`bom_encoding()`,
+  `declared_encoding()`, `autodetect_encoding()`), plus `decode()`, which decodes as browsers do where
+  Python's codecs differ (e.g. `euc_jp`), and `codec_name()`, which gives the Python codec name of any
+  label `resolve_label()` resolves. It lets a library that keeps its own encoding API, such as w3lib,
+  give browser answers. Importing it registers Python codecs for `x-user-defined` and `replacement`.
+  See [PYTHON.md](docs/PYTHON.md#encoding-steps--frostworkencoding).
+
+- `frostwork.navigation()` reads the base URL and meta refresh of a document as a browser does, and
+  `Page.extract_with_navigation()` reads them in the same pass as the fields; in Rust, `navigation()`
+  and `Plan::extract_with_navigation()`. See
+  [PYTHON.md](docs/PYTHON.md#base-url-and-meta-refresh--frostworknavigation).
+
+- The refusal reason of a selector with an unsupported pseudo-class or pseudo-element now names it,
+  e.g. ``pseudo-class `:hover` is unsupported``, also when it sits next to a supported one
+  (`li:nth-child(2):hover`).
+
+- `frostwork.page.detect_encoding()` and `frostwork.page.resolve_label()` are deprecated; use
+  `frostwork.detect_encoding()` and `frostwork.resolve_label()`.
+
+### Correctness
+
+- The `<meta>` prescan skips other tags together with their attributes, as browsers do, so a
+  `<meta charset>` inside an attribute value (`<img alt="<meta charset=big5>">`) no longer declares the
+  encoding.
+
 ## 0.1.6 (2026-09-23)
 
 ### Python API and tooling
