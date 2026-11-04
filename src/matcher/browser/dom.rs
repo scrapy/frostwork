@@ -14,6 +14,7 @@ const OPEN: usize = usize::MAX;
 
 pub(super) type RawAttrs<'a> = Vec<(&'a [u8], Option<&'a [u8]>)>;
 
+#[derive(Clone)]
 pub(super) struct Elem<'a> {
     pub(super) name: &'a [u8],
     /// The matcher's class id: the element's namespace (`HTML_ELEMENT` and the others).
@@ -32,6 +33,7 @@ pub(super) struct Elem<'a> {
 /// One run of a text node: its bytes, the state it was read in, and its offset.
 type Run<'a> = (&'a [u8], DataMode, usize);
 
+#[derive(Clone)]
 enum Kind<'a> {
     Element(Elem<'a>),
     Text(Vec<Run<'a>>),
@@ -209,20 +211,7 @@ impl<'a> Dom<'a> {
     /// A copy of `id` and everything in it, not yet in the tree. The copies keep the originals' source,
     /// which is what their raw-source outer HTML reads.
     pub(super) fn deep_clone(&mut self, id: u32) -> u32 {
-        let kind = match &self.kinds[id as usize] {
-            Kind::Element(e) => Kind::Element(Elem {
-                name: e.name,
-                class: e.class,
-                attrs: e.attrs.clone(),
-                start: e.start,
-                end: e.end,
-                open_end: e.open_end,
-                prefix: e.prefix,
-            }),
-            Kind::Text(runs) => Kind::Text(runs.clone()),
-            Kind::Comment => Kind::Comment,
-        };
-        let copy = self.push(kind);
+        let copy = self.push(self.kinds[id as usize].clone());
         let mut c = self.links[id as usize].first;
         while c != NIL {
             let k = self.deep_clone(c);

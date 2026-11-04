@@ -3061,9 +3061,7 @@ impl<'a> Matcher<'a> {
         let (s, e) = self.replay_spans[span.start];
         s..e
     }
-}
 
-impl<'a> Matcher<'a> {
     /// Give the current element raw source that begins before its own: a browser-mode copy of a
     /// formatting element has no start tag in the page, and its outer HTML is the start tag it was
     /// copied from followed by its own content, the raw-source reading of `<b class=k>2</b>`.
