@@ -190,8 +190,9 @@ attributed through `CONSTRUCTS` as a tree difference only the value column found
 NOVEL and fails the gate. So do: a bridge round trip that changed a tree, bridge XPath that answers a
 fingerprint column differently from the native evaluator, native CSS that answers differently from
 parsel's `.css()` over the bridged tree where the two semantics coincide (the planner's standing check:
-no-quirks documents, no folded attribute, no form feed in a class), a CSS self-check difference, and a
-value-rule selector the oracle answered nowhere or the engine refuses. Decorations go before the id slot
+no-quirks documents, no folded attribute, no form feed in a class), a CSS self-check difference, a
+value-rule selector the oracle answered nowhere or the engine refuses, and a value column the CSS planner
+or the browser cannot ask. Decorations go before the id slot
 and are undone by id for tree attribution (`undecorate`/`redecorate`), so the construct rules see
 ALPHABET tokens and a counterfactual edit keeps its decorations.
 

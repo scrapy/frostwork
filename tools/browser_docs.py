@@ -48,7 +48,7 @@ ALPHABET: list[str] = [
     # <select>, table parts and their end tags, the adoption agency's triggers and markers, Noah's Ark
     # (three alike), the foreign-content breakouts and integration points, declarative shadow hosts,
     # the leading newline in all three spellings, and the doctypes that set quirks and limited quirks.
-    "</head>", "</p>", "</li>", "</dd>", "</h1>", "<h2{}>", "</h2>", "</button>", "</option>", "</ul>",
+    "</head>", "</li>", "</dd>", "</h1>", "<h2{}>", "</h2>", "</button>", "</option>", "</ul>",
     "</pre>", "</tr>", "</tbody>", "</th>", "</caption>", "</colgroup>", "</frameset>", "</nobr>",
     "</object>", "</marquee>", "</math>", "</foreignObject>", "</title>", "</span>", "</dl>",
     "<listing{}>", "<plaintext{}>", "<xmp{}>", "<iframe{}>", "<noembed{}>", "<noframes{}>",

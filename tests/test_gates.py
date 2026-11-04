@@ -679,6 +679,7 @@ def test_the_browser_gate_fails_on_novel_and_on_coverage():
         "fast path's CSS differs from a page load's": B.Report(**clean, selfcheck_css_differ=["<p>"]),
         "a value-rule selector answered nowhere": B.Report(**clean, rule_never_answered=['[lang="en"]::attr(id)']),
         "a value-rule selector the engine refuses": B.Report(**clean, rule_refused=["//text()"]),
+        "a value column the planner cannot ask": B.Report(**clean, unplanned=["p:nth-child(2n of .a)"]),
         "native CSS checked against parsel nowhere": B.Report(**{**clean, "css_mirror_checked": 0}),
         "native CSS disagrees with parsel": B.Report(**clean, css_mirror_differ=[("<p>", "p ::text")]),
         # the debug build's invariants

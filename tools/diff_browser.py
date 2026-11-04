@@ -199,6 +199,7 @@ class Report:
     selfcheck_css_differ: list[str] = field(default_factory=list)
     rule_never_answered: list[str] = field(default_factory=list)
     rule_refused: list[str] = field(default_factory=list)   # value-rule selectors the engine refuses
+    unplanned: list[str] = field(default_factory=list)      # columns the planner or the browser cannot ask
     css_mirror_checked: int = 0                             # native CSS against parsel over the bridge
     css_mirror_differ: list[tuple[str, str]] = field(default_factory=list)
     value_on_tree: list[Divergence] = field(default_factory=list)
@@ -254,6 +255,9 @@ def gate_failures(report: Report) -> list[str]:
     if report.rule_refused:
         fails.append(f"{len(report.rule_refused)} value-rule selector(s) the engine refuses in this mode, so "
                      f"they grade nothing: {report.rule_refused}")
+    if report.unplanned:
+        fails.append(f"{len(report.unplanned)} value column(s) the CSS planner or the browser cannot ask, so "
+                     f"they grade nothing: {report.unplanned[:5]}")
     if report.css_mirror_checked == 0:
         fails.append("native CSS was checked against parsel on no column")
     if report.css_mirror_differ:
@@ -570,6 +574,8 @@ def grade_values(run: Run, report: Report, graded: list[tuple[Doc, str]]) -> Non
             want = answers.value("chrome", r, s)
             if isinstance(want, Refused):
                 run.oracle_refused[(want.by, want.reason[:90])] += 1
+                if want.by in ("plan", "browser") and s not in report.unplanned:
+                    report.unplanned.append(s)
                 continue
             report.value_graded += 1
             run.oracle_answered[s] += bool(want)
