@@ -3716,6 +3716,20 @@ mod browser_mode_tests {
         assert_eq!(lxml(b"<p>x<\0y", "p::text"), v(&["x"])); // NUL deleted first, so `<y` is a tag
     }
 
+    /// A tag whose whitespace run before `>` has a CR as its second character swallows the LF after the
+    /// `>`, as in Chrome; a CR anywhere else in the run does not.
+    #[test]
+    fn a_cr_second_in_a_tags_whitespace_swallows_the_next_lf() {
+        assert_eq!(ex(b"<p><span \r>\nx", "p ::text"), v(&["x"]));
+        assert_eq!(ex(b"<p><span \r\n>\nx", "p ::text"), v(&["x"]));
+        assert_eq!(ex(b"<p>a</b\r\r>\nx", "p ::text"), v(&["ax"]));
+        assert_eq!(ex(b"<p><span\r>\nx", "p ::text"), v(&["\nx"]));
+        assert_eq!(ex(b"<p><span  \r>\nx", "p ::text"), v(&["\nx"]));
+        assert_eq!(ex(b"<p><span \r a>\nx", "p ::text"), v(&["\nx"]));
+        assert_eq!(ex(b"<pre \r>\n\nx</pre>", "pre::text"), v(&["x"]));
+        assert_eq!(lxml(b"<p><span \r>\nx", "span::text"), v(&["\nx"]));
+    }
+
     /// Whitespace after `</body>` goes into the current node without reconstructing the active formatting
     /// elements, as in Chrome; other text after it reconstructs them, as in the body.
     #[test]

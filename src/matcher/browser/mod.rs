@@ -259,6 +259,8 @@ pub(super) struct Browser<'a, const REPLAY: bool> {
     foster: bool,
     /// The previous token was `<pre>`, `<listing>` or `<textarea>`: a leading newline is dropped.
     skip_lf: bool,
+    /// Where an LF the last tag swallowed would be (`swallows_lf`), or `usize::MAX`.
+    swallowed: usize,
     /// The uid of every element on the matcher stack, bottom first.
     path: Vec<u32>,
     /// The parked runs, the most recently parked last.
@@ -303,6 +305,7 @@ impl<const REPLAY: bool> Default for Browser<'_, REPLAY> {
             quirks: false,
             foster: false,
             skip_lf: false,
+            swallowed: usize::MAX,
             path: Vec::new(),
             parked: Vec::new(),
             next_uid: 1,
@@ -351,6 +354,25 @@ const MAX_DEPTH: usize = 512;
 
 fn is_ws(c: u8) -> bool {
     matches!(c, b'\t' | b'\n' | 0x0c | b'\r' | b' ')
+}
+
+/// Does the tag ending just before `end` swallow an LF right after its `>`? Chrome's tokenizer reads the
+/// second character of a run of whitespace in a tag, when that is a CR, as the first half of a CRLF, and
+/// only a character other than whitespace and the closing `>` clears that: the LF after `<p \r>` is no
+/// character at all, while the one after `<p\r>` or `<p  \r>` is kept. A CRLF counts as one character,
+/// as the input stream reads it. Firefox and the spec keep every LF. Only the run of whitespace before the
+/// `>` can hold the CR that counts.
+fn swallows_lf(b: &[u8], end: usize) -> bool {
+    if end < 2 || b[end - 1] != b'>' || b.get(end) != Some(&b'\n') {
+        return false;
+    }
+    let gt = end - 1;
+    let mut run = gt;
+    while run > 0 && is_ws(b[run - 1]) {
+        run -= 1;
+    }
+    let second = run + if b[run..gt].starts_with(b"\r\n") { 2 } else { 1 };
+    second < gt && b[second] == b'\r'
 }
 
 /// A numeric character reference at the start of `b` (`&#10;`, `&#x0a`): its code point and length.
@@ -1305,6 +1327,7 @@ impl<'a, const REPLAY: bool> TreeBuilder<'a> for Browser<'a, REPLAY> {
         open_end: usize,
     ) -> DataMode {
         self.skip_lf = false;
+        self.swallowed = if swallows_lf(m.input.bytes(), open_end) { open_end } else { usize::MAX };
         self.touched = false;
         self.data = DataMode::Normal;
         let mut buf = [0; MAX_NAME];
@@ -1326,6 +1349,7 @@ impl<'a, const REPLAY: bool> TreeBuilder<'a> for Browser<'a, REPLAY> {
 
     fn end_tag(&mut self, m: &mut Matcher<'a>, name: &'a [u8], close_start: usize, close_end: usize) {
         self.skip_lf = false;
+        self.swallowed = if swallows_lf(m.input.bytes(), close_end) { close_end } else { usize::MAX };
         self.touched = false;
         self.end(m, EndTok { name, tag: tag_of(name), start: close_start, end: close_end });
         if !self.touched {
@@ -1335,6 +1359,10 @@ impl<'a, const REPLAY: bool> TreeBuilder<'a> for Browser<'a, REPLAY> {
 
     fn text(&mut self, m: &mut Matcher<'a>, text: &'a [u8], mode: DataMode, start: usize) {
         let (mut b, mut s) = (text, start);
+        if std::mem::replace(&mut self.swallowed, usize::MAX) == s && b.first() == Some(&b'\n') {
+            self.absorb(m, s, s + 1);
+            (b, s) = (&b[1..], s + 1);
+        }
         if std::mem::take(&mut self.skip_lf) {
             let k = leading_lf(b);
             if k > 0 {

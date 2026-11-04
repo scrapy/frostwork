@@ -814,6 +814,9 @@ def test_a_raw_source_value_is_made_of_the_page_bytes():
     assert verdict(page, "<body class=late><p>x</p><body class=late>", oracle) is None
     # a CR from `&#13;` stays a reference in the raw source, and Chrome serialises it as a literal CR
     assert verdict("<p>a&#13;b</p>", "<p>a&#13;b</p>", "<p>a\rb</p>") == "raw-source outer HTML"
+    # ... beside the LF of the next text node, which is a second line break, not a CRLF
+    page = "<p>a&#13;<br>\nb</p>"
+    assert verdict(page, page, "<p>a\r<br>\nb</p>") == "raw-source outer HTML"
     # the engine's raw source normalises line breaks, as the browser's input stream does
     assert verdict('<p title="a\r\nb">x</p>', '<p title="a\nb">x</p>', '<p title="a\nb">x</p>') == "raw-source outer HTML"
 

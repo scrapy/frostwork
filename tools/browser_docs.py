@@ -401,6 +401,13 @@ AFTER_BODY: list[list[str]] = [
     for end in (["</body>"], ["</body>", "</html>"], ["</html>"])
     for tail in (["\n"], ["\n", "t"], [" ", "<p{}>"], ["\n", "<!--c-->", "t"])
 ]
+# A CR in a tag's whitespace: Chrome swallows the LF after the `>` when the CR is the run's second
+# character, in a start tag, an end tag, before raw text and before a `<pre>`'s own leading LF.
+CR_IN_TAGS: list[list[str]] = [
+    [tag.replace("{ws}", ws), "\n", "t"]
+    for tag in ("<span{}{ws}>", "<span{} a=1{ws}>", "</b{ws}>", "<pre{}{ws}>", "<title{}{ws}>")
+    for ws in (" \r", "\r", "  \r", "\r\r", " \r\n", "\n\r ")
+]
 SELECT_OPTIONS: list[list[str]] = [
     _SELECT + body + ["<option{}>", "u", "</select>"]
     for body in (
@@ -415,7 +422,7 @@ SELECT_OPTIONS: list[list[str]] = [
 
 def structured_docs() -> list[Doc]:
     """Every structured family member, as a document."""
-    seqs = [lead + f for f in EOF_FRAMES + FORMATTING + RAW_ENDS + FRAME_MERGES + RULE_VALUES + SELECT_OPTIONS + PAGE_LOADS + AFTER_BODY
+    seqs = [lead + f for f in EOF_FRAMES + FORMATTING + RAW_ENDS + FRAME_MERGES + RULE_VALUES + SELECT_OPTIONS + PAGE_LOADS + AFTER_BODY + CR_IN_TAGS
             for lead in ([], [DOCTYPE])]
     seqs += [s[:k] + [COMMENT] + s[k:] for s in COMMENT_SKELETONS for k in range(len(s) + 1)]
     seqs += [[DOCTYPE] + f for f in ARK_FAMILY]

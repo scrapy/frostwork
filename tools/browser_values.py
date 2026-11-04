@@ -160,9 +160,11 @@ def _context(r: ValueRepro, name: str) -> Optional[str]:
 
 
 def _lines(text: str) -> str:
-    """Text with its line breaks normalised. A browser serialises a CR from `&#13;` as a literal CR, which
-    re-parsing turns into a line feed, while the raw source keeps the reference."""
-    return text.replace("\r\n", "\n").replace("\r", "\n")
+    """Text with each CR read as a line feed. A browser serialises a CR from `&#13;` as a literal CR, which
+    re-parsing turns into a line feed, while the raw source keeps the reference. A CR and an LF are not
+    collapsed into one: the input stream already did that to every literal CRLF, so a pair here is a
+    reference's CR beside the LF of the next text node."""
+    return text.replace("\r", "\n")
 
 
 def _in_order(want: str, have: str) -> bool:
