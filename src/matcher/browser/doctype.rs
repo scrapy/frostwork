@@ -3,6 +3,8 @@
 //! Only quirks mode reaches the tree (a `<table>` does not close an open `<p>`); limited quirks is
 //! returned for completeness.
 
+use super::is_ws;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum DocMode {
     NoQuirks,
@@ -19,10 +21,6 @@ struct Doctype<'a> {
     force_quirks: bool,
 }
 
-fn ws(c: u8) -> bool {
-    matches!(c, b'\t' | b'\n' | 0x0c | b' ' | b'\r')
-}
-
 /// Read a DOCTYPE token from `raw`, which runs from `<!` to just past the `>` that ends it (or to end of
 /// input). HTML5 ends a DOCTYPE at the first `>` even inside a quoted identifier, which is where the
 /// tokenizer ended `raw`.
@@ -34,7 +32,7 @@ fn parse(raw: &[u8]) -> Doctype<'_> {
     let b = &raw[..end];
     // past `<!DOCTYPE`
     let mut i = 9.min(b.len());
-    while i < b.len() && ws(b[i]) {
+    while i < b.len() && is_ws(b[i]) {
         i += 1;
     }
     if i >= b.len() {
@@ -42,7 +40,7 @@ fn parse(raw: &[u8]) -> Doctype<'_> {
         return d;
     }
     let s = i;
-    while i < b.len() && !ws(b[i]) {
+    while i < b.len() && !is_ws(b[i]) {
         i += 1;
     }
     d.name = Some(b[s..i].to_ascii_lowercase());
@@ -51,7 +49,7 @@ fn parse(raw: &[u8]) -> Doctype<'_> {
             d.force_quirks = true;
         }
     };
-    while i < b.len() && ws(b[i]) {
+    while i < b.len() && is_ws(b[i]) {
         i += 1;
     }
     if i >= b.len() {
@@ -68,7 +66,7 @@ fn parse(raw: &[u8]) -> Doctype<'_> {
     // A quoted identifier, after optional whitespace; `None` with force-quirks set if what follows is
     // not a quote (including a `>` or end of input there).
     fn quoted<'a>(b: &'a [u8], i: &mut usize, d: &mut Doctype) -> Option<&'a [u8]> {
-        while *i < b.len() && ws(b[*i]) {
+        while *i < b.len() && is_ws(b[*i]) {
             *i += 1;
         }
         let q = *b.get(*i).filter(|&&c| c == b'"' || c == b'\'')?;
@@ -96,7 +94,7 @@ fn parse(raw: &[u8]) -> Doctype<'_> {
         if d.force_quirks {
             return d;
         }
-        while i < b.len() && ws(b[i]) {
+        while i < b.len() && is_ws(b[i]) {
             i += 1;
         }
         if i < b.len() {

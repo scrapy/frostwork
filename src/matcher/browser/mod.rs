@@ -142,9 +142,13 @@ enum Vis {
     Pending(u32),
 }
 
+/// An HTML integration point.
 const HTML_IP: u8 = 1 << 0;
+/// A MathML text integration point.
 const MATHML_TEXT_IP: u8 = 1 << 1;
+/// A MathML `<annotation-xml>`, which takes an `<svg>` as foreign content of its own.
 const ANNOTATION_XML: u8 = 1 << 2;
+/// A declarative shadow root has been attached to the element.
 const SHADOW_HOST: u8 = 1 << 3;
 /// An element or text node has been inserted into the element.
 const HAS_CHILD: u8 = 1 << 4;
@@ -231,7 +235,9 @@ enum Loc {
 /// tree (`true`). The rules are the same code either way; only the insertion primitives differ.
 pub(super) struct Browser<'a, const REPLAY: bool> {
     mode: Mode,
+    /// The insertion mode the text mode returns to.
     original: Mode,
+    /// The stack of template insertion modes.
     templates: Vec<Mode>,
     stack: OpenStack<'a>,
     afe: Formatting<'a>,
@@ -245,14 +251,17 @@ pub(super) struct Browser<'a, const REPLAY: bool> {
     /// Text nodes of `<html>` in "after head" that a comment has ended, held with `html_text`: head
     /// content written after them still precedes them in document order.
     html_done: Vec<HeldText<'a>>,
+    /// The form element pointer, as the element's uid.
     form: Option<u32>,
     frameset_ok: bool,
     quirks: bool,
+    /// Foster parenting is on, for the token being processed.
     foster: bool,
     /// The previous token was `<pre>`, `<listing>` or `<textarea>`: a leading newline is dropped.
     skip_lf: bool,
     /// The uid of every element on the matcher stack, bottom first.
     path: Vec<u32>,
+    /// The parked runs, the most recently parked last.
     parked: Vec<Seg<'a>>,
     next_uid: u32,
     /// The current token changed the matcher stack. A tag that did not is no node, so the text either

@@ -49,7 +49,6 @@ struct Link {
 
 const UNLINKED: Link = Link { parent: NIL, prev: NIL, next: NIL, first: NIL, last: NIL };
 
-#[derive(Default)]
 pub(super) struct Dom<'a> {
     kinds: Vec<Kind<'a>>,
     links: Vec<Link>,
