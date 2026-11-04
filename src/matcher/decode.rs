@@ -94,6 +94,13 @@ impl<'a> EncodedInput<'a> {
 
     /// One attribute's value (see [`decode_attr`]).
     pub(super) fn attr_value(self, av: &'a [u8]) -> Cow<'a, str> {
+        // With no reference, CR or NUL in it, a value is its own text: valid UTF-8 in a UTF-8 buffer,
+        // and ASCII in any other, since every encoding a buffer can have maps ASCII to itself.
+        if memchr::memchr3(b'&', b'\r', 0, av).is_none() && (self.encoding == encoding_rs::UTF_8 || av.is_ascii()) {
+            if let Ok(s) = std::str::from_utf8(av) {
+                return Cow::Borrowed(s);
+            }
+        }
         if self.keeps_nul && av.contains(&0) {
             let t = replace_nul(normalize_crlf(decode_bytes(av, self.encoding)));
             return Cow::Owned(entities::decode(&t, true).into_owned());

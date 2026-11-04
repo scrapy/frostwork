@@ -336,31 +336,6 @@ pub(super) enum Afe {
     El { uid: u32, tok: u32 },
 }
 
-/// An attribute value as Noah's Ark hashes it: its decoded text. A value of ASCII bytes with no
-/// character reference, CR or NUL decodes to those same bytes in every encoding a buffer can have, so
-/// it is hashed as it stands, without decoding it.
-enum ArkValue<'x> {
-    Plain(&'x [u8]),
-    Decoded(std::borrow::Cow<'x, str>),
-}
-
-impl<'x> ArkValue<'x> {
-    fn of(input: EncodedInput<'x>, raw: &'x [u8]) -> Self {
-        if raw.is_ascii() && memchr::memchr3(b'&', b'\r', 0, raw).is_none() {
-            ArkValue::Plain(raw)
-        } else {
-            ArkValue::Decoded(input.attr_value(raw))
-        }
-    }
-
-    fn bytes(&self) -> &[u8] {
-        match self {
-            ArkValue::Plain(b) => b,
-            ArkValue::Decoded(s) => s.as_bytes(),
-        }
-    }
-}
-
 /// splitmix64's finalizer, which spreads a word's bits over all 64.
 fn mix(mut h: u64) -> u64 {
     h = (h ^ (h >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
@@ -371,11 +346,11 @@ fn mix(mut h: u64) -> u64 {
 /// The key Noah's Ark compares two formatting elements by: their tag, and their attributes as a set of
 /// (lowercased name, decoded value) pairs, the first of a repeated name. Equal elements have equal keys;
 /// [`same_attrs`] settles a collision.
-fn ark_key<'x>(tag: Tag, attrs: impl Iterator<Item = (&'x [u8], ArkValue<'x>)>) -> u64 {
+fn ark_key<'x>(tag: Tag, attrs: impl Iterator<Item = (&'x [u8], std::borrow::Cow<'x, str>)>) -> u64 {
     let (mut sum, mut n) = (0u64, 0u64);
     for (name, value) in attrs {
         // 0xff ends the name: no lowercased name byte is one. Each pair is mixed before the order-free sum.
-        let h = fnv(fnv(FNV_SEED, name.iter().map(u8::to_ascii_lowercase).chain([0xff])), value.bytes().iter().copied());
+        let h = fnv(fnv(FNV_SEED, name.iter().map(u8::to_ascii_lowercase).chain([0xff])), value.bytes());
         sum = sum.wrapping_add(mix(h));
         n += 1;
     }
@@ -476,7 +451,7 @@ impl<'a> Formatting<'a> {
         let tok = self.toks.len() as u32;
         let attrs = t.attrs;
         let firsts = (0..attrs.len()).filter(|&j| !attrs[..j].iter().any(|(n, _)| n.eq_ignore_ascii_case(attrs[j].0)));
-        let ark = ark_key(t.tag, firsts.map(|j| (attrs[j].0, ArkValue::of(input, attrs[j].1.unwrap_or(b"")))));
+        let ark = ark_key(t.tag, firsts.map(|j| (attrs[j].0, input.attr_value(attrs[j].1.unwrap_or(b"")))));
         let from = self.attrs.len();
         self.attrs.extend_from_slice(attrs);
         let span = SourcePrefix::new(t.start, t.end);
