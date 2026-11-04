@@ -114,6 +114,10 @@ ALPHABET: list[str] = [
     # The replay's inputs: the selectedness `<selectedcontent>` copies (a `selected` option, a disabled
     # one, a `multiple` select, which has none), and U+FFFD, which leaves frameset-ok set in Chrome.
     "<option{} selected>", "<option{} disabled>", "<select{} multiple>", "</selectedcontent>", "&#0;", "\ufffd",
+    # Attribute names as HTML5 adjusts them on SVG and MathML (camel case, `definitionURL`, the
+    # namespaced `xlink:`/`xml:`/`xmlns`), each inside its foreign element, so the value columns see them.
+    '<svg{} VIEWBOX="0 0 1 1"><text textlength=5>t</text><a xlink:href=u xmlns=q fill=red>y</a></svg>',
+    "<math{} definitionurl=d><mi definitionURL=k xml:lang=en>x</mi></math>",
 ]
 MAX_TOKENS = 7
 
@@ -175,6 +179,8 @@ VALUE_ATTRS: list[str] = [
     ' target="_Blank"', ' data-case="Mixed"',
     # an upper-case name, a duplicate (the first wins) and an empty value
     ' TITLE="Up"', ' title="1" title="2"', ' data-e=""',
+    # names HTML5 adjusts on an SVG or MathML element, and leaves lowercased on an HTML one
+    ' VIEWBOX="0 0 1 1"', ' textlength="5"', ' definitionurl="d"', ' xlink:href="u"', ' xmlns="q"', ' FILL="red"',
 ]
 VALUE_TEXTS: list[str] = ["alpha", " beta ", "g&amp;h", "x&lt;y", "café", "a&nbsp;b", "&notin;x", "&copy x",
                           "&#0;", "&#x80;", "x\x01y", "a\N{IDEOGRAPHIC SPACE}b"]
@@ -332,6 +338,12 @@ RULE_SELECTORS: list[str] = [
     'div:has(b) ::attr(id)', 'title:has(b) ::text', 'desc:has(b) b::text', 'dd:has(> b) ::text',
     'div:contains("a") b::text', 'li:contains("a") ::text', 'td:contains("a") ::attr(id)',
     '//li[last()]//text()', '//tr[last()]//td/text()', '//*[contains(., "a")]//b/text()',
+    # attribute names: `::attr()` and XPath's `@` compare the DOM's name exactly (camel case on SVG,
+    # `definitionURL` on MathML, lowercase elsewhere), a CSS attribute selector case-insensitively and
+    # never a namespaced one, and an XPath name-test never a camel-cased SVG element
+    '[viewbox]::attr(id)', '*::attr(viewBox)', '*::attr(viewbox)', '*::attr(textLength)', '[textlength]::attr(id)',
+    '*::attr(definitionURL)', '[definitionurl]::attr(id)', '[xmlns]::attr(id)', '*::attr(xmlns)',
+    '[fill]::attr(id)', '//*/@viewbox', '//*[@textlength]/@id', '//*[@fill]/@id', '//clippath/@id',
 ]
 
 
@@ -655,6 +667,76 @@ def attribute(repro: Repro) -> Optional[str]:
 # section 3 constructs cannot explain it either. These are the value-level ones, each a documented
 # decision or divergence rather than a tree rule. They read the reduced, still-decorated document and the
 # oracle's own tree, never the page it came from.
+# The quirks half of HTML's "initial" insertion mode (13.2.6.4.1), for a well-formed doctype as the tree
+# records it: a missing identifier is the empty string there.
+QUIRKS_PUBLIC_PREFIXES = (
+    "+//Silmaril//dtd html Pro v0r11 19970101//",
+    "-//AS//DTD HTML 3.0 asWedit + extensions//",
+    "-//AdvaSoft Ltd//DTD HTML 3.0 asWedit + extensions//",
+    "-//IETF//DTD HTML 2.0 Level 1//",
+    "-//IETF//DTD HTML 2.0 Level 2//",
+    "-//IETF//DTD HTML 2.0 Strict Level 1//",
+    "-//IETF//DTD HTML 2.0 Strict Level 2//",
+    "-//IETF//DTD HTML 2.0 Strict//",
+    "-//IETF//DTD HTML 2.0//",
+    "-//IETF//DTD HTML 2.1E//",
+    "-//IETF//DTD HTML 3.0//",
+    "-//IETF//DTD HTML 3.2 Final//",
+    "-//IETF//DTD HTML 3.2//",
+    "-//IETF//DTD HTML 3//",
+    "-//IETF//DTD HTML Level 0//",
+    "-//IETF//DTD HTML Level 1//",
+    "-//IETF//DTD HTML Level 2//",
+    "-//IETF//DTD HTML Level 3//",
+    "-//IETF//DTD HTML Strict Level 0//",
+    "-//IETF//DTD HTML Strict Level 1//",
+    "-//IETF//DTD HTML Strict Level 2//",
+    "-//IETF//DTD HTML Strict Level 3//",
+    "-//IETF//DTD HTML Strict//",
+    "-//IETF//DTD HTML//",
+    "-//Metrius//DTD Metrius Presentational//",
+    "-//Microsoft//DTD Internet Explorer 2.0 HTML Strict//",
+    "-//Microsoft//DTD Internet Explorer 2.0 HTML//",
+    "-//Microsoft//DTD Internet Explorer 2.0 Tables//",
+    "-//Microsoft//DTD Internet Explorer 3.0 HTML Strict//",
+    "-//Microsoft//DTD Internet Explorer 3.0 HTML//",
+    "-//Microsoft//DTD Internet Explorer 3.0 Tables//",
+    "-//Netscape Comm. Corp.//DTD HTML//",
+    "-//Netscape Comm. Corp.//DTD Strict HTML//",
+    "-//O'Reilly and Associates//DTD HTML 2.0//",
+    "-//O'Reilly and Associates//DTD HTML Extended 1.0//",
+    "-//O'Reilly and Associates//DTD HTML Extended Relaxed 1.0//",
+    "-//SQ//DTD HTML 2.0 HoTMetaL + extensions//",
+    "-//SoftQuad Software//DTD HoTMetaL PRO 6.0::19990601::extensions to HTML 4.0//",
+    "-//SoftQuad//DTD HoTMetaL PRO 4.0::19971010::extensions to HTML 4.0//",
+    "-//Spyglass//DTD HTML 2.0 Extended//",
+    "-//Sun Microsystems Corp.//DTD HotJava HTML//",
+    "-//Sun Microsystems Corp.//DTD HotJava Strict HTML//",
+    "-//W3C//DTD HTML 3 1995-03-24//",
+    "-//W3C//DTD HTML 3.2 Draft//",
+    "-//W3C//DTD HTML 3.2 Final//",
+    "-//W3C//DTD HTML 3.2//",
+    "-//W3C//DTD HTML 3.2S Draft//",
+    "-//W3C//DTD HTML 4.0 Frameset//",
+    "-//W3C//DTD HTML 4.0 Transitional//",
+    "-//W3C//DTD HTML Experimental 19960712//",
+    "-//W3C//DTD HTML Experimental 970421//",
+    "-//W3C//DTD W3 HTML//",
+    "-//W3O//DTD W3 HTML 3.0//",
+    "-//WebTechs//DTD Mozilla HTML 2.0//",
+    "-//WebTechs//DTD Mozilla HTML//",
+)
+
+
+def quirks_doctype(name: str, public: str, system: str) -> bool:
+    pub, sys_ = public.lower(), system.lower()
+    return (name.lower() != "html"
+            or pub in ("-//w3o//dtd w3 html strict 3.0//en//", "-/w3c/dtd html 4.0 transitional/en", "html")
+            or sys_ == "http://www.ibm.com/data/dtd/v11/ibmxhtml1-transitional.dtd"
+            or any(pub.startswith(p.lower()) for p in QUIRKS_PUBLIC_PREFIXES)
+            or (not sys_ and pub.startswith(("-//w3c//dtd html 4.01 frameset//", "-//w3c//dtd html 4.01 transitional//"))))
+
+
 @dataclass
 class ValueRepro:
     doc: Doc                  # the reduced document, decorated
@@ -665,8 +747,10 @@ class ValueRepro:
 
     def quirks(self) -> bool:
         """The document is in quirks mode: no doctype reached the initial insertion mode (it is the only
-        place a doctype is kept, so the tree says), and every one this generator writes is `html`."""
-        return not any(isinstance(n, list) and n[0] == "#dt" for n in self.tree[1])
+        place a doctype is kept, so the tree says), or the one that did names a quirks document. Every
+        doctype this generator writes is well formed, so the tree's name and identifiers decide it."""
+        doctype = next((n for n in self.tree[1] if isinstance(n, list) and n[0] == "#dt"), None)
+        return doctype is None or quirks_doctype(doctype[1], doctype[2], doctype[3])
 
     def elements(self, html_only: bool = False) -> list[Any]:
         out, stack = [], [T.document_view(self.tree)]
@@ -964,14 +1048,24 @@ def split_value(d: Divergence, tree_divergent: set[str], report: Report, value_i
     (report.value_on_tree if render(d.doc) in tree_divergent else value_items).append(d)
 
 
+_ATTR_NAME = re.compile(r"\[\s*([^\s~|^$*!=\]]+)")
+
+
 def mirrors_parsel(tree: Any, sel: str) -> bool:
     """Do browser CSS and cssselect's XPath mean the same thing for `sel` on `tree`? Not in quirks mode
-    (class and id selectors fold case), not for an attribute test HTML folds, and not for a class test where
-    a class value holds a form feed (ASCII whitespace for a browser, not for XPath's normalize-space)."""
+    (class and id selectors fold case), not for an attribute test HTML folds, not for a class test where
+    a class value holds a form feed (ASCII whitespace for a browser, not for XPath's normalize-space), and
+    not for an attribute test naming what an SVG or MathML element carries camel-cased or in a namespace
+    (`viewBox`, `xmlns`): CSS compares an attribute name case-insensitively and names no namespaced one,
+    XPath compares the name exactly."""
     vr = ValueRepro((), sel, [], [], tree)
     if vr.quirks():
         return False
     if any(name.lower() in CASE_INSENSITIVE_ATTRS for name, _op, _v in _ATTR_TEST.findall(sel)):
+        return False
+    tested = {n.lower() for n in _ATTR_NAME.findall(sel)}
+    if tested and any(k.lower() in tested and (k != k.lower() or ":" in k or k == "xmlns")
+                      for el in vr.elements() if el[1] != T.XHTML for k in el[2][0::2]):
         return False
     if "class" in sel or re.search(r"\.", C.top_level(sel)):
         return not any("\x0c" in v for el in vr.elements() for k, v in zip(el[2][0::2], el[2][1::2])

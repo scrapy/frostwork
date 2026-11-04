@@ -81,6 +81,7 @@ use crate::implied_close::{
 };
 use crate::tokenizer::DataMode;
 use tags::{lower, tag_of, Tag};
+pub(super) use tags::{namespaced_foreign_attr, svg_attr_name, svg_local_name};
 
 type Attrs<'a> = [(&'a [u8], Option<&'a [u8]>)];
 
@@ -89,6 +90,17 @@ enum Ns {
     Html,
     Svg,
     MathMl,
+}
+
+impl Ns {
+    /// The matcher's class id for an element of this namespace.
+    fn class(self) -> u8 {
+        match self {
+            Ns::Html => super::HTML_ELEMENT,
+            Ns::Svg => super::SVG_ELEMENT,
+            Ns::MathMl => super::MATHML_ELEMENT,
+        }
+    }
 }
 
 /// The insertion modes. "in table text" and "in head noscript" have none: a text run is a whole
@@ -633,7 +645,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
     /// Open `node` as the matcher's next element, at the current insertion point.
     fn open(&mut self, m: &mut Matcher<'a>, node: &mut Node<'a>, attrs: &Attrs<'a>, at: usize) {
         m.flush_text();
-        let class = if node.ns == Ns::Html { super::HTML_ELEMENT } else { 0 };
+        let class = node.ns.class();
         m.open_element(node.name, class, attrs, at);
         node.vis = Vis::Live;
         node.depth = (m.stack.len() - 1) as u32;
@@ -736,7 +748,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
 
     /// The replay's element for `node`, not yet in the tree.
     fn dom_element(&mut self, node: &mut Node<'a>, attrs: &Attrs<'a>, at: usize) {
-        node.depth = self.dom.element(node.name, node.ns == Ns::Html, attrs.to_vec(), at);
+        node.depth = self.dom.element(node.name, node.ns.class(), attrs.to_vec(), at);
         node.vis = Vis::Live;
     }
 
@@ -1119,7 +1131,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
         let mut a = self.dom.parent(id);
         while a != dom::NIL {
             let e = self.dom.elem(a)?;
-            if e.html {
+            if e.class == super::HTML_ELEMENT {
                 let mut buf = [0; 24];
                 match lower(e.name, &mut buf) {
                     Some(b"select") => return Some(a),
@@ -1177,7 +1189,9 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
         if self.has_attr(select, b"multiple") {
             return Vec::new();
         }
-        let mut all = self.dom.descendants_where(select, |e| e.html && e.name.eq_ignore_ascii_case(b"selectedcontent"));
+        let mut all = self.dom.descendants_where(select, |e| {
+            e.class == super::HTML_ELEMENT && e.name.eq_ignore_ascii_case(b"selectedcontent")
+        });
         all.retain(|&sc| self.owner_select(sc, false) == Some(select));
         all
     }

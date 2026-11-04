@@ -1105,7 +1105,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
             node.vis = Vis::Inert;
         } else if REPLAY {
             let attrs = self.toks[tok as usize].attrs.clone();
-            node.depth = self.dom.element(name, true, attrs, at);
+            node.depth = self.dom.element(name, super::super::HTML_ELEMENT, attrs, at);
             self.dom.set_prefix(node.depth, self.toks[tok as usize].span);
         } else {
             node.vis = Vis::Pending(tok);
@@ -1160,7 +1160,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
         // Foreign content keeps a NUL as U+FFFD, which is how RCDATA text decodes.
         let dm = if dm == DataMode::Normal { DataMode::Rcdata } else { dm };
         self.insert_text(m, b, dm, s);
-        if ends_frameset_ok(b, m.input.encoding() == encoding_rs::UTF_8) {
+        if self.frameset_ok && ends_frameset_ok(b, m.input.encoding() == encoding_rs::UTF_8) {
             self.frameset_ok = false;
         }
     }
@@ -1267,7 +1267,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
         }
         self.reconstruct(m, s);
         self.insert_text(m, b, dm, s);
-        if ends_frameset_ok(b, m.input.encoding() == encoding_rs::UTF_8) {
+        if self.frameset_ok && ends_frameset_ok(b, m.input.encoding() == encoding_rs::UTF_8) {
             self.frameset_ok = false;
         }
     }

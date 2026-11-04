@@ -101,7 +101,10 @@ fn compound_matches_impl<const FILTER: bool>(c: &Compound, el: &OpenElem) -> boo
         return false;
     }
     if let Some(t) = &c.tag {
-        if t != "*" && !el.tag.eq_ignore_ascii_case(t.as_bytes()) {
+        // An XPath name is lowercase (`xpath::valid_name`), so it never names a camel-cased SVG element.
+        if t != "*"
+            && (!el.tag.eq_ignore_ascii_case(t.as_bytes()) || (c.exact_tag && el.camel_cased_svg()))
+        {
             return false;
         }
     }
@@ -120,18 +123,19 @@ fn compound_matches_impl<const FILTER: bool>(c: &Compound, el: &OpenElem) -> boo
         // lxml); `~=` with an empty/whitespace operand also never matches (no empty token).
         let ci = p.ci || (p.html_ci && el.scid == super::HTML_ELEMENT);
         let (n, v) = (p.name.as_str(), p.value.as_str());
+        let found = if p.exact { el.named_attr(n) } else { el.css_attr(n) };
         let ok = match p.op {
-            AttrOp::Exists => el.attr(n).is_some(),
-            AttrOp::Eq => el.attr(n).is_some_and(|a| eq(a, v, ci)),
-            AttrOp::Prefix => !v.is_empty() && el.attr(n).is_some_and(|a| starts(a, v, ci)),
-            AttrOp::Suffix => !v.is_empty() && el.attr(n).is_some_and(|a| ends(a, v, ci)),
-            AttrOp::Substr => !v.is_empty() && el.attr(n).is_some_and(|a| substr(a, v, ci)),
+            AttrOp::Exists => found.is_some(),
+            AttrOp::Eq => found.is_some_and(|a| eq(a, v, ci)),
+            AttrOp::Prefix => !v.is_empty() && found.is_some_and(|a| starts(a, v, ci)),
+            AttrOp::Suffix => !v.is_empty() && found.is_some_and(|a| ends(a, v, ci)),
+            AttrOp::Substr => !v.is_empty() && found.is_some_and(|a| substr(a, v, ci)),
             // ASCII whitespace only, for the reason spelled out on `OpenElem::has_class` — `[rel~=x]`
             // tokenizes the same way `.x` does, so a U+3000 in the value must not separate tokens.
             AttrOp::Includes => {
-                !v.is_empty() && el.attr(n).is_some_and(|a| a.split_ascii_whitespace().any(|t| eq(t, v, ci)))
+                !v.is_empty() && found.is_some_and(|a| a.split_ascii_whitespace().any(|t| eq(t, v, ci)))
             }
-            AttrOp::DashMatch => el.attr(n).is_some_and(|a| {
+            AttrOp::DashMatch => found.is_some_and(|a| {
                 eq(a, v, ci) || (a.len() > v.len() && starts(a, v, ci) && a.as_bytes()[v.len()] == b'-')
             }),
         };

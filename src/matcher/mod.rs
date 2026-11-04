@@ -170,6 +170,33 @@ fn uniform_node_terminal(members: &[Selector]) -> bool {
 /// The class id browser mode's tree builder gives an HTML-namespace element. No libxml2 start-close class
 /// takes it, so in lxml mode no element carries it and CSS's HTML attribute-value fold never applies.
 pub(super) const HTML_ELEMENT: u8 = u8::MAX;
+/// The class ids of browser mode's SVG and MathML elements, whose attribute names HTML5 adjusts (see
+/// [`OpenElem::named_attr`]). Every class id from `MATHML_ELEMENT` up is browser mode's.
+pub(super) const SVG_ELEMENT: u8 = u8::MAX - 1;
+pub(super) const MATHML_ELEMENT: u8 = u8::MAX - 2;
+
+/// Is `want` the name the browser's DOM gives raw attribute `raw` of an element of class `scid`? That
+/// name is the lowercased one, except on an SVG element whose attribute HTML5 camel-cases (`viewBox`)
+/// and on MathML's `definitionURL`. Exact, as `::attr()` and XPath's `@` compare it.
+fn dom_name_is(scid: u8, raw: &[u8], want: &str) -> bool {
+    let mut buf = [0u8; 24];
+    if scid != HTML_ELEMENT {
+        if let Some(low) = buf.get_mut(..raw.len()) {
+            for (o, &c) in low.iter_mut().zip(raw) {
+                *o = c.to_ascii_lowercase();
+            }
+            let adjusted = match scid {
+                SVG_ELEMENT => browser::svg_attr_name(low),
+                _ if low == b"definitionurl" => Some(&b"definitionURL"[..]),
+                _ => None,
+            };
+            if let Some(name) = adjusted {
+                return want.as_bytes() == name;
+            }
+        }
+    }
+    !want.bytes().any(|c| c.is_ascii_uppercase()) && want.as_bytes().eq_ignore_ascii_case(raw)
+}
 
 pub struct OpenElem<'a> {
     // `pub(super)` fields are the ones the read-only matching kernel (`matching`) reads.
@@ -177,7 +204,7 @@ pub struct OpenElem<'a> {
     /// The tree builder's class for the element. Lxml mode: the start-close class
     /// (`implied_close::sc`), the id space libxml2's `htmlStartClose` pair table actually needs (it
     /// distinguishes names a coarser one lumps together: `<td>` closes an open `<b>` but not an open
-    /// `<em>`). Browser mode: [`HTML_ELEMENT`] for an HTML-namespace element, 0 for a foreign one.
+    /// `<em>`). Browser mode: [`HTML_ELEMENT`], [`SVG_ELEMENT`] or [`MATHML_ELEMENT`] by namespace.
     pub(super) scid: u8,
     attrs: Vec<(&'a [u8], Cow<'a, str>)>, // only "interesting" attrs; value entity-decoded (lazy Cow)
     /// This element's identity signature: the Bloom bits of its tag, `id`, and class tokens, built
@@ -387,6 +414,42 @@ impl<'a> OpenElem<'a> {
         self.attrs
             .iter()
             .find(|(n, _)| n.eq_ignore_ascii_case(name.as_bytes()))
+            .map(|(_, v)| v.as_ref())
+    }
+
+    /// Does `raw`, one of this element's attribute names, name the attribute a value terminal or an XPath
+    /// `@name` asks for? Browser mode compares with the browser's DOM name exactly ([`dom_name_is`]);
+    /// lxml mode compares ASCII-case-insensitively.
+    pub(super) fn names(&self, raw: &[u8], name: &str) -> bool {
+        if self.scid >= MATHML_ELEMENT {
+            dom_name_is(self.scid, raw, name)
+        } else {
+            raw.eq_ignore_ascii_case(name.as_bytes())
+        }
+    }
+
+    /// Is this an SVG element whose name HTML5 camel-cases (`clipPath`, `foreignObject`)?
+    pub(super) fn camel_cased_svg(&self) -> bool {
+        self.scid == SVG_ELEMENT
+            && self.tag.iter().any(u8::is_ascii_uppercase)
+            && browser::svg_local_name(self.tag) == Some(self.tag)
+    }
+
+    /// The attribute a value terminal or an XPath `@name` names (see [`Self::names`]).
+    pub(super) fn named_attr(&self, name: &str) -> Option<&str> {
+        self.attrs.iter().find(|(n, _)| self.names(n, name)).map(|(_, v)| v.as_ref())
+    }
+
+    /// The attribute a CSS attribute selector names: ASCII-case-insensitively, as in a browser, but on an
+    /// SVG or MathML element never one HTML5 puts in a namespace (`xlink:href`, `xml:lang`, `xmlns`),
+    /// since a selector without a namespace names an attribute in none.
+    pub(super) fn css_attr(&self, name: &str) -> Option<&str> {
+        if self.scid != SVG_ELEMENT && self.scid != MATHML_ELEMENT {
+            return self.attr(name);
+        }
+        self.attrs
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name.as_bytes()) && !browser::namespaced_foreign_attr(n))
             .map(|(_, v)| v.as_ref())
     }
     /// This element's `class=` tokens, in source order. ASCII whitespace, NOT `split_whitespace`'s
@@ -791,6 +854,7 @@ fn marked_tail(sel: &Selector, k: usize, slot: usize) -> Selector {
             value: slot.to_string(),
             ci: false,
             html_ci: false,
+            exact: false,
         }],
         ..Default::default()
     };
@@ -2411,7 +2475,7 @@ impl<'a> Matcher<'a> {
                     // a group container never emits a flat value; a >=128 column can't be tracked
                     if !cs.emit || cs.col >= 128
                         || self.satisfied & (1u128 << cs.col) != 0
-                        || !aname.eq_ignore_ascii_case(name.as_bytes()) {
+                        || !el.names(aname, name) {
                         continue;
                     }
                     let hit = if subtree {
@@ -2455,7 +2519,7 @@ impl<'a> Matcher<'a> {
                 self.stack[top].matched & (1u128 << k) != 0
             };
             if hit {
-                if let Some(v) = self.stack[top].attr(name) {
+                if let Some(v) = self.stack[top].named_attr(name) {
                     self.ns[k].value = Some(decode::normalize_space(v));
                 }
             }
@@ -2500,7 +2564,7 @@ impl<'a> Matcher<'a> {
             subj |= 1u128 << r;
             // A subtree entry streams nothing — its values are recovered from the winner's span later.
             if let (Tail::Streamed, Terminal::Attr { name, subtree: false }) = (re.tail, &re.terminal) {
-                if let Some(v) = self.stack[top].attr(name) {
+                if let Some(v) = self.stack[top].named_attr(name) {
                     caps.push((r as u32, start, v.to_string()));
                 }
             }
@@ -2547,7 +2611,7 @@ impl<'a> Matcher<'a> {
             subj |= 1u128 << h;
             // a tail entry streams nothing — its values come from the span re-scan at resolution
             if let (Tail::Streamed, Terminal::Attr { name, .. }) = (he.tail, &he.terminal) {
-                if let Some(v) = self.stack[top].attr(name) {
+                if let Some(v) = self.stack[top].named_attr(name) {
                     caps.push((h as u32, start, v.to_string()));
                 }
             }
@@ -2621,7 +2685,7 @@ impl<'a> Matcher<'a> {
             states.push(TextMatchState::new(t as u32, &te.pred));
             // a tail entry streams nothing — its values come from the span re-scan at resolution
             if let (Tail::Streamed, Terminal::Attr { name, .. }) = (te.tail, &te.terminal) {
-                if let Some(v) = self.stack[top].attr(name) {
+                if let Some(v) = self.stack[top].named_attr(name) {
                     emit.push((t as u32, start, v.to_string()));
                 }
             }
@@ -2714,7 +2778,7 @@ impl<'a> Matcher<'a> {
             for (sub_idx, sub) in self.schema.groups[g].subs.iter().enumerate() {
                 if let Terminal::Attr { name, subtree } = &sub.terminal {
                     if sub_hits(&sub.seg, *subtree, &self.stack, top, depth) {
-                        if let Some(v) = self.stack[top].attr(name) {
+                        if let Some(v) = self.stack[top].named_attr(name) {
                             self.open_instances[ii].buckets[sub_idx].push(v.to_string());
                         }
                     }

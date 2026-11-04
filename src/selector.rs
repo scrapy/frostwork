@@ -34,6 +34,9 @@ pub struct AttrPred {
     pub value: String,
     pub ci: bool,
     pub html_ci: bool,
+    /// The NAME is XPath's `@name`, which browser mode compares with the DOM's name exactly; a CSS
+    /// attribute selector's name compares ASCII-case-insensitively.
+    pub exact: bool,
 }
 
 /// The attributes whose values CSS matches ASCII-case-insensitively on an HTML element (WHATWG HTML,
@@ -48,11 +51,16 @@ const CASE_INSENSITIVE_VALUES: [&str; 46] = [
 
 impl AttrPred {
     pub fn new(name: impl Into<String>, op: AttrOp, value: impl Into<String>) -> Self {
-        Self { name: name.into(), op, value: value.into(), ci: false, html_ci: false }
+        Self { name: name.into(), op, value: value.into(), ci: false, html_ci: false, exact: false }
     }
 
     pub fn exists(name: impl Into<String>) -> Self {
         Self::new(name, AttrOp::Exists, "")
+    }
+
+    /// The same test with XPath's name semantics (the `exact` field).
+    pub fn exact(self) -> Self {
+        Self { exact: true, ..self }
     }
 }
 
@@ -124,6 +132,9 @@ pub struct TextPred {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Compound {
     pub tag: Option<String>, // None or Some("*") = universal
+    /// The name-test is XPath's, which browser mode compares with the DOM's name exactly: a camel-cased
+    /// SVG name (`clipPath`) is not `clippath` there. A CSS type selector compares ASCII-case-insensitively.
+    pub exact_tag: bool,
     pub id: Option<String>,
     pub classes: Vec<String>,
     pub attrs: Vec<AttrPred>,
@@ -921,7 +932,7 @@ fn parse_compound_depth(s: &str, depth: u32) -> Result<Compound, ()> {
                     _ => unreachable!(),
                 };
                 let html_ci = !flagged && CASE_INSENSITIVE_VALUES.iter().any(|a| a.eq_ignore_ascii_case(&name));
-                c.attrs.push(AttrPred { name, op, value: val, ci, html_ci });
+                c.attrs.push(AttrPred { name, op, value: val, ci, html_ci, exact: false });
             }
             b':' => {
                 // Supported pseudos: `:not(<compound>)`, the FORWARD positional pseudo-classes

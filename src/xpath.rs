@@ -368,6 +368,7 @@ fn parse_step(step: &str) -> Option<(Option<Comb>, Vec<Compound>)> {
             return None; // uppercase tag name-test never matches libxml2's lowercased tree
         }
         base.tag = Some(name.to_string());
+        base.exact_tag = true;
     } else {
         return None; // node() / comment() / other node tests unsupported
     }
@@ -601,10 +602,10 @@ fn parse_predicate_alts(pred: &str) -> Option<Vec<Vec<AttrPred>>> {
 fn parse_one_attr(t: &str, out: &mut Vec<AttrPred>) -> Option<()> {
     if let Some(inner) = t.strip_prefix("contains(").and_then(|r| r.strip_suffix(")")) {
         let (name, val) = fn_args(inner)?;
-        out.push(AttrPred::new(name, AttrOp::Substr, val));
+        out.push(AttrPred::new(name, AttrOp::Substr, val).exact());
     } else if let Some(inner) = t.strip_prefix("starts-with(").and_then(|r| r.strip_suffix(")")) {
         let (name, val) = fn_args(inner)?;
-        out.push(AttrPred::new(name, AttrOp::Prefix, val));
+        out.push(AttrPred::new(name, AttrOp::Prefix, val).exact());
     } else {
         // not `@name…` -> positional / text() / function predicate -> unsupported
         let rest = t.strip_prefix('@')?;
@@ -614,13 +615,13 @@ fn parse_one_attr(t: &str, out: &mut Vec<AttrPred>) -> Option<()> {
                 return None;
             }
             let val = single_literal(rest[eq + 1..].trim())?;
-            out.push(AttrPred::new(name, AttrOp::Eq, val));
+            out.push(AttrPred::new(name, AttrOp::Eq, val).exact());
         } else {
             let name = rest.trim();
             if !valid_attr_name(name) {
                 return None;
             }
-            out.push(AttrPred::exists(name));
+            out.push(AttrPred::exists(name).exact());
         }
     }
     Some(())

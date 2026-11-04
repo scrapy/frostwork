@@ -3550,12 +3550,53 @@ mod browser_mode_tests {
         assert_eq!(ex(&h, "#d508 > *::attr(id)"), v(&["d509"]));
     }
 
-    /// The class lxml mode's builder gives an element never collides with browser mode's HTML mark.
+    /// The class lxml mode's builder gives an element never collides with browser mode's three namespace
+    /// marks, which switch on browser mode's attribute-name rules.
     #[test]
-    fn libxml2_classes_leave_the_html_mark_free() {
+    fn libxml2_classes_leave_the_namespace_marks_free() {
         for name in ["a", "p", "div", "table", "td", "tr", "body", "html", "head", "li", "dd", "x-y", "option"] {
-            assert!(implied_close::classify(name.as_bytes()).1 < u8::MAX, "{name}");
+            assert!(implied_close::classify(name.as_bytes()).1 < u8::MAX - 2, "{name}");
         }
+    }
+
+    /// Attribute names as Chrome's DOM has them: lowercased, SVG's camel case and MathML's
+    /// `definitionURL` restored, and `xlink:`/`xml:`/`xmlns` attributes of a foreign element in a
+    /// namespace. `::attr()` and XPath's `@` compare the DOM name exactly; a CSS attribute selector
+    /// compares ASCII-case-insensitively and names no namespaced attribute. lxml mode is unchanged.
+    #[test]
+    fn foreign_attribute_names_are_adjusted() {
+        let h = b"<!DOCTYPE html><svg VIEWBOX=\"0 0 1 1\" id=s fill=red><text textlength=5 id=t>x</text>\
+                  <a xlink:href=u xml:lang=en id=a>y</a></svg><math definitionurl=d id=m></math>\
+                  <div viewBox=1 xlink:href=h id=d></div>";
+        // Chrome: CSS
+        assert_eq!(ex(h, "[viewBox]::attr(id)"), v(&["s", "d"]));
+        assert_eq!(ex(h, "[viewbox]::attr(id)"), v(&["s", "d"]));
+        assert_eq!(ex(h, "svg::attr(viewBox)"), v(&["0 0 1 1"]));
+        assert_eq!(ex(h, "svg::attr(viewbox)"), NONE);
+        assert_eq!(ex(h, "text::attr(textLength)"), v(&["5"]));
+        assert_eq!(ex(h, "text::attr(textlength)"), NONE);
+        assert_eq!(ex(h, "[definitionurl]::attr(id)"), v(&["m"]));
+        assert_eq!(ex(h, "math::attr(definitionURL)"), v(&["d"]));
+        assert_eq!(ex(h, "math::attr(definitionurl)"), NONE);
+        assert_eq!(ex(h, "[FILL]::attr(id)"), v(&["s"]));
+        assert_eq!(ex(h, "div::attr(viewBox)"), NONE);
+        assert_eq!(ex(h, "div::attr(viewbox)"), v(&["1"]));
+        assert_eq!(ex(h, "[href]::attr(id)"), NONE);
+        // svg#s > g#g, math#m, div#d, each with an xmlns: in a namespace on the foreign ones
+        let ns = b"<!DOCTYPE html><svg xmlns=\"http://www.w3.org/2000/svg\" id=s><g xmlns=q id=g></g></svg>\
+                   <math xmlns=m id=m></math><div xmlns=q id=d></div>";
+        assert_eq!(ex(ns, "[xmlns]::attr(id)"), v(&["d"]));
+        assert_eq!(ex(ns, "*::attr(xmlns)"), v(&["http://www.w3.org/2000/svg", "q", "m", "q"]));
+        // Chrome's tree through the XPath bridge. An XPath name is lowercase in both modes, so it reaches
+        // no camel-cased name, element or attribute.
+        assert_eq!(ex(h, "//*/@viewbox"), v(&["1"]));
+        assert_eq!(ex(h, "//*[@viewbox]/@id"), v(&["d"]));
+        assert_eq!(ex(h, "//*[@textlength]/@id"), NONE);
+        assert_eq!(ex(h, "//*[@fill]/@id"), v(&["s"]));
+        let camel = b"<!DOCTYPE html><svg><clipPath id=c></clipPath></svg>";
+        assert_eq!(ex(camel, "//clippath/@id"), NONE);
+        assert_eq!(ex(camel, "clippath::attr(id)"), v(&["c"]));
+        assert_eq!(lxml(h, "svg::attr(viewbox)"), v(&["0 0 1 1"]), "lxml mode compares names as it did");
     }
 
     /// A declarative shadow root takes the `<template>` and its content out of the document, on a host

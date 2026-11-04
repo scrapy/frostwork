@@ -4,7 +4,7 @@
 //! where a browser merges them and nothing is ever placed by token order. [`Dom::walk`] then drives the
 //! matcher over it in pre-order.
 
-use super::super::{Matcher, HTML_ELEMENT};
+use super::super::Matcher;
 use crate::tokenizer::DataMode;
 
 /// No node.
@@ -16,7 +16,8 @@ pub(super) type RawAttrs<'a> = Vec<(&'a [u8], Option<&'a [u8]>)>;
 
 pub(super) struct Elem<'a> {
     pub(super) name: &'a [u8],
-    pub(super) html: bool,
+    /// The matcher's class id: the element's namespace (`HTML_ELEMENT` and the others).
+    pub(super) class: u8,
     pub(super) attrs: RawAttrs<'a>,
     /// Raw source: from the start tag, or the token that inserted an element the page never wrote, to
     /// where it was popped. An element that leaves the stack another way ends with its content.
@@ -66,8 +67,8 @@ impl<'a> Dom<'a> {
     }
 
     /// A new element, not yet in the tree.
-    pub(super) fn element(&mut self, name: &'a [u8], html: bool, attrs: RawAttrs<'a>, start: usize) -> u32 {
-        self.push(Kind::Element(Elem { name, html, attrs, start, end: OPEN, prefix: (0, 0) }))
+    pub(super) fn element(&mut self, name: &'a [u8], class: u8, attrs: RawAttrs<'a>, start: usize) -> u32 {
+        self.push(Kind::Element(Elem { name, class, attrs, start, end: OPEN, prefix: (0, 0) }))
     }
 
     pub(super) fn elem(&self, id: u32) -> Option<&Elem<'a>> {
@@ -205,7 +206,7 @@ impl<'a> Dom<'a> {
         let kind = match &self.kinds[id as usize] {
             Kind::Element(e) => Kind::Element(Elem {
                 name: e.name,
-                html: e.html,
+                class: e.class,
                 attrs: e.attrs.clone(),
                 start: e.start,
                 end: e.end,
@@ -307,7 +308,7 @@ impl<'a> Dom<'a> {
             match &self.kinds[cur as usize] {
                 Kind::Element(e) => {
                     m.flush_text();
-                    m.open_element(e.name, if e.html { HTML_ELEMENT } else { 0 }, &e.attrs, rank);
+                    m.open_element(e.name, e.class, &e.attrs, rank);
                     if e.prefix != (0, 0) {
                         m.set_source_prefix(e.prefix);
                     }

@@ -740,6 +740,22 @@ def test_the_merged_frame_allowance_excuses_only_attributes_a_later_tag_added():
     assert verdict('<body id=3>x', '<html id="3" class="k"></html>') is None
 
 
+def test_the_browser_gate_reads_the_document_mode_from_the_doctype():
+    """Class and id selectors fold case in quirks mode, so the value gate must know the document's mode.
+    A doctype is not enough: an HTML 4.01 Transitional one without a system identifier is quirks, and with
+    one it is limited quirks, where they do not fold."""
+    import diff_browser as B
+
+    assert not B.quirks_doctype("html", "", "")
+    assert B.quirks_doctype("html", "-//W3C//DTD HTML 4.01 Transitional//EN", "")
+    assert not B.quirks_doctype("html", "-//W3C//DTD HTML 4.01 Transitional//EN", "http://www.w3.org/TR/html4/loose.dtd")
+    assert not B.quirks_doctype("html", "-//W3C//DTD XHTML 1.0 Transitional//EN", "x")
+    assert B.quirks_doctype("html", "-//IETF//DTD HTML 2.0//EN", "") and B.quirks_doctype("svg", "", "")
+    tree = ["#d", [["#dt", "html", "-//W3C//DTD HTML 4.01 Transitional//EN", ""], ["html", 0, [], []]]]
+    assert B.ValueRepro((), ".a", [], [], tree).quirks()
+    assert not B.ValueRepro((), ".a", [], [], ["#d", [["#dt", "html", "", ""], ["html", 0, [], []]]]).quirks()
+
+
 # A browser tree holding what lxml cannot: control characters in text and attribute values, a `p"x` tag
 # name and a `{x}y` attribute name, comments with `--` and a trailing `-`, a processing instruction, SVG
 # with its namespace, a doctype, an open shadow root and HTML template content.
