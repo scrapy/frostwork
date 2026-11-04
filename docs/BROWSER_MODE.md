@@ -672,9 +672,10 @@ the crawl lab, and pinned browsers in CI. `gate-browser`, `gate-webpoet-browser`
 ## 6. Cost
 
 - **Engine.** Browser mode is one more tree builder behind the seam, plus the replay. Lxml mode keeps
-  its own code path, and `OpenElem` its size. The replay roughly doubles the work on the 3% of pages it
+  its own code path, and `OpenElem` its size. Browser mode costs more than lxml mode in the scan, which
+  shared matching then dilutes as selectors are added; the replay costs more again on the 3% of pages it
   runs on (section 4), and a deferred tail costs one more pass on a page where it has a winner.
-  `docs/BENCHMARKS.md` has the measured throughput of each mode.
+  `docs/BENCHMARKS.md` ("Browser mode against lxml mode") has the figures and how they were measured.
 - **Gates.** A second oracle for the tree, values and the page-object layer, which needs local browsers.
 - **Contract.** COMPATIBILITY.md has a section per mode, each with its own divergence list.
 

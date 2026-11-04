@@ -23,7 +23,9 @@ outside its timed loop, and `bench_engines.py` / `bench_corpus.py` / `bench_mem.
 page object.
 
 **Provenance, because the sections are not all the same vintage.** The page-shape matrix, size sweep,
-grouped and deferred-tail figures below are from an earlier `tools/bench_matrix.py` run on Apple arm64.
+grouped and deferred-tail figures below are from an earlier `tools/bench_matrix.py` run on Apple arm64,
+in lxml mode; the generator now also times browser mode, which that table predates. The browser-mode
+section counts instructions, not time, from 2026-11-04.
 The **production-corpus** and **competitive-field** tables in the next two sections are older: their
 corpus is not distributed and is not present on the machine this build was measured on, so they were
 not re-run. They predate subsequent engine changes and are historical measurements, not a guaranteed performance
@@ -264,6 +266,39 @@ For a fixed-output schema Frostwork's memory is flat while Parsel's tracks the p
 scales with the values you asked for instead: across the 12 largest corpus pages the median ratio is
 **31×**, narrowing to ~2× on the value-heavy ones (42 selectors, or a big inline-JSON `script::text`,
 where Frostwork's RSS *is* the returned data). It never pays for a tree either way.
+
+## Browser mode against lxml mode
+
+The same build and the same selectors, each page parsed in both modes. The measure is instructions
+retired per page (`/usr/bin/time -l`, Apple arm64, 2026-11-04): a 250-page run of `bench` minus a 50-page
+run, divided by 200, so start-up and schema compilation cancel out. Instruction counts repeat to within
+about 0.1% on a loaded machine where wall-clock time swings by half, which is why they are used here.
+They are not time, though: a count says nothing about cache misses or branch prediction. This document
+has no wall-clock figures for browser mode yet.
+
+| pages | count | browser / lxml instructions, p10 – median – p90 |
+| --- | --- | --- |
+| `fixtures/realweb`, each with its own selectors | 31 | 1.13× – 1.16× – 1.22× |
+| Common Crawl pages browser mode streams | 60 | 0.98× – 1.04× – 1.07× |
+| Common Crawl pages browser mode replays | 60 | 1.18× – 1.32× – 2.07× |
+
+The Common Crawl rows are pages over 2 KB from one 10 000-page CC-MAIN-2026-30 sample in a private lab,
+each with 32 selectors generated from its own markup, and the streamed set is matched by size to the
+replayed one. A page replays when one of five HTML5 rules fires (docs/BROWSER_MODE.md, section 4), about
+3% of real pages, so the replayed row is the tail and the streamed row the common case.
+
+The cost is in the scan. On the generated pages below with no selectors, browser mode retires 1.58× lxml
+mode's instructions; with 16 to 32 selectors the ratio is 1.08× to 1.14×, because matching, which the two
+modes share, then dominates.
+
+| generated page (≈196 KB), selectors | lxml, M instructions | browser, M instructions | browser / lxml |
+| --- | ---: | ---: | ---: |
+| utility-CSS, none (pure scan) | 7.1 | 11.2 | 1.58× |
+| attribute-heavy, 16 attribute-predicate | 27.9 | 31.9 | 1.14× |
+| utility-CSS, 32 descendant-led | 50.6 | 54.7 | 1.08× |
+| utility-CSS, 32 class-led | 51.8 | 55.8 | 1.08× |
+| table, 32 tag-led | 158.4 | 176.9 | 1.12× |
+| product listing, 16 tag-led | 76.4 | 84.7 | 1.11× |
 
 ## Page shape — the synthetic matrix
 
