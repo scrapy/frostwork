@@ -357,8 +357,8 @@ and one-time environment/tag protections are in [docs/RELEASING.md](docs/RELEASI
 - Pick the oracle per subsystem: values = Parsel/lxml, selector ACCEPTANCE = cssselect/lxml's parser,
   encoding SNIFFING = w3lib **for the cases browsers and w3lib agree on**. Parsel does not sniff
   `<meta>`, so it cannot oracle the prescan at all; but w3lib is not the *target* either — the intended
-  policy is browser/WHATWG correctness, and w3lib differs from browsers in twelve named places (prescan
-  window, autodetection, `<body>`, two comment closers (`<!-->`, `--!>`), an invalid label, a stray quote inside an unquoted charset value, UTF-32,
+  policy is browser/WHATWG correctness, and w3lib differs from browsers in thirteen named places (prescan
+  window, autodetection, `<body>`, a `<meta>` inside an attribute value, two comment closers (`<!-->`, `--!>`), an invalid label, a stray quote inside an unquoted charset value, UTF-32,
   `utf-16`/`x-user-defined` declarations, BOM-less UTF-16, XML-declaration position). Those are asserted as differences in `tools/enc_check.py`, not
   chased. Adding a w3lib parity case without checking which side is browser-correct is how a bug becomes
   a requirement. The same split applies to the DECODERS: Python's legacy codecs are not the WHATWG
