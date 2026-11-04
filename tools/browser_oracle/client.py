@@ -6,8 +6,8 @@
         chrome.build                      # "Chrome/156.0.8078.80"
 
 Each tree is `__ser`'s lossless JSON serialisation of the document the browser built (see probe.cjs):
-text is a string, a comment `["#c", data]`, a doctype `["#dt", name, public, system]`, the document
-`["#d", children]`, an element `[localName, namespace (0 for HTML), [name, value, ...], children]`, with
+text is a string, a comment `["#c", data]`, a processing instruction `["#7", target, data]`, a doctype
+`["#dt", name, public, system]`, the document `["#d", children]`, an element `[localName, namespace (0 for HTML), [name, value, ...], children]`, with
 an HTML template's content appended to its children as a `["#d", ...]` and an open shadow root as
 `["#shadow", mode, children]`. `tree.document_view` drops those two to get what a selector can reach.
 
@@ -20,12 +20,16 @@ Node from `FROSTWORK_NODE`, else `node` on PATH.
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
 import signal
 import subprocess
 from collections import Counter
+from dataclasses import dataclass
 from typing import Any, Iterable, Optional
+
+from . import css
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROBE = os.path.join(HERE, "probe.cjs")
@@ -38,6 +42,19 @@ DEFAULT_BINARIES = {
 
 class OracleError(RuntimeError):
     """The browser process failed, or answered something other than the request it was sent."""
+
+
+@dataclass(frozen=True)
+class Refused:
+    """A CSS column the oracle cannot answer: `css.py` could not plan it ("plan"), or the browser's
+    selector parser rejected it ("browser"). Never a value, so it can never read as an empty column."""
+
+    reason: str
+    by: str
+
+
+def _key(selector: Any) -> str:
+    return json.dumps(selector)
 
 
 def browser_binary(browser: str) -> str:
@@ -67,6 +84,9 @@ class BrowserOracle:
         self.errors: list[dict[str, Any]] = []
         self.selfcheck_checked = 0
         self.selfcheck_differ: list[str] = []
+        self.selfcheck_css_differ: list[str] = []
+        self.last_charsets: list[Optional[str]] = []
+        self._plans: dict[str, tuple[Optional[dict[str, Any]], Optional[str]]] = {}
         self._proc: Optional[subprocess.Popen] = None
         self._browser_pid: Optional[int] = None
         self._next_id = 0
@@ -135,12 +155,17 @@ class BrowserOracle:
             raise OracleError(f"probe.cjs exited (status {code}) without answering")
         return json.loads(line)
 
-    def _request(self, docs: list[str], selfcheck: bool) -> dict[str, Any]:
+    def _request(self, docs: list[Any], selfcheck: bool, **extra: Any) -> dict[str, Any]:
         if self._proc is None or self._proc.stdin is None:
             raise OracleError("BrowserOracle is not running; use it as a context manager")
         self._next_id += 1
         rid = self._next_id
-        self._proc.stdin.write(json.dumps({"id": rid, "docs": docs, "selfcheck": selfcheck}) + "\n")
+        req: dict[str, Any] = {"id": rid, "selfcheck": selfcheck, **extra}
+        if docs and isinstance(docs[0], bytes):
+            req["bodies"] = [base64.b64encode(d).decode("ascii") for d in docs]
+        else:
+            req["docs"] = docs
+        self._proc.stdin.write(json.dumps(req) + "\n")
         self._proc.stdin.flush()
         reply = self._read()
         if reply.get("id") != rid or "error" in reply:
@@ -149,20 +174,98 @@ class BrowserOracle:
             raise OracleError(f"request {rid}: {len(reply['trees'])} trees for {len(docs)} documents")
         return reply
 
+    def _record(self, chunk: list[Any], reply: dict[str, Any], selfcheck: bool) -> None:
+        self.paths.update(reply["paths"])
+        for err in reply["errors"]:
+            self.errors.append({"doc": chunk[err["index"]], "error": err["error"]})
+        if selfcheck:
+            check = reply["selfcheck"]
+            self.selfcheck_checked += check["checked"]
+            self.selfcheck_differ.extend(chunk[i] for i in check["differ"])
+            self.selfcheck_css_differ.extend(chunk[i] for i in check.get("css_differ", []))
+            for i in check["failed"]:
+                self.errors.append({"doc": chunk[i], "error": "self-check page load failed"})
+
     def trees(self, docs: Iterable[str], *, selfcheck: bool = False) -> list[Any]:
         docs = list(docs)
         out: list[Any] = []
         for start in range(0, len(docs), self.batch):
             chunk = docs[start:start + self.batch]
             reply = self._request(chunk, selfcheck)
-            self.paths.update(reply["paths"])
-            for err in reply["errors"]:
-                self.errors.append({"doc": chunk[err["index"]], "error": err["error"]})
-            if selfcheck:
-                check = reply["selfcheck"]
-                self.selfcheck_checked += check["checked"]
-                self.selfcheck_differ.extend(chunk[i] for i in check["differ"])
-                for i in check["failed"]:
-                    self.errors.append({"doc": chunk[i], "error": "self-check page load failed"})
+            self._record(chunk, reply, selfcheck)
             out.extend(reply["trees"])
         return out
+
+    def query(self, docs: Iterable[Any], selectors: Any, *, selfcheck: bool = False,
+              content_types: Optional[list[Optional[str]]] = None,
+              page: bool = False) -> tuple[list[Any], list[Optional[list[Any]]]]:
+        """Trees AND native CSS answers, both from the one document each load built.
+
+        `selectors` is one list for every document, or one list per document. An entry is a parsel CSS
+        selector, or `(container, [sub, ...])` for values relative to each container match. Returns
+        `(trees, answers)`: `answers[i][j]` is the list of values, or a `Refused` when `css.py` cannot
+        plan the selector or the browser rejects it; `answers[i]` is `None` with an oracle error.
+
+        `docs` may be `bytes`: they are served exactly, with `content_types[i]` as the Content-Type
+        header (`None` sends none), and always page-loaded. `page=True` page-loads strings too. After the
+        call, `last_charsets[i]` is the `document.characterSet` the browser decoded `docs[i]` with.
+        """
+        docs = list(docs)
+        per_doc = [list(s) for s in selectors] if selectors and isinstance(selectors[0], list) else \
+            [list(selectors)] * len(docs)
+        if len(per_doc) != len(docs):
+            raise ValueError(f"{len(per_doc)} selector lists for {len(docs)} documents")
+        for sels in per_doc:
+            for s in sels:
+                key = _key(s)
+                if key not in self._plans:
+                    try:
+                        self._plans[key] = (css.grouped(s[0], list(s[1])) if isinstance(s, tuple)
+                                            else css.plan(s)), None
+                    except css.Unplannable as e:
+                        self._plans[key] = None, str(e)
+        trees: list[Any] = []
+        answers: list[Optional[list[Any]]] = []
+        self.last_charsets = []
+        for start in range(0, len(docs), self.batch):
+            chunk = docs[start:start + self.batch]
+            sels = per_doc[start:start + self.batch]
+            table: dict[str, int] = {}
+            plans: list[Any] = []
+            queries: list[list[int]] = []
+            for doc_sels in sels:
+                q = []
+                for s in doc_sels:
+                    p, _why = self._plans[_key(s)]
+                    if p is None:
+                        continue
+                    k = _key(s)
+                    if k not in table:
+                        table[k] = len(plans)
+                        plans.append(p)
+                    q.append(table[k])
+                queries.append(q)
+            extra: dict[str, Any] = {"plans": plans, "queries": queries}
+            if page:
+                extra["page"] = True
+            if chunk and isinstance(chunk[0], bytes):
+                extra["ctypes"] = (content_types or [None] * len(docs))[start:start + self.batch]
+            reply = self._request(chunk, selfcheck, **extra)
+            self._record(chunk, reply, selfcheck)
+            trees.extend(reply["trees"])
+            self.last_charsets.extend(reply["charsets"])
+            for doc_sels, got in zip(sels, reply["css"]):
+                if got is None:
+                    answers.append(None)
+                    continue
+                it = iter(got)
+                row: list[Any] = []
+                for s in doc_sels:
+                    p, why = self._plans[_key(s)]
+                    if p is None:
+                        row.append(Refused(why or "", "plan"))
+                        continue
+                    a = next(it)
+                    row.append(Refused(a["error"], "browser") if isinstance(a, dict) else a)
+                answers.append(row)
+        return trees, answers

@@ -185,8 +185,10 @@ def from_lxml(element: Any) -> Any:
     def node(e: Any) -> list[Any]:
         if e.tag is etree.Comment:
             return ["#c", e.text or ""]
+        if e.tag is etree.ProcessingInstruction:
+            return ["#7", e.target, e.text or ""]
         if not isinstance(e.tag, str):
-            return ["#7"]
+            return ["#?"]
         flat: list[str] = []
         for k, v in e.attrib.items():
             flat += [k, v]
