@@ -106,11 +106,17 @@ class _FirstStartTag(HTMLParser):
         self.root = ("img" if tag == "image" else tag, tuple(sorted(names)), ident)
 
 
+_BR_END_TAG = re.compile(r"</br[\t\n\x0c\r /][^>]*>|</br>", re.I)
+
+
 def _outer_root(html: str) -> Optional[tuple]:
     """The element an outer-HTML value's start tag names: its tag, its attribute names (the first of a
     repeated one, as a browser keeps) and its id. Read by a tokenizer rather than by parsing the value
     as a fragment, which loses an `<html>` (a fragment parse has nowhere to put it), and without the
-    other values, whose raw spelling (`&noti=c`) Python's unescaping does not read as a browser does."""
+    other values, whose raw spelling (`&noti=c`) Python's unescaping does not read as a browser does.
+    A `</br>` is the source of the `<br>` a browser makes of it, which has no attributes."""
+    if _BR_END_TAG.fullmatch(html):
+        return ("br", (), None)
     if not html.startswith("<"):
         return None  # a value that begins with content is not one element's source
     p = _FirstStartTag(convert_charrefs=False)
@@ -124,14 +130,38 @@ def _outer_root(html: str) -> Optional[tuple]:
 _TRAILING_END_TAGS = re.compile(r"(?:</[^<>]*>)+$")
 
 
-def _text_of(html: str, serialised: bool = False) -> str:
-    """The text an outer-HTML value holds: the value parsed as a document in browser mode, which reads
-    raw text, RCDATA, `<noscript>` and `<plaintext>` as Chrome does. Both sides of a pair are read this
-    way, and the text itself is graded against Chrome by the per-id text columns. A serialisation's
-    trailing end tags hold no text and are dropped first, since a `</plaintext>` would parse back as text."""
+def _text_of(html: str, serialised: bool = False, context: Optional[str] = None) -> str:
+    """The text an outer-HTML value holds: the value parsed as a UTF-8 document in browser mode, which
+    reads raw text, RCDATA, `<noscript>` and `<plaintext>` as Chrome does. Both sides of a pair are read
+    this way, and the text itself is graded against Chrome by the per-id text columns. A serialisation's
+    trailing end tags hold no text and are dropped first, since a `</plaintext>` would parse back as text.
+    `context` is the foreign element (`svg`, `math`) the value was parsed inside, without which its
+    `<style>` or `<script>` would be read as raw text. UTF-8 is pinned: a value may hold the page's own
+    `<meta charset>`, which the prescan would otherwise obey."""
     if serialised:
         html = _TRAILING_END_TAGS.sub("", html)
-    return "".join(frostwork.extract(html.encode("utf-8", "surrogatepass"), ["html ::text"], parser="browser")[0])
+    if context:
+        html = f"<{context}>{html}"
+    return "".join(frostwork.extract(html.encode("utf-8", "surrogatepass"), ["html ::text"], parser="browser",
+                                     encoding="utf-8")[0])
+
+
+_FOREIGN = {"http://www.w3.org/2000/svg": "svg", "http://www.w3.org/1998/Math/MathML": "math"}
+
+
+def _context(r: ValueRepro, name: str) -> Optional[str]:
+    """The foreign element a value whose root is `name` lies inside: `svg` or `math` when every element
+    of the oracle's tree so named is in that namespace, else None (an HTML or a mixed name)."""
+    if r.tree is None:
+        return None
+    spaces = {el[1] for el in T.elements(r.tree) if el[0].lower() == name}
+    return _FOREIGN.get(spaces.pop()) if len(spaces) == 1 else None
+
+
+def _lines(text: str) -> str:
+    """Text with its line breaks normalised. A browser serialises a CR from `&#13;` as a literal CR, which
+    re-parsing turns into a line feed, while the raw source keeps the reference."""
+    return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def _in_order(want: str, have: str) -> bool:
@@ -161,10 +191,14 @@ def _raw_source(r: ValueRepro) -> bool:
     but a value that lost content the browser has is not raw source."""
     if not is_node_query(r.sel) or len(r.engine) != len(r.oracle) or not _from_page(r):
         return False
-    return all(
-        _outer_root(a) is not None and _outer_root(a) == _outer_root(b) and _in_order(_text_of(b, serialised=True), _text_of(a))
-        for a, b in zip(r.engine, r.oracle)
-    )
+
+    def same(a: str, b: str) -> bool:
+        root = _outer_root(a)
+        if root is None or root != _outer_root(b):
+            return False
+        context = _context(r, root[0])
+        return _in_order(_lines(_text_of(b, serialised=True, context=context)), _lines(_text_of(a, context=context)))
+    return all(same(a, b) for a, b in zip(r.engine, r.oracle))
 
 
 def _merged_frame_source(r: ValueRepro) -> bool:

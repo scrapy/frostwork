@@ -3704,6 +3704,18 @@ mod browser_mode_tests {
         assert_eq!(ex(b"<p>X</p><body class=a><body class=b id=b>", "body.b p::text"), NONE);
     }
 
+    /// A valueless attribute is `""` in browser mode, as in Chrome, where lxml mode gives libxml2's
+    /// minimized booleans their own name.
+    #[test]
+    fn a_valueless_attribute_is_empty_in_browser_mode() {
+        let h = b"<script defer src=x></script><input disabled><select multiple></select>";
+        assert_eq!(ex(h, "script::attr(defer)"), v(&[""]));
+        assert_eq!(ex(h, "input::attr(disabled)"), v(&[""]));
+        assert_eq!(ex(h, "//select/@multiple"), v(&[""]));
+        assert_eq!(ex(h, "[disabled=disabled]::attr(id)"), NONE);
+        assert_eq!(lxml(h, "script::attr(defer)"), v(&["defer"]));
+    }
+
     /// A `<select>`'s default option skips a disabled one, and an option is disabled by its own attribute
     /// or by the nearest `<optgroup>` around it, as in Chrome.
     #[test]

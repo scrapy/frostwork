@@ -46,9 +46,10 @@ use deferred::TextMatchState;
 use deferred::TextAccum;
 use matching::{compound_matches, eval_one, gate_open, reverse_matches, seg_match, sub_hits};
 
-/// libxml2's HTML4 minimized-boolean attribute set (`htmlIsBooleanAttr`). A valueless attribute in
-/// this set has its lowercased name as its value (`<input disabled>` -> `"disabled"`); an explicitly
-/// empty value (`disabled=""`) remains empty. The rule is name-only, regardless of the element.
+/// libxml2's HTML4 minimized-boolean attribute set (`htmlIsBooleanAttr`). In lxml mode a valueless
+/// attribute in this set has its lowercased name as its value (`<input disabled>` -> `"disabled"`); an
+/// explicitly empty value (`disabled=""`) remains empty. The rule is name-only, regardless of the element.
+/// Browser mode has no such set: every valueless attribute is `""`, as in Chrome.
 fn is_minimized_boolean_attr(name: &[u8]) -> bool {
     [
         b"checked".as_slice(),
@@ -2477,7 +2478,7 @@ impl<'a> Matcher<'a> {
             if let Some(name) = self.interesting_name::<DECODE_NAMES>(an) {
                 let value = match av {
                     Some(value) => self.input.attr_value(value),
-                    None if is_minimized_boolean_attr(name) => {
+                    None if self.schema.mode == ParseMode::Lxml && is_minimized_boolean_attr(name) => {
                         Cow::Owned(String::from_utf8_lossy(name).to_ascii_lowercase())
                     }
                     None => Cow::Borrowed(""),

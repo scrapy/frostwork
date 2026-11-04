@@ -95,7 +95,10 @@ The one Node tool here (Node 22 or later, no packages).
 
 - `probe.cjs` drives stock Chrome over CDP and Firefox over WebDriver BiDi, headless, from throwaway
   profiles. It serves exact bytes with `Content-Security-Policy: script-src 'none'`, the one way of
-  blocking page scripts that leaves the parser's scripting flag on. `equiv` mode compares a page load with
+  blocking page scripts that leaves the parser's scripting flag on. A tab fetches only the document it
+  was sent: a later navigation (a meta refresh, a frame) gets a 204 and any other request is blocked
+  (`browser_docs.PAGE_LOADS` proves it), and the nonces that CSP hides are restored before the page is
+  read. `equiv` mode compares a page load with
   `DOMParser`, `parseHTMLUnsafe` and `srcdoc` node for node, and `claims` mode evaluates `claims.json`.
   `evidence/<date>/` holds the outputs the design quotes, each stamped with its browser build.
 - `probe.cjs serve` is what the gates call: one browser, one JSON request per line on stdin, one line back

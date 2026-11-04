@@ -396,9 +396,10 @@ DOM, no full tree construction). These rules were derived empirically against li
 ## Value semantics
 
 - `::text` / `text()` — one value per text node, whitespace preserved, entities decoded. Matches Parsel.
-- `::attr(name)` / `@attr` — entity-decoded attribute value. HTML4 minimized boolean attributes use
-  their lowercased name as the value (`<input DISABLED>` → `"disabled"`), while `disabled=""` remains
-  explicitly empty, matching libxml2/Parsel.
+- `::attr(name)` / `@attr` — entity-decoded attribute value. In lxml mode, HTML4 minimized boolean
+  attributes use their lowercased name as the value (`<input DISABLED>` → `"disabled"`), while
+  `disabled=""` remains explicitly empty, matching libxml2/Parsel. In browser mode every valueless
+  attribute is `""`, as in Chrome.
 - **Outer HTML** (bare element / node query) — the element's **raw source bytes**, a *deliberate*
   divergence from lxml's tree reflow (lxml normalizes attribute quotes/case/whitespace and synthesizes
   omitted end tags). Raw source is cheaper, faithful to the page, and **re-parse-equivalent** (parsing

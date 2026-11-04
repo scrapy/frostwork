@@ -15,7 +15,8 @@
 // later (global WebSocket). Each run starts the browser headless from a fresh temporary profile and
 // deletes it on exit. Pages come from an in-process server with exact bytes and headers, served with
 // `Content-Security-Policy: script-src 'none'`: that blocks page scripts and leaves the parser's
-// scripting flag on, which CSP `sandbox` and CDP's script disabling both turn off.
+// scripting flag on, which CSP `sandbox` and CDP's script disabling both turn off. A tab fetches only
+// the document it was sent, so no page navigates away from the tree being read or reaches the network.
 'use strict';
 const { spawn } = require('node:child_process');
 const http = require('node:http');
@@ -103,6 +104,12 @@ window.__ser = (n) => {
   if (n.localName === 'template' && n.namespaceURI === XHTML) kids.push(__ser(n.content));
   if (n.shadowRoot) kids.push(['#shadow', n.shadowRoot.mode, [...n.shadowRoot.childNodes].map(__ser)]);
   return [n.localName, n.namespaceURI === XHTML ? 0 : n.namespaceURI, at, kids]; };
+// A page load's header CSP makes Chrome hide every nonce: on insertion the attribute is set to "" and
+// the value kept only in the element's nonce slot. Put each back, open shadow roots included, so the
+// tree and every query see the page's own value, as DOMParser's documents (which have no CSP) do.
+window.__unhideNonces = (root) => {
+  for (const e of root.querySelectorAll('[nonce=""]')) if (e.nonce) e.setAttribute('nonce', e.nonce);
+  for (const e of root.querySelectorAll('*')) if (e.shadowRoot) __unhideNonces(e.shadowRoot); };
 // Parsel's CSS over document d, from the plans tools/browser_oracle/css.py compiles. A plan is
 // {members: [{css, anchored, value: text|attr|outer, attr, scope: self|subtree, contains: [[mark, s]]}]},
 // or {container: plan, subs: [plan]} for values relative to each container match. One answer per plan:
@@ -181,6 +188,9 @@ const server = http.createServer((req, res) => {
       body = s.body;
     } else body = s;
   } else if (u.pathname === '/harness') body = '<!DOCTYPE html><meta charset="utf-8"><title>h</title><body>';
+  // A subresource that holds a page's load open, so a meta refresh fires before it ends. A tab never
+  // fetches it (see `tab()`); browser_docs.PAGE_LOADS asks for it to prove that.
+  else if (u.pathname === '/slow') { setTimeout(() => { res.writeHead(404); res.end(); }, 1500); return; }
   if (body === undefined) { res.writeHead(404); return res.end(); }
   res.writeHead(200, h); res.end(body);
 });
@@ -256,15 +266,32 @@ async function chrome() {
   return guarded(b, async () => {
     const c = await rpc(b.url);
     const version = (await c.send('Browser.getVersion')).product;
-    const loads = new Map();
-    c.on((j) => { if (j.method === 'Page.loadEventFired' && loads.has(j.sessionId)) loads.get(j.sessionId)(); });
+    const loads = new Map(); const paused = new Map();
+    c.on((j) => {
+      if (j.method === 'Page.loadEventFired' && loads.has(j.sessionId)) loads.get(j.sessionId)();
+      if (j.method === 'Fetch.requestPaused' && paused.has(j.sessionId)) paused.get(j.sessionId)(j.params);
+    });
     async function tab() {
       const { targetId } = await c.send('Target.createTarget', { url: 'about:blank' });
       const { sessionId } = await c.send('Target.attachToTarget', { targetId, flatten: true });
       const s = (m, params) => c.send(m, params, { sessionId });
       await s('Page.enable');
+      // A tab fetches only the document it was sent to, once. Any later navigation (a meta refresh, a
+      // frame) is answered 204, which a browser does not commit, so the parsed document stays; any other
+      // request is blocked, so no page reaches the network.
+      let expected = null;
+      paused.set(sessionId, ({ requestId, request, resourceType }) => {
+        const ignore = () => {};
+        if (resourceType === 'Document' && request.url === expected) {
+          expected = null; s('Fetch.continueRequest', { requestId }).catch(ignore);
+        } else if (resourceType === 'Document') {
+          s('Fetch.fulfillRequest', { requestId, responseCode: 204, responseHeaders: [] }).catch(ignore);
+        } else s('Fetch.failRequest', { requestId, errorReason: 'BlockedByClient' }).catch(ignore);
+      });
+      await s('Fetch.enable', { patterns: [{ urlPattern: '*' }] });
       return {
         async navigate(u) {
+          expected = u;
           const loaded = new Promise((r, x) => { loads.set(sessionId, r); setTimeout(() => x(new Error(`load timeout ${u}`)), 20000).unref(); });
           await s('Page.navigate', { url: u }); await loaded;
         },
@@ -294,10 +321,27 @@ async function firefox() {
     const c = await rpc(b.url.replace(/\/?$/, '/session'));
     const sess = await c.send('session.new', { capabilities: {} });
     const version = `${sess.capabilities.browserName}/${sess.capabilities.browserVersion}`;
+    // The same rule as Chrome's tab: the document it was sent to, once; a later navigation 204; else blocked.
+    // A frame's request carries the frame's own context, which no tab is keyed by.
+    const paused = new Map(); const ignore = () => {};
+    const refuse = ({ request, navigation }) => (navigation
+      ? c.send('network.provideResponse', { request: request.request, statusCode: 204, reasonPhrase: 'No Content' })
+      : c.send('network.failRequest', { request: request.request })).catch(ignore);
+    c.on((j) => {
+      if (j.method === 'network.beforeRequestSent' && j.params.isBlocked) (paused.get(j.params.context) || refuse)(j.params);
+    });
+    await c.send('session.subscribe', { events: ['network.beforeRequestSent'] });
     async function tab() {
       const { context } = await c.send('browsingContext.create', { type: 'tab' });
+      let expected = null;
+      paused.set(context, (p) => {
+        if (p.navigation && p.request.url === expected) {
+          expected = null; c.send('network.continueRequest', { request: p.request.request }).catch(ignore);
+        } else refuse(p);
+      });
+      await c.send('network.addIntercept', { phases: ['beforeRequestSent'], contexts: [context] });
       return {
-        navigate: (u) => c.send('browsingContext.navigate', { context, url: u, wait: 'complete' }),
+        navigate: (u) => { expected = u; return c.send('browsingContext.navigate', { context, url: u, wait: 'complete' }); },
         async evaluate(expr) {
           const r = await c.send('script.evaluate', { expression: `(async () => JSON.stringify(await (${expr})))()`,
             target: { context }, awaitPromise: true, resultOwnership: 'none' });
@@ -479,7 +523,7 @@ async function serve(B, base) {
         try {
           await tabs[k].navigate(`${base}/doc/${key}?csp=script`); await B.lib(tabs[k]);
           const qi = queriesOf(i); const q = qi ? qi.map((p) => plans[p]) : null;
-          out[i] = await tabs[k].evaluate(`(() => { const t = JSON.stringify(__ser(document));
+          out[i] = await tabs[k].evaluate(`(() => { __unhideNonces(document); const t = JSON.stringify(__ser(document));
             return [t, ${q ? `JSON.stringify(__css(document, ${JSON.stringify(q)}))` : 'null'}, document.characterSet]; })()`);
         } catch (e) {
           errors.push({ index: i, error: e.message.slice(0, 200) });

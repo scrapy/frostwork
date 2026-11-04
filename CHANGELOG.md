@@ -19,6 +19,8 @@ first public release.
   `ValueError`. Rust: `ParseMode`, `CompileOptions`, `Plan::compile_with` and `audit_schema_with`.
 - Browser mode does not strip the input or delete NUL. NUL follows HTML5 instead: U+FFFD in tag and
   attribute names, raw text, RCDATA and attribute values, and dropped from body text.
+- In browser mode a valueless attribute is `""`, as in Chrome; lxml mode keeps libxml2's rule that a
+  minimized boolean such as `<input disabled>` has its own name as its value.
 - Browser-mode CSS matches the values of the 46 attributes HTML lists case-insensitively on HTML
   elements, as browsers do (`input[type=submit]` matches `type="SUBMIT"`). XPath and lxml mode compare
   exactly.

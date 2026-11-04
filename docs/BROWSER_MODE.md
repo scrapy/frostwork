@@ -341,7 +341,11 @@ because Chrome's drops comments, which merges text nodes. So the oracle has two 
 - **Fast path: `DOMParser`,** for a document that contains neither `noscript` nor `shadowrootmode` in any
   letter case. A false hit (the word in a comment) only sends a document down the slow path.
 - **Slow path: a CSP-served page load,** for everything else and wherever the bytes matter: encoding
-  cases, the lab, corpus pages.
+  cases, the lab, corpus pages. A tab fetches only the document it was sent. A later navigation (a meta
+  refresh, a frame) is answered 204, which a browser does not commit, and every subresource is blocked,
+  so a page can neither replace the tree being graded nor reach the network. A header CSP also makes
+  Chrome hide every `nonce` attribute, so the probe restores each from the element's nonce slot before
+  reading the page, as `DOMParser`'s documents, which have no CSP, already show it.
 - **A standing self-check.** Every run re-parses a sample through both paths and fails if an eligible
   document's trees differ. When a browser adds a parser feature, its tokens join the generator's alphabet,
   and the eligibility rule grows only from what that measurement shows.

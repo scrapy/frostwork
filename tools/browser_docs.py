@@ -157,11 +157,15 @@ VALUE_ATTRS: list[str] = [
     ' target="_Blank"', ' data-case="Mixed"',
     # an upper-case name, a duplicate (the first wins) and an empty value
     ' TITLE="Up"', ' title="1" title="2"', ' data-e=""',
+    # valueless attributes, among them libxml2's minimized booleans, which lxml mode gives their own name
+    ' disabled', ' defer', ' checked', ' hidden',
+    # a nonce, which a page load's header CSP hides from the DOM and the oracle restores
+    ' nonce="n1"',
     # names HTML5 adjusts on an SVG or MathML element, and leaves lowercased on an HTML one
     ' VIEWBOX="0 0 1 1"', ' textlength="5"', ' definitionurl="d"', ' xlink:href="u"', ' xmlns="q"', ' FILL="red"',
 ]
 VALUE_TEXTS: list[str] = ["alpha", " beta ", "g&amp;h", "x&lt;y", "café", "a&nbsp;b", "&notin;x", "&copy x",
-                          "&#0;", "&#x80;", "x\x01y", "a\N{IDEOGRAPHIC SPACE}b"]
+                          "&#0;", "&#x80;", "x\x01y", "a\N{IDEOGRAPHIC SPACE}b", "a&#13;b"]
 # The structure of half the value documents: ordinary containers, taken from ALPHABET by value, plus
 # elements no tree rule treats specially, which conformant.py's basket asks about and ALPHABET does not hold.
 # These documents open with an explicit `<head></head>`, so their value columns do not depend on how the
@@ -362,6 +366,14 @@ FRAME_MERGES: list[list[str]] = [
     ["<html class=a>", "<p{}>", "t", "<html title=b>"],
     ["<p{}>", "t", "<body class=a>", "<body title=b>", "<body lang=c>"],
 ]
+# Documents a page load could leave: a meta refresh (to another page, to itself, and a frame's
+# navigation) while a subresource the probe serves slowly holds the load open. The oracle must grade the
+# document it was sent, so each is asked of DOMParser and, under selfcheck, of a page load.
+PAGE_LOADS: list[list[str]] = [
+    [f'<meta http-equiv=refresh content="{c}">', "<img src=/slow>", "<p{}>", "t"]
+    for c in ("0; url=/elsewhere", "0")
+] + [["<iframe src=/slow></iframe>", "<p{}>", "t"], ["<noscript{}>", "</noscript>", '<meta http-equiv=refresh content=0>',
+                                                      "<img src=/slow>", "<p{}>", "t"]]
 # The attribute values a tree-construction rule reads, each spelled literally and with a character
 # reference: a rule reads the decoded value, so the two spellings build one tree. The other spellings
 # are the edges of each test (case, a trailing space, the parse of `size`).
@@ -396,7 +408,7 @@ SELECT_OPTIONS: list[list[str]] = [
 
 def structured_docs() -> list[Doc]:
     """Every structured family member, as a document."""
-    seqs = [lead + f for f in EOF_FRAMES + FORMATTING + RAW_ENDS + FRAME_MERGES + RULE_VALUES + SELECT_OPTIONS
+    seqs = [lead + f for f in EOF_FRAMES + FORMATTING + RAW_ENDS + FRAME_MERGES + RULE_VALUES + SELECT_OPTIONS + PAGE_LOADS
             for lead in ([], [DOCTYPE])]
     seqs += [s[:k] + [COMMENT] + s[k:] for s in COMMENT_SKELETONS for k in range(len(s) + 1)]
     seqs += [[DOCTYPE] + f for f in ARK_FAMILY]
@@ -417,29 +429,27 @@ def id_value_selectors(ids: list[str], decorated: bool) -> list[str]:
 
 
 # The basket selectors Chrome answers nowhere on these documents, as recorded. Each can only catch an
-# over-match: most need markup the alphabet does not emit (an `<img src>`, a `<thead>` with a `<th>`, two
-# `<li>` siblings, the `alpha`/`beta` words), and the table-section and optgroup `::text` rows are empty by
+# over-match: most need markup the alphabet does not emit (a `<thead>` with a `<th>`, two `<li>` siblings,
+# the `alpha`/`beta` words), and the table-section and optgroup `::text` rows are empty by
 # the tree rules. `diff_browser --gate` fails on a selector that joins them, which is a column that has
 # stopped grading anything.
 BASKET_ORACLE_EMPTY: frozenset[str] = frozenset({
-    '#\\69 1::attr(id)', 'th::text', 'ol > li::text', 'div > p::text', 'ruby > rt::text', 'ruby > rp::text',
-    'dl > dt + dt::text', 'dl > dd + dd::text', 'dt dt::text', 'table > thead::text', 'table > tbody::text',
+    '#\\69 1::attr(id)', 'th::text', 'ol > li::text', 'ruby > rt::text', 'ruby > rp::text',
+    'dl > dt + dt::text', 'dl > dd + dd::text', 'table > thead::text', 'table > tbody::text',
     'table > tfoot::text', 'table > caption::text', 'thead > tr::text', 'tbody > tr::text', 'thead th::text',
     'table > colgroup::attr(id)', 'table > thead th::text', 'table > tfoot td::text',
     'colgroup + thead th::text', 'table > colgroup > col::attr(class)', 'select > optgroup::text',
-    'optgroup > option::text', 'optgroup + optgroup::text', 'thead + tbody::text', 'caption + thead::text',
-    'table > tr::text', 'tr > th::text', 'img::attr(src)', 'img::attr(Src)', 'section p::text',
-    'dt + dd::text', 'option + option::text', 'h1 ~ p::text', 'ul li ~ li::text', 'span + span::text',
-    'section ~ *::text', 'li + *::attr(class)', 'td > *::attr(data-k)', 'section ~ * ::text',
-    'img[src$=".png"]::attr(src)', 'input[value|="v"]::text', 'li:not([id])::text', 'li:last-child span::text',
-    'div:last-child p::text', 'li:only-child a::text', '//div[last()]//span/text()', 'div:has(a) p::text',
-    'div:has(p) span::text', 'li:has(a) span::text', "//div[contains(.,'alpha')]//a/@href",
-    "//li[contains(.,'beta')]//span/text()", 'div:contains("alpha") a::attr(href)',
-    'li:contains("beta") span::text', 'dt:contains("alpha") + dd::text', 'dt:contains("alpha") ~ dd::text',
-    'div:contains(alpha)::attr(class)', 'div.shared:contains("alpha")::attr(class)', 'dt + ::text',
-    'dt ~ ::text', 'dt + *::text', 'dt ~ *::text', 'dt:contains("alpha") + ::text',
-    'div:has(> p)::attr(class)', '//img/@src', '//td[@class]/text()', '//dt/following-sibling::dd/text()',
-    '//dt[contains(.,"alpha")]/following-sibling::dd/text()',
+    'optgroup + optgroup::text', 'thead + tbody::text', 'caption + thead::text', 'table > tr::text',
+    'tr > th::text', 'dt + dd::text', 'option + option::text', 'h1 ~ p::text', 'ul li ~ li::text',
+    'span + span::text', 'section ~ *::text', 'li + *::attr(class)', 'td > *::attr(data-k)',
+    'section ~ * ::text', 'input[value|="v"]::text', 'li:not([id])::text', '//div[last()]//span/text()',
+    'div:has(a) p::text', 'div:has(p) span::text', 'li:has(a) span::text',
+    "//div[contains(.,'alpha')]//a/@href", "//li[contains(.,'beta')]//span/text()",
+    'div:contains("alpha") a::attr(href)', 'li:contains("beta") span::text',
+    'dt:contains("alpha") + dd::text', 'dt:contains("alpha") ~ dd::text', 'div:contains(alpha)::attr(class)',
+    'div.shared:contains("alpha")::attr(class)', 'dt:contains("alpha") + ::text', 'div:has(> p)::attr(class)',
+    '//td[@class]/text()', '//dt/following-sibling::dd/text()',
+    '//dt[contains(.,"alpha")]/following-sibling::dd/text()', 'p + p::text',
 })
 
 
@@ -456,6 +466,8 @@ RULE_SELECTORS: list[str] = [
     '.a::attr(id)', '.b::attr(id)', '.A::attr(id)', '[class~="b"]::attr(id)', '[class="a b"]::attr(id)',
     '.shared::attr(id)', '//*[contains(@class, "b")]/@id',
     # decoded values, NUL and control characters, in CSS literals and through the bridge's literal map
+    '*::attr(disabled)', '//*/@defer', '[checked]::attr(checked)', '*::attr(hidden)', '*::attr(nonce)',
+    '[nonce="n1"]::attr(id)',
     '[title]::attr(title)', '[title="x&y"]::attr(id)', '[title="a\\FFFD b"]::attr(id)',
     '[title="Up"]::attr(id)', '[title="1"]::attr(id)', '[data-u]::attr(data-u)', '[data-e=""]::attr(id)',
     '//*/@title', '//*/@class', '//*[@title="a\x01b\x0bc"]/@id', '//*[@data-u]/@data-u',

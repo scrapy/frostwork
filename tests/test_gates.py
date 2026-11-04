@@ -812,8 +812,39 @@ def test_a_raw_source_value_is_made_of_the_page_bytes():
     oracle = '<body class="late"><p>x</p></body>'
     assert verdict(page, "<body class=late><p>x</p>", oracle) == "raw-source outer HTML"
     assert verdict(page, "<body class=late><p>x</p><body class=late>", oracle) is None
+    # a CR from `&#13;` stays a reference in the raw source, and Chrome serialises it as a literal CR
+    assert verdict("<p>a&#13;b</p>", "<p>a&#13;b</p>", "<p>a\rb</p>") == "raw-source outer HTML"
     # the engine's raw source normalises line breaks, as the browser's input stream does
     assert verdict('<p title="a\r\nb">x</p>', '<p title="a\nb">x</p>', '<p title="a\nb">x</p>') == "raw-source outer HTML"
+
+
+def test_a_raw_source_pair_is_read_as_the_browser_read_it():
+    """Both sides of a raw-source pair are re-parsed as the browser parsed the element: an SVG element's
+    `<style>` holds decoded text rather than raw text, a value holding the page's own `<meta charset>` is
+    still UTF-8, and a `</br>` is the source of the `<br>` a browser makes of it."""
+    import browser_values as V
+
+    raw = "raw-source outer HTML"
+    svg = "http://www.w3.org/2000/svg"
+
+    def verdict(page, sel, engine, oracle, tree):
+        return V.attribute_value(V.ValueRepro(((0, page),), sel, [engine], [oracle], tree))
+
+    def doc(*body):
+        return ["#d", [["html", 0, [], [["head", 0, [], []], ["body", 0, [], list(body)]]]]]
+
+    page = "<svg><g><style>a&quot;b</style></g></svg>"
+    in_svg = doc(["svg", svg, [], [["g", svg, [], [["style", svg, [], ['a"b']]]]]])
+    assert verdict(page, "g", "<g><style>a&quot;b</style></g>", '<g><style>a"b</style></g>', in_svg) == raw
+    assert verdict(page, "g", "<g><style>ab</style></g>", '<g><style>a"b</style></g>', in_svg) is None
+    in_html = doc(["g", 0, [], [["style", 0, [], ['a"b']]]])
+    assert verdict(page, "g", "<g><style>a&quot;b</style></g>", '<g><style>a"b</style></g>', in_html) is None
+
+    page = "<td><meta charset=gb2312>&middot;</td>"
+    assert verdict(page, "td", page, '<td><meta charset="gb2312">\N{MIDDLE DOT}</td>', doc()) == raw
+
+    assert verdict("<p>a</br>b", "br", "</br>", "<br>", doc()) == raw
+    assert verdict("<p>a</br>b", "br", "</p>", "<br>", doc()) is None
 
 
 def test_the_selectedcontent_allowance_excuses_only_the_copy():
