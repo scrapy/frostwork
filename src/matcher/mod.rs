@@ -1304,14 +1304,7 @@ impl CompiledSchema {
         // sibling combinator whose LEFT compound (`parts[k]`) carries the deferred predicate.
         let mut sibling_pending: Vec<(usize, &Selector, usize)> = Vec::new();
         for (i, members) in queries.iter().enumerate() {
-            if browser
-                && members
-                    .iter()
-                    .any(|m| {
-                        matches!(m.terminal, Terminal::OuterHtml)
-                            && (admits_synthesized_frame(m) || compile::admits_browser_synthesized(m))
-                    })
-            {
+            if browser && members.iter().any(compile::browser_refuses) {
                 refusals.push((Slot::Flat(i), Refusal::SynthesizedOuterHtml));
                 continue;
             }
@@ -1437,25 +1430,12 @@ impl CompiledSchema {
                 container_entries.push((entries.len(), g));
                 push_entry(container, usize::MAX, false, &mut entries, &mut n_sib);
             }
-            // A sub-field is scoped to its container, self included, so it can match a synthesized frame
-            // element only where the container can be or hold one.
-            let frame_scope = container.as_ref().is_some_and(compile::may_hold_synthesized_frame);
             let mut subsels = Vec::with_capacity(subs.len());
             for sub in subs {
                 // MVP: sub-selectors are single-segment (no sibling `+`/`~`). Unsupported or
                 // multi-segment subs -> `seg = None`, which never matches (empty column, no fallback).
                 let (seg, terminal) = match sub {
-                    Some(s)
-                        if browser
-                            && matches!(s.terminal, Terminal::OuterHtml)
-                            && ((frame_scope && admits_synthesized_frame(s))
-                                // `.` (depth 0) is the container itself
-                                || if s.context_depth == Some(0) {
-                                    container.as_ref().is_some_and(compile::admits_browser_synthesized)
-                                } else {
-                                    compile::admits_browser_synthesized(s)
-                                }) =>
-                    {
+                    Some(s) if browser && compile::browser_refuses_sub(container.as_ref(), s) => {
                         refusals.push((Slot::Sub { group: g, sub: subsels.len() }, Refusal::SynthesizedOuterHtml));
                         (None, Terminal::Text { subtree: false })
                     }
