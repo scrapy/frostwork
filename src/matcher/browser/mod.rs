@@ -73,7 +73,7 @@ mod lists;
 mod rules;
 mod tags;
 
-use super::tree::TreeBuilder;
+use super::tree::{Scan, TreeBuilder};
 use super::{CompiledSchema, EncodedInput, HeldText, Matcher, Parked};
 use crate::{FlatColumns, GroupRows};
 use crate::implied_close::{
@@ -433,11 +433,9 @@ fn frame_tag_from(b: &[u8], from: usize) -> usize {
 /// Run `schema` over one document in browser mode. One streaming pass answers it unless a retroactive
 /// rule fires; then the pass stops there, and the replay builds the document's tree and walks it.
 pub(super) fn run<'a>(schema: &'a CompiledSchema, input: EncodedInput<'a>) -> (FlatColumns, Vec<GroupRows>) {
-    let mut scan = super::tree::Scan { m: Matcher::new(schema, input), builder: Browser::<'a, false>::default() };
-    crate::tokenizer::tokenize(input.bytes(), &mut scan);
+    let scan = Scan::tokenize(schema, input, Browser::<'a, false>::default(), Vec::new());
     if scan.builder.retro & RETRO_RULES == 0 {
-        scan.builder.finish(&mut scan.m);
-        return scan.m.finish_grouped();
+        return scan.finish();
     }
     replay(schema, input, Vec::new())
 }
@@ -453,13 +451,7 @@ pub(super) fn run_tail<'a>(
     if replayed {
         return replay(schema, input, marks);
     }
-    let mut m = Matcher::new(schema, input);
-    m.marks = marks;
-    let mut scan = super::tree::Scan { m, builder: Browser::<'a, false>::default() };
-    scan.builder.run_through = true;
-    crate::tokenizer::tokenize(input.bytes(), &mut scan);
-    scan.builder.finish(&mut scan.m);
-    scan.m.finish_grouped()
+    Scan::tokenize(schema, input, Browser::<'a, false>::to_the_end(), marks).finish()
 }
 
 /// The replay: the whole tree, built with the DOM operations a browser performs, walked in pre-order.
@@ -468,22 +460,20 @@ fn replay<'a>(
     input: EncodedInput<'a>,
     marks: Vec<(u32, String)>,
 ) -> (FlatColumns, Vec<GroupRows>) {
-    let mut m = Matcher::new(schema, input);
-    m.marks = marks;
-    let mut scan = super::tree::Scan { m, builder: Browser::<'a, true>::default() };
-    crate::tokenizer::tokenize(input.bytes(), &mut scan);
-    scan.builder.finish(&mut scan.m);
-    scan.builder.dom.walk(&mut scan.m);
-    scan.m.finish_grouped()
+    Scan::tokenize(schema, input, Browser::<'a, true>::default(), marks).finish()
 }
 
 /// Which retroactive rules fire on a document (`RETRO_*`, and [`CENSUS_MERGE_ANY`]), over the whole
 /// document. A merge counts only when it adds an attribute `schema` selects on.
 pub(super) fn retro_census(schema: &CompiledSchema, input: EncodedInput<'_>) -> u8 {
-    let mut scan = super::tree::Scan { m: Matcher::new(schema, input), builder: Browser::<'_, false>::default() };
-    scan.builder.run_through = true;
-    crate::tokenizer::tokenize(input.bytes(), &mut scan);
-    scan.builder.retro
+    Scan::tokenize(schema, input, Browser::<'_, false>::to_the_end(), Vec::new()).builder.retro
+}
+
+impl<const REPLAY: bool> Browser<'_, REPLAY> {
+    /// A streaming builder that stays on to the end of input whatever fires (see `run_through`).
+    fn to_the_end() -> Self {
+        Browser { run_through: true, ..Browser::default() }
+    }
 }
 
 impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
@@ -1437,7 +1427,7 @@ impl<'a, const REPLAY: bool> TreeBuilder<'a> for Browser<'a, REPLAY> {
                     }
                 }
             }
-            return;
+            return self.dom.walk(m);
         }
         m.flush_text();
         while let Some(base) = self.parked.last().map(|s| s.base) {
@@ -1467,11 +1457,7 @@ mod tests {
         let (flat, grouped) = crate::compile_schema(&[query.to_string()], &[]);
         let schema = CompiledSchema::compile(&flat, &grouped, crate::ParseMode::Browser);
         let input = EncodedInput::new(html, encoding_rs::UTF_8, true);
-        let mut scan = super::super::tree::Scan { m: Matcher::new(&schema, input), builder: Browser::<'_, false>::default() };
-        scan.builder.run_through = true;
-        crate::tokenizer::tokenize(input.bytes(), &mut scan);
-        scan.builder.finish(&mut scan.m);
-        scan.m.finish_grouped().0.remove(0)
+        run_tail(&schema, input, Vec::new(), false).0.remove(0)
     }
 
     /// Past the depth cap the adoption agency leaves the formatting element's matcher element parked

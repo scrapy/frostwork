@@ -1794,7 +1794,7 @@ impl CompiledSchema {
     /// `(flat_columns, grouped)` — see [`Matcher::finish_grouped`].
     pub fn run(&self, input: EncodedInput) -> (FlatColumns, Vec<GroupRows>) {
         match self.mode {
-            ParseMode::Lxml => self.run_with(input, libxml2::Libxml2::default(), Vec::new()),
+            ParseMode::Lxml => tree::Scan::tokenize(self, input, libxml2::Libxml2::default(), Vec::new()).finish(),
             ParseMode::Browser => browser::run(self, input),
         }
     }
@@ -1803,22 +1803,6 @@ impl CompiledSchema {
     /// `browser::retro_census`). For measuring how often each does; nothing else reads it.
     pub(crate) fn retro_census(&self, input: EncodedInput) -> u8 {
         browser::retro_census(self, input)
-    }
-
-    /// One document under one tree builder. Generic so each mode's per-token path is its own code, with
-    /// the mode decided once per document above. `marks` is empty except in browser mode's tail pass.
-    fn run_with<'a, B: tree::TreeBuilder<'a>>(
-        &'a self,
-        input: EncodedInput<'a>,
-        builder: B,
-        marks: Vec<(u32, String)>,
-    ) -> (FlatColumns, Vec<GroupRows>) {
-        let mut m = Matcher::new(self, input);
-        m.marks = marks;
-        let mut scan = tree::Scan { m, builder };
-        crate::tokenizer::tokenize(input.bytes(), &mut scan);
-        scan.builder.finish(&mut scan.m);
-        scan.m.finish_grouped()
     }
 
     /// The mode this schema was compiled for.
