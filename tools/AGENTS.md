@@ -143,10 +143,12 @@ through the bridge, and `diff_browser` checks on every run that the two agree on
 `diff_browser.py` is the browser differential (`make gate-browser`). It grades the engine on
 `seq_sweep`'s fingerprint against Chrome's tree, over `seq_sweep`'s short sequences plus seeded random
 documents from an HTML5-heavy alphabet in which every start tag carries an id, and it refuses to grade
-unless every token is emitted. Each differing column is reduced to the smallest token subsequence that
-still differs on it (ids survive the reduction, so the column names the same element) and the reduced
-document is attributed to a row of `CONSTRUCTS`. Attribute by the repro, never by the page it came from.
-It has no rows: the retroactive rules that used to fill it (the adoption agency's moves, fostered content's
+unless every token is emitted. `browser_docs.py` generates those documents and holds the column lists
+asked of them: `ALPHABET`, `VALUE_ATTRS`, `VALUE_TEXTS`, `TAIL_CONTEXTS`, `structured_docs`, `RULE_SELECTORS`,
+`GROUPED_COLUMNS` and `value_selectors` below are its names. Each differing column is reduced to the
+smallest token subsequence that still differs on it (ids survive the reduction, so the column names the
+same element) and the reduced document is attributed to a row of `CONSTRUCTS`. Attribute by the repro,
+never by the page it came from. It has no rows: the retroactive rules that used to fill it (the adoption agency's moves, fostered content's
 document order, a second `<html>`/`<body>`, a `<frameset>` replacing a body, `<selectedcontent>`) are exact
 through the replay, so every tree divergence is NOVEL. `--gate` fails on NOVEL and on coverage: nothing graded,
 a token never emitted, an oracle error, or a self-check difference. `gate_failures` and `attribute` are

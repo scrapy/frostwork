@@ -717,21 +717,22 @@ def test_the_browser_gate_emits_what_the_first_review_found():
     structured family member, its column is one the gate grades there, and the engine must give Chrome's
     answer as the gate compares it: exactly, or by the raw-source allowance for outer HTML, which still
     needs the same elements in the same order."""
+    import browser_docs as D
     import conformant
     import diff_browser as B
     import frostwork
     import seq_sweep
 
-    generated = {B.render(d) for d in B.structured_docs()}
+    generated = {D.render(d) for d in D.structured_docs()}
     run = B.engine_runner("browser")[0]
     no_quirks = ["#d", [["#dt", "html", "", ""]]]
     wrong = []
     for tokens, sel, chrome in REVIEW_FINDINGS:
         doc = tuple(enumerate(tokens))
-        r = B.render(doc)
+        r = D.render(doc)
         assert r in generated, tokens
-        assert sel in B.value_selectors(doc, True, list(conformant.BASKET)) + seq_sweep.fingerprint_selectors(B.ids_of(doc))
-        engine = run.grouped(r.encode(), [sel])[0] if B.grouped_spec(sel) else \
+        assert sel in D.value_selectors(doc, True, list(conformant.BASKET)) + seq_sweep.fingerprint_selectors(D.ids_of(doc))
+        engine = run.grouped(r.encode(), [sel])[0] if D.grouped_spec(sel) else \
             frostwork.extract(r.encode(), [sel], parser="browser", strict=False)[0]
         agrees = B.same_values(engine, chrome, sel) or (
             sel == "b, i" and B.attribute_value(B.ValueRepro(doc, sel, engine, chrome, no_quirks)) is not None)
@@ -746,6 +747,7 @@ def test_the_browser_gates_ask_about_each_selector_alone():
     mixed comma group cannot be routed, and conformant's `p::text, p:contains("alpha")::text` family went
     ungraded in both modes. Both browser gates read the one helper. The deferred tails the value basket
     holds are graded in browser mode, which is the point of their rows."""
+    import browser_docs as D
     import corpus_browser as CB
     import diff_browser as B
 
@@ -753,7 +755,7 @@ def test_the_browser_gates_ask_about_each_selector_alone():
     padding = [f'[id="{i}"]::text' for i in range(130)]
     assert B.engine_refusals(padding + [group, "p"], "browser") == {"p": B.engine_refusals(["p"], "browser")["p"]}
     assert CB.engine_refusals is B.engine_refusals
-    tails = [s for s in B.RULE_SELECTORS if re.search(r":last-|:nth-last-|:only-|:has\(|:contains\(|last\(\)|contains\(", s)]
+    tails = [s for s in D.RULE_SELECTORS if re.search(r":last-|:nth-last-|:only-|:has\(|:contains\(|last\(\)|contains\(", s)]
     assert len(tails) >= 20 and not B.engine_refusals(tails, "browser")
 
 
@@ -912,13 +914,14 @@ def test_value_columns_split_by_the_tree_and_attribute_by_the_oracle_tree():
     reach the value verdict. Where the fingerprint agrees, a value construct explains it only from the
     oracle's own tree: case folding applies to listed attributes on HTML elements and never to XPath, the
     quirks-mode class rule needs a quirks-mode document, and raw-source outer HTML needs the same element."""
+    import browser_docs as D
     import diff_browser as B
     import seq_sweep
     from browser_oracle import tree as T
 
     report, items = B.Report(), []
     d = B.Divergence(((0, "<p{}>"),), "p::text", ("engine", "chrome"))
-    B.split_value(d, {B.render(d.doc)}, report, items)
+    B.split_value(d, {D.render(d.doc)}, report, items)
     assert report.value_on_tree == [d] and items == []
     B.split_value(d, set(), report, items)
     assert items == [d]
@@ -963,16 +966,17 @@ def test_value_documents_keep_their_decorations_through_attribution_edits():
     """Tree attribution reads ALPHABET tokens, so a value document is undecorated for it and every
     counterfactual edit is decorated again, by id, before the oracle is asked. An edit to the token itself
     (dropping a `/>`) must survive that, and a counterfactual must not lose the attributes it is about."""
+    import browser_docs as D
     import diff_browser as B
 
-    docs, _used = B.value_docs(40, 0)
-    decorated = next(d for d in docs if any(t != B.undecorate(d)[0][k][1] for k, (_i, t) in enumerate(d)))
-    plain, decos = B.undecorate(decorated)
-    assert B.redecorate(plain, decos) == decorated
-    assert all(t in B.ALPHABET + B.VALUE_STRUCTURE + [B.DOCTYPE, B.PLAIN_HEAD] for _i, t in plain)
+    docs, _used = D.value_docs(40, 0)
+    decorated = next(d for d in docs if any(t != D.undecorate(d)[0][k][1] for k, (_i, t) in enumerate(d)))
+    plain, decos = D.undecorate(decorated)
+    assert D.redecorate(plain, decos) == decorated
+    assert all(t in D.ALPHABET + D.VALUE_STRUCTURE + [D.DOCTYPE, D.PLAIN_HEAD] for _i, t in plain)
     slashed = ((0, '<p{}/>'),)
     deco = {0: ("attrs", ' title="t"')}
-    assert B.redecorate(B.Repro(slashed, "", lambda d: True, []).deslashed(), deco) == ((0, '<p title="t"{}>'),)
+    assert D.redecorate(B.Repro(slashed, "", lambda d: True, []).deslashed(), deco) == ((0, '<p title="t"{}>'),)
 
 
 def test_the_browser_corpus_report_splits_tree_from_value_only_where_the_fingerprint_can():
