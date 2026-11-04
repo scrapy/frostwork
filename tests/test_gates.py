@@ -681,9 +681,63 @@ def test_the_browser_gate_fails_on_novel_and_on_coverage():
         "a value-rule selector the engine refuses": B.Report(**clean, rule_refused=["//text()"]),
         "native CSS checked against parsel nowhere": B.Report(**{**clean, "css_mirror_checked": 0}),
         "native CSS disagrees with parsel": B.Report(**clean, css_mirror_differ=[("<p>", "p ::text")]),
+        # the debug build's invariants
+        "debug build asked for and checked nothing": B.Report(**clean, debug_requested=True),
+        "debug build panics": B.Report(**clean, debug_requested=True, debug_checked=1,
+                                       debug_panics=[("<p>", "panicked at mod.rs:1: closing an element")]),
     }
     for why, report in seeded.items():
         assert B.gate_failures(report), f"{why} must fail the gate"
+    assert B.gate_failures(B.Report(**clean, debug_requested=True, debug_checked=1)) == []
+
+
+# What Chrome 156.0.8078.80 answers on documents the browser gate's structured families emit, one row per
+# finding of the first review of browser mode: the frame a document that ends before the body still gets
+# (an empty `<body>`, a `<head>` that is not the last child, all three for an empty document), a comment
+# in template content written after `</head>`, a comment between two runs of `<html>` whitespace in
+# "after head", and two matches at one offset (a formatting element's copy and the copy inside it).
+_SKELETON = ["<!DOCTYPE html>", "<html{}>", "<head{}>", "<title{}>T</title>", "</head>", " ", "<template{}>", "<p{}>",
+             "t", "</template>", " ", "<script{}>s</script>", " ", "<style{}>s</style>", " ", "<body{}>", "<p{}>", "t",
+             "</p>", "</body>", " ", "</html>", " "]
+_CLONES = ["<!DOCTYPE html>", "<p{}>", "<b{}>", "t", "<i{}>", "t", "</p>", "t"]
+REVIEW_FINDINGS = [
+    ([], "grouped:body -> ::text", [[[]]]),
+    (["<head{}>", "</head>"], "*:last-child::attr(id)", []),
+    (["<html{}>", "<title{}>T</title>"], ":has(> body)::attr(id)", ["0"]),
+    (_SKELETON[:7] + ["<!--c-->"] + _SKELETON[7:], '[id="6"]', ['<template id="6"><!--c--><p id="8">t</p></template>']),
+    (_SKELETON[:6] + ["<!--c-->"] + _SKELETON[6:], "//html/text()", [" ", "   "]),
+    (_CLONES, "*:last-child::attr(id)", ["2", "4", "2", "4"]),
+    (_CLONES, "b, i", ['<b id="2">t<i id="4">t</i></b>', '<i id="4">t</i>', '<b id="2"><i id="4">t</i></b>',
+                       '<i id="4">t</i>']),
+]
+
+
+def test_the_browser_gate_emits_what_the_first_review_found():
+    """A finding the generator cannot emit is one the gate can never go red on. Each row's document is a
+    structured family member, its column is one the gate grades there, and the engine must give Chrome's
+    answer as the gate compares it: exactly, or by the raw-source allowance for outer HTML, which still
+    needs the same elements in the same order."""
+    import conformant
+    import diff_browser as B
+    import frostwork
+    import seq_sweep
+
+    generated = {B.render(d) for d in B.structured_docs()}
+    run = B.engine_runner("browser")[0]
+    no_quirks = ["#d", [["#dt", "html", "", ""]]]
+    wrong = []
+    for tokens, sel, chrome in REVIEW_FINDINGS:
+        doc = tuple(enumerate(tokens))
+        r = B.render(doc)
+        assert r in generated, tokens
+        assert sel in B.value_selectors(doc, True, list(conformant.BASKET)) + seq_sweep.fingerprint_selectors(B.ids_of(doc))
+        engine = run.grouped(r.encode(), [sel])[0] if B.grouped_spec(sel) else \
+            frostwork.extract(r.encode(), [sel], parser="browser", strict=False)[0]
+        agrees = B.same_values(engine, chrome, sel) or (
+            sel == "b, i" and B.attribute_value(B.ValueRepro(doc, sel, engine, chrome, no_quirks)) is not None)
+        if not agrees:
+            wrong.append(f"{r}  {sel}: engine {engine}, Chrome {chrome}")
+    assert not wrong, "\n".join(wrong)
 
 
 def test_the_browser_gates_ask_about_each_selector_alone():

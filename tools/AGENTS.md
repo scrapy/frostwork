@@ -188,6 +188,20 @@ value-rule selector the oracle answered nowhere or the engine refuses. Decoratio
 and are undone by id for tree attribution (`undecorate`/`redecorate`), so the construct rules see
 ALPHABET tokens and a counterfactual edit keeps its decorations.
 
+The random alphabet also holds mixed-case tag names, the end tags of every formatting and special
+element, text with references and an inner NUL, the markup declarations the tokenizer special-cases, and
+`ARK` tokens: formatting tags that all carry the id `k`, the only way two generated elements can have
+the same attribute set, which Noah's Ark compares. Every fourth random document is up to `LONG_TOKENS`
+long. `structured_docs` adds what a random run of a few tokens almost never assembles: documents that
+end before the body, a comment in every position of three skeletons, formatting copies that share an
+offset, Noah's Ark families and `DEEP` runs of nested divs at Chrome's depth cap (one token each, with no
+ids, so reduction drops a run whole). A flat column cannot see an element with no attribute and no text,
+such as the empty `<body>` a document that ends in its head still gets, so `GROUPED_COLUMNS`
+(`grouped:<container> -> <sub> | <sub>`) grade grouped rows too; the frame's outer HTML is listed but
+browser mode refuses it. `--debug-differ` runs every graded document through a DEBUG `differ` and fails
+on a panic: the builder's `debug_assert!`s are invariants a release build can break while every value
+still passes the raw-source allowance (`make gate-browser` passes it).
+
 `diff_webpoet.py --parser browser` (`make gate-webpoet-browser`, outside `ci`) builds browser-mode page
 objects and takes the expected item from Chrome: the parsel page objects keep their getters, `Processors`
 and `out=`, and their values come from native CSS or the bridge. `.as_node()` must be refused at class

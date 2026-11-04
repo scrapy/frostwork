@@ -13,11 +13,13 @@ see it:
   * every sequence of `seq_sweep.ALPHABET` up to `--seq-depth`, the frame and table shapes lxml mode's
     sequence gate enumerates;
   * `--random` seeded sequences over `ALPHABET` below, the probe's HTML5-heavy alphabet plus the
-    section 3 constructs it does not reach. Half carry a doctype. The run refuses to grade unless every
-    token is emitted;
+    section 3 constructs it does not reach, every fourth up to `LONG_TOKENS` long. Half carry a doctype.
+    The run refuses to grade unless every token is emitted;
   * `--values` decorated sequences: ALPHABET tokens carrying the attributes and text of VALUE_ATTRS and
     VALUE_TEXTS, for the value columns below, under the same refusal, plus every TAIL_CONTEXTS x
-    TAIL_BODIES document, where a deferred winner's content depends on what is open outside it.
+    TAIL_BODIES document, where a deferred winner's content depends on what is open outside it, and the
+    structured families (`structured_docs`): documents that end before the body, a comment in every
+    position, formatting copies that share an offset, Noah's Ark, and nesting at Chrome's depth cap.
 
 Every differing column is REDUCED to the smallest token subsequence that still differs on that column (ids
 are kept, so the column still names the same element), and the reduced document, not the page it came from,
@@ -76,6 +78,8 @@ from browser_oracle import tree as T  # noqa: E402
 from browser_oracle.client import BrowserOracle, Refused  # noqa: E402
 
 RESULTS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results", "browserdiff.json")
+# A tree at Chrome's depth cap nests two JSON arrays per element, past Python's default recursion limit.
+sys.setrecursionlimit(max(sys.getrecursionlimit(), 20000))
 
 DOCTYPE = "<!DOCTYPE html>"
 # The probe's 70-token alphabet (tools/browser_oracle/probe.cjs, TOKENS) with an id slot on every start
@@ -118,8 +122,38 @@ ALPHABET: list[str] = [
     # namespaced `xlink:`/`xml:`/`xmlns`), each inside its foreign element, so the value columns see them.
     '<svg{} VIEWBOX="0 0 1 1"><text textlength=5>t</text><a xlink:href=u xmlns=q fill=red>y</a></svg>',
     "<math{} definitionurl=d><mi definitionURL=k xml:lang=en>x</mi></math>",
+    # Tag names in any letter case (HTML lowercases them, SVG camel-cases them by its own table), the
+    # formatting elements past b/i/a/nobr/em/s/font, and the end tags of elements nothing above closes.
+    "<DIV{}>", "</DIV>", "<B{}>", "</B>", "<TABLE{}>", "<SVG{}>", "</SVG>", "<MATH{}>", "<FOREIGNOBJECT{}>",
+    "<u{}>", "<code{}>", "<strong{}>", "<small{}>", "<big{}>", "<tt{}>", "<strike{}>",
+    "</em>", "</s>", "</font>", "</u>", "</code>", "</applet>", "</optgroup>", "</ruby>", "</rtc>", "</rt>",
+    "</mi>", "</xmp>", "</iframe>", "</noembed>", "</textarea>", "</noscript>",
+    # attributes besides the id, for the attribute sets the adoption agency and reconstruction copy
+    "<a{} href=y>", "<a{} href=x title=t>", "<b{} CLASS=k>", '<b{} class="k">', "<b{} class=k class=j>",
+    "<font{} size=1>",
+    # text the tree builder reads as characters, and the markup declarations the tokenizer special-cases
+    "&amp;", "x\x00y", "<!x>", "<!-->", "<!--a--!>", "--!>", "<![CDATA[x",
+    # raw-text elements the input ends inside
+    "<script{}>", "<style{}>",
 ]
+# Formatting start tags that all carry the SAME id, so Noah's Ark can find three alike among them: every
+# `{}` slot is a unique id, and no two such elements ever have the same attributes. Spellings of one
+# attribute set (order, quoting, a reference, a repeated name, letter case), and sets that differ.
+ARK_ID = "k"
+ARK: list[str] = [
+    "<b id=k>", "<b id=k class=c>", "<b class=c id=k>", '<b id=k class="c">', "<b id=k class=&#99;>",
+    "<b id=k class=c class=d>", "<b ID=k CLASS=c>", "<b id=k class=d>", "<a id=k href=x>", "<a id=k href=y>",
+    "<font id=k color=red>", "<font id=k size=1>", "<i id=k>",
+]
+ALPHABET += ARK
+# Runs of nested `<div>`s that put what follows at Chrome's depth cap (512 open elements, `<html>` and
+# `<body>` included): one token each, so a reduction keeps or drops the run whole. Their elements carry no
+# id, which keeps the fingerprint to the tokens after them.
+DEEP: dict[str, int] = {"<div>" * n: n for n in (508, 509, 510, 511)}
 MAX_TOKENS = 7
+# Every fourth random document is longer, for what only a sequence of many tokens reaches: long lists of
+# active formatting elements, the adoption agency's inner-loop limit, nesting several scopes deep.
+LONG_TOKENS = 20
 
 # A document is a tuple of (id, token template). The id is the token's position in the ORIGINAL
 # document and survives reduction, so a reduced document's columns still name the same elements.
@@ -131,7 +165,8 @@ def _start_tag(token: str) -> bool:
 
 
 for _t in ALPHABET + seq_sweep.ALPHABET:
-    assert not _start_tag(_t) or "{}" in _t, f"{_t!r} is a start tag with no id slot; the fingerprint cannot see it"
+    assert not _start_tag(_t) or "{}" in _t or _t in ARK, \
+        f"{_t!r} is a start tag with no id slot; the fingerprint cannot see it"
 
 
 def render(doc: Doc) -> str:
@@ -139,7 +174,8 @@ def render(doc: Doc) -> str:
 
 
 def ids_of(doc: Doc) -> list[str]:
-    return [str(i) for i, tok in doc if "{}" in tok]
+    ids = [str(i) for i, tok in doc if "{}" in tok]
+    return ids + [ARK_ID] if any(tok in ARK for _i, tok in doc) else ids
 
 
 def seq_docs(depth: int) -> list[Doc]:
@@ -148,10 +184,11 @@ def seq_docs(depth: int) -> list[Doc]:
 
 
 def random_docs(n: int, seed: int) -> tuple[list[Doc], Counter]:
-    """`n` documents of 1 to `MAX_TOKENS` tokens; every other one starts with a doctype."""
+    """`n` documents of 1 to `MAX_TOKENS` tokens, every fourth one of up to `LONG_TOKENS`; every other one
+    starts with a doctype."""
     rng, used, docs = random.Random(seed), Counter[str](), []
     for k in range(n):
-        toks = [rng.choice(ALPHABET) for _ in range(1 + rng.randrange(MAX_TOKENS))]
+        toks = [rng.choice(ALPHABET) for _ in range(1 + rng.randrange(LONG_TOKENS if k % 4 == 3 else MAX_TOKENS))]
         used.update(toks)
         docs.append(tuple(enumerate(([DOCTYPE] if k % 2 else []) + toks)))
     return docs, used
@@ -301,6 +338,91 @@ def tail_docs() -> list[Doc]:
     return docs
 
 
+# ---------------------------------------------------------------- structured families
+# Shapes a random run of a few tokens almost never assembles, each family built for one kind of rule. A
+# family member is a value document (every value column is graded on it), without and with a doctype
+# unless it writes its own.
+#
+# A document that ends before the body: at end of input the insertion mode's "anything else" still runs,
+# so the frame is complete (an empty `<body>` after a lone `<title>`, all three after nothing at all).
+EOF_FRAMES: list[list[str]] = [
+    [], ["<title{}>T</title>"], ["<title{}>"], ["<title{}>", "t"], ["<textarea{}>"], ["<textarea{}>", "t"],
+    ["<head{}>"], ["<head{}>", "</head>"], ["<head{}>", "</head>", " "], ["<head{}>", "</head>", "<!--c-->"],
+    ["<html{}>"], ["<html{}>", "<head{}>"], ["<html{}>", "<head{}>", "</head>"], ["<html{}>", " "],
+    ["<html{}>", "<title{}>T</title>"], ["<html{}>", "<head{}>", "</head>", "<title{}>T</title>"],
+    ["<!--c-->"], [" "], ["<meta{}>"], ["<script{}>s</script>"], ["<script{}>"], ["<style{}>"], ["<noscript{}>"],
+    ["<template{}>"], ["<template{}>", "t"], ["<head{}>", "</head>", "<template{}>", "t"], ["</head>"], ["</html>"],
+    ["<head{}>", "</head>", "</html>"], ["<frameset{}>"], ["<head{}>", "<title{}>"], ["<plaintext{}>"],
+]
+# Comments in every position: each skeleton once per place a comment can go, so one lands in the
+# document, the head, "after head" (where `<html>`'s whitespace is held around head content), template
+# content written after `</head>`, a table, a select, foreign content, a frameset and after the body.
+COMMENT = "<!--c-->"
+COMMENT_SKELETONS: list[list[str]] = [
+    [DOCTYPE, "<html{}>", "<head{}>", "<title{}>T</title>", "</head>", " ", "<template{}>", "<p{}>", "t", "</template>",
+     " ", "<script{}>s</script>", " ", "<style{}>s</style>", " ", "<body{}>", "<p{}>", "t", "</p>", "</body>", " ",
+     "</html>", " "],
+    ["<title{}>T</title>", " ", "<p{}>", "t", "<table{}>", "<tr{}>", "<td{}>", "t", "</table>", "<select{}>",
+     "<option{}>", "t", "</select>", "<svg{}>", "<desc{}>", "t", "</svg>"],
+    [DOCTYPE, "<head{}>", "</head>", " ", "<frameset{}>", " ", "<frame{}>", "</frameset>", " ", "</html>", " "],
+]
+# Formatting elements that reconstruction copies at one offset: the copies and the text that made them
+# begin at the same byte, so two matches of one column share an offset; the active formatting list at its
+# longest, past the adoption agency's inner-loop limit of three; and the adoption agency's outer loop.
+FORMATTING: list[list[str]] = [
+    ["<p{}>", "<b{}>", "t", "<i{}>", "t", "</p>", "t"],
+    ["<p{}>", "<b{}>", "t", "<i{}>", "t", "</p>", "t", "<b{}>"],
+    ["<p{}>", "<a{} href=x>", "<b{}>", "<i{}>", "<u{}>", "t", "</p>", "<p{}>", "t"],
+    ["<p{}>", "<b{} class=k>", "<em{}>", "t", "</p>", "<div{}>", "t", "</div>", "t"],
+    ["<div{}>", "<b{}>", "<i{}>", "t", "</div>", "<br{}>", "</br>", "t"],
+    ["<p{}>", "<b{}>", "<i{}>", "<u{}>", "<s{}>", "<em{}>", "<font{}>", "<code{}>", "<strong{}>", "<small{}>",
+     "<big{}>", "<tt{}>", "<strike{}>", "t", "</p>", "t"],
+    ["<p{}>", "<b{}>", "<i{}>", "<u{}>", "<s{}>", "<em{}>", "<font{}>", "t", "<div{}>", "t", "</b>", "t", "</p>", "t"],
+    ["<b{}>", "<i{}>", "<u{}>", "<s{}>", "<em{}>", "<div{}>", "t", "</b>", "t", "</div>", "t"],
+    ["<b{}>", "<div{}>", "<div{}>", "<div{}>", "<div{}>", "<div{}>", "<div{}>", "<div{}>", "<div{}>", "<div{}>",
+     "<div{}>", "t", "</b>", "t"],
+    ["<a{} href=x>", "<div{}>", "t", "<a{} href=y>", "t", "</a>", "t"],
+    ["<table{}>", "<tr{}>", "<td{}>", "<b{}>", "<i{}>", "t", "</td>", "<td{}>", "t", "</table>", "t"],
+    ["<p{}>", "<b{}>", "<i{}>", "t", "<applet{}>", "<b{}>", "t", "</applet>", "t", "</p>", "t"],
+]
+# Noah's Ark: three alike stay on the list and a fourth evicts the earliest, so the copies a later
+# paragraph gets show how many were kept. Every spelling of one attribute set is alike; `ARK[7:]` differ.
+ARK_FAMILY: list[list[str]] = (
+    [["<p{}>"] + [a] * 4 + ["t", "</p>", "t"] for a in ARK]
+    + [["<p{}>"] + ["<b id=k class=c>"] * 3 + [a, "t", "</p>", "t"] for a in ARK[1:8]]
+    + [["<p{}>", "<b id=k>", "<b id=k>", "<applet{}>", "<b id=k>", "<b id=k>", "t", "</applet>", "<b id=k>", "t",
+        "</p>", "t"],
+       ["<p{}>", "<a id=k href=x>", "<b id=k>", "<a id=k href=x>", "<b id=k>", "<a id=k href=x>", "<b id=k>",
+        "<a id=k href=x>", "t", "</p>", "t"]]
+)
+# Past Chrome's depth cap, an element opens beside the current node instead of in it. Each run of `DEEP`
+# divs is followed by what the cap reorders: an end tag for an element opened beside its parent, the
+# adoption agency, reconstruction, a table, a list, a select, foreign content.
+DEEP_TAILS: list[list[str]] = [
+    ["<div{}>", "<b{}>", "t", "<div{}>", "t", "</b>", "t", "</div>", "</div>", "<p{}>", "t", "</p>"],
+    ["<p{}>", "t", "<p{}>", "t", "</div>", "t"],
+    ["<b{}>", "<i{}>", "t", "</b>", "t", "<p{}>", "t"],
+    ["<table{}>", "<tr{}>", "<td{}>", "t", "</table>", "t"],
+    ["<ul{}>", "<li{}>", "t", "<li{}>", "t"],
+    ["<select{}>", "<option{}>", "t", "<option{}>", "t"],
+    ["<svg{}>", "<desc{}>", "t", "</svg>", "t"],
+    ["<a{} href=x>", "<div{}>", "t", "</a>", "t"],
+]
+
+
+def structured_docs() -> list[Doc]:
+    """Every structured family member, as a document."""
+    seqs = [lead + f for f in EOF_FRAMES + FORMATTING for lead in ([], [DOCTYPE])]
+    seqs += [s[:k] + [COMMENT] + s[k:] for s in COMMENT_SKELETONS for k in range(len(s) + 1)]
+    seqs += [[DOCTYPE] + f for f in ARK_FAMILY]
+    seqs += [[DOCTYPE, deep] + tail for deep in DEEP for tail in DEEP_TAILS]
+    return [tuple(enumerate(s)) for s in seqs]
+
+
+for _t in {t for f in EOF_FRAMES + COMMENT_SKELETONS + FORMATTING + ARK_FAMILY + DEEP_TAILS for t in f}:
+    assert _t in ALPHABET or _t in (TEXT_TOKEN, DOCTYPE), f"{_t!r} is not an ALPHABET token, so no construct can read it"
+
+
 def id_value_selectors(ids: list[str], decorated: bool) -> list[str]:
     """Per-id value columns: own and subtree text, outer HTML, and (on value documents) attributes."""
     out = []
@@ -344,7 +466,49 @@ RULE_SELECTORS: list[str] = [
     '[viewbox]::attr(id)', '*::attr(viewBox)', '*::attr(viewbox)', '*::attr(textLength)', '[textlength]::attr(id)',
     '*::attr(definitionURL)', '[definitionurl]::attr(id)', '[xmlns]::attr(id)', '*::attr(xmlns)',
     '[fill]::attr(id)', '//*/@viewbox', '//*[@textlength]/@id', '//*[@fill]/@id', '//clippath/@id',
+    # the positions the frame gives what is in it, which an empty `<body>` the parser adds at end of input
+    # changes, and the parents it gives
+    '*:last-child::attr(id)', '*:only-child::attr(id)', 'html > :last-child::attr(id)', ':has(> body)::attr(id)',
+    ':has(> head)::attr(id)',
+    # two matches of one column at one offset: a formatting element's copy, and the copy inside it
+    'b, i', 'b:has(i)', '*:has(> i)::attr(id)', 'b:last-child::attr(id)', 'b i::attr(id)',
 ]
+# Outer HTML of the frame, which browser mode refuses (a synthesised element has no source of its own) and
+# lxml mode answers; listed so that an engine that starts answering them is graded on them.
+FRAME_COLUMNS: list[str] = ["body", "head", "html", "head + body", "html > *:last-child"]
+
+# Grouped columns, which see what no flat column can: an element with no attribute and no text still makes
+# a row. A column is written `grouped:<container> -> <sub> | <sub>`, so it travels with the flat ones.
+GROUPED_PREFIX = "grouped:"
+
+
+def grouped_column(container: str, subs: list[str]) -> str:
+    return f"{GROUPED_PREFIX}{container} -> {' | '.join(subs)}"
+
+
+def grouped_spec(col: str) -> Optional[tuple[str, list[str]]]:
+    """`(container, subs)` for a grouped column, else `None`."""
+    if not col.startswith(GROUPED_PREFIX):
+        return None
+    container, subs = col[len(GROUPED_PREFIX):].split(" -> ", 1)
+    return container, subs.split(" | ")
+
+
+GROUPED_COLUMNS: list[str] = [grouped_column(c, s) for c, s in [
+    ("html", ["::attr(id)"]), ("head", ["::text"]), ("body", ["::text"]), ("head > *", ["::attr(id)"]),
+    ("b", ["::attr(id)", "::text"]),
+]]
+
+
+def is_native(col: str) -> bool:
+    """Is the column answered by the browser's own selector engine (CSS and grouped), not the bridge?"""
+    return grouped_spec(col) is not None or C.is_css(col)
+
+
+def oracle_form(col: str) -> Any:
+    """The column as `BrowserOracle.query` takes it."""
+    spec = grouped_spec(col)
+    return (spec[0], spec[1]) if spec else col
 
 
 # ---------------------------------------------------------------- the engine
@@ -359,10 +523,52 @@ def engine_runner(parser: str) -> tuple[Callable[[bytes, list[str]], list[list[s
     def run(doc: bytes, sels: list[str], strict: bool = True) -> list[list[str]]:
         return frostwork.extract(doc, sels, "utf-8", strict=strict, **mode)
 
+    def grouped(doc: bytes, cols: list[str]) -> list[Any]:
+        """Each grouped column's rows: per container match, one value list per sub."""
+        groups = []
+        for c in cols:
+            container, subs = grouped_spec(c)  # type: ignore[misc]
+            groups.append((container, [(f"s{k}", s) for k, s in enumerate(subs)]))
+        return frostwork.extract_grouped(doc, [], groups, "utf-8", **mode)[1]
+
+    run.grouped = grouped  # type: ignore[attr-defined]
     if mode:
         return run, f"frostwork.extract(..., parser={parser!r})"
     note = "" if parser == "lxml" else f"; --parser {parser} was NOT applied"
     return run, f"frostwork.extract without parser= (the installed extension has no such keyword, so lxml mode{note})"
+
+
+def debug_panics(differ: str, parser: str, docs: list[tuple[str, list[str]]]) -> list[tuple[str, str]]:
+    """The documents on which a DEBUG build of the `differ` bridge panics, with the panic.
+
+    Its `debug_assert!`s are the builder's own invariants (an element the builder still has open is never
+    closed, a live element is open or parked, a tail pass opens every recorded winner). A release build
+    that breaks one returns a value that can still pass, such as a template's outer HTML cut short, which
+    the raw-source allowance excuses. The bridge answers a batch at exit, so a panic shows as the line its
+    output stops at; the run goes on after it in a new process."""
+    import subprocess
+
+    lines: list[tuple[int, str]] = []
+    for k, (rendered, sels) in enumerate(docs):
+        sels = [s for s in sels if "\t" not in s and "\n" not in s]
+        for start in range(0, max(1, len(sels)), 60):   # inside the engine's member budget
+            lines.append((k, "\t".join(["utf-8", rendered.encode("utf-8").hex()] + sels[start:start + 60])))
+    out: list[tuple[str, str]] = []
+    at = 0
+    while at < len(lines):
+        p = subprocess.run([differ, "--parser", parser], input="".join(ln + "\n" for _k, ln in lines[at:]),
+                           capture_output=True, text=True, encoding="utf-8")
+        done = p.stdout.count("\n")
+        if p.returncode == 0 and at + done >= len(lines):
+            break
+        k = lines[at + done][0]
+        err = [ln.strip() for ln in p.stderr.splitlines() if ln.strip()]
+        first = next((i for i, ln in enumerate(err) if "panicked" in ln), 0)
+        out.append((docs[k][0], " ".join(err[first:first + 2]) or f"exit {p.returncode}"))
+        at += done
+        while at < len(lines) and lines[at][0] == k:
+            at += 1
+    return out
 
 
 # ---------------------------------------------------------------- answers, cached per document
@@ -443,13 +649,13 @@ class Answers:
     def fetch_values(self, wanted: dict[str, set[str]]) -> None:
         """Every engine and oracle value `wanted` names: CSS in one browser request, XPath via the bridge."""
         for b, oracle in self.oracles.items():
-            need = {r: sorted(s for s in sels if C.is_css(s) and (b, r, s) not in self.values)
+            need = {r: sorted(s for s in sels if is_native(s) and (b, r, s) not in self.values)
                     for r, sels in wanted.items()}
             need = {r: s for r, s in need.items() if s}
             if need:
                 rs = sorted(need)
                 t0 = time.perf_counter()
-                trees, got = oracle.query(rs, [need[r] for r in rs])
+                trees, got = oracle.query(rs, [[oracle_form(s) for s in need[r]] for r in rs])
                 self.oracle_seconds += time.perf_counter() - t0
                 self.oracle_docs += len(rs)
                 for r, t, row in zip(rs, trees, got):
@@ -461,15 +667,20 @@ class Answers:
                 self.fetch(missing)
         for r, sels in wanted.items():
             need = sorted(s for s in sels if ("engine", r, s) not in self.values)
+            grouped = [s for s in need if grouped_spec(s)]
+            need = [s for s in need if not grouped_spec(s)]
             for start in range(0, len(need), MAX_SELECTORS_PER_PASS):
                 chunk = need[start:start + MAX_SELECTORS_PER_PASS]
                 for s, v in zip(chunk, self.run_engine(r.encode(), chunk, strict=False)):
+                    self.values[("engine", r, s)] = v
+            if grouped:
+                for s, v in zip(grouped, self.run_engine.grouped(r.encode(), grouped)):
                     self.values[("engine", r, s)] = v
 
     def value(self, source: str, rendered: str, sel: str) -> Any:
         key = (source, rendered, sel)
         if key not in self.values:
-            if source == "engine" or C.is_css(sel):
+            if source == "engine" or is_native(sel):
                 self.fetch_values({rendered: {sel}})
             else:
                 br = self.bridge(source, rendered)
@@ -784,7 +995,7 @@ class ValueRepro:
                 names.add(el[0])
         return sorted(n for n in names
                       if re.search(rf"(?<![\w-]){re.escape(n)}(?![\w-])", self.sel)
-                      or any(re.search(rf"<{re.escape(n)}[\s/>]", v) for v in self.oracle))
+                      or any(isinstance(v, str) and re.search(rf"<{re.escape(n)}[\s/>]", v) for v in self.oracle))
 
 
 # The attributes whose values HTML has CSS match ASCII case-insensitively on an HTML element (the HTML
@@ -817,7 +1028,7 @@ def _quirks_class_or_id(r: ValueRepro) -> bool:
 
     Deferred by decision 2 in docs/BROWSER_MODE.md section 8: browser mode builds the quirks-mode TREE,
     but matches class and id selectors case-sensitively in every mode."""
-    if not C.is_css(r.sel) or not r.quirks():
+    if not C.is_css(r.sel) or grouped_spec(r.sel) or not r.quirks():
         return False
     for kind, raw in _CLASS_OR_ID.findall(C.top_level(r.sel)):
         want = C._unescape(raw)
@@ -929,6 +1140,10 @@ class Report:
     value_unseen_tree: dict[str, list[Divergence]] = field(default_factory=dict)
     value_buckets: dict[str, list[Divergence]] = field(default_factory=dict)
     value_novel: list[Divergence] = field(default_factory=list)
+    # the debug build's invariants, when `--debug-differ` names one
+    debug_requested: bool = False
+    debug_checked: int = 0
+    debug_panics: list[tuple[str, str]] = field(default_factory=list)   # (document, panic)
 
 
 def gate_failures(report: Report) -> list[str]:
@@ -981,6 +1196,11 @@ def gate_failures(report: Report) -> list[str]:
     if report.value_novel:
         fails.append(f"value NOVEL = {len(report.value_novel)}: value columns that differ on a tree the "
                      f"fingerprint says is right, and that no value construct explains")
+    if report.debug_requested and report.debug_checked == 0:
+        fails.append("the debug build checked no document")
+    if report.debug_panics:
+        fails.append(f"{len(report.debug_panics)} document(s) on which the debug build panics, e.g. "
+                     f"{report.debug_panics[0]}")
     return fails
 
 
@@ -1153,15 +1373,28 @@ def engine_refusals(sels: list[str], parser: str) -> dict[str, str]:
     kw = seq_sweep.parser_kwargs(parser)
     out = {}
     for s in sels:
-        f = frostwork.check([s], **kw).fields[0]
-        if not f.supported:
-            out[s] = f.reason or "unsupported"
+        spec = grouped_spec(s)
+        if spec:
+            g = frostwork.check([], [(spec[0], [(f"s{k}", sub) for k, sub in enumerate(spec[1])])], **kw).groups[0]
+            fields = [g.container] + list(g.subfields)
+        else:
+            fields = [frostwork.check([s], **kw).fields[0]]
+        bad = [f for f in fields if not f.supported]
+        if bad:
+            out[s] = bad[0].reason or "unsupported"
     return out
 
 
 def value_selectors(d: Doc, decorated: bool, basket: list[str]) -> list[str]:
+    """A document's value columns. One at the depth cap leaves out the basket and the frame's outer HTML:
+    their bare-element columns return hundreds of nested `<div>`s, which no structural comparison parses
+    past libxml2's nesting limit, and the per-id and rule columns are what see the elements after them."""
     sels = id_value_selectors(ids_of(d), decorated)
-    return sels + RULE_SELECTORS + basket if decorated else sels
+    if not decorated:
+        return sels
+    if any(t in DEEP for _i, t in d):
+        return sels + RULE_SELECTORS + GROUPED_COLUMNS
+    return sels + RULE_SELECTORS + FRAME_COLUMNS + GROUPED_COLUMNS + basket
 
 
 def main() -> int:
@@ -1179,6 +1412,9 @@ def main() -> int:
     ap.add_argument("--tabs", type=int, default=8, help="page-load tabs per browser")
     ap.add_argument("--show", type=int, default=25, help="NOVEL shapes to print")
     ap.add_argument("--gate", action="store_true", help="exit nonzero on NOVEL or a coverage failure")
+    ap.add_argument("--debug-differ", default=None,
+                    help="a DEBUG build of the differ bridge (target/debug/differ): every graded document is "
+                         "run through it too, and a panic (a broken builder invariant) fails the gate")
     args = ap.parse_args()
 
     browsers = [b.strip() for b in args.browsers.split(",") if b.strip()]
@@ -1190,11 +1426,13 @@ def main() -> int:
     rdocs, used = random_docs(args.random, args.seed)
     vdocs, vused = value_docs(args.values, args.seed)
     tdocs = tail_docs() if args.values else []
-    vdocs += tdocs
+    sdocs = structured_docs() if args.values else []
+    vdocs += tdocs + sdocs
     docs += rdocs + vdocs
     decorated = {render(d) for d in vdocs}
     report = Report(missing_tokens=[t for t in ALPHABET if args.random and not used[t]],
-                    missing_value_tokens=[t for t in VALUE_TOKENS if args.values and not vused[t]])
+                    missing_value_tokens=[t for t in VALUE_TOKENS if args.values and not vused[t]],
+                    debug_requested=bool(args.debug_differ))
 
     # The value basket: conformant.py's, plus the value-rule selectors, minus what the engine refuses here.
     basket = list(dict.fromkeys(conformant.BASKET))
@@ -1222,7 +1460,7 @@ def main() -> int:
                 oracle.trees(sample, selfcheck=True)
             if vsample:
                 oracle.query([render(d) for d in vsample],
-                             [[s for s in value_selectors(d, True, basket) if C.is_css(s) and s not in refused]
+                             [[oracle_form(s) for s in value_selectors(d, True, basket) if is_native(s) and s not in refused]
                               for d in vsample], selfcheck=True)
 
         graded_docs: list[tuple[Doc, str]] = []
@@ -1267,12 +1505,18 @@ def main() -> int:
                     split_value(Divergence(d, s, ("engine", "chrome")), tree_divergent, report, value_items)
                 if "firefox" in oracles and answers.value_differs(("chrome", "firefox"), r, s):
                     browser_value_items.append(Divergence(d, s, ("chrome", "firefox")))
-                if C.is_css(s):
+                if C.is_css(s) and not grouped_spec(s):
                     mirror_check(answers, r, s, want, report)
         report.rule_never_answered = [s for s in RULE_SELECTORS if s not in refused and not oracle_answered[s]]
         report.rule_refused = [s for s in RULE_SELECTORS if s in refused]
         t_values = time.perf_counter()
 
+        t_debug = time.perf_counter()
+        if args.debug_differ:
+            checked = [(r, seq_sweep.fingerprint_selectors(ids_of(d)) + RULE_SELECTORS) for d, r in graded_docs]
+            report.debug_panics = debug_panics(args.debug_differ, args.parser, checked)
+            report.debug_checked = len(checked)
+        t_debug = time.perf_counter() - t_debug
         reduce_all(engine_items + browser_items, answers)
         reduce_values(value_items + browser_value_items, answers)
         t_reduced = time.perf_counter()
@@ -1293,7 +1537,8 @@ def main() -> int:
     for o in oracles.values():
         print(f"oracle            : {o.build} ({dict(o.paths)})")
     print(f"documents         : {len(docs)} ({len(docs) - len(rdocs) - len(vdocs)} seq_sweep sequences up to "
-          f"depth {args.seq_depth}, {len(rdocs)} random, {len(vdocs)} value of which {len(tdocs)} deferred-tail, "
+          f"depth {args.seq_depth}, {len(rdocs)} random, {len(vdocs)} value of which {len(tdocs)} deferred-tail and "
+          f"{len(sdocs)} structured, "
           f"seed {args.seed}); "
           f"graded {report.graded}")
     if args.random:
@@ -1306,7 +1551,12 @@ def main() -> int:
     print(f"oracle throughput : {answers.oracle_docs} trees in {answers.oracle_seconds:.1f}s = {rate:.0f} docs/s "
           f"(all browsers, reduction candidates included)")
     print(f"wall time         : grading {t_graded - t_start:.1f}s, values {t_values - t_graded:.1f}s, "
-          f"reduction {t_reduced - t_values:.1f}s")
+          f"debug build {t_debug:.1f}s, reduction {t_reduced - t_values - t_debug:.1f}s")
+    if args.debug_differ:
+        print(f"debug build       : {report.debug_checked} documents through {args.debug_differ}, "
+              f"{len(report.debug_panics)} panic")
+        for r, why in report.debug_panics[:args.show]:
+            print(f"    {json.dumps(r)[:160]}  {why[:200]}")
     print(f"self-check        : {report.selfcheck_checked} fast-path documents page-loaded, "
           f"{len(report.selfcheck_differ)} trees and {len(report.selfcheck_css_differ)} CSS answers differ")
     print(f"native CSS        : {report.css_mirror_checked} columns checked against parsel's .css() over the "
@@ -1413,6 +1663,7 @@ def main() -> int:
                           for items in vshapes.values()],
                 "engine_refused": sorted(refused), "basket_oracle_empty": empty,
             },
+            "debug": {"checked": report.debug_checked, "panics": report.debug_panics[:20]},
             "bridge": {"checked": report.bridge_checked, "failures": report.bridge_failures[:20],
                        "unrepresentable": report.bridge_unrepresentable[:20],
                        "xpath_differ": report.bridge_xpath_differ[:20]},

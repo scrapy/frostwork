@@ -168,15 +168,17 @@ gate-seq:
 # graded, a token never emitted, an oracle error, or a DOMParser tree that differs from a page load.
 # It also grades VALUE columns: a selector basket answered with native CSS in the browser and with XPath
 # through the lossless lxml bridge (whose round trip it gates), split by whether the fingerprint already
-# explains a difference.
+# explains a difference. Every graded document also goes through a DEBUG `differ`, whose debug_asserts
+# are the builder's invariants; a panic fails the gate.
 # Not part of `ci`: it needs local browsers, and today's NOVEL list is the work browser mode starts from.
 BROWSERS ?= chrome
 BROWSER_SEQ_DEPTH ?= 2
 BROWSER_RANDOM ?= 1000
 BROWSER_VALUES ?= 1000
 gate-browser: ext
+	cargo build --bin differ
 	$(PY) tools/diff_browser.py --browsers $(BROWSERS) --seq-depth $(BROWSER_SEQ_DEPTH) \
-		--random $(BROWSER_RANDOM) --values $(BROWSER_VALUES) --gate
+		--random $(BROWSER_RANDOM) --values $(BROWSER_VALUES) --debug-differ target/debug/differ --gate
 	$(PY) tools/gen_html5_rules.py --check --live
 
 # "Is every rule cell RIGHT?" is what tools/audit_tree_rules.py answers. This answers "if a cell were
