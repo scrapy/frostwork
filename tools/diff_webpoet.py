@@ -53,6 +53,7 @@ import oracle
 import parsel
 import webpoet_cases
 import webpoet_structure
+from browser_answers import same_values
 from diff_lxml import is_node_query
 from web_poet import (
     BrowserHtml,
@@ -723,17 +724,6 @@ class BrowserAnswers:
         return self._answer(css[("group", container, tuple(subs))], container)
 
 
-def _same_column(mine: list, theirs: list, sel: str) -> bool:
-    if mine == theirs:
-        return True
-    if not is_node_query(sel) or len(mine) != len(theirs):
-        return False
-    try:
-        return all(_structure(a) == _structure(b) for a, b in zip(mine, theirs))
-    except Exception:  # noqa: BLE001
-        return False
-
-
 def engine_differs(html: bytes, name: str, schema) -> bool:
     """Browser mode: does the ENGINE's own column for this field differ from the browser's?"""
     g = schema.get("group")
@@ -745,7 +735,7 @@ def engine_differs(html: bytes, name: str, schema) -> bool:
     if sel is None:
         return False
     mine = frostwork.extract(html, [sel], parser=PARSER, strict=False)[0]
-    return not _same_column(mine, ORACLE.column(html.decode(), sel), sel)
+    return not same_values(mine, ORACLE.column(html.decode(), sel), sel)
 
 
 def _as_node_fields(schema) -> set:
