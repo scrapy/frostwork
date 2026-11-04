@@ -130,7 +130,9 @@ serialisation of its JSON node, because the lxml tree is the document view and l
 `<template>` empty. Namespaces, doctypes, template content and shadow roots live beside the lxml tree, so
 `to_json()` rebuilds the browser's tree exactly. What no map can hold (two adjacent text nodes, which lxml
 would merge) raises `Unrepresentable` and is counted, never graded through lxml. `round_trip_failures` is
-the round-trip gate's decision function, seeded in `tests/test_gates.py` with lossy bridges.
+the round-trip gate's decision function, seeded in `tests/test_gates.py` with lossy bridges. The gates ask
+through `open_bridge` and `xpath_answer`, so a page that failed to load, a tree lxml cannot hold and a query
+lxml rejects each come back as a `Refused` with its reason, never as an empty column.
 
 `browser_oracle/tree.py` evaluates the fingerprint's XPath columns over the browser's JSON tree itself,
 with lxml's XPath semantics. `document_view` drops HTML template content and shadow roots, which no
@@ -138,7 +140,9 @@ selector reaches. The evaluator implements only the shapes `seq_sweep.fingerprin
 raises on any other, and `from_lxml` converts lxml's own tree to the same format so
 `tests/test_gates.py` can prove the evaluator returns parsel's answers on lxml's trees. Widen the
 evaluator and that test together whenever the fingerprint gains a shape. Every other XPath column goes
-through the bridge, and `diff_browser` checks on every run that the two agree on the fingerprint.
+through the bridge, and `diff_browser` checks on every run that the two agree on the fingerprint. The
+same module reads a tree's document mode from its doctype (`is_quirks`) and lists its elements
+(`elements`), which the value constructs and the CSS mirror check use.
 
 `diff_browser.py` is the browser differential (`make gate-browser`). It grades the engine on
 `seq_sweep`'s fingerprint against Chrome's tree, over `seq_sweep`'s short sequences plus seeded random

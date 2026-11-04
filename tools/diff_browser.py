@@ -621,10 +621,10 @@ def smallest(items: list[Divergence]) -> Divergence:
     return min(items, key=lambda d: (len(d.repro), render(d.repro)))
 
 
-def table_row(name: str, items: list[Divergence], width: int, *, plain: bool, example: str = "") -> str:
+def table_row(name: str, items: list[Divergence], width: int, *, plain: bool, smallest_example: str = "") -> str:
     """One row of a construct table: columns, documents, reduced shapes, and the smallest example if given."""
     row = f"  {name:<{width}} {len(items):>8} {documents_in(items):>6} {len(by_shape(items, plain=plain)):>7}"
-    return f"{row}  {example}" if example else row
+    return f"{row}  {smallest_example}" if smallest_example else row
 
 
 def print_shapes(shapes: dict, answers: Answers, show: int, *, value: bool = False) -> None:
@@ -679,7 +679,7 @@ def print_tree_report(run: Run, report: Report) -> None:
 
     print(f"\n  {'construct (section 3)':<34} {'columns':>8} {'docs':>6} {'shapes':>7}  smallest example")
     for name, items in sorted(report.buckets.items(), key=lambda kv: -len(kv[1])):
-        print(table_row(name, items, 34, plain=True, example=example(smallest(items), answers)))
+        print(table_row(name, items, 34, plain=True, smallest_example=example(smallest(items), answers)))
     print(table_row("NOVEL", report.novel, 34, plain=True))
     shapes = by_shape(report.novel, plain=True)
     if shapes:
@@ -729,7 +729,7 @@ def print_value_report(run: Run, report: Report) -> None:
     print("  VALUE (the fingerprint agrees):")
     print(f"  {'value construct':<46} {'columns':>8} {'docs':>6} {'shapes':>7}  smallest example")
     for name, items in sorted(report.value_buckets.items(), key=lambda kv: -len(kv[1])):
-        print(table_row(name, items, 46, plain=False, example=example(smallest(items), answers, value=True)))
+        print(table_row(name, items, 46, plain=False, smallest_example=example(smallest(items), answers, value=True)))
     print(table_row("value NOVEL", report.value_novel, 46, plain=False))
     shapes = by_shape(report.value_novel)
     if shapes:
