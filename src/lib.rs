@@ -3773,4 +3773,90 @@ mod browser_mode_tests {
         assert_eq!(ex(sc, "selectedcontent:has(b) ::text"), v(&["A", "t"]));
         assert_eq!(ex(sc, "button:has(b) b::text"), v(&["A"]));
     }
+
+    /// At end of input the insertion mode's "anything else" still runs, so a document that ends before
+    /// the body has all three frame elements, streamed and replayed. A grouped row is how an element
+    /// with no attribute and no text shows: Chrome answers `[[[]]]` for every group below.
+    #[test]
+    fn the_frame_is_finished_at_end_of_input() {
+        let rows = |html: &[u8], container: &str| {
+            let g = GroupQuery { container: container.to_string(), subfields: vec![("t".to_string(), "::text".to_string())] };
+            Plan::compile::<String>(&[], &[g]).extract(html, None, None).1.pop().unwrap().len()
+        };
+        for h in [&b""[..], b"<!DOCTYPE html>", b"<!--c-->", b"<title>T</title>", b"<title>T", b"<head></head>", b"</head>"] {
+            for frame in ["html", "head", "body"] {
+                assert_eq!(rows(h, frame), 1, "{frame} in {:?}", std::str::from_utf8(h));
+            }
+        }
+        // the head is not the last child
+        assert_eq!(ex(b"<head id=h></head>", "#h:last-child::attr(id)"), NONE);
+        assert_eq!(ex(b"<head id=h></head>", "#h:only-child::attr(id)"), NONE);
+        assert_eq!(ex(b"<head id=h></head>", "#h:first-child::attr(id)"), v(&["h"]));
+        // an unterminated text element and template content close, and the head then ends
+        assert_eq!(ex(b"<html id=r><title id=t>T", "#r:has(> body)::attr(id)"), v(&["r"]));
+        assert_eq!(ex(b"<html id=r><title id=t>T", "head > #t::text"), v(&["T"]));
+        assert_eq!(ex(b"<html id=r><template id=t>x", "#r:has(> body)::attr(id)"), v(&["r"]));
+        assert_eq!(ex(b"<html id=r><template id=t>x", "#t:last-child::attr(id)"), v(&["t"]));
+        assert_eq!(ex(b"<textarea id=t>x", "body > #t::text"), v(&["x"]));
+        // a frameset has no body
+        assert_eq!(ex(b"<html id=r><head></head><frameset id=f>", "#r:has(> body)::attr(id)"), NONE);
+        assert_eq!(ex(b"<html id=r><head></head><frameset id=f>", "#r > :last-child::attr(id)"), v(&["f"]));
+        // the replay (a later <html> adds an attribute a selector asks about) finishes it too
+        assert_eq!(ex(b"<html id=r><html class=k><title>T</title>", ".k:has(> body)::attr(id)"), v(&["r"]));
+        assert_eq!(ex(b"<html id=r><html class=k><head id=h></head>", ".k > :last-child::attr(id)"), NONE);
+        assert_eq!(ex(b"<html id=r><html class=k><head id=h></head>", ".k:has(> body)::attr(class)"), v(&["k"]));
+    }
+
+    /// A comment in template content written after `</head>` is the template's: it leaves the
+    /// template open and `<html>`'s whitespace held. (A debug build used to panic here.)
+    #[test]
+    fn a_comment_in_template_content_after_the_head_stays_there() {
+        let h = b"<!DOCTYPE html><html><head></head> <template id=t><!--c--><p>x</p></template> <body><p id=p>y</p>";
+        assert_eq!(ex(h, "#t"), v(&["<template id=t><!--c--><p>x</p></template>"]));
+        assert_eq!(ex(h, "html::text"), v(&["  "]));
+        assert_eq!(ex(h, "head > #t::attr(id)"), v(&["t"]));
+        assert_eq!(ex(h, "#p::text"), v(&["y"]));
+    }
+
+    /// A comment in "after head" is a node of `<html>`, so it ends `<html>`'s whitespace node there. Head
+    /// content written after the node still goes into the head, so it comes first in document order.
+    #[test]
+    fn a_comment_after_the_head_splits_the_html_whitespace() {
+        let h = b"<!DOCTYPE html><html><head></head> <!--c--><script></script> <body>";
+        assert_eq!(ex(h, "html::text"), v(&[" ", " "]));
+        let h = b"<html><head></head> <!--c-->\t<style>s</style>\n<body>";
+        assert_eq!(ex(h, "*::text"), v(&["s", " ", "\t\n"]));
+        assert_eq!(ex(h, "html::text"), v(&[" ", "\t\n"]));
+        let h = b"<html><head></head>\t<style>s</style> <!--c-->\n<style>u</style>\r<body>";
+        assert_eq!(ex(h, "*::text"), v(&["s", "u", "\t ", "\n\n"]));
+        // at end of input, with no body tag
+        let h = b"<html><head></head>\t<!--c--> <script>s</script>";
+        assert_eq!(ex(h, "*::text"), v(&["s", "\t", " "]));
+    }
+
+    /// A formatting element's copy and the copy reconstruction makes inside it begin at one offset, with
+    /// the text that made them; every column orders them as the document does, outer first.
+    #[test]
+    fn values_at_one_offset_come_out_in_document_order() {
+        // body > [p > b#b > ["1", i#i > "2"], b#b > i#i > "3"]
+        let h = b"<!DOCTYPE html><p><b id=b>1<i id=i>2</p>3";
+        assert_eq!(ex(h, "*:last-child::attr(id)"), v(&["b", "i", "b", "i"]));
+        assert_eq!(ex(h, "[id]:nth-last-child(1)::attr(id)"), v(&["b", "i", "b", "i"]));
+        // raw source: a copy's outer HTML is its original's start tag and its own content
+        assert_eq!(ex(h, "b, i"), v(&["<b id=b>1<i id=i>2", "<i id=i>2", "<b id=b>3", "<i id=i>3"]));
+        let c = b"<!DOCTYPE html><p><b id=b>1<i id=i>2</p>3<b id=c>";
+        assert_eq!(ex(c, "b, i"), v(&["<b id=b>1<i id=i>2", "<i id=i>2", "<b id=b>3<b id=c>", "<i id=i>3<b id=c>", "<b id=c>"]));
+        assert_eq!(ex(c, "b:has(i)::attr(id)"), v(&["b", "b"]));
+    }
+
+    /// The adoption agency can move all of a formatting element's content into its copy; the replay
+    /// still gives the element its own start tag as its outer HTML (Chrome: `<a id="a" href="x"></a>`).
+    #[test]
+    fn an_element_the_adoption_agency_empties_keeps_its_start_tag() {
+        let a = b"<!DOCTYPE html><a id=a href=x><div id=d>t</a>t";
+        assert_eq!(ex(a, "#a"), v(&["<a id=a href=x>", "<a id=a href=x></a>"]));
+        assert_eq!(ex(a, "#a::text"), v(&["t"]));
+        let b = b"<!DOCTYPE html><b id=b><div id=d></b>";
+        assert_eq!(ex(b, "#b"), v(&["<b id=b>", "<b id=b></b>"]));
+    }
 }

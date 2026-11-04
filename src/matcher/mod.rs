@@ -289,6 +289,22 @@ static NO_COLD: ColdState = ColdState {
     txt_emit: Vec::new(),
 };
 
+/// Where a value sits in document order: the offset of its node (in a browser-mode replay, the node's
+/// rank), then, for an element's own value (an attribute, its outer HTML), the order the element opened
+/// in. Elements can begin at one offset (a formatting element's copy and the copy inside it, the frame
+/// a first tag implies), and they open in document order; a text node follows every element that
+/// begins where it does.
+type DocPos = (usize, u32);
+const TEXT_SEQ: u32 = u32::MAX;
+
+/// The [`DocPos`] tie-break of a value of `terminal` from the element opened `elem`-th.
+fn value_seq(terminal: &Terminal, elem: u32) -> u32 {
+    match terminal {
+        Terminal::Text { .. } => TEXT_SEQ,
+        Terminal::Attr { .. } | Terminal::OuterHtml | Terminal::NormalizeSpace(_) => elem,
+    }
+}
+
 /// Retain one decoded value for every set entry bit. Each entry ultimately owns a `String`, so clone
 /// for all but the final destination and move the original there; the common one-entry case copies
 /// nothing.
@@ -1076,18 +1092,19 @@ pub struct Matcher<'a> {
     // The document bytes and the encoding that decodes them, as one value (`EncodedInput`).
     // Raw-source outer-HTML fragments are sliced out of it; emitted values are decoded with it.
     input: EncodedInput<'a>,
-    /// `(start, end, dest, prefix)` raw-source spans, sorted at finish. `prefix` is a span read before
-    /// `start..end`, the start tag of the element a browser-mode clone was made from (`(0, 0)`: none).
-    captures: Vec<(usize, usize, Dest, (usize, usize))>,
+    /// `(pos, end, dest, prefix)` raw-source spans, sorted by `pos` at finish: the span is
+    /// `pos.0..end`, and `prefix` is a span read before it, the start tag of the element a browser-mode
+    /// clone was made from (`(0, 0)`: none).
+    captures: Vec<(DocPos, usize, Dest, (usize, usize))>,
     // Must a non-ASCII attribute NAME be decoded before it is compared? Only when the schema spells one
     // that way and the page is byte-scanned under a legacy encoding — see `interesting_name`.
     decode_names: bool,
-    // Values for MIXED columns (`schema.mix_cols`), held as `(col, offset, value)` until finish. A comma
+    // Values for MIXED columns (`schema.mix_cols`), held as `(col, pos, value)` until finish. A comma
     // group can carry both a streamed member and a deferred-close one, and the two produce their values
     // at different times — during the pass, and at the subject's close. Appending would order the column
-    // by member; lxml orders a union by document position. Flushed sorted and deduped on `(col, offset)`,
+    // by member; lxml orders a union by document position. Flushed sorted and deduped on `(col, pos)`,
     // which is a node identity only because `uniform_node_terminal` gates the column.
-    mixed: Vec<(usize, usize, String)>,
+    mixed: Vec<(usize, DocPos, String)>,
     // Satisfied first-value columns, plus finalized outer-HTML columns when early exit is armed.
     // Ordinary all-value schemas leave this zero. Outer-HTML scatters directly at finish, so the
     // streaming emitters can skip every bit here without masking an all-value or deferred column.
@@ -1108,10 +1125,10 @@ pub struct Matcher<'a> {
     // OPEN element plus a leading document frame; each frame is `[n_child_elems, count(tag0), …]` over
     // `positional_tags`. Frame index = the child's own stack depth (`top`); frame 0 = the document.
     pos: Vec<u32>,
-    // Deferred reverse-positional output: resolved `(col, offset, value)` triples, sorted by offset per
-    // column at finish (a reverse value can be committed OUT of document order — e.g. a nested last-child
-    // resolves before an outer one). Empty unless `has_reverse`.
-    pending: Vec<(usize, usize, String)>,
+    // Deferred output: resolved `(col, pos, value)` triples, sorted by position per column at finish (a
+    // deferred value can be committed OUT of document order — e.g. a nested last-child resolves before
+    // an outer one).
+    pending: Vec<(usize, DocPos, String)>,
     // Reverse candidates whose subject is a TOP-LEVEL element (parent = the document); resolved at finish
     // against the document frame's totals, since there is no parent `OpenElem` to hang them on.
     doc_rev_pending: Vec<RevPend>,
@@ -2003,10 +2020,10 @@ impl<'a> Matcher<'a> {
         while cols != 0 {
             let col = cols.trailing_zeros() as usize;
             cols &= cols - 1;
-            self.captures.push((e.start, end, Dest::Flat(col), prefix));
+            self.captures.push(((e.start, e.elem), end, Dest::Flat(col), prefix));
         }
         for &(seq, sub) in &e.cold().gcaps {
-            self.captures.push((e.start, end, Dest::Grouped { seq, sub }, prefix));
+            self.captures.push(((e.start, e.elem), end, Dest::Grouped { seq, sub }, prefix));
         }
         for _ in 0..e.insts {
             let oi = self.open_instances.pop().expect("instance stack tracks element stack");
@@ -2040,8 +2057,9 @@ impl<'a> Matcher<'a> {
                         // share carries this column too
                         Tail::Merged => {}
                         Tail::Streamed => {
+                            let seq = value_seq(&re.terminal, cand.elem);
                             for (off, v) in cand.vals {
-                                self.pending.push((re.col, off, v));
+                                self.pending.push((re.col, (off, seq), v));
                             }
                         }
                     }
@@ -2121,12 +2139,13 @@ impl<'a> Matcher<'a> {
                     Tail::Merged => {}
                     Tail::Streamed if matches!(he.terminal, Terminal::OuterHtml) => {
                         let val = self.source(e.cold().prefix, e.start..end);
-                        self.pending.push((he.col, e.start, val));
+                        self.pending.push((he.col, (e.start, e.elem), val));
                     }
                     Tail::Streamed => {
+                        let seq = value_seq(&he.terminal, e.elem);
                         for (eh, off, v) in &e.cold().has_buf {
                             if *eh == h {
-                                self.pending.push((he.col, *off, v.clone()));
+                                self.pending.push((he.col, (*off, seq), v.clone()));
                             }
                         }
                     }
@@ -2166,12 +2185,13 @@ impl<'a> Matcher<'a> {
                     Tail::Streamed => match te.terminal {
                         Terminal::OuterHtml => {
                             let val = self.source(e.cold().prefix, e.start..end);
-                            self.pending.push((te.col, e.start, val));
+                            self.pending.push((te.col, (e.start, e.elem), val));
                         }
                         Terminal::Attr { .. } | Terminal::Text { .. } => {
+                            let seq = value_seq(&te.terminal, e.elem);
                             for (et, off, v) in &e.cold().txt_emit {
                                 if *et == t {
-                                    self.pending.push((te.col, *off, v.clone()));
+                                    self.pending.push((te.col, (*off, seq), v.clone()));
                                 }
                             }
                         }
@@ -2228,8 +2248,9 @@ impl<'a> Matcher<'a> {
                             Tail::Rescan(slot) => self.tail_winner(slot, cand.span, cand.elem),
                             Tail::Merged => {}
                             Tail::Streamed => {
+                                let seq = value_seq(&re.terminal, cand.elem);
                                 for (off, v) in &cand.vals {
-                                    self.pending.push((re.col, *off, v.clone()));
+                                    self.pending.push((re.col, (*off, seq), v.clone()));
                                 }
                             }
                         }
@@ -2239,9 +2260,9 @@ impl<'a> Matcher<'a> {
             self.resolve_tails();
             if !self.pending.is_empty() {
                 let mut pend = std::mem::take(&mut self.pending);
-                pend.sort_by_key(|&(col, off, _)| (col, off));
-                for (col, off, v) in pend {
-                    self.emit_flat(col, off, v);
+                pend.sort_by_key(|&(col, pos, _)| (col, pos));
+                for (col, pos, v) in pend {
+                    self.emit_flat(col, pos, v);
                 }
             }
         }
@@ -2255,9 +2276,9 @@ impl<'a> Matcher<'a> {
                 }
             }
             // outer-HTML fragments emit in element START order (document order = lxml node order);
-            // pop order is inner-first, so sort by start before scattering.
-            self.captures.sort_by_key(|&(start, _, _, _)| start);
-            for (start, end, dest, prefix) in std::mem::take(&mut self.captures) {
+            // pop order is inner-first, so sort by position before scattering.
+            self.captures.sort_by_key(|&(pos, _, _, _)| pos);
+            for ((start, _), end, dest, prefix) in std::mem::take(&mut self.captures) {
                 let val = self.source(prefix, start..end);
                 match dest {
                     Dest::Flat(col) => self.results[col].push(val),
@@ -2277,7 +2298,7 @@ impl<'a> Matcher<'a> {
         // values that legitimately share an offset keep the order they were produced in.
         if !self.mixed.is_empty() {
             let mut mixed = std::mem::take(&mut self.mixed);
-            mixed.sort_by_key(|&(col, off, _)| (col, off));
+            mixed.sort_by_key(|&(col, pos, _)| (col, pos));
             mixed.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
             for (col, _off, v) in mixed {
                 self.results[col].push(v);
@@ -2310,13 +2331,13 @@ impl<'a> Matcher<'a> {
     /// merged at finish (see [`Self::mixed`]); every other column appends, which is already document
     /// order because the streaming pass emits in it.
     #[inline]
-    fn emit_flat(&mut self, col: usize, off: usize, v: String) {
+    fn emit_flat(&mut self, col: usize, pos: DocPos, v: String) {
         let bit = 1u128 << col;
         if self.satisfied & bit != 0 {
             return;
         }
         if self.schema.mix_cols >> col & 1 != 0 {
-            self.mixed.push((col, off, v));
+            self.mixed.push((col, pos, v));
         } else {
             self.results[col].push(v);
             if self.schema.first_mask != 0 {
@@ -2464,7 +2485,7 @@ impl<'a> Matcher<'a> {
         // so the same attribute node selected by several members appears once. `::text` members of the
         // same column emit separately in `text()`; both stream in document order, so the merged column
         // matches lxml's union. Collect first, then push, to keep the `self.stack` borrow read-only.
-        let mut pushes: Vec<(usize, usize, String)> = Vec::new();
+        let mut pushes: Vec<(usize, DocPos, String)> = Vec::new();
         {
             let el = &self.stack[top];
             let mut done: Vec<(usize, &[u8])> = Vec::new(); // (col, attr-name) already emitted here
@@ -2490,12 +2511,12 @@ impl<'a> Matcher<'a> {
                         continue;
                     }
                     done.push((cs.col, aname));
-                    pushes.push((cs.col, el.start, entry.1.to_string()));
+                    pushes.push((cs.col, (el.start, el.elem), entry.1.to_string()));
                 }
             }
         }
-        for (col, off, v) in pushes {
-            self.emit_flat(col, off, v);
+        for (col, pos, v) in pushes {
+            self.emit_flat(col, pos, v);
         }
         if self.schema.has_ns {
             self.ns_attr(top);
@@ -3217,13 +3238,13 @@ impl<'a> Matcher<'a> {
             return;
         }
         if colmask.count_ones() == 1 {
-            self.emit_flat(colmask.trailing_zeros() as usize, off, out); // common case: move, no clone
+            self.emit_flat(colmask.trailing_zeros() as usize, (off, TEXT_SEQ), out); // common case: move, no clone
         } else {
             let mut m = colmask;
             while m != 0 {
                 let col = m.trailing_zeros() as usize;
                 m &= m - 1;
-                self.emit_flat(col, off, out.clone());
+                self.emit_flat(col, (off, TEXT_SEQ), out.clone());
             }
         }
     }

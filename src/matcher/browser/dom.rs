@@ -20,9 +20,11 @@ pub(super) struct Elem<'a> {
     pub(super) class: u8,
     pub(super) attrs: RawAttrs<'a>,
     /// Raw source: from the start tag, or the token that inserted an element the page never wrote, to
-    /// where it was popped. An element that leaves the stack another way ends with its content.
+    /// where it was popped. An element that leaves the stack another way ends with its content, and no
+    /// earlier than its own start tag (`open_end`).
     start: usize,
     end: usize,
+    open_end: usize,
     /// The start tag a copy was made from, read before its own source.
     prefix: (usize, usize),
 }
@@ -68,7 +70,7 @@ impl<'a> Dom<'a> {
 
     /// A new element, not yet in the tree.
     pub(super) fn element(&mut self, name: &'a [u8], class: u8, attrs: RawAttrs<'a>, start: usize) -> u32 {
-        self.push(Kind::Element(Elem { name, class, attrs, start, end: OPEN, prefix: (0, 0) }))
+        self.push(Kind::Element(Elem { name, class, attrs, start, end: OPEN, open_end: start, prefix: (0, 0) }))
     }
 
     pub(super) fn elem(&self, id: u32) -> Option<&Elem<'a>> {
@@ -107,6 +109,11 @@ impl<'a> Dom<'a> {
 
     pub(super) fn set_prefix(&mut self, id: u32, prefix: (usize, usize)) {
         self.elem_mut(id).prefix = prefix;
+    }
+
+    /// The element's start tag ends at `end`.
+    pub(super) fn set_open_end(&mut self, id: u32, end: usize) {
+        self.elem_mut(id).open_end = end;
     }
 
     /// The element has left the stack of open elements at `end` (the first time only: an element is
@@ -210,6 +217,7 @@ impl<'a> Dom<'a> {
                 attrs: e.attrs.clone(),
                 start: e.start,
                 end: e.end,
+                open_end: e.open_end,
                 prefix: e.prefix,
             }),
             Kind::Text(runs) => Kind::Text(runs.clone()),
@@ -337,7 +345,7 @@ impl<'a> Dom<'a> {
             loop {
                 if let Some(e) = self.elem(cur) {
                     let (r, furthest) = open.pop().expect("an element is open");
-                    let end = if e.end == OPEN { furthest.max(e.start) } else { e.end };
+                    let end = if e.end == OPEN { furthest.max(e.open_end) } else { e.end };
                     if let Some(top) = open.last_mut() {
                         top.1 = top.1.max(end);
                     }
