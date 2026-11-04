@@ -82,8 +82,8 @@ use crate::implied_close::{
 };
 use lists::{Bound, Formatting, OpenStack};
 use crate::tokenizer::DataMode;
-use tags::{lower, tag_of, Tag};
-pub(super) use tags::{namespaced_foreign_attr, svg_attr_name, svg_local_name};
+use tags::{tag_of, tag_of_lower, Tag};
+pub(super) use tags::{lower, namespaced_foreign_attr, svg_attr_name, svg_local_name, MAX_NAME};
 
 type Attrs<'a> = [(&'a [u8], Option<&'a [u8]>)];
 
@@ -151,7 +151,7 @@ const HAS_CHILD: u8 = 1 << 4;
 const SYNTH: u8 = 1 << 5;
 
 /// One entry of the HTML5 stack of open elements.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 struct Node<'a> {
     /// The element's name as the matcher sees it: as written, or the camel-case SVG name.
     name: &'a [u8],
@@ -160,6 +160,8 @@ struct Node<'a> {
     /// `html5_cat` for an HTML element; special and scope for a foreign integration point.
     cat: u16,
     flags: u8,
+    /// How the tokenizer reads the element's content.
+    data: DataMode,
     uid: u32,
     vis: Vis,
     /// While `vis` is `Live`: its depth on the matcher stack when streaming, its node in the replay's
@@ -212,6 +214,8 @@ struct Seg<'a> {
 
 struct StartTok<'a, 't> {
     name: &'a [u8],
+    /// `name` ASCII-lowercased, or `None` when it is longer than any name the tables know.
+    low: Option<&'t [u8]>,
     tag: Tag,
     attrs: &'t Attrs<'a>,
     self_closing: bool,
@@ -479,14 +483,13 @@ impl<const REPLAY: bool> Browser<'_, REPLAY> {
 impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
     // ------------------------------------------------------------------ nodes
 
-    fn new_node(&mut self, name: &'a [u8], tag: Tag, ns: Ns, attrs: &Attrs<'a>) -> Node<'a> {
+    /// A stack entry for an element named `name`, which is `low` lowercased (see [`StartTok::low`]).
+    fn new_node(&mut self, name: &'a [u8], low: Option<&[u8]>, tag: Tag, ns: Ns, attrs: &Attrs<'a>) -> Node<'a> {
         let uid = self.next_uid;
         self.next_uid += 1;
-        let mut buf = [0; 24];
-        let low = lower(name, &mut buf);
         let ip = SPECIAL | SCOPE | LIST_ITEM_SCOPE | BUTTON_SCOPE;
         let (tag, cat, flags) = match ns {
-            Ns::Html => (tag, low.map_or_else(|| html5_cat(b""), html5_cat), 0),
+            Ns::Html => (tag, html5_cat(low.unwrap_or(b"")), 0),
             Ns::Svg => match low {
                 Some(b"foreignobject" | b"desc" | b"title") => (Tag::Other, ip, HTML_IP),
                 _ => (Tag::Other, 0, 0),
@@ -503,7 +506,11 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
                 _ => (Tag::Other, 0, 0),
             },
         };
-        Node { name, tag, ns, cat, flags, uid, vis: Vis::Live, depth: 0 }
+        let data = match ns {
+            Ns::Html => low.map_or(DataMode::Normal, html5_data_mode),
+            Ns::Svg | Ns::MathMl => DataMode::Normal,
+        };
+        Node { name, tag, ns, cat, flags, data, uid, vis: Vis::Live, depth: 0 }
     }
 
     fn cur(&self) -> &Node<'a> {
@@ -732,12 +739,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
                 }
             }
         }
-        if node.ns == Ns::Html {
-            let mut buf = [0; 24];
-            self.data = lower(node.name, &mut buf).map_or(DataMode::Normal, html5_data_mode);
-        } else {
-            self.data = DataMode::Normal;
-        }
+        self.data = node.data;
         self.stack.push(node);
     }
 
@@ -760,7 +762,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
 
     /// Insert an HTML element for a start tag.
     fn insert_html(&mut self, m: &mut Matcher<'a>, t: &StartTok<'a, '_>) {
-        let node = self.new_node(t.name, t.tag, Ns::Html, t.attrs);
+        let node = self.new_node(t.name, t.low, t.tag, Ns::Html, t.attrs);
         self.insert_node(m, node, t.attrs, t.start);
         self.dom_open_end(t.end);
     }
@@ -774,7 +776,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
 
     /// Insert an element the page never wrote (no attributes, no source of its own), at `at`.
     fn insert_synth(&mut self, m: &mut Matcher<'a>, name: &'static [u8], tag: Tag, at: usize) {
-        let mut node = self.new_node(name, tag, Ns::Html, &[]);
+        let mut node = self.new_node(name, Some(name), tag, Ns::Html, &[]);
         node.flags |= SYNTH;
         self.insert_node(m, node, &[], at);
     }
@@ -788,10 +790,10 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
 
     fn insert_foreign(&mut self, m: &mut Matcher<'a>, t: &StartTok<'a, '_>, ns: Ns) {
         let name = match ns {
-            Ns::Svg => tags::svg_local_name(t.name).unwrap_or(t.name),
+            Ns::Svg => t.low.and_then(tags::svg_camel_case).unwrap_or(t.name),
             _ => t.name,
         };
-        let node = self.new_node(name, Tag::Other, ns, t.attrs);
+        let node = self.new_node(name, t.low, Tag::Other, ns, t.attrs);
         self.insert_node(m, node, t.attrs, t.start);
         self.dom_open_end(t.end);
         if t.self_closing {
@@ -1030,7 +1032,8 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
             let Afe::El { tok, .. } = self.afe[j] else { unreachable!("a marker is open") };
             let (name, tag) = (self.toks[tok as usize].name, self.toks[tok as usize].tag);
             let attrs = std::mem::take(&mut self.toks[tok as usize].attrs);
-            let node = self.new_node(name, tag, Ns::Html, &attrs);
+            let mut buf = [0; MAX_NAME];
+            let node = self.new_node(name, lower(name, &mut buf), tag, Ns::Html, &attrs);
             let uid = node.uid;
             self.insert_node(m, node, &attrs, at);
             let span = self.toks[tok as usize].span;
@@ -1207,7 +1210,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
         while a != dom::NIL {
             let e = self.dom.elem(a)?;
             if e.class == super::HTML_ELEMENT {
-                let mut buf = [0; 24];
+                let mut buf = [0; MAX_NAME];
                 match lower(e.name, &mut buf) {
                     Some(b"select") => return Some(a),
                     Some(b"option") => return None,
@@ -1350,7 +1353,10 @@ impl<'a, const REPLAY: bool> TreeBuilder<'a> for Browser<'a, REPLAY> {
         self.skip_lf = false;
         self.touched = false;
         self.data = DataMode::Normal;
-        let t = StartTok { name, tag: tag_of(name), attrs: raw_attrs, self_closing, start: span_start, end: open_end };
+        let mut buf = [0; MAX_NAME];
+        let low = lower(name, &mut buf);
+        let tag = low.map_or(Tag::Other, tag_of_lower);
+        let t = StartTok { name, low, tag, attrs: raw_attrs, self_closing, start: span_start, end: open_end };
         let before = self.stack.last().map(|n| n.uid);
         self.start(m, &t);
         if !self.touched {

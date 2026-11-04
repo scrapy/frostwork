@@ -123,10 +123,10 @@ pub(super) enum Tag {
 }
 
 /// The longest name [`lower`] keeps: longer than every name a table here is keyed by.
-const MAX_NAME: usize = 24;
+pub(in crate::matcher) const MAX_NAME: usize = 24;
 
 /// `name` ASCII-lowercased into `buf`, or `None` when it is too long to be any name these tables know.
-pub(super) fn lower<'b>(name: &[u8], buf: &'b mut [u8; MAX_NAME]) -> Option<&'b [u8]> {
+pub(in crate::matcher) fn lower<'b>(name: &[u8], buf: &'b mut [u8; MAX_NAME]) -> Option<&'b [u8]> {
     let out = buf.get_mut(..name.len())?;
     for (o, &c) in out.iter_mut().zip(name) {
         *o = c.to_ascii_lowercase();
@@ -140,7 +140,8 @@ pub(super) fn tag_of(name: &[u8]) -> Tag {
     lower(name, &mut buf).map_or(Tag::Other, tag_of_lower)
 }
 
-fn tag_of_lower(name: &[u8]) -> Tag {
+/// The [`Tag`] of an ASCII-lowercased tag name.
+pub(super) fn tag_of_lower(name: &[u8]) -> Tag {
     match name {
         b"a" => Tag::A,
         b"address" => Tag::Address,
@@ -284,7 +285,11 @@ pub(super) fn font_breaks_out(attrs: &[(&[u8], Option<&[u8]>)]) -> bool {
 /// The local name of an SVG element: HTML5 restores the camel case of the SVG names that have it.
 pub(in crate::matcher) fn svg_local_name(name: &[u8]) -> Option<&'static [u8]> {
     let mut buf = [0; MAX_NAME];
-    let low = lower(name, &mut buf)?;
+    svg_camel_case(lower(name, &mut buf)?)
+}
+
+/// [`svg_local_name`] of an ASCII-lowercased name.
+pub(super) fn svg_camel_case(low: &[u8]) -> Option<&'static [u8]> {
     Some(match low {
         b"altglyph" => b"altGlyph",
         b"altglyphdef" => b"altGlyphDef",

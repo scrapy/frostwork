@@ -3,7 +3,7 @@
 //! is on. Each function is one section of the spec; "process using the rules for X" is a call, and
 //! "reprocess" a call after switching modes.
 
-use super::tags::{breaks_out, font_breaks_out, Tag};
+use super::tags::{breaks_out, font_breaks_out, lower, Tag, MAX_NAME};
 use super::lists::Bound;
 use super::{
     ends_frameset_ok, has_content, ws_at, ws_prefix, Afe, Browser, EndTok, Mode, Node, Ns, StartTok, Vis, CENSUS_MERGE_ANY, HAS_CHILD,
@@ -19,8 +19,8 @@ const CELLS: [Tag; 2] = [Tag::Td, Tag::Th];
 
 /// The names `attachShadow()` accepts as a host, besides a custom element.
 fn valid_shadow_host(name: &[u8]) -> bool {
-    let mut buf = [0; 24];
-    let Some(low) = super::tags::lower(name, &mut buf) else { return custom_element_name(name) };
+    let mut buf = [0; MAX_NAME];
+    let Some(low) = lower(name, &mut buf) else { return custom_element_name(name) };
     matches!(
         low,
         b"article" | b"aside" | b"blockquote" | b"body" | b"div" | b"footer" | b"h1" | b"h2" | b"h3" | b"h4"
@@ -255,7 +255,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
             && !matches!(self.location(), super::Loc::Foster(_));
         if attaches {
             self.stack[host].flags |= SHADOW_HOST;
-            let mut node = self.new_node(t.name, t.tag, Ns::Html, t.attrs);
+            let mut node = self.new_node(t.name, t.low, t.tag, Ns::Html, t.attrs);
             node.vis = Vis::Inert;
             self.stack.push(node);
         } else {
@@ -431,7 +431,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
                 self.frameset_ok = false;
             }
             Tag::Image => {
-                let img = StartTok { name: b"img", tag: Tag::Img, ..*t };
+                let img = StartTok { name: b"img", low: Some(b"img"), tag: Tag::Img, ..*t };
                 self.in_body_start(m, &img)
             }
             Tag::Textarea => {
@@ -894,7 +894,15 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
             }
             Tag::Br => {
                 // `</br>` is a `<br>` with no attributes.
-                let br = StartTok { name: b"br", tag: Tag::Br, attrs: &[], self_closing: false, start: t.start, end: t.end };
+                let br = StartTok {
+                    name: b"br",
+                    low: Some(b"br"),
+                    tag: Tag::Br,
+                    attrs: &[],
+                    self_closing: false,
+                    start: t.start,
+                    end: t.end,
+                };
                 self.reconstruct(m, t.start);
                 self.insert_void(m, &br);
                 self.frameset_ok = false;
@@ -1062,7 +1070,8 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
     /// replay's tree when replaying.
     fn clone_node(&mut self, tok: u32, inert: bool, at: usize) -> Node<'a> {
         let (name, tag) = (self.toks[tok as usize].name, self.toks[tok as usize].tag);
-        let mut node = self.new_node(name, tag, Ns::Html, &[]);
+        let mut buf = [0; MAX_NAME];
+        let mut node = self.new_node(name, lower(name, &mut buf), tag, Ns::Html, &[]);
         if inert {
             node.vis = Vis::Inert;
         } else if REPLAY {

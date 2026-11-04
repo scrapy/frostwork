@@ -179,12 +179,9 @@ pub(super) const MATHML_ELEMENT: u8 = u8::MAX - 2;
 /// name is the lowercased one, except on an SVG element whose attribute HTML5 camel-cases (`viewBox`)
 /// and on MathML's `definitionURL`. Exact, as `::attr()` and XPath's `@` compare it.
 fn dom_name_is(scid: u8, raw: &[u8], want: &str) -> bool {
-    let mut buf = [0u8; 24];
+    let mut buf = [0; browser::MAX_NAME];
     if scid != HTML_ELEMENT {
-        if let Some(low) = buf.get_mut(..raw.len()) {
-            for (o, &c) in low.iter_mut().zip(raw) {
-                *o = c.to_ascii_lowercase();
-            }
+        if let Some(low) = browser::lower(raw, &mut buf) {
             let adjusted = match scid {
                 SVG_ELEMENT => browser::svg_attr_name(low),
                 _ if low == b"definitionurl" => Some(&b"definitionURL"[..]),
