@@ -168,7 +168,7 @@ impl DocumentFrame {
 
     /// Does this end tag pop a phantom rather than the document? Consumes one if so.
     pub(super) fn absorbs_end_tag(&mut self, name: &[u8]) -> bool {
-        if frame_slot(name).is_some() && self.phantoms > 0 {
+        if self.phantoms > 0 && frame_slot(name).is_some() {
             self.phantoms -= 1;
             return true;
         }

@@ -175,6 +175,12 @@ pub(super) const HTML_ELEMENT: u8 = u8::MAX;
 pub(super) const SVG_ELEMENT: u8 = u8::MAX - 1;
 pub(super) const MATHML_ELEMENT: u8 = u8::MAX - 2;
 
+/// Does `raw` ASCII-lowercase to exactly `name`? The same answer as an ASCII-case-insensitive comparison
+/// with a `name` that has no ASCII capital, in one pass.
+fn lowercases_to(raw: &[u8], name: &[u8]) -> bool {
+    raw.len() == name.len() && raw.iter().zip(name).all(|(r, n)| r.to_ascii_lowercase() == *n)
+}
+
 /// Is `want` the name the browser's DOM gives raw attribute `raw` of an element of class `scid`? That
 /// name is the lowercased one, except on an SVG element whose attribute HTML5 camel-cases (`viewBox`)
 /// and on MathML's `definitionURL`. Exact, as `::attr()` and XPath's `@` compare it.
@@ -345,6 +351,7 @@ impl<'a> OpenElem<'a> {
     /// it, so a derived field cannot be set at one site and forgotten at the other. `wants` is what the
     /// schema's compounds require (see [`sig::Wants`]); when they require nothing, every `req` is 0 and
     /// the signature would filter nothing, so it isn't built.
+    #[inline(always)]
     fn open(
         tag: &'a [u8],
         scid: u8,
@@ -452,12 +459,19 @@ impl<'a> OpenElem<'a> {
     /// ([`dom_name_is`]); an XPath name with an ASCII capital is refused, so `@name` compares exactly
     /// too. Lxml mode compares with libxml2's name, which is the lowercased one, exactly, as parsel's
     /// `::attr()` and `@name` do.
+    #[inline]
     pub(super) fn names(&self, raw: &[u8], name: &str) -> bool {
         match self.scid {
             HTML_ELEMENT => raw.eq_ignore_ascii_case(name.as_bytes()),
             SVG_ELEMENT | MATHML_ELEMENT => dom_name_is(self.scid, raw, name),
-            _ => raw.eq_ignore_ascii_case(name.as_bytes()) && !name.bytes().any(|c| c.is_ascii_uppercase()),
+            _ => lowercases_to(raw, name.as_bytes()),
         }
+    }
+
+    /// Did browser mode's tree builder make this element? Only its elements carry the DOM's attribute
+    /// names and HTML's value fold; every class id from [`MATHML_ELEMENT`] up is one of its three.
+    pub(super) fn is_browser_element(&self) -> bool {
+        self.scid >= MATHML_ELEMENT
     }
 
     /// Is this an SVG element whose name HTML5 camel-cases (`clipPath`, `foreignObject`)?
@@ -2412,6 +2426,7 @@ impl<'a> Matcher<'a> {
     /// characters *and vice versa*, so no multi-byte sequence in a byte-scanned page can decode to a
     /// name a schema spells in ASCII. `DECODE_NAMES` is const (see [`Self::materialize_attrs`]), so for
     /// the schemas that cannot use any of this the branch is not compiled at all.
+    #[inline(always)]
     fn interesting_name<const DECODE_NAMES: bool>(&self, name: &'a [u8]) -> Option<&'a [u8]> {
         let schema: &'a CompiledSchema = self.schema;
         if DECODE_NAMES && !name.is_ascii() {
@@ -2432,7 +2447,7 @@ impl<'a> Matcher<'a> {
     }
 
     /// [`Self::materialize_attrs`] under this page's `decode_names`.
-    #[inline]
+    #[inline(always)]
     fn interesting_attrs(&self, raw_attrs: &[(&'a [u8], Option<&'a [u8]>)]) -> Vec<(&'a [u8], Cow<'a, str>)> {
         if self.decode_names {
             self.materialize_attrs::<true>(raw_attrs)
@@ -2452,6 +2467,7 @@ impl<'a> Matcher<'a> {
     /// That is a structural argument, not a measured one: as a per-attribute branch the A/B reads 3/13
     /// cells above jitter at 3 reps and 0/12 at 7 (median +0.8%), a null result either way. The const
     /// removes the question rather than answering it.
+    #[inline(always)]
     fn materialize_attrs<const DECODE_NAMES: bool>(
         &self,
         raw_attrs: &[(&'a [u8], Option<&'a [u8]>)],
@@ -2497,6 +2513,7 @@ impl<'a> Matcher<'a> {
     /// segment `i`). Read at open (pre-update), so `prev`/`seen` still exclude `top` itself — the fix
     /// for a sibling followed by a descendant/child step, where the anchor is the sibling element, not
     /// the subject. Only run when `has_sibling` (bits are globally unique per boundary, no collision).
+    #[inline(always)]
     fn compute_anchors(&self, top: usize) -> u64 {
         let (seen, prev) = if top >= 1 {
             let parent = &self.stack[top - 1];
@@ -2520,6 +2537,7 @@ impl<'a> Matcher<'a> {
         anchor
     }
 
+    #[inline(always)]
     fn eval(&self, top: usize) -> (u128, u64) {
         let mut matched = 0u128;
         let mut trig = 0u64;
@@ -2533,6 +2551,7 @@ impl<'a> Matcher<'a> {
         (matched, trig)
     }
 
+    #[inline(always)]
     fn emit_attrs(&mut self) {
         let top = self.stack.len() - 1;
         // A comma group can mix `::attr(<different names>)` with `::text` (see `parse_list`). `::attr`
@@ -2612,6 +2631,7 @@ impl<'a> Matcher<'a> {
     /// parent's counts and push a fresh (zeroed) counter frame for `stack[top]`'s own children. The
     /// parent's frame is index `top` (the document is frame 0); `of_type_index` is filled only when the
     /// element's tag is one a positional selector counts.
+    #[inline(always)]
     fn positional_open(&mut self, top: usize, name: &[u8]) {
         let stride = 1 + self.schema.positional_tags.len();
         let parent = top * stride;
@@ -2632,6 +2652,7 @@ impl<'a> Matcher<'a> {
     /// matches STRUCTURALLY (`compound_matches` ignores the reverse bit); whether the element is actually
     /// last/only is decided at its parent's close. The subject's captured values ride on its own
     /// `rev_buf` until it closes, then get promoted to the parent (see `close_elem`).
+    #[inline(always)]
     fn reverse_open(&mut self, top: usize) {
         // provisional (structural) subject matches for THIS element, plus its `::attr` value up front
         // (attributes are known at open; `::text` arrives in `reverse_text`). Reverse subjects use only
@@ -2682,6 +2703,7 @@ impl<'a> Matcher<'a> {
     /// is decided at THIS element's OWN close, as `has_descendant_check` sets `has_done` while the
     /// subtree streams. Attached (`subtree == false`) / outer terminals only, so a match's value is the
     /// element's own (attr now, `::text` in `has_text`, outer source at close).
+    #[inline(always)]
     fn has_open(&mut self, top: usize) {
         let mut subj = 0u128;
         let start = self.stack[top].start;
@@ -2706,6 +2728,7 @@ impl<'a> Matcher<'a> {
     /// on the enclosing provisional subject(s): for `rel == Descendant` every ancestor subject (`top` is
     /// a strict descendant of each), for `rel == Child` only the direct parent. Called at each open, so
     /// by the time a subject closes its `has_done` reflects its whole subtree.
+    #[inline(always)]
     fn has_descendant_check(&mut self, top: usize) {
         for (h, he) in self.schema.has_entries.iter().enumerate() {
             if he.dead || !compound_matches(&he.has.inner, &self.stack[top]) {
@@ -2754,6 +2777,7 @@ impl<'a> Matcher<'a> {
 
     /// Register PROVISIONAL text-content-predicate subject matches for `stack[top]` (structural), create
     /// bounded predicate state, and capture its prospective `::attr` output. Bumps the open counter.
+    #[inline(always)]
     fn text_open(&mut self, top: usize) {
         let mut subj = 0u128;
         let start = self.stack[top].start;
@@ -2851,6 +2875,7 @@ impl<'a> Matcher<'a> {
     }
 
     /// Route `::attr(name)` sub-fields into every open instance whose scope contains `top`.
+    #[inline(always)]
     fn emit_grouped_attrs(&mut self, top: usize) {
         if self.open_instances.is_empty() {
             return;
@@ -2907,7 +2932,40 @@ impl<'a> Matcher<'a> {
     /// the token that caused it, so it has no source of its own; its outer HTML is its content.
     ///
     /// The caller has flushed any text that belongs to the element open before this one.
+    #[inline(never)]
     pub(super) fn open_element(
+        &mut self,
+        name: &'a [u8],
+        scid: u8,
+        raw_attrs: &[(&'a [u8], Option<&'a [u8]>)],
+        span_start: usize,
+    ) {
+        self.push_element::<true>(name, scid, raw_attrs, span_start);
+        self.evaluate_opened_inline(name);
+    }
+
+    /// [`Self::open_element`] for lxml mode, which runs no marked tail pass: the push is inlined into
+    /// the caller and the selector work stays out of line. Lxml mode opens every element from one call
+    /// site in its start-tag path, where this measures fewer instructions than a call to
+    /// `open_element`. Browser mode opens elements from inside large functions, where inlining the push
+    /// measures more.
+    #[inline(always)]
+    pub(super) fn open_element_inline(
+        &mut self,
+        name: &'a [u8],
+        scid: u8,
+        raw_attrs: &[(&'a [u8], Option<&'a [u8]>)],
+        span_start: usize,
+    ) {
+        debug_assert!(self.marks.is_empty(), "lxml mode re-scans a winner's span instead of marking it");
+        self.push_element::<false>(name, scid, raw_attrs, span_start);
+        self.evaluate_opened(name);
+    }
+
+    /// Push the element with the attributes the schema asks about, and with the winner mark when
+    /// `MARKS` says the scan may be a marked tail pass.
+    #[inline(always)]
+    fn push_element<const MARKS: bool>(
         &mut self,
         name: &'a [u8],
         scid: u8,
@@ -2919,7 +2977,7 @@ impl<'a> Matcher<'a> {
         self.next_elem = elem.wrapping_add(1);
         // Browser mode's tail pass: a deferred winner of the first pass carries the mark its tail
         // selectors are rooted at (see `marked_tail`). Elements open in `elem` order, so one cursor does.
-        if self.mark_at < self.marks.len() && self.marks[self.mark_at].0 == elem {
+        if MARKS && self.mark_at < self.marks.len() && self.marks[self.mark_at].0 == elem {
             let slots = std::mem::take(&mut self.marks[self.mark_at].1);
             attrs.push((WINNER_MARK.as_bytes(), Cow::Owned(slots)));
             self.mark_at += 1;
@@ -2929,6 +2987,22 @@ impl<'a> Matcher<'a> {
         // references them, so a `req` carrying class/id bits implies this element's `sig` saw the same
         // attributes; a schema referencing neither leaves both at 0 and the filter idle.
         self.stack.push(OpenElem::open(name, scid, attrs, span_start, elem, self.schema.wants));
+    }
+
+    /// [`Self::evaluate_opened_inline`], out of line.
+    #[inline(never)]
+    fn evaluate_opened(&mut self, name: &[u8]) {
+        self.evaluate_opened_inline(name)
+    }
+
+    /// The work [`Self::open_element`] does once the element is on the stack: everything the schema's
+    /// selectors ask of it.
+    ///
+    /// This body is inlined twice, into `open_element` and `evaluate_opened`, and LLVM moves a helper
+    /// with two callers out of line, which costs a call per element and, for `eval_one`, per entry. So
+    /// every helper it calls once per element is `#[inline(always)]`.
+    #[inline(always)]
+    fn evaluate_opened_inline(&mut self, name: &[u8]) {
         let top = self.stack.len() - 1;
         // Assign this element's 1-based sibling positions from its parent's running counts, BEFORE
         // `eval` (positional compounds read them). Only when the schema uses positions.
@@ -3051,6 +3125,7 @@ impl<'a> Matcher<'a> {
 
     /// Close the current element, whose raw source ends at `end`: finalize its captures, resolve the
     /// deferred predicates waiting on it and pop the group instances it opened.
+    #[inline]
     pub(super) fn close_top(&mut self, end: usize) {
         let e = self.stack.pop().expect("close_top with nothing open");
         self.close_elem(e, end);
