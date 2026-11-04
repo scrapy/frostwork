@@ -7,16 +7,20 @@ Frostwork has no fallback parser. Correctness therefore has three parts:
 3. the gates must prove that the relevant rules and cases were actually exercised.
 
 `make ci` is the minimum local release check. The sections below explain what it covers, which oracle owns
-each subsystem, and which broader checks run separately.
+each subsystem, and which broader checks run separately. The browser-mode gates (`make gate-browser`,
+`make gate-webpoet-browser`, `make gate-corpus-browser`) need local Chrome and Firefox and are not part of
+`make ci`; [BROWSER_MODE.md](BROWSER_MODE.md) section 5 describes them.
 
 ## Oracles and pass criteria
 
-There is no single oracle for every layer:
+There is no single oracle for every layer, and two of them depend on the parse mode:
 
-- **Extracted values:** Parsel/lxml, using libxml2 2.15 or newer.
+- **Extracted values:** in lxml mode, Parsel/lxml using libxml2 2.15 or newer. In browser mode, Chrome:
+  CSS answered natively by `querySelectorAll` and XPath through a lossless bridge from the browser's tree.
 - **CSS selector acceptance:** cssselect/lxml's parser. A selector rejected by the oracle must be reported
   unsupported, not answered with an empty value that looks legitimate.
-- **HTML tree construction:** empirical parity with libxml2, not a separate HTML5 implementation.
+- **HTML tree construction:** in lxml mode, empirical parity with libxml2. In browser mode, the tree
+  Chrome builds, with Firefox run alongside on request. Every lxml-mode gate pins `parser="lxml"`.
 - **Encoding:** browser/WHATWG behavior is the target. `w3lib` is used where it agrees with browsers; known
   browser/w3lib and WHATWG/Python-decoder differences are asserted explicitly in
   [COMPATIBILITY.md](COMPATIBILITY.md).

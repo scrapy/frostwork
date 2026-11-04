@@ -4,10 +4,12 @@ Fast HTML extraction for Python and Rust, without a DOM.
 
 Frostwork compiles a set of CSS or XPath selectors and extracts their values in one scan of an HTML
 response. Reuse the schema across Scrapy callbacks, web-poet pages or standalone code. Working memory
-tracks parser state, pending matches and returned values, without storing a document tree.
+tracks parser state, pending matches and returned values, without storing a document tree. The
+exception is the roughly 3% of pages where an HTML5 rule rewrites elements already parsed: browser mode
+answers those from a compact tree of the finished page.
 
-Frostwork supports a focused selector subset. By default it answers against the tree a browser builds;
-`parser="lxml"` answers against lxml's, continuously checked for value parity with Parsel. Python rejects
+Frostwork supports a focused selector subset. By default it answers against the tree a browser builds,
+checked against Chrome; `parser="lxml"` answers against lxml's, checked for value parity with Parsel. Python rejects
 unsupported selectors before scanning; `strict=False` requests empty columns. There is no parser fallback.
 Check the [compatibility contract](https://github.com/scrapy/frostwork/blob/main/docs/COMPATIBILITY.md)
 before migrating code that needs arbitrary tree traversal.

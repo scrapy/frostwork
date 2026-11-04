@@ -5,6 +5,32 @@ first public release.
 
 ## 0.1.7 (unreleased)
 
+### Parse modes
+
+- **Breaking: browser mode is the default.** Frostwork now answers selectors against the tree a browser
+  builds: HTML5 tree construction as Chrome 156 implements it, streamed inside the same one-pass
+  matcher and graded against Chrome and Firefox. `parser="lxml"` keeps the libxml2 tree and the value
+  parity with Parsel that earlier releases had. A port that must reproduce Parsel's items exactly passes
+  `parser="lxml"`. The two modes can build different trees from the same markup: an implied `<tbody>`,
+  `<noscript>` read as raw text, inert `<template>` content, foster parenting, the adoption agency,
+  foreign content and quirks mode among others. docs/COMPATIBILITY.md lists every difference.
+- `parser="browser" | "lxml"` on `extract`, `extract_grouped`, `check`, `audit_schema`, `Page` and
+  `Plan`, and as a class keyword on `FrostPage` that subclasses inherit. An unknown value raises
+  `ValueError`. Rust: `ParseMode`, `CompileOptions`, `Plan::compile_with` and `audit_schema_with`.
+- Browser mode does not strip the input or delete NUL. NUL follows HTML5 instead: kept in names,
+  dropped from body text, U+FFFD in raw text, RCDATA and attribute values.
+- Browser-mode CSS matches the values of the 46 attributes HTML lists case-insensitively on HTML
+  elements, as browsers do (`input[type=submit]` matches `type="SUBMIT"`). XPath and lxml mode compare
+  exactly.
+- Five HTML5 rules change elements a forward scan has already passed (a second `<html>` or `<body>`
+  merging attributes, the adoption agency with a furthest block, foster parenting's document order, a
+  `<frameset>` replacing the body, and `<selectedcontent>`). On a page where one fires, about 3% of real
+  pages, browser mode answers from a compact tree of the finished page instead of the stream.
+- Browser mode refuses, with a reason, the outer HTML of an element the page never wrote (the frame, an
+  implied `<tbody>`, `<tr>` or `<colgroup>`, the `<p>` a stray `</p>` inserts) and `.as_node()` handoffs.
+  Deferred selectors with a tail (`li:last-child b::text`, `div:has(a) ::text`) are supported, read by a
+  second pass over the page.
+
 ### Correctness
 
 - `FrostPage` and `Page.extract_response` give the engine the response's raw `Content-Type` header, its
@@ -13,7 +39,7 @@ first public release.
   response, so a `<meta charset>` deep in the head or early in the body, a stray quote in a charset value,
   `<meta charset=utf-16>`, an XML declaration after offset 0 and an HTTP `charset=x-user-defined` decode
   as a browser decodes them. Over the encoding lab's 48 cases, a web-poet response now differs from
-  Chrome on 9, the same as the engine given the header alone, where it differed on 21. A forced encoding
+  Chrome on 2, both deliberate (docs/COMPATIBILITY.md), where it differed on 21. A forced encoding
   is still honoured, below a BOM.
 
 ### Python API and tooling

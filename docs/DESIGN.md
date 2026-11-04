@@ -11,9 +11,25 @@ DOM and then discards the 96–99% of nodes no selector touches — and parsing 
 cost. Frostwork treats extraction as a **query**: scan the bytes once, keep just enough structure (a
 corrected open-element stack) to answer the selectors, and materialise/decode only the values emitted.
 
-There is **no DOM** and **no fallback**: the engine answers every query itself. It stays *close to
-libxml2* (the parser Parsel/lxml use) rather than to the HTML5 spec, because libxml2 is what real
-Scrapy/Parsel output is compared against.
+There is **no DOM** and **no fallback**: the engine answers every query itself.
+
+## Two parse modes
+
+Which tree the selectors are answered against is a per-schema choice. **Browser mode**, the default,
+follows HTML5 tree construction as Chrome implements it. **Lxml mode** (`parser="lxml"`) stays *close to
+libxml2* (the parser Parsel/lxml use) rather than to the HTML5 spec, because libxml2 is what existing
+Scrapy/Parsel output is compared against. Most of this document describes the machinery the modes share
+and lxml mode's rules; [BROWSER_MODE.md](BROWSER_MODE.md) is the design of browser mode and its gates.
+
+The modes meet at one seam (`matcher/tree.rs`). A `TreeBuilder` receives the tokenizer's events and
+decides what they mean as a tree, including the tokenizer's next state, by calling a few matcher
+primitives; the matcher does all selector evaluation, capture and decoding for both. `libxml2.rs` is
+lxml mode's builder and `browser/` is browser mode's. The schema's mode picks the builder once per
+document and the scan is monomorphised over it. Browser mode keeps the matcher's stack as the DOM path
+to the insertion point, separate from its own HTML5 stack of open elements, so foster parenting, the
+form pointer and the adoption agency's copies match as the browser's tree does. On the roughly 3% of
+pages where a rule rewrites elements already parsed, it answers from a compact tree of the finished page
+(BROWSER_MODE.md section 4, "The replay").
 
 ## Pipeline
 
