@@ -3211,9 +3211,6 @@ mod browser_mode_tests {
             "tbody",
             "tr",
             "p",
-            "b.k",
-            "a[href]",
-            ".x",
         ];
         let kept = [
             "div:has(a)::attr(id)",
@@ -3226,6 +3223,9 @@ mod browser_mode_tests {
             "p.lead",
             "span",
             "a::attr(href)",
+            "a",
+            "b.k",
+            ".x",
         ];
         let all: Vec<&str> = refused.iter().chain(&kept).copied().collect();
         let browser = audit_schema_with(&all, &[], ParseMode::Browser);
@@ -3260,18 +3260,18 @@ mod browser_mode_tests {
         }
         assert!(a.groups[2].subfields.iter().all(Support::is_supported), "a <div> holds no frame element");
         assert!(audit_schema_with(&[] as &[String], &[group("html")], ParseMode::Lxml).ok());
-        // any container can hold a formatting clone or an implied <tbody>, and `.` is the container
+        // any container can hold an implied <tbody>, and `.` is the container
         let synth = |container: &str, sub: &str| GroupQuery {
             container: container.to_string(),
             subfields: vec![("x".to_string(), sub.to_string())],
         };
         let b = audit_schema_with(
             &[] as &[String],
-            &[synth("div", "b"), synth("div", "tbody"), synth("div", "tbody.x"), synth("b", "."), synth("div", ".")],
+            &[synth("div", "b"), synth("div", "tbody"), synth("div", "tbody.x"), synth("tr", "."), synth("div", ".")],
             ParseMode::Browser,
         );
         let refused: Vec<bool> = b.groups.iter().map(|g| !g.subfields[0].is_supported()).collect();
-        assert_eq!(refused, [true, true, false, true, false]);
+        assert_eq!(refused, [false, true, false, true, false]);
     }
 
     // ---- HTML5 tree construction (Phase 2). Each comment gives Chrome's tree for the document.
@@ -3411,6 +3411,8 @@ mod browser_mode_tests {
         let clone = b"<p><b id=b class=k>1</p>2";
         assert_eq!(ex(clone, "b.k::text"), v(&["1", "2"]));
         assert_eq!(ex(clone, "body > b::text"), v(&["2"]));
+        // the copy's raw source is the start tag it was copied from, then its own content
+        assert_eq!(ex(clone, "b.k"), v(&["<b id=b class=k>1", "<b id=b class=k>2"]));
         // after </p>, three of the four identical <b>s reopen, nested, around "x"
         assert_eq!(ex(b"<p><b>1<b>2<b>3<b>4</p>x", "body > b > b > b::text"), v(&["x"]));
         assert_eq!(ex(b"<p><b>1<b>2<b>3<b>4</p>x", "body > b > b > b > b"), NONE);

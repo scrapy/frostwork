@@ -3195,7 +3195,7 @@ def test_scan_finds_inline_selectors_without_importing(tmp_path, capsys):
     from frostwork.audit import main
 
     target = _write_spider(tmp_path)
-    code = main(["--scan", target, "-v", "--parser", "lxml"])
+    code = main(["--scan", target, "-v"])
     out = capsys.readouterr().out
     assert code == 1  # unsupported selectors present
     assert "spider.py:10" in out and UNSUPPORTED_REASON in out  # LinkExtractor restrict_css
@@ -3204,11 +3204,6 @@ def test_scan_finds_inline_selectors_without_importing(tmp_path, capsys):
     assert "Many/One" in out  # relative `td/text()` names the rewrite
     assert "not a literal" in out  # the f-string is skipped, not silently dropped
     assert "5/7 literal selector(s) supported" in out
-    # browser mode refuses the outer HTML of an element with no name or a formatting one: a match can be
-    # a formatting element the tree builder reopened as a copy, with no source of its own
-    assert main(["--scan", target, "-v"]) == 1
-    out = capsys.readouterr().out
-    assert "3/7 literal selector(s) supported" in out and "reopened as a copy" in out
 
 
 def test_scan_json_and_directory_walk(tmp_path, capsys):

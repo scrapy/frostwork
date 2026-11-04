@@ -194,20 +194,18 @@ pub(crate) fn admits_synthesized_frame(sel: &Selector) -> bool {
 }
 
 /// Could a match of `sel` be one of the other elements browser mode builds with no source of its own:
-/// an implied `<tbody>`, `<tr>` or `<colgroup>`, the `<p>` a stray `</p>` inserts (none of which has
-/// attributes), or a formatting element reopened as a clone, which carries the original's attributes?
-/// Any container can hold one, so unlike the frame this is not scoped.
+/// an implied `<tbody>`, `<tr>` or `<colgroup>`, or the `<p>` a stray `</p>` inserts? None of them has
+/// attributes, so as with the frame an attribute test rules them out; any container can hold one, so
+/// unlike the frame this is not scoped. A formatting element's copy is not among them: its source is
+/// the start tag it was copied from followed by its own content.
 pub(crate) fn admits_browser_synthesized(sel: &Selector) -> bool {
     let subject = sel.parts.last().expect("a compiled selector has a subject compound");
     let attribute_bound = subject.id.is_some() || !subject.classes.is_empty() || !subject.attrs.is_empty();
-    match subject.tag.as_deref().filter(|t| *t != "*") {
-        None => true, // a clone of any formatting element, with whatever attributes it was written with
-        Some(name) => {
-            let low = name.to_ascii_lowercase();
-            crate::implied_close::html5_cat(low.as_bytes()) & crate::implied_close::FORMATTING != 0
-                || (!attribute_bound && IMPLIED_NAMES.contains(&low.as_str()))
-        }
-    }
+    let names_one = match subject.tag.as_deref().filter(|t| *t != "*") {
+        None => true,
+        Some(name) => IMPLIED_NAMES.iter().any(|n| n.eq_ignore_ascii_case(name)),
+    };
+    names_one && !attribute_bound
 }
 
 /// The elements browser mode's tree builder inserts for a token that is not their own start tag, besides
@@ -250,10 +248,9 @@ impl Refusal {
             }
             Refusal::SynthesizedOuterHtml => {
                 "unsupported in browser mode: the selector can match an element the page never wrote (an \
-                 <html>, <head> or <body>, an implied <tbody>, <tr> or <colgroup>, the <p> a stray </p> \
-                 inserts, or a formatting element such as <b> or <a> reopened as a copy), which has no \
-                 source of its own to return as outer HTML. Name a non-formatting element and constrain it \
-                 with an attribute (div.page), select its content, or use parser=\"lxml\""
+                 <html>, <head> or <body>, an implied <tbody>, <tr> or <colgroup>, or the <p> a stray </p> \
+                 inserts), which has no source of its own to return as outer HTML. Constrain it with an \
+                 attribute (tr.row), select its content, or use parser=\"lxml\""
             }
         }
     }

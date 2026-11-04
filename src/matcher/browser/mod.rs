@@ -120,11 +120,13 @@ struct Node<'a> {
     depth: u32,
 }
 
-/// The start tag a formatting element was created for, kept so a clone can be made from it.
+/// The start tag a formatting element was created for, kept so a clone can be made from it. `span` is
+/// the tag's source, which a clone's outer HTML begins with.
 struct FmtTok<'a> {
     name: &'a [u8],
     tag: Tag,
     attrs: Vec<(&'a [u8], Option<&'a [u8]>)>,
+    span: (usize, usize),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -461,6 +463,7 @@ impl<'a> Browser<'a> {
         let attrs = std::mem::take(&mut self.toks[tok as usize].attrs);
         let mut node = self.stack[i];
         self.open(m, &mut node, &attrs, at);
+        m.set_source_prefix(self.toks[tok as usize].span);
         self.stack[i] = node;
         self.toks[tok as usize].attrs = attrs;
     }
@@ -734,7 +737,7 @@ impl<'a> Browser<'a> {
     /// Insert a formatting element for a start tag and push it onto the list.
     fn insert_formatting(&mut self, m: &mut Matcher<'a>, t: &StartTok<'a, '_>) {
         let tok = self.toks.len() as u32;
-        self.toks.push(FmtTok { name: t.name, tag: t.tag, attrs: t.attrs.to_vec() });
+        self.toks.push(FmtTok { name: t.name, tag: t.tag, attrs: t.attrs.to_vec(), span: (t.start, t.end) });
         self.insert_html(m, t);
         let uid = self.cur().uid;
         self.push_afe(m, uid, tok);
@@ -763,6 +766,9 @@ impl<'a> Browser<'a> {
             let node = self.new_node(name, tag, Ns::Html, &attrs);
             let uid = node.uid;
             self.insert_node(m, node, &attrs, at);
+            if self.path.last() == Some(&uid) {
+                m.set_source_prefix(self.toks[tok as usize].span);
+            }
             self.toks[tok as usize].attrs = attrs;
             self.afe[j] = Afe::El { uid, tok };
         }

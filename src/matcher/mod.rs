@@ -233,6 +233,9 @@ pub struct OpenElem<'a> {
 #[derive(Default)]
 struct ColdState {
     gcaps: Vec<(u64, usize)>, // grouped outer-HTML captures: (instance seq, sub) this element feeds
+    /// Raw source read before the element's own: a clone's original start tag (see
+    /// [`Matcher::set_source_prefix`]); `(0, 0)` for none.
+    prefix: (usize, usize),
     rev_buf: Vec<(u32, usize, String)>, // (rev-entry, offset, value) captured while this el is a subject
     rev_pending: Vec<RevPend>, // candidates promoted from this element's children, resolved at its close
     has_buf: Vec<(u32, usize, String)>, // (has-entry, offset, value) captured while this el is a subject
@@ -246,6 +249,7 @@ struct ColdState {
 /// no allocation and lets [`OpenElem::cold`] be infallible without the box existing.
 static NO_COLD: ColdState = ColdState {
     gcaps: Vec::new(),
+    prefix: (0, 0),
     rev_buf: Vec::new(),
     rev_pending: Vec::new(),
     has_buf: Vec::new(),
@@ -906,7 +910,9 @@ pub struct Matcher<'a> {
     // The document bytes and the encoding that decodes them, as one value (`EncodedInput`).
     // Raw-source outer-HTML fragments are sliced out of it; emitted values are decoded with it.
     input: EncodedInput<'a>,
-    captures: Vec<(usize, usize, Dest)>, // (start, end, dest) raw-source spans, sorted at finish
+    /// `(start, end, dest, prefix)` raw-source spans, sorted at finish. `prefix` is a span read before
+    /// `start..end`, the start tag of the element a browser-mode clone was made from (`(0, 0)`: none).
+    captures: Vec<(usize, usize, Dest, (usize, usize))>,
     // Must a non-ASCII attribute NAME be decoded before it is compared? Only when the schema spells one
     // that way and the page is byte-scanned under a legacy encoding — see `interesting_name`.
     decode_names: bool,
@@ -1758,13 +1764,14 @@ impl<'a> Matcher<'a> {
             self.satisfied |= cols;
             self.open_captures -= 1;
         }
+        let prefix = e.cold().prefix;
         while cols != 0 {
             let col = cols.trailing_zeros() as usize;
             cols &= cols - 1;
-            self.captures.push((e.start, end, Dest::Flat(col)));
+            self.captures.push((e.start, end, Dest::Flat(col), prefix));
         }
         for &(seq, sub) in &e.cold().gcaps {
-            self.captures.push((e.start, end, Dest::Grouped { seq, sub }));
+            self.captures.push((e.start, end, Dest::Grouped { seq, sub }, prefix));
         }
         for _ in 0..e.insts {
             let oi = self.open_instances.pop().expect("instance stack tracks element stack");
@@ -1878,7 +1885,7 @@ impl<'a> Matcher<'a> {
                     // share carries this column too
                     Tail::Merged => {}
                     Tail::Streamed if matches!(he.terminal, Terminal::OuterHtml) => {
-                        let val = self.input.raw_source(e.start..end);
+                        let val = self.source(e.cold().prefix, e.start..end);
                         self.pending.push((he.col, e.start, val));
                     }
                     Tail::Streamed => {
@@ -1923,7 +1930,7 @@ impl<'a> Matcher<'a> {
                     Tail::Merged => {}
                     Tail::Streamed => match te.terminal {
                         Terminal::OuterHtml => {
-                            let val = self.input.raw_source(e.start..end);
+                            let val = self.source(e.cold().prefix, e.start..end);
                             self.pending.push((te.col, e.start, val));
                         }
                         Terminal::Attr { .. } | Terminal::Text { .. } => {
@@ -2014,9 +2021,9 @@ impl<'a> Matcher<'a> {
             }
             // outer-HTML fragments emit in element START order (document order = lxml node order);
             // pop order is inner-first, so sort by start before scattering.
-            self.captures.sort_by_key(|&(start, _, _)| start);
-            for (start, end, dest) in std::mem::take(&mut self.captures) {
-                let val = self.input.raw_source(start..end);
+            self.captures.sort_by_key(|&(start, _, _, _)| start);
+            for (start, end, dest, prefix) in std::mem::take(&mut self.captures) {
+                let val = self.source(prefix, start..end);
                 match dest {
                     Dest::Flat(col) => self.results[col].push(val),
                     Dest::Grouped { seq, sub } => {
@@ -2798,6 +2805,27 @@ impl<'a> Matcher<'a> {
         if wants.any() {
             el.sig = el.signature(wants);
         }
+    }
+}
+
+impl<'a> Matcher<'a> {
+    /// Give the current element raw source that begins before its own: a browser-mode copy of a
+    /// formatting element has no start tag in the page, and its outer HTML is the start tag it was
+    /// copied from followed by its own content, the raw-source reading of `<b class=k>2</b>`.
+    pub(super) fn set_source_prefix(&mut self, prefix: (usize, usize)) {
+        if let Some(top) = self.stack.last_mut() {
+            top.cold_mut().prefix = prefix;
+        }
+    }
+
+    /// An element's outer HTML: its raw source, after its prefix if it has one.
+    fn source(&self, prefix: (usize, usize), span: std::ops::Range<usize>) -> String {
+        if prefix == (0, 0) {
+            return self.input.raw_source(span);
+        }
+        let mut out = self.input.raw_source(prefix.0..prefix.1);
+        out.push_str(&self.input.raw_source(span));
+        out
     }
 }
 
