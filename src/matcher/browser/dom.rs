@@ -12,7 +12,7 @@ pub(super) const NIL: u32 = u32::MAX;
 /// The end of an element that has not left the stack of open elements by a pop.
 const OPEN: usize = usize::MAX;
 
-pub(super) type RawAttrs<'a> = Vec<(&'a [u8], Option<&'a [u8]>)>;
+type RawAttrs<'a> = Vec<(&'a [u8], Option<&'a [u8]>)>;
 
 #[derive(Clone)]
 pub(super) struct Elem<'a> {

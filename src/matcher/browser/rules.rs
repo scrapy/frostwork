@@ -276,7 +276,7 @@ impl<'a, const REPLAY: bool> Browser<'a, REPLAY> {
         self.reset_mode();
     }
 
-    pub(super) fn in_body_start(&mut self, m: &mut Matcher<'a>, t: &StartTok<'a, '_>) {
+    fn in_body_start(&mut self, m: &mut Matcher<'a>, t: &StartTok<'a, '_>) {
         let at = t.start;
         match t.tag {
             Tag::Html => {

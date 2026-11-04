@@ -358,7 +358,7 @@ impl<'a> Formatting<'a> {
     }
 
     /// The index of the first entry after the last marker.
-    pub(super) fn after_last_marker(&self) -> usize {
+    fn after_last_marker(&self) -> usize {
         self.markers.last().map_or(0, |&k| k + 1)
     }
 
