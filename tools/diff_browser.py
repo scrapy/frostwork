@@ -460,11 +460,13 @@ RULE_SELECTORS: list[str] = [
     'div:has(b) ::attr(id)', 'title:has(b) ::text', 'desc:has(b) b::text', 'dd:has(> b) ::text',
     'div:contains("a") b::text', 'li:contains("a") ::text', 'td:contains("a") ::attr(id)',
     '//li[last()]//text()', '//tr[last()]//td/text()', '//*[contains(., "a")]//b/text()',
-    # attribute names: `::attr()` and XPath's `@` compare the DOM's name exactly (camel case on SVG,
-    # `definitionURL` on MathML, lowercase elsewhere), a CSS attribute selector case-insensitively and
-    # never a namespaced one, and an XPath name-test never a camel-cased SVG element
+    # attribute names: `::attr()` reads as `getAttribute()` does (the name lowercased on an HTML element,
+    # the DOM name exactly on an SVG or MathML one: `viewBox`, `definitionURL`), XPath's `@` compares the
+    # DOM name exactly, a CSS attribute selector case-insensitively and never a namespaced one, and an
+    # XPath name-test never a camel-cased SVG element
     '[viewbox]::attr(id)', '*::attr(viewBox)', '*::attr(viewbox)', '*::attr(textLength)', '[textlength]::attr(id)',
     '*::attr(definitionURL)', '[definitionurl]::attr(id)', '[xmlns]::attr(id)', '*::attr(xmlns)',
+    '*::attr(ID)', '*::attr(Title)', '*::attr(VIEWBOX)', '*::attr(DEFINITIONURL)',
     '[fill]::attr(id)', '//*/@viewbox', '//*[@textlength]/@id', '//*[@fill]/@id', '//clippath/@id',
     # the positions the frame gives what is in it, which an empty `<body>` the parser adds at end of input
     # changes, and the parents it gives
@@ -1273,13 +1275,16 @@ _ATTR_NAME = re.compile(r"\[\s*([^\s~|^$*!=\]]+)")
 
 def mirrors_parsel(tree: Any, sel: str) -> bool:
     """Do browser CSS and cssselect's XPath mean the same thing for `sel` on `tree`? Not in quirks mode
-    (class and id selectors fold case), not for an attribute test HTML folds, not for a class test where
+    (class and id selectors fold case), not for an `::attr()` name with a capital (`getAttribute()`
+    lowercases it on an HTML element, XPath's `@` does not), not for an attribute test HTML folds, not for a class test where
     a class value holds a form feed (ASCII whitespace for a browser, not for XPath's normalize-space), and
     not for an attribute test naming what an SVG or MathML element carries camel-cased or in a namespace
     (`viewBox`, `xmlns`): CSS compares an attribute name case-insensitively and names no namespaced one,
     XPath compares the name exactly."""
     vr = ValueRepro((), sel, [], [], tree)
     if vr.quirks():
+        return False
+    if any(c.isupper() for name in re.findall(r"::attr\(([^)]*)\)", sel) for c in name if c.isascii()):
         return False
     if any(name.lower() in CASE_INSENSITIVE_ATTRS for name, _op, _v in _ATTR_TEST.findall(sel)):
         return False

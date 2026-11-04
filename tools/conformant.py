@@ -236,6 +236,9 @@ BASKET = [
     "thead + tbody::text", "caption + thead::text",
     "table tr > td::text", "select > option::text", "table > tr::text", "tr > th::text",
     "a::attr(href)", "img::attr(src)", "input::attr(value)", "[data-k]::attr(data-k)",
+    # a capital in an `::attr()` name: parsel's is XPath's exact `@` over libxml2's lowercased names, so
+    # these answer nothing in lxml mode; a browser's getAttribute() lowercases it on an HTML element
+    "a::attr(HREF)", "[data-k]::attr(Data-K)", "[id]::attr(ID)", "img::attr(Src)",
     "[title]::attr(title)",  # exercises CR/CRLF-in-attribute normalization (T4)
     ".shared::text", ".shared ::text", "section p::text", "div div ::text",
     # sibling combinators (+ / ~), incl. chains and a descendant base

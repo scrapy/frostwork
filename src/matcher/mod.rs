@@ -418,13 +418,16 @@ impl<'a> OpenElem<'a> {
     }
 
     /// Does `raw`, one of this element's attribute names, name the attribute a value terminal or an XPath
-    /// `@name` asks for? Browser mode compares with the browser's DOM name exactly ([`dom_name_is`]);
-    /// lxml mode compares ASCII-case-insensitively.
+    /// `@name` asks for? Browser mode reads it as `getAttribute()` does: on an HTML element the name is
+    /// ASCII-lowercased first, and on an SVG or MathML element it is compared with the DOM name exactly
+    /// ([`dom_name_is`]); an XPath name with an ASCII capital is refused, so `@name` compares exactly
+    /// too. Lxml mode compares with libxml2's name, which is the lowercased one, exactly, as parsel's
+    /// `::attr()` and `@name` do.
     pub(super) fn names(&self, raw: &[u8], name: &str) -> bool {
-        if self.scid >= MATHML_ELEMENT {
-            dom_name_is(self.scid, raw, name)
-        } else {
-            raw.eq_ignore_ascii_case(name.as_bytes())
+        match self.scid {
+            HTML_ELEMENT => raw.eq_ignore_ascii_case(name.as_bytes()),
+            SVG_ELEMENT | MATHML_ELEMENT => dom_name_is(self.scid, raw, name),
+            _ => !name.bytes().any(|c| c.is_ascii_uppercase()) && raw.eq_ignore_ascii_case(name.as_bytes()),
         }
     }
 

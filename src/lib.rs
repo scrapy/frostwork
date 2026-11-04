@@ -3561,13 +3561,14 @@ mod browser_mode_tests {
 
     /// Attribute names as Chrome's DOM has them: lowercased, SVG's camel case and MathML's
     /// `definitionURL` restored, and `xlink:`/`xml:`/`xmlns` attributes of a foreign element in a
-    /// namespace. `::attr()` and XPath's `@` compare the DOM name exactly; a CSS attribute selector
-    /// compares ASCII-case-insensitively and names no namespaced attribute. lxml mode is unchanged.
+    /// namespace. `::attr()` reads an attribute as `getAttribute()` does (the name lowercased on an HTML
+    /// element, the DOM name exactly on a foreign one) and XPath's `@` compares the DOM name exactly; a
+    /// CSS attribute selector compares ASCII-case-insensitively and names no namespaced attribute.
     #[test]
     fn foreign_attribute_names_are_adjusted() {
         let h = b"<!DOCTYPE html><svg VIEWBOX=\"0 0 1 1\" id=s fill=red><text textlength=5 id=t>x</text>\
                   <a xlink:href=u xml:lang=en id=a>y</a></svg><math definitionurl=d id=m></math>\
-                  <div viewBox=1 xlink:href=h id=d></div>";
+                  <div viewBox=1 xlink:href=h id=d DATA-K=v></div>";
         // Chrome: CSS
         assert_eq!(ex(h, "[viewBox]::attr(id)"), v(&["s", "d"]));
         assert_eq!(ex(h, "[viewbox]::attr(id)"), v(&["s", "d"]));
@@ -3579,8 +3580,17 @@ mod browser_mode_tests {
         assert_eq!(ex(h, "math::attr(definitionURL)"), v(&["d"]));
         assert_eq!(ex(h, "math::attr(definitionurl)"), NONE);
         assert_eq!(ex(h, "[FILL]::attr(id)"), v(&["s"]));
-        assert_eq!(ex(h, "div::attr(viewBox)"), NONE);
+        // getAttribute() lowercases the name on an HTML element and on no other
+        assert_eq!(ex(h, "div::attr(viewBox)"), v(&["1"]));
         assert_eq!(ex(h, "div::attr(viewbox)"), v(&["1"]));
+        assert_eq!(ex(h, "div::attr(ID)"), v(&["d"]));
+        assert_eq!(ex(h, "div::attr(Data-K)"), v(&["v"]));
+        assert_eq!(ex(h, "div::attr(XLINK:HREF)"), v(&["h"]));
+        assert_eq!(ex(h, "svg::attr(ID)"), NONE);
+        assert_eq!(ex(h, "svg::attr(VIEWBOX)"), NONE);
+        assert_eq!(ex(h, "text::attr(TEXTLENGTH)"), NONE);
+        assert_eq!(ex(h, "math::attr(DEFINITIONURL)"), NONE);
+        assert_eq!(ex(h, "svg a::attr(xlink:href)"), v(&["u"]));
         assert_eq!(ex(h, "[href]::attr(id)"), NONE);
         // svg#s > g#g, math#m, div#d, each with an xmlns: in a namespace on the foreign ones
         let ns = b"<!DOCTYPE html><svg xmlns=\"http://www.w3.org/2000/svg\" id=s><g xmlns=q id=g></g></svg>\
@@ -3596,7 +3606,11 @@ mod browser_mode_tests {
         let camel = b"<!DOCTYPE html><svg><clipPath id=c></clipPath></svg>";
         assert_eq!(ex(camel, "//clippath/@id"), NONE);
         assert_eq!(ex(camel, "clippath::attr(id)"), v(&["c"]));
-        assert_eq!(lxml(h, "svg::attr(viewbox)"), v(&["0 0 1 1"]), "lxml mode compares names as it did");
+        // lxml mode: libxml2 lowercases every name, and parsel's `::attr()` is XPath's exact `@`
+        assert_eq!(lxml(h, "svg::attr(viewbox)"), v(&["0 0 1 1"]));
+        assert_eq!(lxml(h, "svg::attr(viewBox)"), NONE);
+        assert_eq!(lxml(h, "div::attr(ID)"), NONE);
+        assert_eq!(lxml(h, "div::attr(id)"), v(&["d"]));
     }
 
     /// A declarative shadow root takes the `<template>` and its content out of the document, on a host

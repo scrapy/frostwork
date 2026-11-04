@@ -54,7 +54,10 @@ ATTR_OPS = ["=", "^=", "$=", "*=", "~=", "|="]
 UNQUOTED_VALS = ["v1", "c1", "shared", "-v", "_v", "café", "2", "2v", "1e5", "--v", "$v", "/p1",
                  "s1.png", "#v", "", "-"]
 COMBS = [" ", " > ", " + ", " ~ "]
-TERMS = ["", "::text", "::attr(href)", "::attr(class)", "::attr(data-k)", " ::text"]
+# A capital in an `::attr()` name matches nothing in lxml mode: parsel's is XPath's exact `@`, over libxml2's
+# lowercased names.
+TERMS = ["", "::text", "::attr(href)", "::attr(class)", "::attr(data-k)", " ::text", "::attr(HREF)",
+         "::attr(Class)", "::attr(DATA-K)"]
 # text-content-predicate needles: decoded forms of conformant.py TEXTBITS (full matches), substrings
 # (for `contains`), and misses. `g&h`/`x<y` exercise entity-decoded comparison (page has g&amp;h/x&lt;y).
 TEXT_NEEDLES = ["alpha", "café", " beta ", "1 2 3", "g&h", "x<y", "al", "et", "2", "zzz", ""]

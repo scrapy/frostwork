@@ -5,8 +5,10 @@ a selector matches, attribute-value case folding and quirks-mode class matching 
 `querySelectorAll` answers on the document the load built. What a browser has no syntax for is parsel's,
 and is mirrored from parsel's own translator rather than re-derived:
 
-  * `::text` is the matched element's text-node children, and `::attr(name)` the attribute whose name is
-    exactly `name` (XPath's `@name`, case-sensitive);
+  * `::text` is the matched element's text-node children, and `::attr(name)` the attribute
+    `getAttribute(name)` returns: the name ASCII-lowercased on an HTML element, compared with the DOM name
+    exactly on an SVG or MathML one. Parsel's XPath `@name` is case-sensitive everywhere, so the two differ
+    only on a name with a capital, which `diff_browser.mirrors_parsel` leaves out;
   * a pseudo-element after a DESCENDANT combinator and a bare universal (`p ::text`, `div *::text`) is
     the SUBTREE form: parsel rewrites the XPath step `descendant-or-self::*/*` to
     `descendant-or-self::text()` (or `descendant-or-self::*/@name`), so the values come from the left

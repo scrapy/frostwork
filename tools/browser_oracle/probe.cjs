@@ -132,7 +132,9 @@ window.__css = (d, plans) => {
         if (m.scope === 'self') { for (const c of el.childNodes) if (c.nodeType === 3) acc.set(order.get(c), c.data); }
         else { const w = d.createTreeWalker(el, 4); let t; while ((t = w.nextNode())) acc.set(order.get(t), t.data); }
       } else {
-        const take = (e) => { let i = 0; for (const a of e.attributes) { if (a.name === m.attr) acc.set(order.get(e) + 1 + i, a.value); i++; } };
+        // getAttribute(): the name ASCII-lowercased on an HTML element, then the first attribute so named
+        const take = (e) => { const want = e.namespaceURI === XHTML ? m.attr.replace(/[A-Z]/g, (c) => c.toLowerCase()) : m.attr;
+          let i = 0; for (const a of e.attributes) { if (a.name === want) { acc.set(order.get(e) + 1 + i, a.value); break; } i++; } };
         take(el); if (m.scope === 'subtree') for (const e of el.querySelectorAll('*')) take(e);
       }
     }

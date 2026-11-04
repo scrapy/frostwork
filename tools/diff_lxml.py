@@ -82,6 +82,9 @@ ORACLE_EMPTY_BASKET = frozenset({
     # a row and an optgroup hold their text in descendants, and `<input>` is void so it has no text at all.
     "table > thead::text", "table > tbody::text", "table > tfoot::text", "table > tr::text",
     "thead > tr::text", "tbody > tr::text", "select > optgroup::text", 'input[value|="v"]::text',
+    # INTENDED — parsel's `::attr()` is XPath's case-sensitive `@`, and libxml2 lowercases every attribute
+    # name, so a capital in the name matches nothing; a value here is the engine folding the case.
+    "a::attr(HREF)", "[data-k]::attr(Data-K)", "[id]::attr(ID)", "img::attr(Src)",
 })
 
 
