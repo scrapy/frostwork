@@ -2,7 +2,7 @@
 name = "frostwork"
 version = "0.1.6"
 edition = "2021"
-description = "Streaming HTML extraction that builds a minimal tree only when needed: CSS/XPath selectors matched in one scan, no fallback."
+description = "Streaming HTML parser: CSS/XPath selectors answered in one pass over the page, with no fallback."
 license = "Apache-2.0"
 repository = "https://github.com/scrapy/frostwork"
 keywords = ["html", "scraping", "css-selectors", "xpath", "streaming"]

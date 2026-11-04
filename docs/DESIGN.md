@@ -1,12 +1,12 @@
 # Design: how Frostwork is built, and why
 
-Frostwork extracts data from HTML in **one streaming pass, building a minimal tree only when needed**.
-Browser mode has two exceptions to the single pass: a page where an HTML5 rule rewrites elements
-already parsed is answered from a compact tree of the finished page (the replay, under 2% of pages), and
-a deferred predicate whose value is inside its element is read in a second pass over the document, on
-the pages where one arose. This is the *why* and
-*how* behind that; [COMPATIBILITY.md](COMPATIBILITY.md) is the precise contract, and the differential
-harness in `tools/` is the executable spec.
+Frostwork is a **streaming parser**: it extracts data from HTML in **one pass**, rather than building a
+complete tree and querying it. Browser mode has two exceptions to the single pass: a page where an HTML5
+rule rewrites elements already parsed is answered from a compact tree of the finished page (the replay,
+under 2% of pages), and a deferred predicate whose value is inside its element is read in a second pass
+over the document, on the pages where one arose. This is the *why* and *how* behind that;
+[COMPATIBILITY.md](COMPATIBILITY.md) is the precise contract, and the differential harness in `tools/` is
+the executable spec.
 
 ## The core idea: query-directed parsing
 
@@ -15,8 +15,9 @@ DOM and then discards the 96–99% of nodes no selector touches — and parsing 
 cost. Frostwork treats extraction as a **query**: scan the bytes once, keep just enough structure (a
 corrected open-element stack) to answer the selectors, and materialise/decode only the values emitted.
 
-The only tree is browser mode's replay, built for the page in hand only where streaming cannot give the
-browser's answer, and there is **no fallback**: the engine answers every query itself.
+It builds a **minimal tree only when needed**: browser mode's replay, for the page in hand, only where
+streaming cannot give the browser's answer. There is **no fallback**: the engine answers every query
+itself.
 
 ## Two parse modes
 

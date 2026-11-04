@@ -1,7 +1,7 @@
 # Frostwork compatibility contract
 
-Frostwork executes supported selectors itself, without parser fallback, building a minimal tree only when needed. This reference describes
-four kinds of behavior:
+Frostwork is a streaming parser that executes supported selectors itself, without parser fallback. This
+reference describes four kinds of behavior:
 
 | bucket | meaning |
 |---|---|

@@ -1,6 +1,6 @@
 # Frostwork benchmarks
 
-Frostwork answers a fixed set of CSS/XPath selectors in **one streaming pass, building a minimal tree only when needed**. These are
+Frostwork answers a fixed set of CSS/XPath selectors in **one streaming pass**. These are
 its measured numbers against the parsers scraping actually uses.
 
 | on a real production corpus | Frostwork |
@@ -107,7 +107,7 @@ swapping in.
 
 | engine | what it is |
 | --- | --- |
-| **Frostwork** | one streaming pass, a minimal tree only when needed |
+| **Frostwork** | streaming parser, one pass |
 | **Parsel** | what Scrapy uses; also this run's parity oracle |
 | **lxml + cssselect** | Parsel's tree and translation without Parsel's Python wrapper |
 | **selectolax (lexbor)** | the fastest CSS-selector HTML parser in Python scraping |

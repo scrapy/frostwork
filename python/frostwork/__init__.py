@@ -1,4 +1,4 @@
-"""Frostwork — streaming HTML extraction that builds a minimal tree only when needed.
+"""Frostwork — a streaming HTML parser for extraction.
 
 `extract(html, queries, encoding=None)` is the primitive: one streaming scan answers every
 CSS/XPath query, returning one value-column per query (no fallback). ``parser="browser"`` (the

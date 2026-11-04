@@ -466,7 +466,7 @@ fn audit_schema(
 
 #[pymodule]
 fn _frostwork(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add("__doc__", "Native Frostwork core: streaming HTML extraction that builds a minimal tree only when needed.")?;
+    m.add("__doc__", "Native Frostwork core: a streaming HTML parser for extraction.")?;
     m.add_function(wrap_pyfunction!(extract, m)?)?;
     m.add_function(wrap_pyfunction!(extract_grouped, m)?)?;
     m.add_function(wrap_pyfunction!(audit_schema, m)?)?;
