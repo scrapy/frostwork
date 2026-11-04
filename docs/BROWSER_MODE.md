@@ -73,15 +73,11 @@ still loses 14, which is why the integrations no longer do (E1).
 
 ### E1. Give the engine the transport label, not the decision
 
-Implemented as described below: `content_type=` on every entry point, one precedence table in Rust
-(`frostwork::resolve_encoding`), `detect_encoding(explain=True)`, and the integrator contract in PYTHON.md.
-
-`Page.extract_response` and `FrostPage.frostwork_input` pass `response.encoding`. In web-poet that
-property is `_encoding or BOM or Content-Type or w3lib's <meta> regex or an inferred fallback`, so it
-is always a string. Frostwork's BOM check still runs first, but its prescan and its autodetection
-never run behind a web-poet or Scrapy response.
-
-Measured over the same 48 cases:
+Before this change, `Page.extract_response` and `FrostPage.frostwork_input` passed `response.encoding`.
+In web-poet that property is `_encoding or BOM or Content-Type or w3lib's <meta> regex or an inferred
+fallback`, so it is always a string, and it outranked Frostwork's prescan and autodetection, which
+therefore never ran behind a web-poet or Scrapy response. Measured over the same 48 cases, before
+browser mode:
 
 | label passed to the engine | cases that differ from Chrome |
 |---|---|
@@ -94,19 +90,18 @@ declarations past its 4 KB window (`late-meta-4k` to `-1m`). Three are body decl
 first 1 KB (`body-meta-0`, `-100`, `-512`), which w3lib's regex gives up on at `<body>`. All eight
 come back as `1.299,00 ¤`. The other three are `stray-quote` (`cp1252`, mojibake), `meta-utf16`
 (`utf-16`, an empty column) and `xmldecl-late` (`big5hkscs`, mojibake). Frostwork answers all eleven
-correctly when it gets only the header, so through web-poet today, the prescan work this repo did to
-match the browser does not reach the user.
+correctly when it gets only the header.
 
-The fix splits by owner. Adrian owns the Scrapy and w3lib integration. This work owns the core and
-the contract he builds against, so the core has to make the right call easy and the wrong one hard.
+Adrian owns the Scrapy and w3lib integration; this work owns the core and the contract he builds against,
+so the core makes the right call easy and the wrong one hard.
 
-**Core (this work):**
+**The core:**
 
-- Add `content_type=` to `extract`, `extract_grouped`, `detect_encoding`, `Plan.extract*` and
-  `Page.extract`. `url=` already exists on all of them; the gap is that the two response entry points
-  never pass it (below). Rust parses the charset parameter and resolves it with `Encoding::for_label`,
-  without the Python-codec detour, so `x-user-defined` and the `replacement` labels survive.
-- One precedence table, the same for every entry point:
+- `content_type=` is on `extract`, `extract_grouped`, `detect_encoding`, `Plan.extract*` and
+  `Page.extract`, beside `url=`. Rust parses the charset parameter and resolves it with
+  `Encoding::for_label`, without the Python-codec detour, so `x-user-defined` and the `replacement`
+  labels survive.
+- One precedence table, the same for every entry point (`frostwork::resolve_encoding`):
 
   | rank | source | an unusable value |
   |---|---|---|
@@ -117,52 +112,37 @@ the contract he builds against, so the core has to make the right call easy and 
   | 5 | document declarations: an XML declaration at offset 0, then `<meta>` in document order, in the head at any depth or within the first 1024 bytes of the body | unsupported labels are skipped, and the scan continues |
   | 6 | autodetection: UTF-8 if valid (the E2 exception), else chardetng with the TLD of `url=` | n/a |
 
-  This keeps `encoding=` exactly as it behaves today, in rank 3 after the bytes that cannot lie. A BOM
-  beats `encoding="windows-1252"` now (measured), and it keeps beating it. That is a difference from
-  Scrapy and web-poet, which rank `_encoding` ahead of the BOM. A label that outranks a BOM would be a
-  new override contract, and a BOM-marked document read as anything else is mojibake, so I would not
-  add one unless Adrian's integration needs it.
+  `encoding=` ranks below the bytes that cannot lie: a BOM beats `encoding="windows-1252"`. That is a
+  difference from Scrapy and web-poet, which rank `_encoding` ahead of the BOM. A label that outranks a
+  BOM would be a new override contract, and a BOM-marked document read as anything else is mojibake, so
+  there is none (decision 6).
 - **`str` input has already been decoded**, so no rank applies. `encoding=` must be absent or a UTF-8
-  label, which is today's rule, and anything else raises. `content_type=` is accepted and its charset
-  ignored, because transport metadata describes bytes that no longer exist and must not reinterpret
-  decoded text.
-- **Detection and extraction make the same decision.** Today they do not on an unknown label.
-  `extract` and `Page.extract` raise, because the check lives in `page._check_encoding`.
-  `detect_encoding` ignores the label and sniffs, and so does `Plan.extract*`, which is what
-  `FrostPage` calls, so the integration path silently sniffs where the public function raises. Every
-  valid label I tried agrees. Move the rank-3 check below every entry point, into the binding or the
-  Rust resolver, and gate it: every `enc_check` input through `extract`, `detect_encoding`,
-  `Plan.extract*` and `FrostPage` must give the same answer, error included.
-- `detect_encoding(body, content_type=..., url=..., encoding=...)` returns the WHATWG name the scan
-  will use, so a framework can set its own `.encoding`, and with it `.text`, from the same decision.
-  An `explain=True` form returns the winning source as well (`"bom"`, `"utf16-prefix"`, `"encoding"`,
-  `"content-type"`, `"xml-declaration"`, `"meta"`, `"utf8"`, `"autodetect"`), which is what an
-  integrator debugging a mismatch needs first.
-- Write the contract down in PYTHON.md, where an integrator will look for it. Pass the raw
-  `Content-Type` header value, the response URL, and `encoding=` only when the user forced one; never
-  pass a resolved encoding. Each argument gets one sentence on what goes wrong if it is omitted or
-  replaced by `response.encoding`, with the counts above as evidence.
-- Gate the core: every `enc_check` case through the public API with header-only input must give the
-  engine's answer.
+  label, and anything else raises. `content_type=` is accepted and its charset ignored, because transport
+  metadata describes bytes that no longer exist.
+- **Detection and extraction make the same decision.** The label check lives below every entry point, so
+  `extract`, `detect_encoding`, `Plan.extract*` and `FrostPage` raise on the same unknown label and agree
+  on every valid one. `tests/test_encoding_inputs.py` runs every `enc_check` document through each of
+  them.
+- `detect_encoding(body, content_type=..., url=..., encoding=...)` returns the WHATWG name the scan will
+  use, so a framework can set its own `.encoding`, and with it `.text`, from the same decision.
+  `explain=True` returns the winning source as well (`"bom"`, `"utf16-prefix"`, `"encoding"`,
+  `"content-type"`, `"xml-declaration"`, `"meta"`, `"utf8"`, `"autodetect"`).
+- PYTHON.md ("Encoding inputs") is the integrator contract: pass the raw `Content-Type` header value, the
+  response URL, and `encoding=` only when the user forced one; never pass a resolved encoding.
 
-**Integrations:**
+**The integrations in this repo:**
 
-- In this repo, `Page.extract_response` and `FrostPage` follow the contract. They pass the header and
-  the URL (neither passes one today, so chardetng's TLD hint never reaches either), and pass a forced
-  encoding from `_encoding` as `encoding=`, where it ranks below a BOM. web-poet's
-  `HttpResponse(encoding=...)` and Scrapy's `TextResponse(encoding=...)` both store it there and both
-  rank it first, ahead of BOM, header and `<meta>`, so the one shape where the two can disagree is a
-  forced label on a BOM-marked body. Document that in the contract. Scrapy's order is
+- `Page.extract_response` and `FrostPage` pass the header and the URL, so chardetng's TLD hint reaches
+  both, and pass a forced encoding from `_encoding` as `encoding=`, where it ranks below a BOM. web-poet's
+  `HttpResponse(encoding=...)` and Scrapy's `TextResponse(encoding=...)` both store a forced label there
+  and both rank it first, ahead of BOM, header and `<meta>`, so the one shape where Frostwork and the
+  framework can disagree is a forced label on a BOM-marked body. Scrapy's order is
   `self._encoding or self._bom_encoding() or self._headers_encoding() or self._body_declared_encoding()`
   ([source](https://github.com/scrapy/scrapy/blob/master/scrapy/http/response/text.py)).
-  Pin that private-attribute dependency with one test per framework, and run every `enc_check` case
-  through a real web-poet `HttpResponse` and `FrostPage`.
-- Scrapy and w3lib are Adrian's. The core API and the contract above are what he needs from this side.
-- `diff_webpoet` grades against parsel built from `response.text`, which is w3lib's decision. If its
-  generator can emit any of the shapes above, it will grade the fix as a divergence, so it needs
-  `enc_check`'s browser-difference table or a generator that stays out of those shapes.
+- `diff_webpoet` grades against parsel built from `response.text`, which is w3lib's decision, so its
+  generator has to stay out of the shapes above.
 
-None of this needs the shared-decision API (scrapy/w3lib#333, reverted) to land.
+None of this needs the shared-decision API (scrapy/w3lib#333, reverted).
 
 ### E2. Unlabelled valid UTF-8 (decided: keep the UTF-8 check)
 
@@ -421,6 +401,9 @@ page with its own production selectors), the rules fire on these shares of pages
 | a `<frameset>` replacing the body | 1 page |
 | `<selectedcontent>` | none |
 | any of them, so the page replays | 2.99% (none of the 31 realweb pages) |
+
+On a replayed page, `extract` took a median of 1.35 and a 90th percentile of 2.0 times one streaming
+pass (200 such pages, minimum of 15 runs each, on a shared CPU), against 1.06 on pages that stream.
 
 The alternative was to replay the tokens with hints about what is to come: a body inert from the start,
 a table's subtree deferred past its fostered content, the adoption agency's final parents applied when
@@ -687,7 +670,9 @@ the crawl lab, and pinned browsers in CI. `gate-browser`, `gate-webpoet-browser`
 ## 6. Cost
 
 - **Engine.** Browser mode is one more tree builder behind the seam, plus the replay. Lxml mode keeps
-  its own code path, and `OpenElem` its size. See `docs/BENCHMARKS.md` for the measured cost of each mode.
+  its own code path, and `OpenElem` its size. The replay roughly doubles the work on the 3% of pages it
+  runs on (section 4), and a deferred tail costs one more pass on a page where it has a winner.
+  `docs/BENCHMARKS.md` has the measured throughput of each mode.
 - **Gates.** A second oracle for the tree, values and the page-object layer, which needs local browsers.
 - **Contract.** COMPATIBILITY.md has a section per mode, each with its own divergence list.
 
@@ -700,8 +685,10 @@ the crawl lab, and pinned browsers in CI. `gate-browser`, `gate-webpoet-browser`
   that source.
 - `.as_node()` is refused in browser mode. A faithful one would hand over a node built from browser
   mode's own tree, never an lxml reparse.
-- XPath names must be lowercase in both modes, so `@viewBox` and `//clipPath` are refused in browser
-  mode.
+- XPath names must be lowercase in both modes, and browser mode keeps SVG and MathML names in their
+  camel case. So an XPath query cannot reach a camel-cased foreign name in browser mode at all:
+  `@viewBox` and `//clipPath` are refused, and `@viewbox` and `//clippath` match nothing, where lxml mode
+  answers the lowercase spelling. CSS reaches them (`svg::attr(viewBox)`, `clipPath`).
 - The gaps listed under Gates.
 
 ## 8. Decisions
