@@ -84,6 +84,21 @@ const FAST_PATH_ELIGIBLE = (doc) => doc.includes('<') && !doc.slice(0, doc.index
 // included, namespaces kept. Only an HTML-namespace <template> has `.content`.
 const PAGE_LIB = `
 const XHTML = 'http://www.w3.org/1999/xhtml';
+// Every element property is read through its prototype's own accessor: a <form> exposes its controls
+// by name over its own properties, so <input name=attributes> or name=localName would otherwise hand
+// the serialiser an element in their place.
+const getter = (proto, name) => { const g = Object.getOwnPropertyDescriptor(proto, name).get; return (o) => g.call(o); };
+const method = (proto, name) => { const f = proto[name]; return (o, ...a) => f.apply(o, a); };
+const $type = getter(Node.prototype, 'nodeType'), $kids = getter(Node.prototype, 'childNodes');
+const $text = getter(Node.prototype, 'textContent');
+const $attrs = getter(Element.prototype, 'attributes'), $local = getter(Element.prototype, 'localName');
+const $ns = getter(Element.prototype, 'namespaceURI'), $shadow = getter(Element.prototype, 'shadowRoot');
+const $outer = getter(Element.prototype, 'outerHTML'), $content = getter(HTMLTemplateElement.prototype, 'content');
+const $set = method(Element.prototype, 'setAttribute'), $unset = method(Element.prototype, 'removeAttribute');
+const $all = (o, sel) => ($type(o) === 1 ? Element.prototype : $type(o) === 9 ? Document.prototype
+  : DocumentFragment.prototype).querySelectorAll.call(o, sel);
+const $nonce = (e) => { const c = [HTMLElement, SVGElement, MathMLElement].find((k) => e instanceof k);
+  return c ? getter(c.prototype, 'nonce')(e) : ''; };
 window.__probe = (d) => { const ns = d.getElementById('ns'), fo = d.getElementById('fo'),
   a = d.querySelector('div.a'), sd = d.getElementById('sd');
   return { scriptRan: d.documentElement.getAttribute('data-ran') === '1',
@@ -93,23 +108,25 @@ window.__probe = (d) => { const ns = d.getElementById('ns'), fo = d.getElementBy
     selfCloseIgnored: !!a && a.textContent.includes('sc'),
     divKeptInSelect: !!sd && !!sd.closest('select') }; };
 window.__ser = (n) => {
-  if (n.nodeType === 3) return n.data;
-  if (n.nodeType === 8) return ['#c', n.data];
-  if (n.nodeType === 10) return ['#dt', n.name, n.publicId, n.systemId];
-  if (n.nodeType === 7) return ['#7', n.target, n.data];
-  if (n.nodeType === 9 || n.nodeType === 11) return ['#d', [...n.childNodes].map(__ser)];
-  if (!n.attributes) return ['#' + n.nodeType];
-  const at = []; for (const x of n.attributes) at.push(x.name, x.value);
-  const kids = [...n.childNodes].map(__ser);
-  if (n.localName === 'template' && n.namespaceURI === XHTML) kids.push(__ser(n.content));
-  if (n.shadowRoot) kids.push(['#shadow', n.shadowRoot.mode, [...n.shadowRoot.childNodes].map(__ser)]);
-  return [n.localName, n.namespaceURI === XHTML ? 0 : n.namespaceURI, at, kids]; };
+  const type = $type(n);
+  if (type === 3) return n.data;
+  if (type === 8) return ['#c', n.data];
+  if (type === 10) return ['#dt', n.name, n.publicId, n.systemId];
+  if (type === 7) return ['#7', n.target, n.data];
+  if (type === 9 || type === 11) return ['#d', [...$kids(n)].map(__ser)];
+  if (type !== 1) return ['#' + type];
+  const at = []; for (const x of $attrs(n)) at.push(x.name, x.value);
+  const kids = [...$kids(n)].map(__ser);
+  if ($local(n) === 'template' && $ns(n) === XHTML) kids.push(__ser($content(n)));
+  const sh = $shadow(n);
+  if (sh) kids.push(['#shadow', sh.mode, [...$kids(sh)].map(__ser)]);
+  return [$local(n), $ns(n) === XHTML ? 0 : $ns(n), at, kids]; };
 // A page load's header CSP makes Chrome hide every nonce: on insertion the attribute is set to "" and
 // the value kept only in the element's nonce slot. Put each back, open shadow roots included, so the
 // tree and every query see the page's own value, as DOMParser's documents (which have no CSP) do.
 window.__unhideNonces = (root) => {
-  for (const e of root.querySelectorAll('[nonce=""]')) if (e.nonce) e.setAttribute('nonce', e.nonce);
-  for (const e of root.querySelectorAll('*')) if (e.shadowRoot) __unhideNonces(e.shadowRoot); };
+  for (const e of $all(root, '[nonce=""]')) { const v = $nonce(e); if (v) $set(e, 'nonce', v); }
+  for (const e of $all(root, '*')) if ($shadow(e)) __unhideNonces($shadow(e)); };
 // Parsel's CSS over document d, from the plans tools/browser_oracle/css.py compiles. A plan is
 // {members: [{css, anchored, value: text|attr|outer, attr, scope: self|subtree, contains: [[mark, s]]}]},
 // or {container: plan, subs: [plan]} for values relative to each container match. One answer per plan:
@@ -120,35 +137,35 @@ window.__css = (d, plans) => {
   // numbered BEFORE any marker is added, and an attribute by its owner's number plus its position, so
   // a result never depends on Attr object identity.
   const order = new Map(); let k = 0;
-  const walk = (n) => { order.set(n, k); k += 1 + (n.attributes ? n.attributes.length : 0);
-    for (const c of n.childNodes) walk(c); };
+  const walk = (n) => { order.set(n, k); k += 1 + ($type(n) === 1 ? $attrs(n).length : 0);
+    for (const c of $kids(n)) walk(c); };
   walk(d);
   const run = (m, scope, acc) => {
     const marked = [];
     let els;
     try {
       for (const [name, needle] of m.contains) {
-        for (const e of d.querySelectorAll('*')) if (e.textContent.includes(needle)) { e.setAttribute(name, ''); marked.push([e, name]); }
+        for (const e of $all(d, '*')) if ($text(e).includes(needle)) { $set(e, name, ''); marked.push([e, name]); }
       }
-      if (scope) { scope.setAttribute('data-fw-scope', ''); marked.push([scope, 'data-fw-scope']); }
-      els = [...d.querySelectorAll(scope ? m.anchored : m.css)];
-    } finally { for (const [e, name] of marked) e.removeAttribute(name); }
+      if (scope) { $set(scope, 'data-fw-scope', ''); marked.push([scope, 'data-fw-scope']); }
+      els = [...$all(d, scope ? m.anchored : m.css)];
+    } finally { for (const [e, name] of marked) $unset(e, name); }
     for (const el of els) {
       if (m.value === 'outer') acc.set(order.get(el), el);
       else if (m.value === 'text') {
-        if (m.scope === 'self') { for (const c of el.childNodes) if (c.nodeType === 3) acc.set(order.get(c), c.data); }
+        if (m.scope === 'self') { for (const c of $kids(el)) if ($type(c) === 3) acc.set(order.get(c), c.data); }
         else { const w = d.createTreeWalker(el, 4); let t; while ((t = w.nextNode())) acc.set(order.get(t), t.data); }
       } else {
         // getAttribute(): the name ASCII-lowercased on an HTML element, then the first attribute so named
-        const take = (e) => { const want = e.namespaceURI === XHTML ? m.attr.replace(/[A-Z]/g, (c) => c.toLowerCase()) : m.attr;
-          let i = 0; for (const a of e.attributes) { if (a.name === want) { acc.set(order.get(e) + 1 + i, a.value); break; } i++; } };
-        take(el); if (m.scope === 'subtree') for (const e of el.querySelectorAll('*')) take(e);
+        const take = (e) => { const want = $ns(e) === XHTML ? m.attr.replace(/[A-Z]/g, (c) => c.toLowerCase()) : m.attr;
+          let i = 0; for (const a of $attrs(e)) { if (a.name === want) { acc.set(order.get(e) + 1 + i, a.value); break; } i++; } };
+        take(el); if (m.scope === 'subtree') for (const e of $all(el, '*')) take(e);
       }
     }
   };
   const answer = (p, scope) => { const acc = new Map(); for (const m of p.members) run(m, scope, acc);
     return [...acc.keys()].sort((a, b) => a - b).map((key) => acc.get(key)); };
-  const value = (v) => (typeof v === 'string' ? v : v.outerHTML);
+  const value = (v) => (typeof v === 'string' ? v : $outer(v));
   return plans.map((p) => { try {
     if (p.subs) return answer(p.container, null).map((c) => p.subs.map((s) => answer(s, c).map(value)));
     return answer(p, null).map(value);

@@ -418,6 +418,13 @@ IS_ATTR: list[list[str]] = [
     ["<a{} is>", "t", "<a{}>", "t"],
     ["<b{}>", "t", "<b{} is>", "t", "<b{}>", "t", "<b{}>", "t", "</div>", "t"],
 ]
+# A <form> exposes its controls by name over its own properties, so the oracle must read every element
+# through its prototype: each name below would replace a property the serialiser or a query reads.
+CLOBBER: list[list[str]] = [
+    ["<form{} nonce=n1 class=c>", f"<input{{}} name={name}>", "t", "</form>", "t"]
+    for name in ("attributes", "childNodes", "localName", "namespaceURI", "nodeType", "shadowRoot",
+                 "textContent", "querySelectorAll", "setAttribute", "removeAttribute", "outerHTML", "nonce")
+] + [["<noscript{}>", "</noscript>", "<form{}>", "<input{} name=localName>", "t", "</form>"]]
 SELECT_OPTIONS: list[list[str]] = [
     _SELECT + body + ["<option{}>", "u", "</select>"]
     for body in (
@@ -432,7 +439,7 @@ SELECT_OPTIONS: list[list[str]] = [
 
 def structured_docs() -> list[Doc]:
     """Every structured family member, as a document."""
-    seqs = [lead + f for f in EOF_FRAMES + FORMATTING + RAW_ENDS + FRAME_MERGES + RULE_VALUES + SELECT_OPTIONS + PAGE_LOADS + AFTER_BODY + CR_IN_TAGS + IS_ATTR
+    seqs = [lead + f for f in EOF_FRAMES + FORMATTING + RAW_ENDS + FRAME_MERGES + RULE_VALUES + SELECT_OPTIONS + PAGE_LOADS + AFTER_BODY + CR_IN_TAGS + IS_ATTR + CLOBBER
             for lead in ([], [DOCTYPE])]
     seqs += [s[:k] + [COMMENT] + s[k:] for s in COMMENT_SKELETONS for k in range(len(s) + 1)]
     seqs += [[DOCTYPE] + f for f in ARK_FAMILY]
