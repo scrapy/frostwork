@@ -1,52 +1,44 @@
-# Browser compatibility: encoding, then a browser parse mode
+# Browser mode and browser-compatible encoding
 
-Status: proposal, with six open decisions in section 8. Drafted by Claude for Shane, then reviewed by
-Gemini (`gemini-4-argon`), Astra and Claude Fable, with every accepted finding re-measured before it
-went in. Measured against `main` at `68927e9` on 2026-11-03; sources and versions are at the end.
+Status: implemented on the `browser-mode` branch. Browser mode is the default parse mode, and lxml mode
+stays available as `parser="lxml"` for libxml2 parity. The design was drafted by Claude for Shane and
+reviewed by Gemini (`gemini-4-argon`), Astra and Claude Fable before any of it was built; the
+implementation was then reviewed by Claude Fable. Sources and versions are at the end.
 
-Scope: browser mode is the default and is graded against real browsers; lxml mode stays available as
-`parser="lxml"` for libxml2 parity. Adrian owns the Scrapy and w3lib integration. This proposal covers the core engine and the
-API he builds against.
+Scope: the core engine, its gates, and the API that integrations build against. Adrian owns the Scrapy
+and w3lib integration.
 
 ## Answers first
 
-**Encoding.** The engine's encoding decision already matches the browser on every case
-`~/src/encoding-hacks` measures, apart from two deliberate exceptions. Frostwork is still not
-browser-compatible on encoding in practice, for three reasons:
+**Encoding.** Frostwork now makes the browser's encoding decision through every entry point. Over the
+48 cases of `~/src/encoding-hacks`, the engine differs from Chrome on 2, both deliberate: unlabelled
+valid UTF-8 stays UTF-8 (E2), and autodetection follows Firefox's detector rather than Chrome's (E3).
+Before this work it differed on 9, and on 21 through web-poet, because the integrations handed the
+engine w3lib's resolved `.encoding` and that label outranked Frostwork's own prescan. The engine now
+takes the transport label (`content_type=`) and the URL, and `Page.extract_response` and `FrostPage`
+pass them (E1). The two remaining "encoding" gaps the lab used to show (`utf32-bom`, `nul-split`) were
+Parsel's input normalisation, and browser mode does not apply it.
 
-1. The Python integrations hand the engine the response's *resolved* `.encoding`, which is w3lib's
-   decision, and a caller label outranks Frostwork's own prescan. Through web-poet, 21 of the lab's 48
-   cases differ from Chrome against 9 for the engine alone, and routing the header through w3lib drops
-   `x-user-defined`.
-2. On an unlabelled page that is valid UTF-8, Frostwork reads UTF-8. Chrome refuses to, on purpose,
-   and shows mojibake (measured), and chardetng documents the same policy for Firefox (not yet
-   measured). Decided: Frostwork keeps its answer, as one named exception.
-3. Autodetection uses chardetng, which is Firefox's detector. Chrome uses a different one and they
-   disagree. Decided: autodetection is pinned to Firefox.
+**A parse-mode option.** Each compiled schema runs in one of two modes. Browser mode builds the tree
+HTML5 tree construction builds, as Chrome 156 implements it, inside the same one-pass matcher; lxml mode
+builds libxml2's. The two share the tokenizer, the matcher, encoding and value decoding, and differ only
+in the tree builder behind one interface (section 4). HTML5's builder is stateful: it chooses the
+tokenizer's next state, tracks namespaces, and keeps DOM ancestry apart from the parser stack, so the
+interface is a stateful builder rather than the six rule functions lxml mode used to expose.
 
-The lab's two remaining "encoding" gaps (`utf32-bom`, `nul-split`) are not encoding at all. They come
-from Parsel's input normalisation (NUL deletion), and they belong to the parse mode.
+**The oracle is the browsers themselves.** In Chrome 156 and Firefox 159, a page load served with
+`Content-Security-Policy: script-src 'none'` builds the real tree without running page scripts, and
+`DOMParser` builds the same tree for every document with neither `<noscript>` nor a declarative shadow
+root, at over 20,000 documents a second per browser process (section 5). Every browser-mode gate grades
+against Chrome, and against Firefox on request.
 
-**A parse-mode option.** Yes, and the two modes stay separate, but browser mode is more than a
-second set of answers to today's six rule functions. HTML5's tree builder is stateful. It chooses the
-tokenizer's next state (an SVG `<title>` holds markup, an HTML one does not), tracks namespaces, and
-keeps DOM ancestry apart from the parser stack. The two features that reparse source spans, deferred
-selectors and `.as_node()`, lose their context in browser mode, so the first version refuses them
-(section 4). Most of the cost is in the gates. Every gate in this repo is oracled against lxml, so
-a second mode needs a second oracle, a second rule derivation and a second set of runs.
-
-**The oracle can be the browsers themselves.** In both Chrome 156 and Firefox 159, a page load served
-with `Content-Security-Policy: script-src 'none'` builds the real tree without running page scripts.
-`DOMParser` built the same tree as that page load for all 4478 of 5002 random documents that contain
-neither `<noscript>` nor a declarative shadow root, at over 20,000 documents a second per browser
-process. That is fast enough for every gate, and it cannot drift from the browser the way parse5 or
-html5lib can (section 5).
-
-Some HTML5 rules change what a single forward pass has already decided: the adoption agency
-algorithm, the document-order half of foster parenting, a second `<html>` or `<body>` tag merging its
-attributes into an element already matched, and a `<frameset>` that replaces a body already parsed.
-The first two are documented divergences in lxml mode today. All four should be documented
-divergences in browser mode unless Phase 2 chooses to buffer for one of them.
+**Five HTML5 rules change a decision a single forward pass has already made**: the adoption agency with
+a furthest block, foster parenting's document order, a second `<html>` or `<body>` tag merging its
+attributes into an element already matched, a `<frameset>` replacing a body already parsed, and an
+`<option>`'s content copied into a `<selectedcontent>` that precedes it. None of them fired on 97% of the
+30,031 crawl and real-web pages measured (`tools/retro_census.py`). When one fires, browser mode stops streaming and answers the page from a compact tree of the
+finished document, built by the same builder (section 4, "The replay"). So browser mode is exact on
+all five, and treeless on every page where none of them fires.
 
 ## 1. What the lab shows today
 
@@ -57,8 +49,8 @@ answers equal the stored ones on all 32, so mixing the builds moves no grade. Th
 ISO-8859-15 over the byte 0xA4, so honouring the declaration (`€`) and ignoring it (`¤` under
 windows-1252) give different text.
 
-I ran the 48 cases through `frostwork.extract` (`main` at `68927e9`) with the raw `Content-Type`
-charset. 9 differ from the browser.
+Before this work, I ran the 48 cases through `frostwork.extract` (`main` at `68927e9`) with the raw
+`Content-Type` charset, and 9 differed from the browser.
 
 | cases | cause | verdict |
 |---|---|---|
@@ -71,14 +63,18 @@ charset. 9 differ from the browser.
 On every other depth case Frostwork matches Chrome: a head declaration is honoured at any depth up to
 1 MB, a body declaration up to byte 512, and none from body byte 1024 on.
 
-So at the engine level there is no unexplained encoding divergence left in the lab, and two
-deliberate ones. COMPATIBILITY.md describes the UTF-8 check and the chardetng step as behaviour, but
-says neither that browsers answer `no-declaration` differently nor that Chrome's guesses differ from
-Firefox's.
+So at the engine level there was no unexplained encoding divergence in the lab, only the two
+deliberate ones and seven parse-mode cases. Browser mode fixes all seven. `tools/browser_oracle/lab_compare.py`
+now reports 2 of 48 for the engine given the header and 2 of 48 through `Page.extract_response`, the
+two being `no-declaration` and `body-meta-512k`. Passing web-poet's resolved `.encoding` as the label
+still loses 14, which is why the integrations no longer do (E1).
 
 ## 2. Encoding changes
 
 ### E1. Give the engine the transport label, not the decision
+
+Implemented as described below: `content_type=` on every entry point, one precedence table in Rust
+(`frostwork::resolve_encoding`), `detect_encoding(explain=True)`, and the integrator contract in PYTHON.md.
 
 `Page.extract_response` and `FrostPage.frostwork_input` pass `response.encoding`. In web-poet that
 property is `_encoding or BOM or Content-Type or w3lib's <meta> regex or an inferred fallback`, so it
@@ -278,132 +274,176 @@ Rows marked "browser" were measured in Chrome 156 and Firefox 159 with CSP-serve
 agreed. Rows marked "gate" were found by `tools/diff_browser.py` against both browsers, as divergences
 no other row explained. Rows marked "lab" come from the lab's Chrome 148 column. The rest compare Frostwork with
 html5lib (lxml tree builder, HTML elements un-namespaced, parsel over the result) on the minimal input
-shown, and the browser gate in section 5 is what would confirm them. "Streams" means the browser's
-answer is known when the token arrives, so the one-pass matcher can produce it.
+shown, and `make gate-browser` (section 5) now confirms every row against Chrome. "Streams" means the
+browser's answer is known when the token arrives, so the one-pass matcher produces it. "Replay" means
+the rule changes a decision already made, and the page is answered from its finished tree (section 4).
 
-| construct | example | here (= lxml) | browser | streams | phase |
-|---|---|---|---|---|---|
-| NUL | `<di\0v>`; NUL in text | deleted everywhere, so `<di\0v>` is a `div` | U+FFFD in names and most text, dropped in body text (lab) | yes | 1 |
-| leading strip | indented BOM, leading VT | stripped (Parsel) | kept; a non-whitespace character opens `<body>` | yes | 1 |
-| `<noscript>` | `<noscript><p id=t>x` | markup | raw text, scripting on (lab, browser) | yes, data mode | 1 |
-| HTML `<template>` | `<template id=t><p id=y>x` | `#y` matched | `#t` matches, `#y` never does: the content is an inert fragment (lab, browser). An SVG `<template>` is an ordinary element whose children stay selectable (browser) | yes, keyed on namespace and name | 1 |
-| SVG `<title>` | `<svg><title><b id=x>t</b>` | RCDATA by name, so no `<b>` | an HTML integration point: `#x` is a real element (browser) | yes, the builder sets the tokenizer state | 2 |
-| implied `<tbody>` | `table > tbody > tr > td` | empty; `table > tr > td` matches | the reverse: DevTools' "Copy selector" works (browser) | yes, synthetic element | 2 |
-| `/>` on a non-void tag | `<div class="a"/>text` | div closed, `div.a::text` empty | `/>` ignored, text inside the div (browser) | yes | 2 |
-| `<p>` closers | `<p>a<section>b</section>c` | `p::text` is `a`, `c` | `a`: HTML5's closer set includes `section`, `article`, `nav`... | yes | 2 |
-| deep `<p>` | `<p><b><div>x` | `div` inside `p` | `p` closed (button-scope walk) | yes | 2 |
-| stray `</p>` | `<div>A</p>B</div>` | one node `AB` | empty `<p>` inserted, so `A` and `B` | yes | 2 |
-| formatting reconstruction | `<p><b>1</p>2` | `b::text` is `1` | `1`, `2`: after `</p>`, a clone of `<b>` reopens for the `2` (browser) | yes, synthetic element | 2 |
-| quirks-mode tree | `<p id=p><table id=t>` with no doctype | `<table>` closes the `<p>` | in quirks mode the table stays inside the `<p>`; with a doctype it closes it (browser). The document mode comes from the doctype | yes, the mode is known before the first element | 2 |
-| leading newline | `<pre>\nx`, also `<textarea>`, `<listing>` | `\nx` | `x`: a newline right after the start tag is dropped (browser) | yes | 2 |
-| form pointer | `<form id=a><form id=b><input>`; `<table><form id=f><tr><td><input id=i>` | the second form nests; the input is inside `#f` | the second form is ignored; in a table the form is an empty child of the table, so `#f #i` is empty (browser) | yes, form-pointer state | 2 |
-| declarative shadow root | `<div><template shadowrootmode=open><p id=s>` | the `<template>` and `#s` match | the `<template>` leaves the document tree and its content becomes a shadow root, so neither matches a document selector (browser) | yes, with the spec's host conditions | 2 |
-| frameset replacing the body | `<div id=x></div><frameset>` | `#x` stays | the body and `#x` are removed and the `<frameset>` replaces them (browser). Text first makes the `<frameset>` ignored instead | only by buffering every match since the body opened until frameset-ok clears. Text clears it, and so do some start tags (`li`, `table`, `img`, `input`...), but `div`, `p`, `span`, `a` and `form` do not, so the buffer is unbounded in principle though short on real pages. Otherwise a divergence | 2 or divergence |
-| `dt`/`dd` repeat | `<dl><dt>a<dt>b` | nested | siblings | yes | 2 |
-| table parts outside a table | `<td>x`, `<tr><input>` | the element is built | the start tag is ignored and its content joins the current node (gate) | yes | 2 |
-| `<frame>` outside a frameset | `<div><frame>` | the element is built | ignored (gate) | yes | 2 |
-| foreign-content breakout | `<svg><pre>`, `<math><p>` | nested inside the `<svg>` | an HTML start tag such as `<p>` or `<pre>` closes the foreign elements first (gate) | yes | 2 |
-| closes HTML5 does not do | `<pre><dd>`, `<dt><dl>` | libxml2 closes the first element | both stay open, so the second nests inside the first (gate) | yes | 2 |
-| head content after the head | `<style>s</style><button>` and similar | stays where written | head-only elements arriving in "after head" go back into the head (gate) | yes | 2 |
-| `<select>` rules | a `<select>` inside a `<select>` | nested | the second closes the first (gate) | yes | 2 |
-| nested `button`/`h1`/`nobr` | `<button>x<button>y` | nested | the outer one closes | yes | 2 |
-| `<head>` | `<p>x` | no head | an empty head is always built | yes | 2 |
-| after `</html>` | `…</html><div id=a>late` | outside `body` | inside `body`: HTML5 never pops `body` or `html` before EOF | yes | 2 |
-| renames | `</br>`, `<image>` | ignored, unknown element | `<br>`, `<img>` | yes | 2 |
-| CDATA in foreign content | `<svg><text><![CDATA[b]]>` | bogus comment | text | yes, tokenizer flag | 2 |
-| foster parenting | `<table><p id=t>moved` | `table #t` matches | `<p>` moved before the table (lab, browser) | ancestry yes; document order and siblings no | divergence |
-| adoption agency | `<b>1<p>2</b>3`; `<a><div>t</a>u</div>` | `b::text` is `1`; `a::text` empty | `<p>` moves out of the `<b>`, so `b p` is empty and `b::text` is `1`, `2` (browser); `t` inside a cloned `<a>` | no: the later end tag re-parents content already matched | divergence |
-| second `<html>`/`<body>` tag | `<body x=1>…<body y=2>` | ignored | attributes merged into the open element | no: retroactive for selectors already evaluated | divergence |
+| construct | example | lxml mode | browser mode | how browser mode answers it |
+|---|---|---|---|---|
+| NUL | `<di\0v>`; NUL in text | deleted everywhere, so `<di\0v>` is a `div` | U+FFFD in names and most text, dropped in body text (lab) | input rules |
+| leading strip | indented BOM, leading VT | stripped (Parsel) | kept; a non-whitespace character opens `<body>` | input rules |
+| `<noscript>` | `<noscript><p id=t>x` | markup | raw text, scripting on (lab, browser) | the builder picks the data mode |
+| HTML `<template>` | `<template id=t><p id=y>x` | `#y` matched | `#t` matches, `#y` never does: the content is an inert fragment (lab, browser). An SVG `<template>` is an ordinary element whose children stay selectable (browser) | inert content, keyed on namespace and name |
+| SVG `<title>` | `<svg><title><b id=x>t</b>` | RCDATA by name, so no `<b>` | an HTML integration point: `#x` is a real element (browser) | the builder sets the tokenizer state |
+| implied `<tbody>` | `table > tbody > tr > td` | empty; `table > tr > td` matches | the reverse: DevTools' "Copy selector" works (browser) | synthetic element |
+| `/>` on a non-void tag | `<div class="a"/>text` | div closed, `div.a::text` empty | `/>` ignored, text inside the div (browser) | streams |
+| `<p>` closers | `<p>a<section>b</section>c` | `p::text` is `a`, `c` | `a`: HTML5's closer set includes `section`, `article`, `nav`... | streams |
+| deep `<p>` | `<p><b><div>x` | `div` inside `p` | `p` closed (button-scope walk) | streams |
+| stray `</p>` | `<div>A</p>B</div>` | one node `AB` | empty `<p>` inserted, so `A` and `B` | synthetic element |
+| formatting reconstruction | `<p><b>1</p>2` | `b::text` is `1` | `1`, `2`: after `</p>`, a clone of `<b>` reopens for the `2` (browser) | a synthetic copy with the original's attributes |
+| quirks-mode tree | `<p id=p><table id=t>` with no doctype | `<table>` closes the `<p>` | in quirks mode the table stays inside the `<p>`; with a doctype it closes it (browser). The document mode comes from the doctype | the document mode, read from the doctype |
+| leading newline | `<pre>\nx`, also `<textarea>`, `<listing>` | `\nx` | `x`: a newline right after the start tag is dropped (browser) | streams |
+| form pointer | `<form id=a><form id=b><input>`; `<table><form id=f><tr><td><input id=i>` | the second form nests; the input is inside `#f` | the second form is ignored; in a table the form is an empty child of the table, so `#f #i` is empty (browser) | streams; a form that leaves the stack stays a DOM ancestor |
+| declarative shadow root | `<div><template shadowrootmode=open><p id=s>` | the `<template>` and `#s` match | the `<template>` leaves the document tree and its content becomes a shadow root, so neither matches a document selector (browser) | inert, with the host conditions |
+| frameset replacing the body | `<div id=x></div><frameset>` | `#x` stays | the body and `#x` are removed and the `<frameset>` replaces them (browser). Text first makes the `<frameset>` ignored instead | replay |
+| `dt`/`dd` repeat | `<dl><dt>a<dt>b` | nested | siblings | streams |
+| table parts outside a table | `<td>x`, `<tr><input>` | the element is built | the start tag is ignored and its content joins the current node (gate) | streams |
+| `<frame>` outside a frameset | `<div><frame>` | the element is built | ignored (gate) | streams |
+| foreign-content breakout | `<svg><pre>`, `<math><p>` | nested inside the `<svg>` | an HTML start tag such as `<p>` or `<pre>` closes the foreign elements first (gate) | streams |
+| closes HTML5 does not do | `<pre><dd>`, `<dt><dl>` | libxml2 closes the first element | both stay open, so the second nests inside the first (gate) | streams |
+| head content after the head | `<style>s</style><button>` and similar | stays where written | head-only elements arriving in "after head" go back into the head (gate) | the head is parked, then reopened |
+| `<select>` rules | a `<select>` inside a `<select>` | nested | the second closes the first (gate) | streams |
+| nested `button`/`h1`/`nobr` | `<button>x<button>y` | nested | the outer one closes | streams |
+| `<head>` | `<p>x` | no head | an empty head is always built | synthetic element |
+| after `</html>` | `…</html><div id=a>late` | outside `body` | inside `body`: HTML5 never pops `body` or `html` before EOF | streams |
+| renames | `</br>`, `<image>` | ignored, unknown element | `<br>`, `<img>` | streams |
+| CDATA in foreign content | `<svg><text><![CDATA[b]]>` | bogus comment | text | tokenizer hook |
+| foster parenting | `<table><p id=t>moved` | `table #t` matches | `<p>` moved before the table (lab, browser) | ancestry streams (the table is parked); document order by replay |
+| adoption agency | `<b>1<p>2</b>3`; `<a><div>t</a>u</div>` | `b::text` is `1`; `a::text` empty | `<p>` moves out of the `<b>`, so `b p` is empty and `b::text` is `1`, `2` (browser); `t` inside a cloned `<a>` | streams without a furthest block; replay with one |
+| second `<html>`/`<body>` tag | `<body x=1>…<body y=2>` | ignored | attributes merged into the open element | replay, when it adds an attribute a selector reads |
+| `<selectedcontent>` | `<select><button><selectedcontent></selectedcontent></button><option>A` | an empty element | the selected option's content is copied in when the option closes (browser) | replay |
+| foreign attribute names | `<svg viewbox="0 0 1 1">`, `<math definitionurl=x>`, `xlink:href` | as written, lowercased | `viewBox`, `definitionURL`, and `xlink:`/`xml:`/`xmlns` namespaced on foreign elements (browser) | streams |
+| depth cap | more than 512 nested elements | nested | a new element becomes a sibling of the current node (browser) | replay |
 
 `<select>` content is not a departure. html5lib and parse5 drop a `<div>` written inside a `<select>`,
 but Chrome 156 and Firefox 159 keep it since the customisable-`<select>` parser change, and so does
 lxml. It is also an example of why the libraries cannot be the oracle.
 
-Foster parenting fixes only part of the lab's `foster` case even with its ancestry right. The fostered
-element's parent is known when it opens (the element below the table on the stack), but in the
-browser's tree it comes before the table's content while the source puts it after. A single column can
-therefore come back in the wrong order, and `p + table` is decided after the table already opened.
-There is a way to fix the ordering later, if a crawl shows it matters: give each value a document-order
-key, give a fostered subtree a key that sorts before its table, and sort a column only when a foster
-actually happened.
+Foster parenting is the clearest case of a rule that needs both halves. A fostered element's parent is
+known when it opens (the table's own parent), so its ancestry streams. Its place does not: in the
+browser's tree it comes before the table, while the source puts it after the table's start, so `p +
+table`, the table's sibling positions and the order of a column are all decided after the fact. That half
+goes through the replay.
 
 Parsing semantics and selector semantics are separate, and browser mode has to keep them apart in
 three places:
 
-- **Quirks mode is two features.** The tree half is not optional. Without a doctype, `<p><table>`
-  nests where with one it does not, in both browsers, so the document mode has to be computed from the
-  doctype (WHATWG's quirks, limited-quirks and no-quirks tables) in Phase 2. The selector half, where
-  class and id selectors match case-insensitively in quirks mode, can be deferred.
-- **Attribute case folding is CSS-only.** HTML lists about forty attributes whose values CSS matches
-  case-insensitively, so `input[type=submit]` matches `type="SUBMIT"` in both browsers, while XPath
-  `//input[@type='submit']` does not. The compiled matcher shares one representation for CSS and
-  XPath, so the attribute test has to carry which syntax it came from. The list itself is a
-  compile-time table.
+- **Quirks mode is two features.** The tree half is implemented: without a doctype, `<p><table>`
+  nests where with one it does not, in both browsers, so the builder computes the document mode from
+  the doctype (WHATWG's quirks, limited-quirks and no-quirks tables). The selector half, where class and
+  id selectors match case-insensitively in quirks mode, is deferred, and the browser gate attributes it
+  to its own value construct.
+- **Attribute case folding is CSS-only.** HTML lists 46 attributes whose values CSS matches
+  case-insensitively on HTML elements, so `input[type=submit]` matches `type="SUBMIT"` in both browsers,
+  while XPath `//input[@type='submit']` does not. Chrome folds exactly that list and does not fold on
+  SVG elements (measured). Browser mode does the same: the attribute test carries which syntax it came
+  from, and the list is a compile-time table. Lxml mode compares exactly.
 - **Form owner is not ancestry.** Chrome's `DOMParser` builds the same tree as a page load for a form
   inside a table but does not set the input's form owner. Selectors only see the tree, so this
   matters only to anyone tempted to compare whole documents rather than trees.
 
 ## 4. How it fits the engine
 
-Tree rules reach the matcher through `classify` (void flag and start-close class), `start_closes`,
-`blocks_end_tag`/`end_tag_discardable`, `frame_content_of`, `data_mode_of` (used by the tokenizer) and
-`matcher/frame.rs`. Input normalisation is `lib.rs::normalize`. That boundary fits libxml2, whose
-rules are a function of a tag name and the open elements. It does not fit HTML5, whose tree builder
-is stateful and steers the tokenizer. So the interface below has to be specified before any Phase 2
-rule is written.
+In lxml mode, tree rules used to reach the matcher through six functions of a tag name and the open
+elements (`classify`, `start_closes`, `blocks_end_tag`/`end_tag_discardable`, `frame_content_of`,
+`data_mode_of`, and `matcher/frame.rs`). That boundary fits libxml2. It does not fit HTML5, whose tree
+builder is stateful and steers the tokenizer, so both modes now sit behind one stateful interface.
 
-### A stateful tree builder, not six functions
+### One seam, two builders
 
-- **The tree builder chooses the next tokenizer state.** Today `tokenizer::handle_start` picks the data
-  mode from the tag name, through `data_mode_of`, before the matcher sees the token. In HTML5 the
-  answer depends on where the tag lands. An SVG `<title>` is an HTML integration point, so its content
-  is markup and `<svg><title><b id=x>` holds a real `<b>`, while an HTML `<title>` is RCDATA. The same
-  goes for `<style>`, `<script>`, `<textarea>` and `<plaintext>` inside foreign content, for CDATA
-  (text only in foreign content), and for `/>` (honoured in foreign content, ignored on a non-void
-  HTML element). In browser mode the tokenizer therefore asks the tree builder after every start tag.
-  The builder answers with whether the tag was inserted, ignored or reprocessed, its namespace,
-  whether it self-closed, and which tokenizer state comes next.
-- **Namespaces and integration points are tree-builder state.** The builder tracks the namespace of
-  the adjusted current node, the HTML integration points (`foreignObject`, `desc` and `title` in SVG,
-  and `annotation-xml` with an HTML encoding in MathML), the MathML text integration points, and the
-  start tags that break out of foreign content. The matcher needs the namespace too. An HTML
-  `<template>` is itself selectable while its content is outside selector traversal, but an SVG
-  `<template>` is an ordinary SVG element whose descendants stay selectable. Template suppression
-  keys on namespace and name together, never on the name alone.
-- **The parser stack and DOM ancestry are different things.** The matcher reads ancestry off the stack
-  of open elements, and under libxml2 the two coincide. Under HTML5 they do not. In
-  `<form id=f><div id=d>a</form><p id=after>x</p>`, the `</form>` takes the form off the stack but
-  leaves the div open inside it, so `#f #after` matches in a browser. lxml agrees on that value for a
-  different reason (libxml2 discards the `</form>` while the div is open), so this is a trap for the
-  implementation rather than a divergence today: a browser-mode matcher that read ancestry off the
-  stack would lose the match. Foster parenting inserts into an element that is not the current node,
-  and the adoption agency moves elements. Browser mode keeps a DOM-parent link for each open element,
-  separate from its stack position, and selector matching walks that link.
-- **Ignored and reprocessed tokens are builder outcomes.** A `<td>` outside a table, a second
-  `<form>`, or a `</p>` that inserts an empty `<p>` is reported to the matcher by the builder, not
-  re-derived by it.
-- **Monomorphised dispatch.** `Matcher` is generic over the builder, and `Plan` holds one of two
-  compiled matchers, so dispatch happens once per document. Lxml mode must come out unchanged within
-  jitter on `tools/ab_bench.py`. "No new `OpenElem` fields" stays a performance goal for lxml mode, not
-  a constraint on browser mode's correctness model. If the DOM-parent link and the namespace cost
-  bytes, browser mode keeps its own element record.
+`src/matcher/tree.rs` defines `TreeBuilder`. The tokenizer's events (start tag, end tag, text,
+comment, doctype) go to the builder, and the builder answers them by calling a few matcher primitives:
+`open_element` (also for an element the page never wrote), `close_top`, `buffer_text`/`flush_text`,
+`absorb_into_text_gap`, and `park`/`unpark` (below). The matcher evaluates selectors and the builder
+never does, so the two modes share every line of matching, capture, decoding and grouping code.
+`CompiledSchema::run` picks the builder once per document, and `Scan<B>` is monomorphised over it, so
+nothing on the per-token path asks which mode it is in.
+
+- `src/matcher/libxml2.rs` is lxml mode: libxml2's rules, moved there unchanged, over the generated
+  tables in `implied_close/generated.rs`.
+- `src/matcher/browser/` is browser mode: `rules.rs` holds the insertion modes (WHATWG 13.2.6, initial
+  through after after frameset), `doctype.rs` the document-mode tables, `tags.rs` names and the SVG and
+  MathML adjustments, `dom.rs` the replay's tree, and `mod.rs` the builder's state and how it drives the
+  matcher. The HTML5 element categories (special, formatting, the scope lists, implied end tags, void,
+  data mode) are generated from Chrome by `tools/gen_html5_rules.py` into
+  `implied_close/generated_html5.rs`. The algorithms that walk the stack are written from the spec and
+  graded by sequence.
+
+The builder chooses the tokenizer's next state. `start_tag` returns the data mode for the element's
+content, because in HTML5 it depends on where the tag lands: an SVG `<title>` is an HTML integration
+point whose content is markup, while an HTML `<title>` is RCDATA, and `/>` is honoured in foreign content
+and ignored on a non-void HTML element. `cdata_is_text` answers whether `<![CDATA[` is character data at
+that point, which it is only in foreign content.
+
+### The parser stack is not the DOM path
+
+The matcher reads ancestry, positions and sibling state off its own stack, so in browser mode that stack
+is the DOM path to the current insertion point, and the HTML5 stack of open elements is the builder's
+own. Under libxml2 the two coincide. Under HTML5 they differ in four ways:
+
+- **Ghosts.** An element can leave the HTML5 stack while it is still a DOM ancestor of what is open. In
+  `<form id=f><div id=d>a</form><p id=after>x</p>` the `</form>` removes the form but leaves the div open
+  inside it, so `#f #after` matches. The form's matcher element stays on the matcher stack with no
+  builder entry, and closes when the insertion point next moves below it.
+- **Parked elements.** Foster parenting inserts beside the table, in the table's parent, while the table
+  and its rows stay open. The matcher parks the table's run of elements, with their positions, group
+  instances and pending text, so fostered content is a child of the table's parent and not a descendant
+  of the table, and unparks them when the next insertion targets them. The head is parked in "after
+  head", where whitespace goes to `<html>` but a later `<script>` still goes into the head, and so is the
+  current node past Chrome's depth cap of 512.
+- **Inert elements.** HTML template content and declarative shadow roots are parsed with the full rules
+  but never reach the matcher. An SVG or MathML `<template>` is an ordinary element, so this keys on
+  namespace and name together.
+- **Pending elements.** The adoption agency's copies of a formatting element enter the HTML5 stack
+  without a matcher element and get one only if something is inserted into them.
+
+`OpenElem` keeps its size and lxml mode runs none of this.
+
+### The replay
+
+Five rules change a decision the matcher has already made (Answers first). The streaming pass runs
+unchanged until the first of them fires, and then stops. The page is then answered by the replay: the
+same builder, compiled with `REPLAY` set, runs again from the start, and every insertion becomes a DOM
+operation (append, insert before the table, move, copy, detach) on an arena of the finished tree in
+`browser/dom.rs`. The matcher then walks that tree in pre-order, each node's rank serving as its document
+position, so values come out in document order even where fostering moved them. A merge of `<html>` or
+`<body>` attributes counts only when it adds an attribute some selector of the schema reads, which makes
+it the one rule whose firing depends on the schema.
+
+Over 30,031 pages, three Common Crawl samples plus `fixtures/realweb` (`tools/retro_census.py`, each
+page with its own production selectors), the rules fire on these shares of pages:
+
+| rule | pages |
+|---|---|
+| a second `<html>`/`<body>` adds an attribute a selector reads | 1.48% (2.42% for any attribute) |
+| the adoption agency with a furthest block | 1.14% |
+| foster parenting | 0.46% |
+| a `<frameset>` replacing the body | 1 page |
+| `<selectedcontent>` | none |
+| any of them, so the page replays | 2.99% (none of the 31 realweb pages) |
+
+The alternative was to replay the tokens with hints about what is to come: a body inert from the start,
+a table's subtree deferred past its fostered content, the adoption agency's final parents applied when
+the block opens. It needs every event known before it starts, so it would run the builder over the whole
+document first anyway, and it needs a mechanism per rule where the tree needs one for all five.
+
+Early exit (`first_only` columns) stays sound. A replay walks a finished tree, and the streaming pass
+stops early only where no later token can reach back: no open table, no formatting element holding an
+open special element, no body a frameset could still remove, and no `<html` or `<body` bytes left in the
+page.
 
 ### The rest of the engine
 
-- **A second generated file**, `implied_close/generated_html5.rs`, written by `tools/gen_html5_rules.py`
-  from the HTML5 oracle over the same `ELEMENTS` universe. HTML5's rules are not an (open x incoming)
-  table, though. They are element categories (special, formatting, the four scope sets, implied end
-  tags, void, data modes) plus algorithms that walk the stack. Derive the categories from the oracle,
-  write the algorithms from the spec, and audit the algorithms by sequence, because that is where this
-  repo's own history says tree bugs live.
-- **A separate HTML5 frame module** rather than branches in `frame.rs`. HTML5's frame is simpler (one
-  `<html>`, a head that always exists, `<body>` never popped before EOF), and `frame.rs` exists to keep
-  libxml2-specific distinctions apart, phantom slots among them, that HTML5 does not have.
-- **Synthetic elements** already exist: the frame synthesises `html`/`head`/`body` with no source span.
-  An implied `<tbody>` and a reconstructed formatting element reuse that path for matching. Their
-  outer HTML has no source span to return, so browser mode refuses it (next subsection).
-- **Normalisation:** browser mode skips the strip and NUL deletion. A NUL byte in a tag name then fails
-  to match an ASCII selector by itself. Value decoding turns NUL into U+FFFD, or drops it in body text.
+- **Synthetic elements.** The frame (`html`, `head`, `body`), an implied `<tbody>`, `<tr>` or
+  `<colgroup>`, and the `<p>` a stray `</p>` inserts are opened through the same primitive with no source
+  of their own. A formatting element's copy carries the original's attributes, and its outer HTML is the
+  start tag it was copied from followed by its own content.
+- **Input preparation.** Browser mode skips Parsel's strip and NUL deletion, and consumes only a UTF-8
+  BOM at offset 0. NUL follows HTML5: tag and attribute names keep the byte, so `<di\0v>` does not match
+  `div`; body text drops it; raw text, RCDATA and attribute values turn it into U+FFFD.
+- **Names.** Attribute names follow Chrome's DOM: lowercased, SVG camel case, MathML `definitionURL`, and
+  `xlink:`/`xml:`/`xmlns` namespaced on foreign elements. `::attr()` and XPath `@` compare the name
+  exactly. CSS `[attr]` compares it case-insensitively and never matches a namespaced attribute.
 
 ### Rescans and node handoffs
 
@@ -454,7 +494,8 @@ browser-mode engine's own view, never an lxml reparse.
 
 This is the expensive part. `diff_lxml`, `gate-corpus`, `gate-seq`, `audit_tree_rules`,
 `gen_tree_rules --check`, `mutate_rules`, `diff_fuzz`, `sel_fuzz` and `gate-webpoet` all grade against
-lxml. A browser mode is only as trustworthy as a second oracle for each of them.
+lxml, and they now pin `parser="lxml"`. Browser mode is only as trustworthy as its own oracle, and the
+gates below are that oracle.
 
 ### The oracle is the browser
 
@@ -546,11 +587,14 @@ evaluates each kind of query where it can do so losslessly:
   every rebuilt tree and requires it to equal the browser's JSON tree. A document the map cannot
   represent is counted and reported, never skipped.
 
-The driver is small. The harness behind these numbers is `tools/browser_oracle/probe.cjs`, about 360
-lines of Node with no packages, covering both protocols and the four measurements above (`fidelity`,
-`throughput`, `equiv`, `claims`). `claims.json` holds the parser fixtures behind every "(browser)" cell
-in section 3, and `evidence/2026-11-03/` holds the outputs, each stamped with its browser build. It is
-a prototype: no gate calls it yet.
+The driver is `tools/browser_oracle/probe.cjs`, Node with no packages, covering both protocols. Its
+`fidelity`, `throughput`, `equiv` and `claims` modes produced the measurements above, and `serve` is the
+oracle the gates call: one browser kept running, one JSON request per line, a lossless tree (and native
+CSS answers) per document. `client.py` wraps it as `BrowserOracle("chrome" | "firefox")`, `bridge.py` is
+the lossless XPath bridge with its round-trip check, and `css.py` plans each selector as a native
+`querySelectorAll` and checks the plan against parsel's own XPath before sending it. `claims.json` holds
+the parser fixtures behind every "(browser)" cell in section 3, and `evidence/2026-11-03/` holds the
+outputs, each stamped with its browser build.
 
 ### Which browser
 
@@ -561,10 +605,13 @@ runs, 2026-11-03), Chrome 156 passes 8121 of 8166 tests, Firefox 159 passes 7859
 `selectedcontent` cases of customisable `<select>`, and Chrome and Safari fail some `<search>` cases.
 
 So browser mode has to name its reference, as autodetection does. Decided on 2026-11-03: **where the
-two disagree, Frostwork follows Chrome**, because Chrome is what most users see. Every run still grades
-against both Chrome and Firefox. Where they agree, that is the target. Where they disagree, the case
-goes in a named Chrome-versus-Firefox table, gated in both directions like `enc_check`'s w3lib table,
-so a browser that changes its answer fails as stale rather than passing silently.
+two disagree, Frostwork follows Chrome**, because Chrome is what most users see. The default gate
+grades against Chrome, and `BROWSERS=chrome,firefox` adds Firefox. Where the two agree, that is the
+target. Where they disagree, the case goes in a Chrome-versus-Firefox table of its own, which is
+reported but not yet gated in both directions the way `enc_check`'s w3lib table is. In the last
+two-browser run that table held a handful of tree and value columns: `</br>` and frameset-ok,
+`search` and `dialog` being special in Firefox, `</p>` inside a MathML integration point, and processing
+instructions, which Firefox turns into comments.
 
 Encoding and tree construction therefore pin to different browsers, each for its own reason.
 Autodetection follows Firefox because Chrome's detector cannot be run outside Chrome. Tree
@@ -608,114 +655,79 @@ browser.
 
 ### Gates
 
-Each existing gate then gains a browser mode:
+- **`make gate-browser`** (`tools/diff_browser.py`) is the main one. Its documents are every sequence of
+  the frame and table alphabet up to `--seq-depth`, seeded random runs over an HTML5-heavy alphabet in
+  which every start tag carries an id, decorated documents for the value rules, and documents built
+  around deferred tails. It refuses to grade unless every token is emitted. Each document is graded on
+  two kinds of column. The tree columns are `seq_sweep`'s whole-tree fingerprint, with a child-axis
+  column per id and a column per name browser mode can synthesise, evaluated on the browser's own JSON
+  tree. The value columns are a selector basket answered natively in the browser for CSS and through the
+  bridge for XPath. Every differing column is reduced to the smallest token subsequence that still
+  differs, and the reduced document is attributed to a named construct. A value column that differs
+  where the fingerprint agrees has its own constructs. The gate fails on NOVEL (a divergence no construct
+  explains), and on coverage: nothing graded, a token never emitted, an oracle error, a bridge round
+  trip that changed a tree, or a `DOMParser` tree that differs from a page load. Every tree construct
+  has been implemented and deleted, so the gate holds each of them at zero. It then re-measures the HTML5
+  categories in Chrome (`gen_html5_rules.py --check --live`).
+- **`gen_html5_rules.py --check`** runs in `make py` with no browser. It compares the generated Rust
+  file with the stored per-cell answers.
+- **`make gate-webpoet-browser`** grades browser-mode page objects against parsel page objects whose
+  values come from Chrome, and checks that `.as_node()` is refused at class definition.
+- **`make gate-corpus-browser`** is report-only. It serves each corpus page as exact bytes with its
+  `Content-Type`, page-loads it, and grades every production selector, split into tree and value.
+- **`tools/retro_census.py`** counts how often each retroactive rule fires over a corpus, through the
+  `differ` bridge.
+- `tests/test_gates.py` seeds a regression into each of these decision functions, the fast/slow
+  self-check and the bridge round trip included, so each is shown to go red.
 
-- `diff_lxml` gets `--oracle chrome,firefox`: the same generators, with two more verdicts.
-- `gate-seq` against the browsers matters most, because insertion-mode bugs are ordering bugs, but it
-  has to be strengthened first. Its fingerprint (`seq_sweep.fingerprint_selectors`) reads document
-  order, descendant sets and own text per id, and it cannot see an element that carries no id. These
-  two tables give identical answers on all 13 of its selectors:
-  `<table id="0"><tr id="1"><td id="2">x</td></tr></table>` and the same with a `<tbody>` around the
-  row. Run as it is, the gate would pass a browser mode with no implied `<tbody>` at all, one of the
-  mode's headline features. Add a child-axis column per id (`//*[@id="0"]/*/@id` gives `["1"]`
-  without the `<tbody>` and `[]` with it; the engine supports it today), keep the document-order id
-  column duplicate-aware (a reconstructed formatting element copies the original's attributes, id
-  included, so a clone shows up as a repeated id), and add a column per name browser mode can
-  synthesise. Then seed two regressions into `tests/test_gates.py`, an oracle tree with its `<tbody>`
-  removed and one with a formatting clone removed, and require the gate to reject both. Its whole
-  sweep is seconds of `DOMParser` time per browser. The same blind spot applies in lxml mode to any
-  id-less intermediate element, so lxml mode should get the columns too.
-- `gen_tree_rules`, `audit_tree_rules` and `mutate_rules` derive, audit and mutate the HTML5
-  categories against the browsers, and the mutation sweep runs per mode.
-- `gate-corpus` and the crawl lab get two more oracle columns, through the slow path.
-- `tests/test_gates.py` gets a seeded regression for every new gate, the fast/slow self-check
-  included, so each one is shown to go red.
-- `gate-webpoet` grades browser-mode items through the same split: CSS natively in the browser,
-  XPath through the lossless bridge.
+Not built yet: browser-mode verdicts in `diff_lxml`, `gate-seq` and `mutate_rules`, browser columns in
+the crawl lab, and pinned browsers in CI. `gate-browser`, `gate-webpoet-browser` and
+`gate-corpus-browser` need local browsers and are not part of `make ci`.
 
-Until Phase 2 lands, a browser gate cannot be green on its divergence count. The generators already
-emit an implied `<tbody>`, `<p>` closers, `<div/>` and formatting reconstruction, which only Phase 2
-implements. So from Phase 1 on, each browser gate attributes every divergence to a named construct
-from section 3's table, the way `diff_fuzz` attributes lxml-mode divergences, and fails on NOVEL: any
-divergence that no named construct explains. Each Phase 2 rule lands with its bucket deleted, so from
-then on the gate holds that construct at zero. Attribute by the smallest input that reproduces a
-divergence, not by what the page contains, because page-scoped attribution over-credits (AGENTS.md's
-truncated-tag lesson).
+## 6. Cost
 
-CI downloads two pinned browsers (cacheable), and the tree gates roughly double in wall time. The
-encoding gates (`enc_check`, the decoder sweep) do not change, because encoding is the same in both
-modes.
+- **Engine.** Browser mode is one more tree builder behind the seam, plus the replay. Lxml mode keeps
+  its own code path, and `OpenElem` its size. See `docs/BENCHMARKS.md` for the measured cost of each mode.
+- **Gates.** A second oracle for the tree, values and the page-object layer, which needs local browsers.
+- **Contract.** COMPATIBILITY.md has a section per mode, each with its own divergence list.
 
-## 6. Does it complicate the implementation much?
+## 7. What is left
 
-- **Engine: moderate to large.** Phase 1 is small. Phase 2 is a second rule set, closer to a spec than
-  the libxml2 one, but it sits behind a stateful builder interface that steers the tokenizer and keeps
-  DOM ancestry apart from the stack. The rules that change decisions already made stay out of it, and
-  deferred tails take a second pass over the document rather than a context-carrying re-scan.
-- **Gates: large, though the oracle itself is cheap.** The driver is small and the browsers are fast
-  enough. The cost is a second verdict in every gate, two pinned browsers in CI, and roughly double the
-  tree-gate wall time. The oracle layer is where this repo's correctness comes from, so this is the
-  part not to skimp on.
-- **Contract: moderate.** COMPATIBILITY.md gains a second tree-construction section with its own
-  divergence list. The README's "value-identical to lxml" becomes "lxml by default, browser on
-  request".
+- Quirks-mode class and id matching, where CSS compares case-insensitively without a doctype. The gate
+  attributes it to its own value construct.
+- Outer HTML is the element's raw source, as in lxml mode, and browser mode refuses it for an element
+  the page never wrote. Attributes merged in from a later `<html>` or `<body>` tag do not appear in
+  that source.
+- `.as_node()` is refused in browser mode. A faithful one would hand over a node built from browser
+  mode's own tree, never an lxml reparse.
+- XPath names must be lowercase in both modes, so `@viewBox` and `//clipPath` are refused in browser
+  mode.
+- The gaps listed under Gates.
 
-The main risk is a browser mode that reads as "what Chrome shows" before it is. It ships with its
-divergence list and its fuzzer attribution buckets from day one, as lxml mode does, and it ships
-**experimental**. A gate that reports no NOVEL divergence is not evidence of readiness, because every
-known bucket can still be large. Browser mode leaves experimental when, for the selector shapes it
-claims to support, the gates show zero divergences against both pinned browsers on generated pages,
-the lab and a crawl sample. Every shape that cannot meet that is refused, not bucketed.
-
-## 7. Phasing
-
-- **Phase 0: encoding, no mode needed.** E1, documenting E2 and E3, and the lab's Firefox column (the
-  rest of E4 is done). Small, and E1 is a user-visible fix on its own: through web-poet it recovers 12
-  of the lab's 48 cases.
-- **Phase 1: the mode exists, and its gates can be trusted.**
-  - The oracle harness, grown from `tools/browser_oracle/`: the browser driver, native CSS evaluation,
-    the lossless XPath bridge and its round-trip gate, and the fast/slow self-check.
-  - The strengthened sequence fingerprint, with seeded `<tbody>` and formatting-clone regressions that
-    must go red.
-  - Every gate parameterised by mode, starting with one attribution bucket per Phase 2 construct and
-    failing only on NOVEL (section 5).
-  - The stateful builder interface written down, with the tokenizer asking the builder for its next
-    state, even though only a few rules use it yet.
-  - The browser-mode refusals for synthetic outer HTML and `.as_node()`, and deferred tails read by a
-    second whole-document pass (section 4).
-  - `parser="browser"` published as experimental, with the oracle builds recorded in the evidence.
-  - Browser rules at this stage: the NUL rules, no strip, `<noscript>` as raw text and HTML template
-    content inert. That fixes six of the lab's seven parse-mode differences (all but `foster`),
-    including both bot-poisoning demos.
-- **Phase 2: streaming HTML5 tree rules,** the "2" rows in the table above: foreign content and
-  integration points, the DOM-parent link, then the insertion-mode rules. Each rule deletes its
-  attribution bucket when it lands.
-- **Phase 3, only if a crawl calls for it:** foster-parenting order.
-
-## 8. Decisions needed
+## 8. Decisions
 
 Decided on 2026-11-03: E2 (unlabelled valid UTF-8 stays UTF-8), E3 (autodetection follows Firefox),
-and where Chrome and Firefox build different trees, browser mode follows Chrome. These are open:
+browser mode is the default, and where Chrome and Firefox build different trees, browser mode follows
+Chrome. The six questions this proposal left open were settled as recommended:
 
-1. Oracle: the browsers themselves (`DOMParser` fast path, CSP-served page loads, pinned Chrome for
-   Testing and Firefox), with Firefox's Java parser held in reserve? I recommend yes.
-2. Browser-mode CSS: include HTML's case-insensitive attribute list now, and defer quirks-mode class and
-   id matching (quirks-mode tree construction is not deferrable)? The CSS oracle is native
-   `querySelectorAll`, so it applies the list by itself. XPath keeps exact matching.
-3. Names: keep `parser="lxml" | "browser"` as the stable public names, with browser builds recorded in
-   the evidence rather than in the name? I recommend yes.
-4. Browser mode refuses synthetic outer HTML and `.as_node()`, and reads a deferred winner's subtree
-   with a second whole-document pass rather than a context-carrying re-scan (section 4). I recommend
-   yes: the refusals are honest and cheap, and the second pass is exact and costs only the documents on
-   which a winner arose.
-5. Browser-mode XPath: the browser's tree with lxml's XPath semantics, so `//svg` still finds SVG?
-   I recommend yes; native `document.evaluate` finds no SVG element at all.
-6. Encoding: keep `encoding=` below the BOM, as it is today, and add no BOM-beating override unless
-   Adrian's integration needs one? I recommend yes.
+1. The oracle is the browsers themselves: the `DOMParser` fast path, CSP-served page loads, and Chrome
+   and Firefox, with Firefox's Java parser held in reserve.
+2. Browser-mode CSS folds HTML's case-insensitive attribute list. Quirks-mode class and id matching is
+   deferred; quirks-mode tree construction is not.
+3. The public names are `parser="browser" | "lxml"`, with browser builds recorded in the evidence rather
+   than in the name.
+4. Browser mode refuses synthetic outer HTML and `.as_node()`, and reads a deferred winner's subtree with
+   a second whole-document pass.
+5. Browser-mode XPath has lxml's XPath semantics over the browser's tree, so `//svg` still finds SVG.
+6. `encoding=` stays below the BOM, with no BOM-beating override.
+
+One decision was taken during the build and is Shane's to confirm: the replay builds a tree of the page
+on the 3% of pages where a retroactive rule fires, instead of leaving those rules as documented
+divergences.
 
 ## Sources and versions
 
-Measured for this proposal on 2026-11-03, on macOS:
+Measured for the design on 2026-11-03, on macOS:
 
 - Frostwork `main` at `68927e9`, with the extension rebuilt from it, and web-poet 2.5.0 with w3lib from
   the repo's `.venv`.
