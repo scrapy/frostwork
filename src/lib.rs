@@ -733,12 +733,10 @@ impl Plan {
     ) -> (FlatColumns, Vec<GroupRows>, Navigation) {
         let doc_url = url::Url::parse(url).ok();
         let (bytes, value_enc, doc_enc) = prepare_bytes(html, encoding, Some(url));
-        // With no fields to extract, a document that never spells a tag that can change the answer
-        // needs no scan. Checked on the prepared bytes, where NUL deletion can have joined a tag name.
-        if self.schema.is_empty()
-            && !has_start_tag(&bytes, b"base")
-            && !(options.meta_refresh && has_start_tag(&bytes, b"meta"))
-        {
+        // With no fields to extract, a document that never spells what can change the answer needs no
+        // scan. Checked on the prepared bytes, where NUL deletion can have joined a name, and which are
+        // ASCII-compatible. A `<base>` only matters to the refresh when there is one.
+        if self.schema.is_empty() && !may_change(&bytes, options.base_url, options.meta_refresh) {
             let base_url = options.base_url.then(|| matcher::document_url(doc_url.as_ref(), url));
             let nav = Navigation { base_url, meta_refresh: None };
             return (Vec::new(), Vec::new(), nav);
@@ -750,10 +748,25 @@ impl Plan {
     }
 }
 
-/// Whether `<name` occurs in `bytes`, ASCII-case-insensitively: a superset of the start tags named `name`.
-fn has_start_tag(bytes: &[u8], name: &[u8]) -> bool {
+/// Whether `bytes` can hold a `<base>`, when `base`, or a `<meta>` with an `http-equiv` attribute,
+/// which every meta refresh needs, when `refresh`. Tags are matched ASCII-case-insensitively wherever
+/// `<name` is followed by the end of a tag name, a superset of the start tags named `name`.
+fn may_change(bytes: &[u8], base: bool, refresh: bool) -> bool {
+    let mut attrs = Vec::new();
     memchr::memchr_iter(b'<', bytes).any(|i| {
-        bytes.get(i + 1..i + 1 + name.len()).is_some_and(|candidate| candidate.eq_ignore_ascii_case(name))
+        let tag_end = |name: &[u8]| {
+            let end = i + 1 + name.len();
+            (bytes.get(i + 1..end).is_some_and(|candidate| candidate.eq_ignore_ascii_case(name))
+                && bytes.get(end).is_some_and(|&c| !tokenizer::is_name_char(c)))
+            .then_some(end)
+        };
+        (base && tag_end(b"base").is_some())
+            || (refresh
+                && tag_end(b"meta").is_some_and(|end| {
+                    attrs.clear();
+                    tokenizer::scan_attrs(bytes, end, &mut attrs);
+                    attrs.iter().any(|(name, _)| name.eq_ignore_ascii_case(b"http-equiv"))
+                }))
     })
 }
 

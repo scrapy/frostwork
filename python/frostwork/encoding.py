@@ -77,7 +77,7 @@ def codec_name(label: str) -> Optional[str]:
     :func:`decode` to decode with it. The name of ``ISO-8859-8-I`` resolves back to ``ISO-8859-8``,
     which decodes the same.
     """
-    name = resolve_label(label)
+    name = _cached_resolve_label(label)
     return None if name is None else _CODEC_NAMES[name]
 
 
@@ -100,7 +100,7 @@ def bom_encoding(body: Buffer) -> Optional[Tuple[str, int]]:
     A UTF-16 document that starts with an XML declaration and no BOM is recognized too, with length
     0. A UTF-32LE BOM reads as a UTF-16LE one, as in browsers.
     """
-    return _bom_encoding(bytes(body))
+    return _bom_encoding(body if type(body) is bytes else bytes(body))
 
 
 def declared_encoding(body: Buffer) -> Optional[str]:
@@ -125,10 +125,11 @@ def decode(body: Buffer, label: str) -> str:
     A BOM is decoded like any other bytes; strip the length :func:`bom_encoding` returns first. Raises
     :exc:`LookupError` if :func:`resolve_label` cannot resolve *label*.
     """
-    name = resolve_label(label)
+    name = _cached_resolve_label(label)
     if name is None:
         raise LookupError(f"unknown encoding: {label}")
-    body = bytes(body)
+    if type(body) is not bytes:
+        body = bytes(body)
     if name == "UTF-8":
         return body.decode("utf-8", "replace")
     if name in _SINGLE_BYTE:
