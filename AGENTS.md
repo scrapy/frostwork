@@ -341,9 +341,10 @@ git push --atomic origin main X.Y.Z
 Pushing the annotated tag runs `.github/workflows/publish.yml`: the complete correctness workflow, abi3
 wheels for every supported platform + an sdist, artifact metadata/rendering checks, smoke installation,
 PyPI Trusted Publishing (OIDC, `pypi` environment — no token), public-index verification, then a GitHub
-Release. `workflow_dispatch` runs through the artifact checks without publishing. Tags are immutable:
-never delete, recreate or force-move one; fix a failed release with a new version. The complete process
-and one-time environment/tag protections are in [docs/RELEASING.md](docs/RELEASING.md).
+Release. `workflow_dispatch` runs through the artifact checks without publishing. Once any file of a
+version is on PyPI, its tag is immutable: never delete, recreate or force-move it; fix a failed release
+with a new version. A release that failed before uploading anything is re-tagged instead. The complete
+process and one-time environment/tag protections are in [docs/RELEASING.md](docs/RELEASING.md).
 
 ## Conventions
 
