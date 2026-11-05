@@ -259,8 +259,8 @@ pub(super) struct Browser<'a, const REPLAY: bool> {
     foster: bool,
     /// The previous token was `<pre>`, `<listing>` or `<textarea>`: a leading newline is dropped.
     skip_lf: bool,
-    /// Where an LF the last tag swallowed would be (`swallows_lf`), or `usize::MAX`.
-    swallowed: usize,
+    /// Where the last tag ended, for `swallows_lf`, or `usize::MAX`.
+    tag_end: usize,
     /// The uid of every element on the matcher stack, bottom first.
     path: Vec<u32>,
     /// The parked runs, the most recently parked last.
@@ -305,7 +305,7 @@ impl<const REPLAY: bool> Default for Browser<'_, REPLAY> {
             quirks: false,
             foster: false,
             skip_lf: false,
-            swallowed: usize::MAX,
+            tag_end: usize::MAX,
             path: Vec::new(),
             parked: Vec::new(),
             next_uid: 1,
@@ -362,8 +362,11 @@ fn is_ws(c: u8) -> bool {
 /// character at all, while the one after `<p\r>` or `<p  \r>` is kept. A CRLF counts as one character,
 /// as the input stream reads it. Firefox and the spec keep every LF. Only the run of whitespace before the
 /// `>` can hold the CR that counts.
+#[cold]
+#[inline(never)]
 fn swallows_lf(b: &[u8], end: usize) -> bool {
-    if end < 2 || b[end - 1] != b'>' || b.get(end) != Some(&b'\n') {
+    // the CR that counts is at least second in the run, so the run is at least two characters
+    if end < 3 || b[end - 1] != b'>' || !is_ws(b[end - 2]) || !is_ws(b[end - 3]) {
         return false;
     }
     let gt = end - 1;
@@ -1332,7 +1335,7 @@ impl<'a, const REPLAY: bool> TreeBuilder<'a> for Browser<'a, REPLAY> {
         open_end: usize,
     ) -> DataMode {
         self.skip_lf = false;
-        self.swallowed = if swallows_lf(m.input.bytes(), open_end) { open_end } else { usize::MAX };
+        self.tag_end = open_end;
         self.touched = false;
         self.data = DataMode::Normal;
         let mut buf = [0; MAX_NAME];
@@ -1354,7 +1357,7 @@ impl<'a, const REPLAY: bool> TreeBuilder<'a> for Browser<'a, REPLAY> {
 
     fn end_tag(&mut self, m: &mut Matcher<'a>, name: &'a [u8], close_start: usize, close_end: usize) {
         self.skip_lf = false;
-        self.swallowed = if swallows_lf(m.input.bytes(), close_end) { close_end } else { usize::MAX };
+        self.tag_end = close_end;
         self.touched = false;
         self.end(m, EndTok { name, tag: tag_of(name), start: close_start, end: close_end });
         if !self.touched {
@@ -1364,7 +1367,10 @@ impl<'a, const REPLAY: bool> TreeBuilder<'a> for Browser<'a, REPLAY> {
 
     fn text(&mut self, m: &mut Matcher<'a>, text: &'a [u8], mode: DataMode, start: usize) {
         let (mut b, mut s) = (text, start);
-        if std::mem::replace(&mut self.swallowed, usize::MAX) == s && b.first() == Some(&b'\n') {
+        if std::mem::replace(&mut self.tag_end, usize::MAX) == s
+            && b.first() == Some(&b'\n')
+            && swallows_lf(m.input.bytes(), s)
+        {
             self.absorb(m, s, s + 1);
             (b, s) = (&b[1..], s + 1);
         }
