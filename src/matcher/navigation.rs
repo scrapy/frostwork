@@ -702,11 +702,22 @@ mod tests {
         let utf16: Vec<u8> = "\u{feff}<meta http-equiv=refresh content=3>".encode_utf16().flat_map(u16::to_le_bytes).collect();
         assert_eq!(refresh(&utf16), to(3, DOC));
         assert_eq!(refresh(br#"<meta a=">" http-equiv=refresh content=5>"#), to(5, DOC));
+        assert_eq!(refresh(b"<script>'<meta a=\"</script><meta http-equiv=refresh content=6>\"'</script>"), to(6, DOC));
         assert_eq!(refresh(b"<meta name=refresh content=4><p http-equiv=refresh>http-equiv</p>"), None);
         let base = |html: &[u8]| nav(html, None, true).base_url;
         assert_eq!(base(b"<BASE\thref=/a/>"), Some("http://h/a/".into()));
         assert_eq!(base(b"<base/href=/b/>"), Some("http://h/b/".into()));
         assert_eq!(base(b"<basefont href=/c/>"), Some(DOC.into()));
+    }
+
+    #[test]
+    fn many_unclosed_meta_tags_take_linear_time() {
+        let evil = "<meta ".repeat(80000);
+        let start = std::time::Instant::now();
+        assert_eq!(nav(evil.as_bytes(), None, true).meta_refresh, None);
+        let good = evil + r#"<meta http-equiv="refresh" content="3;url=/next">"#;
+        assert_eq!(nav(good.as_bytes(), None, true).meta_refresh, Some((3, "http://h/next".into())));
+        assert!(start.elapsed().as_secs() < 2, "{:?}", start.elapsed());
     }
 
     #[test]

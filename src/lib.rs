@@ -750,24 +750,24 @@ impl Plan {
 
 /// Whether `bytes` can hold a `<base>`, when `base`, or a `<meta>` with an `http-equiv` attribute,
 /// which every meta refresh needs, when `refresh`. Tags are matched ASCII-case-insensitively wherever
-/// `<name` is followed by the end of a tag name, a superset of the start tags named `name`.
+/// `<name` is followed by the end of a tag name, a superset of the start tags named `name`, and
+/// `http-equiv` anywhere after the first `<meta`, a superset of its attributes. Linear in `bytes`.
 fn may_change(bytes: &[u8], base: bool, refresh: bool) -> bool {
-    let mut attrs = Vec::new();
-    memchr::memchr_iter(b'<', bytes).any(|i| {
-        let tag_end = |name: &[u8]| {
-            let end = i + 1 + name.len();
-            (bytes.get(i + 1..end).is_some_and(|candidate| candidate.eq_ignore_ascii_case(name))
-                && bytes.get(end).is_some_and(|&c| !tokenizer::is_name_char(c)))
-            .then_some(end)
-        };
-        (base && tag_end(b"base").is_some())
-            || (refresh
-                && tag_end(b"meta").is_some_and(|end| {
-                    attrs.clear();
-                    tokenizer::scan_attrs(bytes, end, &mut attrs);
-                    attrs.iter().any(|(name, _)| name.eq_ignore_ascii_case(b"http-equiv"))
-                }))
-    })
+    let tag_at = |i: usize, name: &[u8]| {
+        let end = i + 1 + name.len();
+        bytes.get(i + 1..end).is_some_and(|candidate| candidate.eq_ignore_ascii_case(name))
+            && bytes.get(end).is_some_and(|&c| !tokenizer::is_name_char(c))
+    };
+    let tags = || memchr::memchr_iter(b'<', bytes);
+    (base && tags().any(|i| tag_at(i, b"base")))
+        || (refresh
+            && tags().find(|&i| tag_at(i, b"meta")).is_some_and(|i| {
+                // `q` is the rarest byte of `http-equiv` in markup, so few candidates reach the comparison.
+                let rest = &bytes[i..];
+                memchr::memchr2_iter(b'q', b'Q', rest).any(|q| {
+                    q >= 6 && rest.get(q - 6..q + 4).is_some_and(|w| w.eq_ignore_ascii_case(b"http-equiv"))
+                })
+            }))
 }
 
 /// The base URL and meta refresh of `html`, as a browser reads them; see

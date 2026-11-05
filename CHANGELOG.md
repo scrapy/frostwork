@@ -3,6 +3,13 @@
 All notable user-facing changes will be recorded here. Frostwork will follow semantic versioning after its
 first public release.
 
+## 0.2.2 (unreleased)
+
+### Performance
+
+- `navigation()` no longer takes quadratic time on a document with many unclosed `<meta` tags, e.g.
+  `"<meta " * 80000`, which took over 30 seconds in 0.2.1.
+
 ## 0.2.1 (2026-11-05)
 
 ### Correctness

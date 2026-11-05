@@ -477,7 +477,7 @@ fn handle_markup<'a, S: TokenSink<'a>>(
 /// After `</img\nsrc="http:>`, whose value is unterminated and so runs on to the next quote 300 bytes
 /// later, that reading keeps an `</a>`, two `</div>`s and a whole `<div id='HTML3'>` start tag.
 /// Reporting an element the document does not contain is the FALSE-POSITIVE direction.
-pub(crate) fn scan_attrs<'a>(
+fn scan_attrs<'a>(
     b: &'a [u8],
     mut i: usize,
     attr_buf: &mut Vec<(&'a [u8], Option<&'a [u8]>)>,
