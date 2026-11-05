@@ -33,7 +33,8 @@ def _attr(rng, n):
     if r < 0.95:
         # CR / CRLF in a value: HTML normalizes to \n before entity decode (T4 gate coverage)
         return f' title="a{n}\r\nb\rc"'
-    return ' title="t"'
+    # an XPath literal with `::` in it is a value, not an axis
+    return rng.choice([' title="t"', ' title="a::b"'])
 
 
 def _next(ctr):
@@ -255,7 +256,7 @@ BASKET = [
     "div > * ::text", "li + * ::text", "div * ::text", "p * ::text", "section ~ * ::text",
     "div > * ::attr(id)", "li * ::attr(class)",
     # attribute operators
-    'a[href^="/p"]::attr(href)', 'img[src$=".png"]::attr(src)', '[class~="shared"]::text',
+    '//*[@title="a::b"]/@title', "//*[contains(@title, '::')]//text()", 'a[href^="/p"]::attr(href)', 'img[src$=".png"]::attr(src)', '[class~="shared"]::text',
     '[data-k^="v"]::text', 'a[href*="p"]::attr(href)', '[class*="c"]::text', 'input[value|="v"]::text',
     # :not()
     "a:not([data-k])::attr(href)", "span:not(.shared)::text", "li:not([id])::text",
@@ -277,6 +278,10 @@ BASKET = [
     "div:has(a) p::text", "div:has(a) a::attr(href)", "div:has(p) span::text",
     "li:has(a) span::text", "//div[contains(.,'alpha')]//text()",
     "//div[contains(.,'alpha')]//a/@href", "//li[contains(.,'beta')]//span/text()",
+    # ... whose tail can name the winner itself, which is never its own descendant, and a winner the
+    # page never wrote (`*` matching the implied `<body>`)
+    "div:has(span) div::text", "div:has(a) div::attr(id)", "li:has(a) li::text", "div:last-child div::text",
+    "div:contains('alpha') div::text", "//div[contains(.,'alpha')]//div/text()", "*:has(li) li::text",
     # CSS `:contains()` — cssselect lowers it to `contains(., "v")`, so it shares every value location the
     # XPath text predicate above has, and each one is listed rather than assumed: own, subtree, descendant,
     # and the following-sibling (label->value) shape. Both argument tokens cssselect accepts are here too.

@@ -77,7 +77,7 @@ fn xpath_reason(qt: &str) -> String {
         "comparison against an unquoted operand — XPath reads `[@a=2]` numerically (`@a=\"02\"` \
          matches) and `[@a=b]` as a node-set compare against child `<b>` elements, neither of which is \
          a byte compare; quote the value (`[@a=\"2\"]`) if a literal is what you meant"
-    } else if qt.contains("::") && !qt.contains("()") {
+    } else if crate::xpath::has_axis(qt) && !qt.contains("()") {
         "unsupported XPath axis — supported axes are child (`/`), descendant (`//`), \
          `following-sibling::` (after a single `/`), and `ancestor::`/`parent::` as an absolute two-step \
          path (`//INNER/ancestor::E`); `preceding[-sibling]::`, `ancestor-or-self::`, `following::` and \

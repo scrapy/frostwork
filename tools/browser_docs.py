@@ -425,6 +425,15 @@ CLOBBER: list[list[str]] = [
     for name in ("attributes", "childNodes", "localName", "namespaceURI", "nodeType", "shadowRoot",
                  "textContent", "querySelectorAll", "setAttribute", "removeAttribute", "outerHTML", "nonce")
 ] + [["<noscript{}>", "</noscript>", "<form{}>", "<input{} name=localName>", "t", "</form>"]]
+# A `::` in an attribute value, which an XPath literal holding it must not read as an axis, and the
+# deferred tails that can name their winner (`div:has(span) div`), which is never its own descendant.
+LITERALS_AND_TAILS: list[list[str]] = [
+    ['<p{} title="a::b">', "t", "</p>"],
+    ["<div{}>", "<div{}>", "t", "<span{}>", "t", "</span>", "</div>", "</div>"],
+    ["<div{}>", "<a{} href=x>", "t", "</a>", "<div{}>", "t", "</div>", "</div>"],
+    ["<div{}>", "alpha", "<div{}>", "alpha", "</div>", "</div>"],
+    ["<ul{}>", "<li{}>", "<a{} href=x>", "t", "</a>", "<ul{}>", "<li{}>", "t"],
+]
 SELECT_OPTIONS: list[list[str]] = [
     _SELECT + body + ["<option{}>", "u", "</select>"]
     for body in (
@@ -439,7 +448,7 @@ SELECT_OPTIONS: list[list[str]] = [
 
 def structured_docs() -> list[Doc]:
     """Every structured family member, as a document."""
-    seqs = [lead + f for f in EOF_FRAMES + FORMATTING + RAW_ENDS + FRAME_MERGES + RULE_VALUES + SELECT_OPTIONS + PAGE_LOADS + AFTER_BODY + CR_IN_TAGS + IS_ATTR + CLOBBER
+    seqs = [lead + f for f in EOF_FRAMES + FORMATTING + RAW_ENDS + FRAME_MERGES + RULE_VALUES + SELECT_OPTIONS + PAGE_LOADS + AFTER_BODY + CR_IN_TAGS + IS_ATTR + CLOBBER + LITERALS_AND_TAILS
             for lead in ([], [DOCTYPE])]
     seqs += [s[:k] + [COMMENT] + s[k:] for s in COMMENT_SKELETONS for k in range(len(s) + 1)]
     seqs += [[DOCTYPE] + f for f in ARK_FAMILY]

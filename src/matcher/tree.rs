@@ -78,9 +78,11 @@ impl<'a, B: TreeBuilder<'a>> Scan<'a, B> {
         input: EncodedInput<'a>,
         builder: B,
         marks: Vec<(u32, String)>,
+        root: &'a [u8],
     ) -> Self {
         let mut m = Matcher::new(schema, input);
         m.marks = marks;
+        m.root = root;
         let mut scan = Scan { m, builder };
         crate::tokenizer::tokenize(input.bytes(), &mut scan);
         scan

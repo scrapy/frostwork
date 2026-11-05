@@ -42,6 +42,11 @@ first public release.
 
 ### Correctness
 
+- In both modes, a `::` inside an XPath string literal is part of the value, not an axis:
+  `//*[@id="a::b"]//a` answers where it was refused.
+- Lxml mode no longer counts a deferred winner as its own descendant: `div:has(b) div`,
+  `li:contains("x") li` and `//li[text()="x"]//li` returned the winner itself, and a winner the page
+  never wrote (`*:has(r) li` matching the `<body>`) now roots its tail correctly.
 - Lxml mode compares an `::attr()` name exactly with libxml2's lowercased attribute name, as Parsel
   does, so `div::attr(ID)` is `[]` where it returned the id.
 - In both modes, a raw-text, RCDATA or script end tag that the input ends on right after its name is

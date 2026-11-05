@@ -254,7 +254,7 @@ pub struct OpenElem<'a> {
     /// The buffers those tiers fill, allocated ONLY for an element that actually feeds one — see
     /// [`ColdState`], which exists because this struct is memcpy'd per element and they are empty on
     /// almost every one.
-    cold: Option<Box<ColdState>>,
+    cold: Option<Box<ColdState<'a>>>,
 }
 
 /// Per-element buffers that only the DEFERRED tiers (`:has()`, reverse position, text predicates) and
@@ -267,11 +267,11 @@ pub struct OpenElem<'a> {
 /// while a deferred tier is live, so reads go through [`OpenElem::cold`], which returns a shared empty
 /// instance. Only [`OpenElem::cold_mut`] creates the box.
 #[derive(Default)]
-struct ColdState {
+struct ColdState<'a> {
     gcaps: Vec<(u64, usize)>, // grouped outer-HTML captures: (instance seq, sub) this element feeds
     prefix: Option<SourcePrefix>,
     rev_buf: Vec<(u32, usize, String)>, // (rev-entry, offset, value) captured while this el is a subject
-    rev_pending: Vec<RevPend>, // candidates promoted from this element's children, resolved at its close
+    rev_pending: Vec<RevPend<'a>>, // candidates promoted from this element's children, resolved at its close
     has_buf: Vec<(u32, usize, String)>, // (has-entry, offset, value) captured while this el is a subject
     // Predicate evaluation is streaming and bounded by the needle length; only prospective terminal
     // values are retained.
@@ -281,7 +281,7 @@ struct ColdState {
 
 /// Read-side stand-in for an element that never wrote cold state. `Vec::new` is `const`, so this costs
 /// no allocation and lets [`OpenElem::cold`] be infallible without the box existing.
-static NO_COLD: ColdState = ColdState {
+static NO_COLD: ColdState<'static> = ColdState {
     gcaps: Vec::new(),
     prefix: None,
     rev_buf: Vec::new(),
@@ -436,14 +436,14 @@ impl<'a> OpenElem<'a> {
 
     /// The cold buffers for reading: the element's own if it ever wrote one, else the shared empty
     /// [`NO_COLD`]. Infallible and allocation-free, so a close path can read these unconditionally.
-    fn cold(&self) -> &ColdState {
+    fn cold(&self) -> &ColdState<'a> {
         self.cold.as_deref().unwrap_or(&NO_COLD)
     }
 
     /// The cold buffers for writing, created on first use. Every call site is a tier that is about to
     /// push a captured value or a predicate state, so the allocation lands only on elements that were
     /// going to allocate a `Vec` anyway.
-    fn cold_mut(&mut self) -> &mut ColdState {
+    fn cold_mut(&mut self) -> &mut ColdState<'a> {
         self.cold.get_or_insert_with(Box::default)
     }
 
@@ -711,7 +711,7 @@ struct RevEntry {
 /// index (child or of-type, per the entry); `vals` are its captured `(offset, value)` pairs. For
 /// `single_slot` entries a parent keeps one candidate (overwrite); otherwise it collects all, resolved
 /// by `reverse_matches` at the close.
-struct RevCand {
+struct RevCand<'a> {
     idx: u32,
     vals: Vec<(usize, String)>,
     /// The subject's raw source span and its [`OpenElem::elem`]. Unused for an attached terminal (`vals`
@@ -719,11 +719,12 @@ struct RevCand {
     /// subtree.
     span: (usize, usize),
     elem: u32,
+    tag: &'a [u8],
 }
 
-struct RevPend {
+struct RevPend<'a> {
     entry: u32,
-    cands: Vec<RevCand>,
+    cands: Vec<RevCand<'a>>,
 }
 
 /// A `:has()` flat selector held out of `entries` (like [`RevEntry`]) because its subject can't be
@@ -804,10 +805,11 @@ enum Tail {
 /// mode re-scans) and its [`OpenElem::elem`] (by which browser mode's second pass finds it again). The
 /// field order is the sort order `resolve_tail_spans` relies on.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct TailWinner {
+struct TailWinner<'a> {
     slot: usize,
     span: (usize, usize),
     elem: u32,
+    tag: &'a [u8],
 }
 
 /// A compiled tail: the sub-schema that recovers deferred winners' values, and the output column each
@@ -1178,6 +1180,13 @@ pub struct Matcher<'a> {
     schema: &'a CompiledSchema,
     results: Vec<Vec<String>>,
     stack: Vec<OpenElem<'a>>,
+    /// The stack index flat selectors are rooted at: 0, or the span's root in a span re-scan (`root`).
+    floor: usize,
+    /// In lxml mode's re-scan of one deferred winner's span, the winner's tag, else empty. The winner is
+    /// the span's root, which libxml2's frame puts under an implied `<html>` and `<body>` that also open
+    /// at offset 0, so the deepest element opened at offset 0 with the winner's name is the floor: the
+    /// root is then not its own descendant (`div:has(b) div`), and nothing outside it is an ancestor.
+    root: &'a [u8],
     // The document bytes and the encoding that decodes them, as one value (`EncodedInput`).
     // Raw-source outer-HTML fragments are sliced out of it; emitted values are decoded with it.
     input: EncodedInput<'a>,
@@ -1219,13 +1228,13 @@ pub struct Matcher<'a> {
     pending: Vec<(usize, DocPos, String)>,
     // Reverse candidates whose subject is a TOP-LEVEL element (parent = the document); resolved at finish
     // against the document frame's totals, since there is no parent `OpenElem` to hang them on.
-    doc_rev_pending: Vec<RevPend>,
+    doc_rev_pending: Vec<RevPend<'a>>,
     // Count of currently-open text-content-predicate subjects, so `text_event`'s ancestor walk runs only
     // while at least one subject is open (0 elsewhere, even when the schema has text-pred entries).
     txt_open: usize,
     // Each deferred winner whose value lives in its subtree. A few integers per winner is the whole
     // retention cost — values are recovered by a second run at finish (`resolve_tails`).
-    tail_winners: Vec<TailWinner>,
+    tail_winners: Vec<TailWinner<'a>>,
     // The `elem` the next opened element gets (see `OpenElem::elem`).
     next_elem: u32,
     // Browser mode's second pass only (`resolve_tail_pass`): the winners to mark, as `(elem, slots)`
@@ -1871,9 +1880,14 @@ impl CompiledSchema {
     /// `(flat_columns, grouped)` — see [`Matcher::finish_grouped`].
     pub fn run(&self, input: EncodedInput) -> (FlatColumns, Vec<GroupRows>) {
         match self.mode {
-            ParseMode::Lxml => tree::Scan::tokenize(self, input, libxml2::Libxml2::default(), Vec::new()).finish(),
+            ParseMode::Lxml => tree::Scan::tokenize(self, input, libxml2::Libxml2::default(), Vec::new(), b"").finish(),
             ParseMode::Browser => browser::run(self, input),
         }
+    }
+
+    /// lxml mode's re-scan of one deferred winner's span, rooted at the winner (see `Matcher::root`).
+    fn run_span<'i>(&self, input: EncodedInput<'i>, root: &'i [u8]) -> (FlatColumns, Vec<GroupRows>) {
+        tree::Scan::tokenize(self, input, libxml2::Libxml2::default(), Vec::new(), root).finish()
     }
 
     /// Which of browser mode's retroactive rules fire on one document, as a bit per rule (see
@@ -1949,6 +1963,8 @@ impl<'a> Matcher<'a> {
             pos: if schema.has_positional { vec![0u32; 1 + schema.positional_tags.len()] } else { Vec::new() },
             schema,
             stack: Vec::new(),
+            floor: 0,
+            root: b"",
             input,
             captures: Vec::new(),
             decode_names: schema.non_ascii_interesting && input.encoding() != encoding_rs::UTF_8,
@@ -2011,7 +2027,7 @@ impl<'a> Matcher<'a> {
         // short-circuit, so `div:has(a) ::text` over thousands of cards paid it in full.
         winners.sort_unstable();
         let (mut cur_slot, mut max_end) = (usize::MAX, 0usize);
-        for TailWinner { slot, span: (s, e), .. } in winners {
+        for TailWinner { slot, span: (s, e), tag, .. } in winners {
             if slot != cur_slot {
                 (cur_slot, max_end) = (slot, 0);
             }
@@ -2020,7 +2036,7 @@ impl<'a> Matcher<'a> {
             }
             max_end = e;
             let tail = &self.schema.tail_schemas[slot];
-            let (cols, _) = tail.schema.run(self.input.sub(self.raw_span(s..e)));
+            let (cols, _) = tail.schema.run_span(self.input.sub(self.raw_span(s..e)), tag);
             for (vals, &col) in cols.into_iter().zip(&tail.cols) {
                 self.results[col].extend(vals);
             }
@@ -2061,15 +2077,15 @@ impl<'a> Matcher<'a> {
     }
 
     /// Record a deferred winner of tail `slot`, by its raw source span and its `elem`.
-    fn tail_winner(&mut self, slot: usize, span: (usize, usize), elem: u32) {
-        self.tail_winners.push(TailWinner { slot, span, elem });
+    fn tail_winner(&mut self, slot: usize, span: (usize, usize), elem: u32, tag: &'a [u8]) {
+        self.tail_winners.push(TailWinner { slot, span, elem, tag });
     }
 
     /// Finalize a just-popped element `e` whose raw source runs `[e.start, end)`: record its flat and
     /// grouped outer-HTML captures, and pop any group instances it opened into their group's rows
     /// (an empty container still yields a row). Called at every close site (implied-close / end tag /
     /// self-close / EOF), so instance lifetime tracks element lifetime with no depth scan.
-    fn close_elem(&mut self, mut e: OpenElem, end: usize) {
+    fn close_elem(&mut self, mut e: OpenElem<'a>, end: usize) {
         let mut cols = e.cap_cols;
         if cols != 0 && self.schema.stop_mask != 0 {
             // This element is no longer open, so its capture is final. EARLY EXIT reads both facts:
@@ -2113,7 +2129,7 @@ impl<'a> Matcher<'a> {
                     match re.tail {
                         // value lives in the winner's subtree: remember the span; re-scanned at finish,
                         // once nested winners can be de-duplicated against each other
-                        Tail::Rescan(slot) => self.tail_winner(slot, cand.span, cand.elem),
+                        Tail::Rescan(slot) => self.tail_winner(slot, cand.span, cand.elem, cand.tag),
                         // an entry of the same prefix already pushed that span, and the sub-schema they
                         // share carries this column too
                         Tail::Merged => {}
@@ -2157,7 +2173,7 @@ impl<'a> Matcher<'a> {
                         .collect(),
                     None => Vec::new(),
                 };
-                let cand = RevCand { idx, vals, span: (e.start, end), elem: e.elem };
+                let cand = RevCand { idx, vals, span: (e.start, end), elem: e.elem, tag: e.tag };
                 let target = match self.stack.last_mut() {
                     Some(parent) => &mut parent.cold_mut().rev_pending,
                     None => &mut self.doc_rev_pending,
@@ -2194,7 +2210,7 @@ impl<'a> Matcher<'a> {
                 }
                 match he.tail {
                     // value lives in this element's subtree (`div:has(a) ::text`, `div:has(a) a::attr(..)`)
-                    Tail::Rescan(slot) => self.tail_winner(slot, (e.start, end), e.elem),
+                    Tail::Rescan(slot) => self.tail_winner(slot, (e.start, end), e.elem, e.tag),
                     // an entry of the same prefix already pushed that span, and the sub-schema they
                     // share carries this column too
                     Tail::Merged => {}
@@ -2239,7 +2255,7 @@ impl<'a> Matcher<'a> {
                 }
                 match te.tail {
                     // value lives in this element's subtree (`//div[contains(.,"x")]/a/@href`)
-                    Tail::Rescan(slot) => self.tail_winner(slot, (e.start, end), e.elem),
+                    Tail::Rescan(slot) => self.tail_winner(slot, (e.start, end), e.elem, e.tag),
                     // an entry of the same prefix already pushed that span, and the sub-schema they
                     // share carries this column too
                     Tail::Merged => {}
@@ -2306,7 +2322,7 @@ impl<'a> Matcher<'a> {
                             continue;
                         }
                         match re.tail {
-                            Tail::Rescan(slot) => self.tail_winner(slot, cand.span, cand.elem),
+                            Tail::Rescan(slot) => self.tail_winner(slot, cand.span, cand.elem, cand.tag),
                             Tail::Merged => {}
                             Tail::Streamed => {
                                 let seq = value_seq(&re.terminal, cand.elem);
@@ -2543,7 +2559,7 @@ impl<'a> Matcher<'a> {
         let mut matched = 0u128;
         let mut trig = 0u64;
         for (k, cs) in self.schema.entries.iter().enumerate() {
-            let (subj, tg) = eval_one(cs, &self.stack, top);
+            let (subj, tg) = eval_one(cs, &self.stack, top, self.floor);
             if subj && k < 128 {
                 matched |= 1u128 << k;
             }
@@ -2987,6 +3003,9 @@ impl<'a> Matcher<'a> {
         // `collect_interesting` adds `class`/`id` to the interesting set whenever any compiled compound
         // references them, so a `req` carrying class/id bits implies this element's `sig` saw the same
         // attributes; a schema referencing neither leaves both at 0 and the filter idle.
+        if !self.root.is_empty() && span_start == 0 && name.eq_ignore_ascii_case(self.root) {
+            self.floor = self.stack.len();
+        }
         self.stack.push(OpenElem::open(name, scid, attrs, span_start, elem, self.schema.wants));
     }
 

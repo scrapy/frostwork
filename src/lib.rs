@@ -3740,6 +3740,28 @@ mod browser_mode_tests {
         assert_eq!(ex(b"<a is>1<a>2", "a a::text"), v(&["2"]));
     }
 
+    /// lxml mode recovers a deferred winner's tail from its span, where the winner is never its own
+    /// descendant and an implied winner (`*` matching the `<body>`) roots the tail at itself.
+    #[test]
+    fn a_deferred_tail_is_rooted_at_its_winner_in_lxml_mode() {
+        let h = b"<div><div><b>x</b></div></div>";
+        assert_eq!(lxml(h, "div:has(b) div"), v(&["<div><b>x</b></div>"]));
+        assert_eq!(lxml(h, "div:has(> b) div"), NONE);
+        let h = b"<li>caf\xc3\xa9<r>b";
+        assert_eq!(lxml(h, "li:has(r) li::text"), NONE);
+        assert_eq!(lxml(h, "*:has(r) li::text"), v(&["caf\u{e9}"]));
+        assert_eq!(lxml(h, "//*[text()=\"caf\u{e9}\"]//li"), NONE);
+    }
+
+    /// A `::` inside an XPath literal is part of the value, not an axis.
+    #[test]
+    fn a_double_colon_in_an_xpath_literal_is_not_an_axis() {
+        let h = b"<div id=\"a::b\"><p id=x>t</p></div><ul><li id=l1>1</li><li id=l2>2</li></ul>";
+        assert_eq!(ex(h, "//*[@id=\"a::b\"]//*/@id"), v(&["x"]));
+        assert_eq!(lxml(h, "//*[@id='a::b']/p/text()"), v(&["t"]));
+        assert_eq!(ex(h, "//li[@id=\"l1\"]/following-sibling::li/@id"), v(&["l2"]));
+    }
+
     /// Whitespace after `</body>` goes into the current node without reconstructing the active formatting
     /// elements, as in Chrome; other text after it reconstructs them, as in the body.
     #[test]

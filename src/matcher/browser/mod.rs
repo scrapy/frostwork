@@ -465,7 +465,7 @@ fn frame_tag_from(b: &[u8], from: usize) -> usize {
 /// Run `schema` over one document in browser mode. One streaming pass answers it unless a retroactive
 /// rule fires; then the pass stops there, and the replay builds the document's tree and walks it.
 pub(super) fn run<'a>(schema: &'a CompiledSchema, input: EncodedInput<'a>) -> (FlatColumns, Vec<GroupRows>) {
-    let scan = Scan::tokenize(schema, input, Browser::<'a, false>::default(), Vec::new());
+    let scan = Scan::tokenize(schema, input, Browser::<'a, false>::default(), Vec::new(), b"");
     if scan.builder.retro & RETRO_RULES == 0 {
         return scan.finish();
     }
@@ -483,7 +483,7 @@ pub(super) fn run_tail<'a>(
     if replayed {
         return replay(schema, input, marks);
     }
-    Scan::tokenize(schema, input, Browser::<'a, false>::to_the_end(), marks).finish()
+    Scan::tokenize(schema, input, Browser::<'a, false>::to_the_end(), marks, b"").finish()
 }
 
 /// The replay: the whole tree, built with the DOM operations a browser performs, walked in pre-order.
@@ -493,13 +493,13 @@ fn replay<'a>(
     marks: Vec<(u32, String)>,
 ) -> (FlatColumns, Vec<GroupRows>) {
     let builder = Browser::<'a, true> { dom: dom::Dom::new(input.len()), ..Browser::default() };
-    Scan::tokenize(schema, input, builder, marks).finish()
+    Scan::tokenize(schema, input, builder, marks, b"").finish()
 }
 
 /// Which retroactive rules fire on a document (`RETRO_*`, and [`CENSUS_MERGE_ANY`]), over the whole
 /// document. A merge counts only when it adds an attribute `schema` selects on.
 pub(super) fn retro_census(schema: &CompiledSchema, input: EncodedInput<'_>) -> u8 {
-    Scan::tokenize(schema, input, Browser::<'_, false>::to_the_end(), Vec::new()).builder.retro
+    Scan::tokenize(schema, input, Browser::<'_, false>::to_the_end(), Vec::new(), b"").builder.retro
 }
 
 impl<const REPLAY: bool> Browser<'_, REPLAY> {
