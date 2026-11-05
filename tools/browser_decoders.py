@@ -12,6 +12,9 @@ breaks that standard, the engine keeps WHATWG's answer: Chrome's answer is a dec
 is not even well-formed text. BROWSER_BUGS lists each such line with Chrome's answer. The gate fails on any
 other difference and on a listed one that no longer occurs, so a Chrome fix shows as stale.
 
+A page that ends inside a sequence is a second table, EOF_CASES: one page per case, its whole text
+compared. WHATWG makes a sequence left open at the end U+FFFD.
+
 Not reached: ISO-2022-JP (escape sequences switch its state, which one sequence per line cannot sweep),
 gb18030's four-byte sequences, UTF-16 and `replacement`.
 
@@ -48,8 +51,25 @@ BROWSER_BUGS: dict[tuple[str, str, str], str] = {
     ("chrome", "Big5", "88a3"): "\xb3\udf04", ("chrome", "Big5", "88a5"): "\xb3\udf0c",
     # after `8F FE` and an LF, Chrome keeps the JIS X 0212 flag WHATWG clears, so the next sequence
     # is looked up in JIS X 0212: `8F FE 0A A1 A1` gives U+FFFD, not U+3000
-    ("chrome", "EUC-JP", "a1a1"): "�",
+    ("chrome", "EUC-JP", "a1a1"): "\ufffd",
+    # a UTF-16 page ending on half a code unit, or on a lead surrogate: Chrome drops it, where WHATWG
+    # (and every other encoding in Chrome) gives U+FFFD. The text is the page's whole `<pre>`.
+    ("chrome", "UTF-16LE", "eof:00"): "x", ("chrome", "UTF-16LE", "eof:3dd8"): "x",
+    ("chrome", "UTF-16BE", "eof:00"): "x", ("chrome", "UTF-16BE", "eof:d83d"): "x",
 }
+
+# A page that ends inside a sequence: (encoding, the bytes it ends on after `<pre id=s>x`), keyed `eof:<hex>`
+EOF_CASES: list[tuple[str, bytes]] = [
+    ("UTF-16LE", b"\x00"), ("UTF-16LE", b"\x3d\xd8"), ("UTF-16BE", b"\x00"), ("UTF-16BE", b"\xd8\x3d"),
+    ("UTF-8", b"\xe2\x82"), ("UTF-8", b"\xf0\x9f\x98"), ("UTF-8", b"\xc3"), ("Shift_JIS", b"\x82"),
+    ("EUC-JP", b"\xa4"), ("EUC-JP", b"\x8f\xa1"), ("GBK", b"\x81"), ("gb18030", b"\x81\x30"), ("Big5", b"\xa4"),
+    ("EUC-KR", b"\xb0"),
+]
+
+
+def eof_page(encoding: str, tail: bytes) -> bytes:
+    codec = {"UTF-16LE": "utf-16-le", "UTF-16BE": "utf-16-be"}.get(encoding, "ascii")
+    return "<pre id=s>x".encode(codec) + tail
 
 
 def sequences(encoding: str) -> list[bytes]:
@@ -104,7 +124,7 @@ def main() -> int:
     args = ap.parse_args()
     browsers = args.browsers.split(",")
     encodings = SINGLE_BYTE + MULTI_BYTE
-    resolved = {e: frostwork.resolve_label(e) for e in encodings}
+    resolved = {e: frostwork.resolve_label(e) for e in encodings + sorted({e for e, _ in EOF_CASES})}
     engine = {e: engine_lines(e) for e in encodings}
     found: dict[tuple[str, str, str], str] = {}
     charsets: dict[tuple[str, str], str] = {}
@@ -114,7 +134,17 @@ def main() -> int:
                                       content_types=[content_type(e) for e in encodings])
             for e, cs in zip(encodings, oracle.last_charsets):
                 charsets[(b, e)] = cs
+            _, at_eof = oracle.query([eof_page(e, t) for e, t in EOF_CASES], ["#s::text"],
+                                     content_types=[content_type(e) for e, _ in EOF_CASES])
+            for (e, _), cs in zip(EOF_CASES, oracle.last_charsets):
+                charsets[(b, e)] = cs
             build = oracle.build
+        for (e, t), a in zip(EOF_CASES, at_eof):
+            got = "".join(a[0]) if a else None
+            want = "".join(frostwork.extract(eof_page(e, t), ["#s::text"], content_type=content_type(e))[0])
+            if got != want:
+                found[(b, e, "eof:" + t.hex())] = got if got is not None else "(no answer)"
+        print(f"{b:8} {len(EOF_CASES)} pages ending inside a sequence")
         for e, a in zip(encodings, answers):
             diff = differences(e, lines(a[0][0]) if a else [], engine[e])
             found.update({(b, e, s): line for s, line in diff.items()})

@@ -241,7 +241,8 @@ Browser mode is graded against Chrome, and against Firefox as well with `BROWSER
     `make py` checks the generated file against the stored answers without a browser.
   - Last, it sweeps every legacy decoder against the browser (`browser_decoders.py`): each single-byte
     encoding's high half and each multi-byte encoding's two-byte space, in sequence, so a decoder state one
-    malformed sequence leaves reaches the next. Chrome's decoder bugs are listed with Chrome's answer, and
+    malformed sequence leaves reaches the next, and pages that end inside a sequence. Chrome's decoder
+    bugs are listed with Chrome's answer, and
     the sweep fails on any other difference and on a listed one that stops occurring.
 - **`make gate-webpoet-browser`** grades browser-mode page objects against parsel page objects whose
   values come from Chrome, and checks that `.as_node()` is refused at class definition.

@@ -843,6 +843,12 @@ def test_a_raw_source_pair_is_read_as_the_browser_read_it():
     in_html = doc(["g", 0, [], [["style", 0, [], ['a"b']]]])
     assert verdict(page, "g", "<g><style>a&quot;b</style></g>", '<g><style>a"b</style></g>', in_html) is None
 
+    # a name in both namespaces is read in each: here the SVG `<a>`, whose `<script>` decodes references
+    page = '<a href=x>t</a><svg><a><script>&lt;b&quot;</script></a></svg>'
+    mixed = doc(["a", 0, ["href", "x"], ["t"]], ["svg", svg, [], [["a", svg, [], [["script", svg, [], ['<b"']]]]]])
+    assert V.attribute_value(V.ValueRepro(((0, page),), "a", ["<a href=x>t</a>", '<a><script>&lt;b&quot;</script></a>'],
+                                          ['<a href="x">t</a>', '<a><script>&lt;b"</script></a>'], mixed)) == raw
+
     page = "<td><meta charset=gb2312>&middot;</td>"
     assert verdict(page, "td", page, '<td><meta charset="gb2312">\N{MIDDLE DOT}</td>', doc()) == raw
 

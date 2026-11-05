@@ -750,8 +750,8 @@ hint. Chrome uses a different detector (Compact Encoding Detection) and the two 
 `1.299,00 ค` in one and `1.299,00 ¤` in the other. Chrome's guess also moves with the build and with a
 single byte of payload, so Frostwork does not chase it.
 
-**Two Chrome decoder bugs are not followed.** Frostwork decodes as WHATWG's Encoding Standard does, which
-Firefox matches on every byte `tools/browser_decoders.py` sweeps. Chrome 156 breaks it in two places:
+**Three Chrome decoder bugs are not followed.** Frostwork decodes as WHATWG's Encoding Standard does, which
+Firefox matches on every byte `tools/browser_decoders.py` sweeps. Chrome 156 breaks it in three places:
 
 - Big5 `88 62`, `88 64`, `88 A3` and `88 A5`, which WHATWG maps to a letter and a combining mark (`Ê̄`,
   `Ê̌`, `ê̄`, `ê̌`), come out of Chrome as a C1 control and a lone surrogate, text that is not well formed
@@ -760,7 +760,10 @@ Firefox matches on every byte `tools/browser_decoders.py` sweeps. Chrome 156 bre
   so the next two-byte sequence is read from JIS X 0212: `8F A1 58 B0 A1` ends in `亜` in Frostwork and
   Firefox, and in `丂` in Chrome.
 
-`make gate-browser` asserts both against Chrome's answers and fails when either stops occurring.
+- A UTF-16 page that ends on half a code unit or on a lead surrogate: Chrome drops it, where WHATWG, and
+  Chrome itself for every other encoding, gives U+FFFD.
+
+`make gate-browser` asserts each against Chrome's answers and fails when one stops occurring.
 
 ### Extended characters in a SELECTOR
 

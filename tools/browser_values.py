@@ -213,13 +213,15 @@ def _text_of(html: str, serialised: bool = False, context: Optional[str] = None)
 _FOREIGN = {"http://www.w3.org/2000/svg": "svg", "http://www.w3.org/1998/Math/MathML": "math"}
 
 
-def _context(r: ValueRepro, name: str) -> Optional[str]:
-    """The foreign element a value whose root is `name` lies inside: `svg` or `math` when every element
-    of the oracle's tree so named is in that namespace, else None (an HTML or a mixed name)."""
+def _contexts(r: ValueRepro, name: str) -> list[Optional[str]]:
+    """The elements a value whose root is `name` may have been parsed inside: `None` (HTML) when the
+    oracle's tree has an HTML element so named, and `svg` or `math` for each foreign namespace it has one
+    in. A name in more than one (an HTML and an SVG `<a>`) is read in each, both sides alike."""
     if r.tree is None:
-        return None
+        return [None]
     spaces = {el[1] for el in T.elements(r.tree) if el[0].lower() == name}
-    return _FOREIGN.get(spaces.pop()) if len(spaces) == 1 else None
+    out: list[Optional[str]] = [None] if not spaces or T.XHTML in spaces else []
+    return out + [_FOREIGN[ns] for ns in sorted(spaces - {T.XHTML}, key=str) if ns in _FOREIGN]
 
 
 def _lines(text: str) -> str:
@@ -262,8 +264,8 @@ def _raw_source(r: ValueRepro) -> bool:
         root = _outer_root(a)
         if root is None or root != _outer_root(b):
             return False
-        context = _context(r, root[0])
-        return _in_order(_lines(_text_of(b, serialised=True, context=context)), _lines(_text_of(a, context=context)))
+        return any(_in_order(_lines(_text_of(b, serialised=True, context=c)), _lines(_text_of(a, context=c)))
+                   for c in _contexts(r, root[0]))
     return all(same(a, b) for a, b in zip(r.engine, r.oracle))
 
 
