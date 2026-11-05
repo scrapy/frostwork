@@ -113,7 +113,7 @@ fn is_ws(c: u8) -> bool {
 ///
 /// `find_raw_end` ends a rawtext close tag on exactly this set, so anything narrower here leaves the
 /// tokenizer's two name scanners disagreeing with each other as well as with the oracle.
-fn is_name_char(c: u8) -> bool {
+pub(crate) fn is_name_char(c: u8) -> bool {
     !cls::is(c, cls::TAG_NAME_END)
 }
 
@@ -232,6 +232,26 @@ fn find_raw_end<'a>(
                 i = p + 1;
             }
         }
+    }
+}
+
+/// Where the character data of a `name` element in `mode`, starting at `from`, ends. Returns
+/// (text_end, after_end_tag).
+pub(crate) fn raw_text_end<'a>(
+    b: &'a [u8],
+    from: usize,
+    name: &[u8],
+    mode: DataMode,
+    attr_buf: &mut Vec<(&'a [u8], Option<&'a [u8]>)>,
+) -> (usize, usize) {
+    match mode {
+        // PLAINTEXT has no end: the rest of the document is its text, and libxml2 emits no end tag
+        // (the element is closed by end-of-document, like any element left open).
+        DataMode::Plaintext => (b.len(), b.len()),
+        // `script` needs the escaped/double-escaped states on top of "find the end tag"; every
+        // other mode ends at the first matching end tag.
+        _ if name.eq_ignore_ascii_case(b"script") => find_script_end(b, from, attr_buf),
+        _ => find_raw_end(b, from, name, attr_buf),
     }
 }
 
@@ -457,7 +477,7 @@ fn handle_markup<'a, S: TokenSink<'a>>(
 /// After `</img\nsrc="http:>`, whose value is unterminated and so runs on to the next quote 300 bytes
 /// later, that reading keeps an `</a>`, two `</div>`s and a whole `<div id='HTML3'>` start tag.
 /// Reporting an element the document does not contain is the FALSE-POSITIVE direction.
-fn scan_attrs<'a>(
+pub(crate) fn scan_attrs<'a>(
     b: &'a [u8],
     mut i: usize,
     attr_buf: &mut Vec<(&'a [u8], Option<&'a [u8]>)>,
@@ -575,15 +595,7 @@ fn handle_start<'a, S: TokenSink<'a>>(
     sink.start_tag(name, attr_buf, self_closing, p, i);
 
     if mode != DataMode::Normal && !self_closing {
-        // PLAINTEXT has no end: the rest of the document is its text, and libxml2 emits no end tag
-        // (the element is closed by end-of-document, like any element left open).
-        let (text_end, after) = match mode {
-            DataMode::Plaintext => (n, n),
-            // `script` needs the escaped/double-escaped states on top of "find the end tag"; every
-            // other mode ends at the first matching end tag.
-            _ if name.eq_ignore_ascii_case(b"script") => find_script_end(b, i, attr_buf),
-            _ => find_raw_end(b, i, name, attr_buf),
-        };
+        let (text_end, after) = raw_text_end(b, i, name, mode, attr_buf);
         if text_end > i {
             sink.text(&b[i..text_end], mode == DataMode::Rcdata, i);
         }

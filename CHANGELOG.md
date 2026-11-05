@@ -3,6 +3,21 @@
 All notable user-facing changes will be recorded here. Frostwork will follow semantic versioning after its
 first public release.
 
+## 0.2.1 (unreleased)
+
+### Correctness
+
+- `navigation()` no longer reads a `<base>` or meta refresh written after a self-closed element whose
+  content browsers read as text, e.g. `<script/><base href="…">`: unless it is an SVG or MathML
+  element, browsers ignore the `/` of `<script/>`, `<style/>`, `<title/>`, `<textarea/>`,
+  `<noscript/>` (with scripting enabled), … and read the markup up to the matching end tag as text.
+
+### Performance
+
+- `navigation()` no longer tokenizes a document that cannot hold what was asked for: a `<base>` for
+  the base URL, a `<meta>` with an `http-equiv` attribute for the meta refresh.
+- `frostwork.encoding.bom_encoding()`, `codec_name()` and `decode()` have less call overhead.
+
 ## 0.2.0 (2026-11-05)
 
 ### Backward-incompatible changes

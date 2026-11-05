@@ -2636,6 +2636,9 @@ impl<'a> TokenSink<'a> for Matcher<'a> {
             self.materialize_attrs::<false>(raw_attrs)
         };
         if let Some(nav) = self.nav.as_mut() {
+            if self_closing {
+                nav.self_closed(name, &self.stack, span_start, open_end, self.input.bytes());
+            }
             if nav.wants(name) {
                 nav.start_tag(name, raw_attrs, &self.stack, span_start, self.input.encoding());
             }

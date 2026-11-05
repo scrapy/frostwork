@@ -17,6 +17,7 @@ use encoding_rs::Encoding;
 use url::Url;
 
 use super::OpenElem;
+use crate::tokenizer::DataMode;
 
 /// What [`crate::navigation`] and [`crate::Plan::extract_with_navigation`] collect.
 #[derive(Clone, Copy, Debug)]
@@ -55,8 +56,11 @@ pub(crate) struct NavCollector {
     /// The refresh to follow, with `None` for the document itself.
     refresh: Option<(u64, Option<Url>)>,
     /// The open elements that start or end foreign content for a browser, outermost first, tracked
-    /// until the base URL is settled.
+    /// until the answer is settled.
     scopes: Vec<OpenScope>,
+    /// Where the text a browser reads after a self-closed `<script/>`, `<title/>`… ends; the tags
+    /// before it are part of that text.
+    text_until: usize,
 }
 
 /// What a browser parses the content of an element as. Inside SVG or MathML, a `<base>` is a foreign
@@ -90,19 +94,23 @@ impl NavCollector {
             base: None,
             refresh: None,
             scopes: Vec::new(),
+            text_until: 0,
         }
     }
 
     /// Whether a start tag named `name` can change the answer. Checked before anything else, so outside
     /// foreign content every other element costs a few comparisons of its name length.
     pub(crate) fn wants(&self, name: &[u8]) -> bool {
-        (!self.base_seen && (!self.scopes.is_empty() || is_any(name, &[b"base", b"svg", b"math"])))
-            || (self.opts.meta_refresh && name.eq_ignore_ascii_case(b"meta"))
+        !self.done()
+            && (!self.scopes.is_empty()
+                || is_any(name, &[b"svg", b"math"])
+                || (!self.base_seen && name.eq_ignore_ascii_case(b"base"))
+                || (self.opts.meta_refresh && name.eq_ignore_ascii_case(b"meta")))
     }
 
     /// An end tag, which in foreign content breaks out of it if it is `</p>` or `</br>`.
     pub(crate) fn end_tag(&mut self, name: &[u8], stack: &[OpenElem]) {
-        if self.base_seen || self.scopes.is_empty() || !is_any(name, &[b"p", b"br"]) {
+        if self.done() || self.scopes.is_empty() || !is_any(name, &[b"p", b"br"]) {
             return;
         }
         self.prune(stack);
@@ -189,6 +197,41 @@ impl NavCollector {
         self.scopes.push(OpenScope { depth, start, scope, broken: false });
     }
 
+    /// A start tag `name` spanning `start..open_end` of `bytes` and ending in `/>`, below the open
+    /// elements `stack`. Called before [`Self::start_tag`].
+    ///
+    /// Outside foreign content, a browser ignores the slash, so the markup up to the element's end tag is
+    /// its text. libxml2 honours the slash, and its raw-text elements are the browser's, less
+    /// `<noscript>`, which is raw text to a browser running scripts.
+    pub(crate) fn self_closed(
+        &mut self,
+        name: &[u8],
+        stack: &[OpenElem],
+        start: usize,
+        open_end: usize,
+        bytes: &[u8],
+    ) {
+        if self.done() || start < self.text_until || self.in_noscript_text(stack) {
+            return;
+        }
+        let mode = match crate::implied_close::data_mode_of(name) {
+            DataMode::Normal if self.opts.scripting && name.eq_ignore_ascii_case(b"noscript") => {
+                DataMode::Rawtext
+            }
+            DataMode::Normal => return,
+            mode => mode,
+        };
+        self.prune(stack);
+        if !self.in_foreign_content() {
+            self.text_until = crate::tokenizer::raw_text_end(bytes, open_end, name, mode, &mut Vec::new()).0;
+        }
+    }
+
+    /// Whether `stack` has a `<noscript>`, whose content is text to a browser running scripts.
+    fn in_noscript_text(&self, stack: &[OpenElem]) -> bool {
+        self.opts.scripting && stack.iter().any(|e| e.tag.eq_ignore_ascii_case(b"noscript"))
+    }
+
     /// Whether the rest of the document can no longer change the answer.
     pub(crate) fn done(&self) -> bool {
         !self.opts.meta_refresh && self.base_seen
@@ -210,21 +253,21 @@ impl NavCollector {
                 .find(|(n, _)| n.eq_ignore_ascii_case(wanted))
                 .map(|&(_, v)| v.map_or(Cow::Borrowed(""), |v| super::decode::decode_attr(v, value_encoding)))
         };
-        if !self.base_seen {
-            self.prune(stack);
-            self.track_scope(name, attr, stack.len(), start);
+        if start < self.text_until {
+            return;
         }
+        self.prune(stack);
+        self.track_scope(name, attr, stack.len(), start);
         let is_base = name.eq_ignore_ascii_case(b"base");
         if !is_base && !name.eq_ignore_ascii_case(b"meta") {
             return;
         }
         // `<template>` content is not part of the document, and a `<noscript>` is text to a browser
         // running scripts. A `<meta>` breaks out of foreign content and stays an HTML element.
-        let ignored = |e: &OpenElem| {
-            e.tag.eq_ignore_ascii_case(b"template")
-                || (self.opts.scripting && e.tag.eq_ignore_ascii_case(b"noscript"))
-        };
-        if stack.iter().any(ignored) || (is_base && self.in_foreign_content()) {
+        if stack.iter().any(|e| e.tag.eq_ignore_ascii_case(b"template"))
+            || self.in_noscript_text(stack)
+            || (is_base && self.in_foreign_content())
+        {
             return;
         }
         if is_base {
@@ -469,6 +512,45 @@ mod tests {
         }
     }
 
+    /// Whether Chromium 143 and Firefox 144 read a `<base>` after a self-closed element whose content
+    /// is text as the base URL (2026-11-05). They agree on every case.
+    #[test]
+    fn navigation_browser_table_self_closed_text() {
+        const B: &str = "<base href='/s/'>";
+        let names = ["script", "style", "title", "textarea", "xmp", "iframe", "noembed", "noframes", "noscript"];
+        for name in names.iter().chain(&["plaintext"]) {
+            let ends = *name != "plaintext";
+            let cases: &[(&str, String, bool)] = &[
+                ("head", page(&format!("<{name}/>{B}"), ""), false),
+                ("body", page("", &format!("<{name}/>{B}")), false),
+                ("closed", page("", &format!("<{name}/>x</{name}>{B}")), ends),
+                ("closed, upper case", page("", &format!("<{}/>x</{name}>{B}", name.to_uppercase())), ends),
+                ("svg", page("", &format!("<svg><{name}/></svg>{B}")), true),
+                ("foreignObject", page("", &format!("<svg><foreignObject><{name}/>{B}")), false),
+                ("mi", page("", &format!("<math><mi><{name}/></mi></math>{B}")), false),
+            ];
+            for (case, html, counts) in cases {
+                let expected = if *counts { "http://h/s/" } else { DOC };
+                assert_eq!(nav(html.as_bytes(), None, true).base_url.as_deref(), Some(expected), "{name}, {case}");
+            }
+        }
+        let cases: &[(&str, &str, bool, bool)] = &[
+            ("noscript, no scripting", "<noscript/>{B}", false, true),
+            ("script in noscript", "<noscript><script/></noscript>{B}", true, true),
+            ("script in noscript, no scripting", "<noscript><script/></noscript>{B}", false, false),
+            ("svg in the text", "<title/><svg></title>{B}", true, true),
+            ("escaped script", "<script/><!--<script></script>{B}</script>", true, false),
+            ("template", "<template><script/></template>{B}", true, false),
+        ];
+        for (case, body, scripting, counts) in cases {
+            let html = page("", &body.replace("{B}", B));
+            let expected = if *counts { "http://h/s/" } else { DOC };
+            assert_eq!(nav(html.as_bytes(), None, *scripting).base_url.as_deref(), Some(expected), "{case}");
+        }
+        let html = page("<script/><meta http-equiv=refresh content='5;url=/r'>", "");
+        assert_eq!(nav(html.as_bytes(), None, true).meta_refresh, None);
+    }
+
     /// The query of a `<base href>` is encoded in the document encoding, as is that of every link
     /// resolved against it (measured on the links; the base URL itself is not observable).
     #[test]
@@ -607,6 +689,24 @@ mod tests {
         assert_eq!(crate::navigation(b"<p>none</p>", None, "HTTP://H/a b", options).base_url.as_deref(), Some("http://h/a%20b"));
         let reload = crate::navigation(br#"<meta http-equiv="refresh" content="5">"#, None, "http://h", NavOptions { meta_refresh: true, ..options });
         assert_eq!(reload.meta_refresh, Some((5, "http://h/".into())));
+    }
+
+    /// A document is not scanned when a byte search rules out what was asked for, so the spellings such a
+    /// search could miss still count, and the near misses it must not take for a match answer the same.
+    #[test]
+    fn what_the_skipped_scan_could_miss_still_counts() {
+        let refresh = |html: &[u8]| nav(html, None, true).meta_refresh;
+        let to = |delay, url: &str| Some((delay, url.to_owned()));
+        assert_eq!(refresh(b"<META HTTP-EQUIV=REFRESH CONTENT=1>"), to(1, DOC));
+        assert_eq!(refresh(b"<meta http-equiv=r&#101;fresh content=2>"), to(2, DOC));
+        let utf16: Vec<u8> = "\u{feff}<meta http-equiv=refresh content=3>".encode_utf16().flat_map(u16::to_le_bytes).collect();
+        assert_eq!(refresh(&utf16), to(3, DOC));
+        assert_eq!(refresh(br#"<meta a=">" http-equiv=refresh content=5>"#), to(5, DOC));
+        assert_eq!(refresh(b"<meta name=refresh content=4><p http-equiv=refresh>http-equiv</p>"), None);
+        let base = |html: &[u8]| nav(html, None, true).base_url;
+        assert_eq!(base(b"<BASE\thref=/a/>"), Some("http://h/a/".into()));
+        assert_eq!(base(b"<base/href=/b/>"), Some("http://h/b/".into()));
+        assert_eq!(base(b"<basefont href=/c/>"), Some(DOC.into()));
     }
 
     #[test]
