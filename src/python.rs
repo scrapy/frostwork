@@ -4,7 +4,7 @@
 //! (`python/frostwork/`), so there is nothing to keep in sync between two implementations of the
 //! matching logic — there is only one (the Rust core).
 
-use pyo3::exceptions::{PyTypeError, PyValueError};
+use pyo3::exceptions::{PyLookupError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 
 use crate::{CompileOptions, EncodingHints, EncodingSource, GroupQuery, ParseMode, Query, Syntax};
@@ -88,40 +88,41 @@ fn canonical_label(label: &str) -> Option<&'static str> {
     encoding_rs::Encoding::for_label(label.as_bytes()).map(|e| e.name())
 }
 
-/// What a caller's `encoding=` label names, which decides rank 3 of the precedence table.
-enum CallerLabel {
-    /// A WHATWG encoding, by its canonical name.
-    Whatwg(&'static str),
-    /// A real encoding WHATWG has no equivalent for (`utf-7`): ignored, and resolution continues.
-    NotWhatwg,
-    /// No codec knows the label: the caller made a mistake, and every entry point raises.
-    Unknown,
-}
-
 /// Resolve a caller label against WHATWG's labels first, then Python's codec set:
 /// `codecs.lookup(label).name` fed back through [`canonical_label`].
 ///
 /// Both label universes have to be consulted, or the same argument means different things to
 /// different callers. `latin-1` is the case that forces the second: WHATWG defines `iso-8859-1` and
 /// not `latin-1`, so WHATWG alone cannot see that `latin-1` means windows-1252. `utf-8-sig` is the
-/// case that forces `NotWhatwg`: Python resolves it and WHATWG does not name it, so the label is
-/// ignored and the text scanned as UTF-8, which is what it is.
+/// case that gives `None`: Python resolves it and WHATWG does not name it, so the label is ignored
+/// and the text scanned as UTF-8, which is what it is. A label neither knows is ignored too, which is
+/// WHATWG's "failure, continue".
 ///
 /// Some canonical Python names are WHATWG encodings under a spelling WHATWG does not list:
 /// `codecs.lookup("shift_jis").name` is `cp932`, and that is what `w3lib.encoding.resolve_encoding`
 /// (Scrapy's `response.encoding`) hands over. Those are translated here, in the Python binding, so the
-/// engine itself stays WHATWG-only. `codecs` is consulted only when this crate cannot resolve the label
-/// itself, so the common path stays inside Rust.
-fn caller_label(py: Python<'_>, label: &str) -> CallerLabel {
-    if let Some(name) = canonical_label(label) {
-        return CallerLabel::Whatwg(name);
-    }
-    let lookup = py
-        .import("codecs")
-        .and_then(|codecs| codecs.call_method1("lookup", (label,)))
-        .and_then(|info| info.getattr("name"))
-        .and_then(|name| name.extract::<String>());
-    let Ok(name) = lookup else { return CallerLabel::Unknown };
+/// engine itself stays WHATWG-only.
+///
+/// Python has no `x-user-defined` or `replacement` codec until `frostwork.encoding` registers them, so
+/// a label Python does not know is matched against their spellings with the normalization their
+/// lookup applies, for the answer not to depend on whether that module has been imported.
+fn caller_label(py: Python<'_>, label: &str) -> Option<&'static str> {
+    canonical_label(label).or_else(|| whatwg_via_python_codecs(py, label))
+}
+
+/// [`caller_label`]'s lookup through Python's codecs, for a label WHATWG does not list.
+fn whatwg_via_python_codecs(py: Python<'_>, label: &str) -> Option<&'static str> {
+    let codecs = py.import("codecs").ok()?;
+    let Ok(info) = codecs.call_method1("lookup", (label,)) else {
+        let encodings = py.import("encodings").ok()?;
+        let normalized = encodings.call_method1("normalize_encoding", (label.to_lowercase(),)).ok()?;
+        return match normalized.extract::<String>().ok()?.as_str() {
+            "x_user_defined" => canonical_label("x-user-defined"),
+            "replacement" => canonical_label("replacement"),
+            _ => None,
+        };
+    };
+    let name: String = info.getattr("name").ok()?.extract().ok()?;
     let whatwg = match name.as_str() {
         "cp932" => "shift_jis",
         "euc_jp" => "euc-jp",
@@ -138,7 +139,19 @@ fn caller_label(py: Python<'_>, label: &str) -> CallerLabel {
         "iso2022_kr" => "iso-2022-kr",
         other => other,
     };
-    canonical_label(whatwg).map_or(CallerLabel::NotWhatwg, CallerLabel::Whatwg)
+    canonical_label(whatwg)
+}
+
+/// What [`Html::hints`] does with a label no codec knows.
+#[derive(Clone, Copy)]
+enum Unknown {
+    Refuse,
+    Ignore,
+}
+
+/// Whether Python's codecs know `label` at all, WHATWG encoding or not.
+fn python_knows(py: Python<'_>, label: &str) -> bool {
+    py.import("codecs").and_then(|codecs| codecs.call_method1("lookup", (label,))).is_ok()
 }
 
 /// The document to scan, as Python hands it over: raw `bytes` off the wire, or an already-decoded
@@ -192,10 +205,11 @@ impl Html<'_> {
 
     /// The encoding inputs to scan with: rank 3 decided here, for every Python entry point alike.
     ///
-    /// A label no codec knows raises `ValueError`, because it is the caller's own mistake and silently
-    /// sniffing instead would hide it. A real encoding WHATWG lacks (`utf-7`) is ignored and resolution
-    /// continues, as a browser does. Every entry point comes through here, so `extract`,
-    /// `detect_encoding` and a `Plan` (what `FrostPage` calls) make the same decision, error included.
+    /// A real encoding WHATWG lacks (`utf-7`) is ignored and resolution continues, as a browser does. A
+    /// label no codec knows raises `ValueError` from the extraction entry points (`Unknown::Refuse`),
+    /// because it is the caller's own mistake and silently sniffing instead would hide it. The detection
+    /// entry points, `detect_encoding` and `navigation`, ignore it too (`Unknown::Ignore`): they read
+    /// labels a server sent, which browsers treat as WHATWG's "failure, continue".
     ///
     /// For `bytes`, the WHATWG name, `content_type` and `url` pass through to the engine's precedence
     /// table. For `str` no rank applies: the bytes handed on are UTF-8 by construction, so the answer is
@@ -209,18 +223,17 @@ impl Html<'_> {
         label: Option<&str>,
         content_type: Option<&'a str>,
         url: Option<&'a str>,
+        unknown: Unknown,
     ) -> PyResult<EncodingHints<'a>> {
-        let resolved = match label.map(|l| (l, caller_label(py, l))) {
-            None => None,
-            Some((l, CallerLabel::Unknown)) => {
+        let resolved = label.and_then(|l| caller_label(py, l));
+        if let (Some(l), None, Unknown::Refuse) = (label, resolved, unknown) {
+            if !python_knows(py, l) {
                 return Err(PyValueError::new_err(format!(
                     "frostwork: unknown encoding label {l:?} - pass a WHATWG charset label (e.g. \
                      'utf-8', 'windows-1252', 'shift_jis') or None to sniff from BOM/<meta>"
-                )))
+                )));
             }
-            Some((_, CallerLabel::NotWhatwg)) => None,
-            Some((_, CallerLabel::Whatwg(name))) => Some(name),
-        };
+        }
         let Html::Str(_) = self else {
             return Ok(EncodingHints { encoding: resolved, content_type, url });
         };
@@ -292,7 +305,7 @@ impl Plan {
         content_type: Option<&str>,
         url: Option<&str>,
     ) -> PyResult<Vec<Vec<String>>> {
-        let hints = html.hints(py, encoding, content_type, url)?;
+        let hints = html.hints(py, encoding, content_type, url, Unknown::Refuse)?;
         let bytes = html.as_bytes();
         Ok(py.detach(|| self.inner.extract_with(bytes, hints).0))
     }
@@ -309,10 +322,65 @@ impl Plan {
         content_type: Option<&str>,
         url: Option<&str>,
     ) -> PyResult<(Vec<Vec<String>>, Vec<Vec<Vec<Vec<String>>>>)> {
-        let hints = html.hints(py, encoding, content_type, url)?;
+        let hints = html.hints(py, encoding, content_type, url, Unknown::Refuse)?;
         let bytes = html.as_bytes();
         Ok(py.detach(|| self.inner.extract_with(bytes, hints)))
     }
+
+    /// `extract_grouped`, also returning the document's base URL and meta refresh, read as `navigation`
+    /// reads them: `(flat_columns, grouped, (base_url, meta_refresh))`.
+    #[pyo3(signature = (
+        html, url, encoding=None, *, content_type=None, base_url=true, meta_refresh=true, scripting=true
+    ))]
+    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
+    fn extract_with_navigation(
+        &self,
+        py: Python<'_>,
+        html: Html<'_>,
+        url: &str,
+        encoding: Option<&str>,
+        content_type: Option<&str>,
+        base_url: bool,
+        meta_refresh: bool,
+        scripting: bool,
+    ) -> PyResult<(Vec<Vec<String>>, Vec<Vec<Vec<Vec<String>>>>, PyNavigation)> {
+        let hints = html.hints(py, encoding, content_type, Some(url), Unknown::Refuse)?;
+        let bytes = html.as_bytes();
+        let options = crate::NavOptions { base_url, meta_refresh, scripting };
+        let (flat, grouped, nav) =
+            py.detach(|| self.inner.extract_with_navigation_hints(bytes, hints, url, options));
+        Ok((flat, grouped, py_navigation(nav)))
+    }
+}
+
+/// `(base_url, meta_refresh)`, with the refresh delay as a float, which is how Scrapy compares it.
+type PyNavigation = (Option<String>, Option<(f64, String)>);
+
+fn py_navigation(nav: crate::Navigation) -> PyNavigation {
+    (nav.base_url, nav.meta_refresh.map(|(delay, url)| (delay as f64, url)))
+}
+
+/// The document's base URL and meta refresh, as a browser reads them, in one pass over `html`:
+/// `(base_url, meta_refresh)`. The pure-Python `frostwork.navigation` wraps this into a `Navigation`.
+#[pyfunction]
+#[pyo3(signature = (
+    html, url, encoding=None, *, content_type=None, base_url=true, meta_refresh=true, scripting=true
+))]
+#[allow(clippy::too_many_arguments)]
+fn navigation(
+    py: Python<'_>,
+    html: Html<'_>,
+    url: &str,
+    encoding: Option<&str>,
+    content_type: Option<&str>,
+    base_url: bool,
+    meta_refresh: bool,
+    scripting: bool,
+) -> PyResult<PyNavigation> {
+    let hints = html.hints(py, encoding, content_type, Some(url), Unknown::Ignore)?;
+    let bytes = html.as_bytes();
+    let options = crate::NavOptions { base_url, meta_refresh, scripting };
+    Ok(py_navigation(py.detach(|| crate::navigation_with(bytes, hints, url, options))))
 }
 
 /// One run over `html` for every query, returning one value-column per query (in query order) — the exact
@@ -337,7 +405,7 @@ fn extract(
 ) -> PyResult<Vec<Vec<String>>> {
     let options = CompileOptions { mode: parse_mode(parser)?, first_only: &[] };
     check_budget(&queries, &[])?;
-    let hints = html.hints(py, encoding, content_type, url)?;
+    let hints = html.hints(py, encoding, content_type, url, Unknown::Refuse)?;
     let bytes = html.as_bytes();
     Ok(py.detach(|| crate::Plan::compile_with(&queries, &[], options).extract_with(bytes, hints).0))
 }
@@ -363,7 +431,7 @@ fn extract_grouped(
     let options = CompileOptions { mode: parse_mode(parser)?, first_only: &[] };
     let gq = group_queries(groups);
     check_budget(&flat_queries, &gq)?;
-    let hints = html.hints(py, encoding, content_type, url)?;
+    let hints = html.hints(py, encoding, content_type, url, Unknown::Refuse)?;
     let bytes = html.as_bytes();
     Ok(py.detach(|| crate::Plan::compile_with(&flat_queries, &gq, options).extract_with(bytes, hints)))
 }
@@ -373,10 +441,7 @@ fn extract_grouped(
 /// `None` if nothing names a WHATWG encoding.
 #[pyfunction]
 fn resolve_label(py: Python<'_>, label: &str) -> Option<&'static str> {
-    match caller_label(py, label) {
-        CallerLabel::Whatwg(name) => Some(name),
-        CallerLabel::NotWhatwg | CallerLabel::Unknown => None,
-    }
+    caller_label(py, label)
 }
 
 /// The encoding `extract` would scan this document with, as a WHATWG canonical name, from the same
@@ -397,11 +462,11 @@ fn detect_encoding<'py>(
     url: Option<&str>,
     explain: bool,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let hints = html.hints(py, encoding, content_type, url)?;
+    let hints = html.hints(py, encoding, content_type, url, Unknown::Ignore)?;
     let (name, source) = match html {
         Html::Str(_) => ("UTF-8", "str"),
         Html::Bytes(bytes) => {
-            let (name, source): (&str, EncodingSource) = crate::resolve_encoding(bytes, hints);
+            let (name, source): (&str, EncodingSource) = py.detach(|| crate::resolve_encoding(bytes, hints));
             (name, source.as_str())
         }
     };
@@ -410,6 +475,35 @@ fn detect_encoding<'py>(
     } else {
         Ok(name.into_pyobject(py)?.into_any())
     }
+}
+
+/// The BOM step of [`detect_encoding`] alone: `(encoding, bom_length)`, or `None`.
+#[pyfunction]
+fn bom_encoding(body: &[u8]) -> Option<(&'static str, usize)> {
+    crate::encoding::bom(body).map(|(enc, len)| (enc.name(), len))
+}
+
+/// The `<meta>`/XML-declaration prescan step of [`detect_encoding`] alone.
+#[pyfunction]
+fn declared_encoding(py: Python<'_>, body: &[u8]) -> Option<&'static str> {
+    py.detach(|| crate::encoding::declaration(body).map(|(enc, _)| enc.name()))
+}
+
+/// The last step of [`detect_encoding`] alone: UTF-8 if `body` is valid UTF-8, else a guess.
+#[pyfunction]
+#[pyo3(signature = (body, *, url=None))]
+fn autodetect_encoding(py: Python<'_>, body: &[u8], url: Option<&str>) -> &'static str {
+    py.detach(|| crate::encoding::autodetect(body, url.and_then(crate::encoding::tld).as_deref()).0.name())
+}
+
+/// `body` decoded with the WHATWG decoder of the encoding the WHATWG label `label` names, BOM
+/// included, with U+FFFD for invalid input. Raises `LookupError` for any other label.
+#[pyfunction]
+fn decode(py: Python<'_>, body: &[u8], label: &str) -> PyResult<String> {
+    let Some(enc) = encoding_rs::Encoding::for_label(label.as_bytes()) else {
+        return Err(PyLookupError::new_err(format!("unknown encoding: {label}")));
+    };
+    Ok(py.detach(|| enc.decode_without_bom_handling(body).0.into_owned()))
 }
 
 /// `Support` as a Python-facing `(supported: bool, reason: Optional[str])` tuple.
@@ -474,6 +568,11 @@ fn _frostwork(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(selector_node_identity, m)?)?;
     m.add_function(wrap_pyfunction!(resolve_label, m)?)?;
     m.add_function(wrap_pyfunction!(detect_encoding, m)?)?;
+    m.add_function(wrap_pyfunction!(bom_encoding, m)?)?;
+    m.add_function(wrap_pyfunction!(declared_encoding, m)?)?;
+    m.add_function(wrap_pyfunction!(autodetect_encoding, m)?)?;
+    m.add_function(wrap_pyfunction!(decode, m)?)?;
+    m.add_function(wrap_pyfunction!(navigation, m)?)?;
     m.add_class::<Plan>()?;
     Ok(())
 }

@@ -7,16 +7,23 @@ are a promise, and only a type checker can hold them: annotating `field()` as th
 makes correct code an error in the user's CI while every runtime test here passes.
 """
 
+# mypy: warn-unused-ignores
+
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import attrs
 from typing_extensions import assert_type
 
-from frostwork import Page, Parser, check, detect_encoding, extract, extract_grouped
+# Deliberate errors: `frostwork` exports its names lazily, and if a type checker ever read them as `Any`,
+# these ignores would go unused and fail the check.
+from frostwork import NoSuchName  # type: ignore[attr-defined]
+from frostwork import (
+    MetaRefresh, Navigation, Page, Parser, check, detect_encoding, extract, extract_grouped, navigation,
+    resolve_label,
+)
 from frostwork._frostwork import Plan
-from frostwork.page import EncodingSource
+from frostwork.encoding import EncodingSource
 from frostwork.webpoet import FrostBrowserPage, FrostFields, FrostInput, FrostPage, Many, One, field
-
 
 assert_type(extract_grouped(b'', [], [('article', {'title': './h2/text()'})]), Tuple[List[List[str]], list])
 # the parse mode is spelled the same way everywhere, and is a `Literal`, not any `str`
@@ -29,6 +36,10 @@ assert_type(detect_encoding(b'', content_type='text/html; charset=big5'), str)
 assert_type(detect_encoding(b'', url='https://example.jp/', explain=True), Tuple[str, EncodingSource])
 EXPLAIN: bool = False
 assert_type(detect_encoding(b'', explain=EXPLAIN), Union[str, Tuple[str, EncodingSource]])
+resolve_label(b'utf-8')  # type: ignore[arg-type]  # deliberate, see the imports
+assert_type(navigation(b'', 'http://h/').base_url, Optional[str])
+assert_type(navigation(b'', 'http://h/').meta_refresh, Optional[MetaRefresh])
+assert_type(Page().extract_with_navigation(b'', 'http://h/')[1], Navigation)
 
 
 @attrs.define

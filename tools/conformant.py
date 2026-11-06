@@ -282,6 +282,9 @@ BASKET = [
     # page never wrote (`*` matching the implied `<body>`)
     "div:has(span) div::text", "div:has(a) div::attr(id)", "li:has(a) li::text", "div:last-child div::text",
     "div:contains('alpha') div::text", "//div[contains(.,'alpha')]//div/text()", "*:has(li) li::text",
+    # tails the winner itself would satisfy (`*`, its own tag): only proper descendants count
+    "//li[last()]//*/text()", "//div[last()]//div/@class",
+    "//div[contains(.,'alpha')]//*/text()",
     # CSS `:contains()` — cssselect lowers it to `contains(., "v")`, so it shares every value location the
     # XPath text predicate above has, and each one is listed rather than assumed: own, subtree, descendant,
     # and the following-sibling (label->value) shape. Both argument tokens cssselect accepts are here too.

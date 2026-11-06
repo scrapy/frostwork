@@ -31,6 +31,7 @@ mod frame;
 mod deferred;
 mod libxml2;
 mod matching;
+mod navigation;
 mod sig;
 mod tree;
 
@@ -41,6 +42,8 @@ use compile::{
 pub(crate) use compile::{admits_synthesized_frame, Refusal};
 use decode::decode_bytes;
 pub(crate) use decode::EncodedInput;
+pub(crate) use navigation::{document_url, NavCollector};
+pub use navigation::{NavOptions, Navigation};
 use deferred::TextMatchState;
 #[cfg(test)]
 use deferred::TextAccum;
@@ -1180,12 +1183,14 @@ pub struct Matcher<'a> {
     schema: &'a CompiledSchema,
     results: Vec<Vec<String>>,
     stack: Vec<OpenElem<'a>>,
-    /// The stack index flat selectors are rooted at: 0, or the span's root in a span re-scan (`root`).
+    /// The stack index flat selectors are rooted at: 0, or the span's root in a span re-scan (`root`),
+    /// and `usize::MAX` there until the root opens, so nothing before it matches.
     floor: usize,
     /// In lxml mode's re-scan of one deferred winner's span, the winner's tag, else empty. The winner is
     /// the span's root, which libxml2's frame puts under an implied `<html>` and `<body>` that also open
-    /// at offset 0, so the deepest element opened at offset 0 with the winner's name is the floor: the
-    /// root is then not its own descendant (`div:has(b) div`), and nothing outside it is an ancestor.
+    /// at offset 0, so the deepest element opened at offset 0 with the winner's name is the floor. A tail
+    /// is strict, so the root is not its own descendant (`div:has(b) div`, `li:last-child *`), and the
+    /// frame above it matches nothing (`li:last-child body`).
     root: &'a [u8],
     // The document bytes and the encoding that decodes them, as one value (`EncodedInput`).
     // Raw-source outer-HTML fragments are sliced out of it; emitted values are decoded with it.
@@ -1249,6 +1254,9 @@ pub struct Matcher<'a> {
     /// ranks, and `replay_spans[rank]` is the raw source of the element at that rank.
     replay: bool,
     replay_spans: Vec<(usize, usize)>,
+    /// The base URL and meta refresh, collected in the same pass when the caller asked for them (lxml
+    /// mode's builder feeds it).
+    pub(super) nav: Option<NavCollector>,
 }
 
 /// One text node handed to the consumers: either a raw run still to be decoded (the common case, so
@@ -1915,6 +1923,29 @@ impl CompiledSchema {
         self.refusals.iter().find(|(s, _)| *s == slot).map(|&(_, r)| r)
     }
 
+
+    /// Whether the schema has no flat query and no group.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.n_flat_cols == 0 && self.n_groups == 0
+    }
+
+    /// lxml mode's [`run`](Self::run), also collecting the base URL and meta refresh into `nav` in the
+    /// same pass. The lxml builder feeds the collector (see `libxml2.rs`).
+    pub(crate) fn run_with_navigation(
+        &self,
+        input: EncodedInput,
+        nav: NavCollector,
+    ) -> (FlatColumns, Vec<GroupRows>, NavCollector) {
+        debug_assert!(self.mode == ParseMode::Lxml, "navigation is read off lxml mode's scan");
+        let mut m = Matcher::new(self, input);
+        m.nav = Some(nav);
+        let mut scan = tree::Scan { m, builder: libxml2::Libxml2::default() };
+        crate::tokenizer::tokenize(input.bytes(), &mut scan);
+        let nav = scan.m.nav.take().expect("set above");
+        let (flat, grouped) = scan.finish();
+        (flat, grouped, nav)
+    }
+
     /// Does flat column `col` have a LIVE (matchable) entry — a normal member or a deferred reverse
     /// member that survived compile-time routing? The audit uses this so its supported/unsupported
     /// verdict is EXACTLY what the matcher does: a reverse form the compiler drops to empty (subtree
@@ -1985,6 +2016,7 @@ impl<'a> Matcher<'a> {
             pending_text: None,
             replay: false,
             replay_spans: Vec::new(),
+            nav: None,
         }
     }
 
@@ -2920,11 +2952,15 @@ impl<'a> Matcher<'a> {
     /// is `0 == 0`... which would be `true`, hence the explicit disarm: an unarmed schema must never
     /// stop, least of all before it starts.
     pub(super) fn done(&self) -> bool {
-        self.schema.stop_mask != 0
+        let fields_done = self.schema.stop_mask != 0
             && self.satisfied == self.schema.stop_mask
             // ...and no capturing element is still open, or closing the stack at finish would give its
             // column an end-of-input span. See `CompiledSchema::arm_early_exit`.
-            && self.open_captures == 0
+            && self.open_captures == 0;
+        match &self.nav {
+            None => fields_done,
+            Some(nav) => nav.done() && (fields_done || self.schema.is_empty()),
+        }
     }
 
     /// Markup over `[from, to)` that leaves no node and does not end the text node around it: a

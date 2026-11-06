@@ -34,29 +34,41 @@ use encoding_rs::Encoding;
 /// and no attribute name this cares about, so a mangled byte can only turn "not a declaration" into
 /// "still not a declaration", the answer a browser reaches too.
 fn meta_attrs(head: &[u8], from: usize) -> (Vec<(String, String)>, usize) {
+    let mut attrs = Vec::new();
+    let after = walk_attrs(head, from, |name, value| {
+        attrs.push((
+            String::from_utf8_lossy(name).to_ascii_lowercase(),
+            String::from_utf8_lossy(value).to_string(),
+        ));
+    });
+    (attrs, after)
+}
+
+/// Call `f` with the raw name and value of each attribute of the tag whose name ends at `from`, and
+/// return the offset just past the tag.
+fn walk_attrs(head: &[u8], from: usize, mut f: impl FnMut(&[u8], &[u8])) -> usize {
     const WS: [u8; 5] = [b' ', b'\t', b'\n', b'\r', 0x0c];
     let n = head.len();
     let mut i = from;
-    let mut attrs = Vec::new();
     loop {
         while i < n && (WS.contains(&head[i]) || head[i] == b'/') {
             i += 1;
         }
         if i >= n || head[i] == b'>' {
-            return (attrs, (i + 1).min(n));
+            return (i + 1).min(n);
         }
         let ns = i;
         while i < n && !WS.contains(&head[i]) && !matches!(head[i], b'=' | b'>' | b'/') {
             i += 1;
         }
-        let name = String::from_utf8_lossy(&head[ns..i]).to_ascii_lowercase();
+        let name = &head[ns..i];
         // whitespace is allowed on BOTH sides of `=` (`charset\n=\nwindows-1252` is a real declaration)
         while i < n && WS.contains(&head[i]) {
             i += 1;
         }
         if i >= n || head[i] != b'=' {
             if !name.is_empty() {
-                attrs.push((name, String::new())); // valueless attribute
+                f(name, b""); // valueless attribute
             }
             continue;
         }
@@ -71,7 +83,7 @@ fn meta_attrs(head: &[u8], from: usize) -> (Vec<(String, String)>, usize) {
             while i < n && head[i] != q {
                 i += 1;
             }
-            let v = String::from_utf8_lossy(&head[vs..i]).to_string();
+            let v = &head[vs..i];
             i = (i + 1).min(n);
             v
         } else {
@@ -79,10 +91,10 @@ fn meta_attrs(head: &[u8], from: usize) -> (Vec<(String, String)>, usize) {
             while i < n && !WS.contains(&head[i]) && head[i] != b'>' {
                 i += 1;
             }
-            String::from_utf8_lossy(&head[vs..i]).to_string()
+            &head[vs..i]
         };
         if !name.is_empty() {
-            attrs.push((name, value));
+            f(name, value);
         }
     }
 }
@@ -211,7 +223,8 @@ fn start_tag_name(head: &[u8], lt: usize) -> Option<&[u8]> {
 /// honours abrupt closes (`<!-->`, `<!--->`, `--!>`), so a local `-->`-only search would read a live
 /// `<meta charset>` after one of them as still commented out and ignore the declaration.
 ///
-/// ONE left-to-right pass, allocation-free, skipping comments on the way past them.
+/// ONE left-to-right pass, allocation-free outside `<meta>` tags, skipping comments and every other
+/// tag on the way past them.
 ///
 /// Both properties are load-bearing. Lowercasing the document to search it would be an allocation and
 /// a memcpy the size of the page on every label-less parse; and finding each `<meta` first, then
@@ -235,7 +248,7 @@ fn start_tag_name(head: &[u8], lt: usize) -> Option<&[u8]> {
 /// A flat byte window is wrong in both directions: it would drop late head declarations and honour late
 /// body declarations no browser does. It also costs ~35µs on every label-less page, a whole extra pass
 /// over the document, which stopping at the real head boundary does not.
-fn meta_prescan(head: &[u8]) -> Option<&'static Encoding> {
+pub(crate) fn meta_prescan(head: &[u8]) -> Option<&'static Encoding> {
     let mut mfrom = 0usize;
     // Raised to `max(PRESCAN_FLOOR, here)` the moment a tag ends the head; `MAX` while still inside it.
     let mut limit = usize::MAX;
@@ -244,38 +257,32 @@ fn meta_prescan(head: &[u8]) -> Option<&'static Encoding> {
         if hit >= limit {
             return None;
         }
-        // The head ends at `</head>` or at the first start tag that may not appear in it — and with
-        // it ends the browser's willingness to re-decode, once past the floor.
-        if let Some(name) = start_tag_name(head, hit) {
-            if is_raw_text(name) {
-                mfrom = skip_raw_text(head, hit, name).max(hit + 1);
-                continue;
-            }
-            if !is_head_element(name) {
-                limit = limit.min(PRESCAN_FLOOR.max(hit));
-            }
-        } else if head[hit..].len() >= 7 && head[hit..hit + 7].eq_ignore_ascii_case(b"</head>") {
-            limit = limit.min(PRESCAN_FLOOR.max(hit));
-        }
         // a COMMENT declares nothing: `<!-- <meta charset=big5> -->` must not switch the decode.
         // `scan_comment` owns the abrupt-close shapes (`<!-->`, `--!>`); `.max` guarantees progress.
         if head[hit..].starts_with(b"<!--") {
             mfrom = crate::tokenizer::scan_comment(head, hit).max(hit + 1);
             continue;
         }
-        match head.get(hit + 1..hit + 5) {
-            Some(name) if name.eq_ignore_ascii_case(b"meta") => {}
-            // no 4 bytes left to compare: no later `<` can match either
-            None => return None,
-            Some(_) => {
-                mfrom = hit + 1;
-                continue;
-            }
+        // `</` + letter is an end tag, whose name `start_tag_name` finds one byte further on
+        let end_tag = head.get(hit + 1) == Some(&b'/');
+        let Some(name) = start_tag_name(head, hit + usize::from(end_tag)) else {
+            mfrom = hit + 1;
+            continue;
+        };
+        let tag_start = hit + usize::from(end_tag) + 1 + name.len();
+        if !end_tag && is_raw_text(name) {
+            mfrom = skip_raw_text(head, hit, name).max(hit + 1);
+            continue;
         }
-        let tag_start = hit + b"<meta".len();
-        // require a tag-name terminator so `<metadata …>` is not a meta tag
-        if !matches!(head.get(tag_start), Some(b' ' | b'\t' | b'\n' | b'\r' | 0x0c | b'/' | b'>')) {
-            mfrom = tag_start;
+        // The head ends at `</head>` or at the first start tag that may not appear in it — and with
+        // it ends the browser's willingness to re-decode, once past the floor.
+        if (end_tag && name.eq_ignore_ascii_case(b"head")) || (!end_tag && !is_head_element(name)) {
+            limit = limit.min(PRESCAN_FLOOR.max(hit));
+        }
+        // Any other tag is skipped WITH its attributes, as WHATWG's prescan does, so a `<meta` inside
+        // a quoted value (`<img alt="<meta charset=big5>">`) is text.
+        if end_tag || !name.eq_ignore_ascii_case(b"meta") {
+            mfrom = walk_attrs(head, tag_start, |_, _| {}).max(hit + 1);
             continue;
         }
         let (attrs, after) = meta_attrs(head, tag_start);
@@ -424,25 +431,9 @@ fn is_http_ws(c: char) -> bool {
 /// No UTF-32: the WHATWG Encoding Standard has no UTF-32, and neither does any browser, so a UTF-32 BOM
 /// is not a BOM here. w3lib does recognize it (its BOM table predates the standard).
 pub fn resolve_explained(html: &[u8], hints: EncodingHints<'_>) -> (&'static Encoding, EncodingSource) {
-    if html.starts_with(&[0xEF, 0xBB, 0xBF]) {
-        return (encoding_rs::UTF_8, EncodingSource::Bom);
-    }
-    if html.starts_with(&[0xFF, 0xFE]) {
-        return (encoding_rs::UTF_16LE, EncodingSource::Bom);
-    }
-    if html.starts_with(&[0xFE, 0xFF]) {
-        return (encoding_rs::UTF_16BE, EncodingSource::Bom);
-    }
-    // A UTF-16 document with NO BOM, detected the way XML 1.0 Appendix F (and libxml2's own
-    // `xmlDetectEncoding`) does it: `<?` encoded as UTF-16 is `3C 00 3F 00` / `00 3C 00 3F`. This sits with
-    // the BOM checks rather than after the label, on the same reasoning WHATWG gives a BOM priority — the
-    // bytes are unambiguous, and no ASCII-compatible document can begin with a NUL. Without it the whole
-    // document decoded as mojibake, and libxml2 (the value oracle) reads these files correctly.
-    if html.starts_with(&[0x3C, 0x00, 0x3F, 0x00]) {
-        return (encoding_rs::UTF_16LE, EncodingSource::Utf16Prefix);
-    }
-    if html.starts_with(&[0x00, 0x3C, 0x00, 0x3F]) {
-        return (encoding_rs::UTF_16BE, EncodingSource::Utf16Prefix);
+    if let Some((enc, len)) = bom(html) {
+        let source = if len == 0 { EncodingSource::Utf16Prefix } else { EncodingSource::Bom };
+        return (enc, source);
     }
     if let Some(enc) = hints.encoding.and_then(|label| Encoding::for_label(label.as_bytes())) {
         return (enc, EncodingSource::Encoding);
@@ -479,16 +470,46 @@ fn resolve(html: &[u8], label: Option<&str>, url: Option<&str>) -> &'static Enco
 ///
 /// Deliberately NOT stopped at `<body>` (w3lib's regex does), because a real page can carry a late
 /// `<meta charset>` inside the body and browsers still honour it.
-fn declaration(html: &[u8]) -> Option<(&'static Encoding, EncodingSource)> {
+pub(crate) fn declaration(html: &[u8]) -> Option<(&'static Encoding, EncodingSource)> {
     if let Some(enc) = xml_decl_encoding(html) {
         return Some((enc, EncodingSource::XmlDeclaration));
     }
     meta_prescan(html).map(|enc| (enc, EncodingSource::Meta))
 }
 
+/// The encoding the start of `html` fixes before any label is consulted, with the length of the BOM
+/// that announced it: a UTF-8 or UTF-16 BOM, or the BOM-less UTF-16 start of an XML declaration
+/// (length 0).
+///
+/// No UTF-32: the WHATWG Encoding Standard has no UTF-32, and neither does any browser, so a UTF-32 BOM
+/// is not a BOM here. w3lib does recognize it (its BOM table predates the standard).
+pub(crate) fn bom(html: &[u8]) -> Option<(&'static Encoding, usize)> {
+    if html.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        return Some((encoding_rs::UTF_8, 3));
+    }
+    if html.starts_with(&[0xFF, 0xFE]) {
+        return Some((encoding_rs::UTF_16LE, 2));
+    }
+    if html.starts_with(&[0xFE, 0xFF]) {
+        return Some((encoding_rs::UTF_16BE, 2));
+    }
+    // A UTF-16 document with NO BOM, detected the way XML 1.0 Appendix F (and libxml2's own
+    // `xmlDetectEncoding`) does it: `<?` encoded as UTF-16 is `3C 00 3F 00` / `00 3C 00 3F`. This sits with
+    // the BOM checks rather than after the label, on the same reasoning WHATWG gives a BOM priority — the
+    // bytes are unambiguous, and no ASCII-compatible document can begin with a NUL. Without it the whole
+    // document decoded as mojibake, and libxml2 (the value oracle) reads these files correctly.
+    if html.starts_with(&[0x3C, 0x00, 0x3F, 0x00]) {
+        return Some((encoding_rs::UTF_16LE, 0));
+    }
+    if html.starts_with(&[0x00, 0x3C, 0x00, 0x3F]) {
+        return Some((encoding_rs::UTF_16BE, 0));
+    }
+    None
+}
+
 /// WHATWG's optional frequency-analysis step, as Firefox runs it: chardetng, with UTF-8 decided up
 /// front by a strict decode, as Chrome and Scrapy do. A body cut off inside a UTF-8 sequence is still
-/// UTF-8.
+/// UTF-8. The guess is informed by the top-level domain of `url` when given.
 ///
 /// The UTF-8 check is the one place the encoding subsystem knowingly differs from browsers: Chrome
 /// reads an unlabelled valid UTF-8 page as windows-1252 by policy, and chardetng documents the same
@@ -497,7 +518,7 @@ fn declaration(html: &[u8]) -> Option<(&'static Encoding, EncodingSource)> {
 ///
 /// The decode is `simdutf8::compat`, which returns what `std::str::from_utf8` does. Not `basic`: it
 /// reads the whole document before failing and has no `error_len()` to tell a truncated tail apart.
-fn autodetect(html: &[u8], tld: Option<&[u8]>) -> (&'static Encoding, EncodingSource) {
+pub(crate) fn autodetect(html: &[u8], tld: Option<&[u8]>) -> (&'static Encoding, EncodingSource) {
     match simdutf8::compat::from_utf8(html) {
         Ok(_) => (encoding_rs::UTF_8, EncodingSource::Utf8),
         Err(e) if e.error_len().is_none() => (encoding_rs::UTF_8, EncodingSource::Utf8),
@@ -511,7 +532,7 @@ fn autodetect(html: &[u8], tld: Option<&[u8]>) -> (&'static Encoding, EncodingSo
 
 /// The last label of `url`'s host, lowercased, in the form chardetng accepts: ASCII without periods.
 /// An IP address or a non-ASCII host yields `None`, as does a string without a scheme.
-fn tld(url: &str) -> Option<Vec<u8>> {
+pub(crate) fn tld(url: &str) -> Option<Vec<u8>> {
     let (_, rest) = url.split_once("://")?;
     let authority = rest.split(['/', '\\', '?', '#']).next()?;
     let host = authority.rsplit('@').next()?;
@@ -636,6 +657,18 @@ mod tests {
         assert_eq!(resolve(&[&long[..], b"\xe2\x82"].concat(), None, None), encoding_rs::UTF_8);
         assert_ne!(resolve(&[&long[..], b"\xe9t\xe9</p>"].concat(), None, None), encoding_rs::UTF_8);
     }
+
+    #[test]
+    fn autodetection_reads_the_whole_document() {
+        // Firefox 144 reports windows-1251 for this page: the 46 000 Shift_JIS bytes at the start do not
+        // decide the guess.
+        let japanese = "<p>日本語のページです。こんにちは、世界。</p>\n".repeat(1000);
+        let russian = "<p>Привет мир, это страница.</p>\n".repeat(10_000);
+        let (japanese, _, _) = encoding_rs::SHIFT_JIS.encode(&japanese);
+        let (russian, _, _) = encoding_rs::WINDOWS_1251.encode(&russian);
+        assert_eq!(autodetect(&japanese, None).0, encoding_rs::SHIFT_JIS);
+        assert_eq!(autodetect(&[&japanese[..], &russian[..]].concat(), None).0, encoding_rs::WINDOWS_1251);
+    }
 }
 
 /// Prescan regression vectors. Cases where browsers and w3lib agree are oracled against
@@ -689,6 +722,17 @@ mod w3lib_oracle_tests {
         assert_eq!(scan(br#"<meta content="text/html; charset=big5">"#), None); // no http-equiv
         assert_eq!(scan(b"<meta charset=utf-16>"), Some(encoding_rs::UTF_8)); // UTF-16 decl -> UTF-8
         assert_eq!(scan(b"<metadata charset=big5>"), None); // not a <meta> tag
+    }
+
+    /// Other tags are skipped with their attributes, so markup inside an attribute value is text.
+    #[test]
+    fn a_meta_inside_an_attribute_value_declares_nothing() {
+        assert_eq!(scan(br#"<img alt="<meta charset=big5>">"#), None);
+        assert_eq!(scan(br#"</p title='<meta charset=big5>'>"#), None);
+        assert_eq!(
+            scan(br#"<img alt="<meta charset=big5>"><meta charset=shift_jis>"#),
+            Some(encoding_rs::SHIFT_JIS)
+        );
     }
 
     /// Browser behaviour w3lib also implements, and the prescan did not.

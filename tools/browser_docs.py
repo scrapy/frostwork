@@ -474,6 +474,7 @@ def id_value_selectors(ids: list[str], decorated: bool) -> list[str]:
 # the tree rules. `diff_browser --gate` fails on a selector that joins them, which is a column that has
 # stopped grading anything.
 BASKET_ORACLE_EMPTY: frozenset[str] = frozenset({
+    '//div[last()]//div/@class',
     '#\\69 1::attr(id)', 'th::text', 'ol > li::text', 'ruby > rt::text', 'ruby > rp::text',
     'dl > dt + dt::text', 'dl > dd + dd::text', 'table > thead::text', 'table > tbody::text',
     'table > tfoot::text', 'table > caption::text', 'thead > tr::text', 'tbody > tr::text', 'thead th::text',

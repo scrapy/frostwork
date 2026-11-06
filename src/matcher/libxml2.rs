@@ -118,6 +118,15 @@ impl Libxml2 {
             // begins (`<head>`) or ends (`<body>`, real or the one synthesized just above)
             self.frame.note_inserted(slot);
         }
+        // The navigation collector sees the element's ancestors, after the implied closes.
+        if let Some(nav) = m.nav.as_mut() {
+            if self_closing {
+                nav.self_closed(name, &m.stack, span_start, open_end, m.input.bytes());
+            }
+            if nav.wants(name) {
+                nav.start_tag(name, raw_attrs, &m.stack, span_start, m.input.encoding());
+            }
+        }
         m.open_element_inline(name, scid, raw_attrs, span_start);
         if self_closing || void {
             m.close_top(open_end); // no children; raw source = input[start..open_end]
@@ -274,6 +283,9 @@ impl<'a> TreeBuilder<'a> for Libxml2 {
     }
 
     fn end_tag(&mut self, m: &mut Matcher<'a>, name: &'a [u8], close_start: usize, close_end: usize) {
+        if let Some(nav) = m.nav.as_mut() {
+            nav.end_tag(name, &m.stack);
+        }
         // A frame end tag matching an earlier IGNORED frame start tag pops that phantom, not the
         // document: `<div><body>x</body>tail</div>` keeps `xtail` inside the div (verified against
         // libxml2, which keeps a stack entry for the start tag it merged away). Checked before the

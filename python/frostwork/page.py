@@ -22,6 +22,7 @@ the number and complexity of fields.
 from __future__ import annotations
 
 import json
+import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass, field as _dc_field
 from functools import lru_cache
@@ -37,9 +38,10 @@ from ._frostwork import detect_encoding as _detect_encoding
 from ._frostwork import extract as _extract
 from ._frostwork import extract_grouped as _extract_grouped
 from ._frostwork import resolve_label as _resolve_label
+from ._navigation import Navigation, _from_native
 
 __all__ = [
-    "extract", "extract_grouped", "check", "detect_encoding", "Page", "Item",
+    "extract", "extract_grouped", "check", "Page", "Item",
     "SchemaReport", "FieldReport", "GroupReport", "UnsupportedSelector", "Parser",
 ]
 
@@ -83,13 +85,6 @@ def _query_text(query: _Query) -> str:
 
 
 Bytesish = Union[bytes, bytearray, memoryview, str]
-
-
-EncodingSource = Literal[
-    "bom", "utf16-prefix", "encoding", "content-type", "xml-declaration", "meta", "utf8", "autodetect",
-    "str",
-]
-"""The rank that decided an encoding, as ``detect_encoding(..., explain=True)`` reports it."""
 
 
 class Response(Protocol):
@@ -172,69 +167,21 @@ def _validate_grouped(
     check(selectors, groups, syntax=syntax, parser=parser).raise_for_status()
 
 
-@overload
-def detect_encoding(
-    html: Bytesish,
-    encoding: Optional[str] = None,
-    *,
-    content_type: Optional[str] = None,
-    url: Optional[str] = None,
-    explain: Literal[False] = False,
-) -> str: ...
-
-
-@overload
-def detect_encoding(
-    html: Bytesish,
-    encoding: Optional[str] = None,
-    *,
-    content_type: Optional[str] = None,
-    url: Optional[str] = None,
-    explain: Literal[True],
-) -> Tuple[str, EncodingSource]: ...
-
-
-@overload
-def detect_encoding(
-    html: Bytesish,
-    encoding: Optional[str] = None,
-    *,
-    content_type: Optional[str] = None,
-    url: Optional[str] = None,
-    explain: bool = False,
-) -> Union[str, Tuple[str, EncodingSource]]: ...
-
-
-def detect_encoding(
-    html: Bytesish,
-    encoding: Optional[str] = None,
-    *,
-    content_type: Optional[str] = None,
-    url: Optional[str] = None,
-    explain: bool = False,
-) -> Union[str, Tuple[str, EncodingSource]]:
-    """The encoding :func:`extract` would scan ``html`` with, as a WHATWG name (``"windows-1252"``).
-
-    It takes the same inputs as :func:`extract` and raises the same errors, so a framework can set its own
-    ``.encoding`` (and with it ``.text``) from the decision the scan will use. The precedence is: BOM,
-    BOM-less UTF-16 prefix, ``encoding``, the charset of ``content_type``, the document's XML declaration
-    or ``<meta>``, then UTF-8 if valid, else autodetected with the top-level domain of ``url``.
-
-    With ``explain=True`` it returns ``(name, source)``, where ``source`` names the rank that decided:
-    ``"bom"``, ``"utf16-prefix"``, ``"encoding"``, ``"content-type"``, ``"xml-declaration"``, ``"meta"``,
-    ``"utf8"`` or ``"autodetect"``, or ``"str"`` for already-decoded text, which is always UTF-8.
-    """
-    return _detect_encoding(
-        _as_scan_input(html), encoding, content_type=content_type, url=url, explain=explain
+def detect_encoding(html: Bytesish, encoding: Optional[str] = None, *, url: Optional[str] = None) -> str:
+    warnings.warn(
+        "frostwork.page.detect_encoding() is deprecated, use frostwork.detect_encoding() instead",
+        DeprecationWarning,
+        stacklevel=2,
     )
+    return _detect_encoding(_as_scan_input(html), encoding, url=url)
 
 
 def resolve_label(label: str) -> Optional[str]:
-    """The WHATWG name of the encoding charset *label* names (``"cp874"`` → ``"windows-874"``), or
-    ``None`` if it names none (``"cp437"``).
-
-    *label* can be a WHATWG label or a Python codec name, e.g. Scrapy's ``response.encoding``.
-    """
+    warnings.warn(
+        "frostwork.page.resolve_label() is deprecated, use frostwork.resolve_label() instead",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     return _resolve_label(label)
 
 
@@ -834,16 +781,43 @@ class Page:
         raise :class:`UnsupportedSelector` by default. Construct with ``Page(strict=False)`` or pass
         ``strict=False`` here for permissive empty results. A successful default validation is cached
         until the schema changes."""
-        use_strict = self._strict if strict is None else strict
-        if use_strict and not self._validated:
-            self.check().raise_for_status()
-            self._validated = True
+        self._validate(strict)
         body = _as_scan_input(html)
         plan = self._get_plan()  # compiled once, reused across pages
         if not self._groups:
             cols = plan.extract(body, encoding, content_type=content_type, url=url)
             return Item._from_columns(self._fields, cols)
-        flat_cols, grouped = plan.extract_grouped(body, encoding, content_type=content_type, url=url)
+        return self._item(*plan.extract_grouped(body, encoding, content_type=content_type, url=url))
+
+    def extract_with_navigation(
+        self,
+        html: Bytesish,
+        url: str,
+        encoding: Optional[str] = None,
+        *,
+        content_type: Optional[str] = None,
+        base_url: bool = True,
+        meta_refresh: bool = True,
+        scripting: bool = True,
+        strict: Optional[bool] = None,
+    ) -> Tuple["Item", Navigation]:
+        """Like :meth:`extract`, also reading the base URL and meta refresh of *html*, the document at
+        *url*. *base_url*, *meta_refresh* and *scripting* work as in :func:`~frostwork.navigation`, and
+        *encoding* and *content_type* as in :meth:`extract`."""
+        self._validate(strict)
+        flat_cols, grouped, nav = self._get_plan().extract_with_navigation(
+            _as_scan_input(html), url, encoding, content_type=content_type,
+            base_url=base_url, meta_refresh=meta_refresh, scripting=scripting,
+        )
+        return self._item(flat_cols, grouped), _from_native(nav)
+
+    def _validate(self, strict: Optional[bool]) -> None:
+        use_strict = self._strict if strict is None else strict
+        if use_strict and not self._validated:
+            self.check().raise_for_status()
+            self._validated = True
+
+    def _item(self, flat_cols: List[List[str]], grouped: List[List[List[List[str]]]]) -> "Item":
         gout: dict = {}
         for (name, g), rows in zip(self._groups.items(), grouped):
             shaped = [{sn: _shape(col, sub.card) for (sn, sub), col in zip(g.subfields.items(), row)}

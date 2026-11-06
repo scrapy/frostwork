@@ -28,7 +28,8 @@ published number keeps that decision in a function `tests/test_gates.py` can see
 `enc_check.py` is encoding parity. Its importable halves are `enc_cases.py` (every document it grades,
 which `tests/test_encoding_inputs.py` also runs through each Python entry point) and `decoder_sweep.py`
 (the two-byte enumeration and its four disagreement classes). They are separate modules because
-`enc_check` runs its gate at import, where a test cannot reach it.
+`enc_check` runs its gate at import, where a test cannot reach it. `tests/test_encoding.py` runs
+`enc_cases.documents()` through `frostwork.encoding` as well.
 
 `browser_decoders.py` is the same space against the browser, in `make gate-browser`: every legacy
 decoder's lines compared with Chrome's (and Firefox's with `--browsers`). `BROWSER_BUGS` lists Chrome's
@@ -37,7 +38,9 @@ function. It names what it cannot reach: ISO-2022-JP, gb18030's four-byte sequen
 
 ## Benchmarks
 
-`bench_matrix.py`, `bench_corpus.py`, `bench_mem.py` and `bench_webpoet.py` are the benchmarks.
+`bench_matrix.py`, `bench_corpus.py`, `bench_mem.py` and `bench_webpoet.py` are the benchmarks. `bench_encoding.py`
+times `frostwork.encoding` against Python's codecs, w3lib and charset-normalizer, and `bench_navigation.py`
+`frostwork.navigation` against w3lib's base URL and meta refresh functions.
 `bench_webpoet.py` times `to_item()` at the page-object level after checking both items are identical,
 and `--boundaries` measures the shapes where the usual curve does not hold, one of which Parsel wins.
 

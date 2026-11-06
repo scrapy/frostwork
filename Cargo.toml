@@ -1,6 +1,6 @@
 [package]
 name = "frostwork"
-version = "0.1.6"
+version = "0.2.2"
 edition = "2021"
 description = "Streaming HTML parser: CSS/XPath selectors answered in one pass over the page, with no fallback."
 license = "Apache-2.0"
@@ -20,6 +20,7 @@ html-escape = "0.2"
 encoding_rs = "0.8"
 chardetng = "1"
 simdutf8 = "0.1.5"
+url = "2.5"
 # Only compiled when the `python` feature is on (i.e. maturin builds the extension). Plain
 # `cargo build`/`cargo test` and the differ/bench bins never pull it in.
 pyo3 = { version = "0.29", features = ["extension-module", "abi3-py310"], optional = true }

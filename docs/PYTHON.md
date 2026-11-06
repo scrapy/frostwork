@@ -116,7 +116,7 @@ The precedence is the same for every entry point:
 | --- | --- | --- | --- |
 | 1 | a BOM: UTF-8, UTF-16LE, UTF-16BE | `"bom"` | n/a |
 | 2 | BOM-less UTF-16, from the `<?` prefix | `"utf16-prefix"` | n/a |
-| 3 | `encoding=` | `"encoding"` | a label no codec knows raises `ValueError`; a real encoding WHATWG lacks, such as `utf-7`, is ignored |
+| 3 | `encoding=` | `"encoding"` | a label no codec knows raises `ValueError`, except in `detect_encoding` and `navigation`, which ignore it as a browser does; a real encoding WHATWG lacks, such as `utf-7`, is ignored |
 | 4 | the `charset` parameter of `content_type=` | `"content-type"` | ignored, and never raises, because it is server data |
 | 5 | an XML declaration at offset 0, then `<meta>` in document order | `"xml-declaration"`, `"meta"` | skipped, and the scan continues |
 | 6 | UTF-8 if the document is valid UTF-8, else chardetng with the top-level domain of `url=` | `"utf8"`, `"autodetect"` | n/a |
@@ -141,6 +141,61 @@ assert frostwork.detect_encoding(body, content_type=header, explain=True) == ("w
 assert frostwork.detect_encoding(body, explain=True) == ("KOI8-R", "meta")
 assert frostwork.detect_encoding(body, "windows-1252", content_type="text/html; charset=big5") == "windows-1252"
 ```
+
+### Encoding steps — `frostwork.encoding`
+
+`frostwork.encoding` is for a library that keeps its own encoding API and wants browser answers behind
+it, as w3lib does for Scrapy's `response.encoding` and `response.text`. Besides `detect_encoding()` and
+`resolve_label()`, it has a function for each step of `detect_encoding()`, and a `decode()`.
+
+<!-- doc-test: encoding-steps -->
+```python
+from frostwork.encoding import (
+    autodetect_encoding, bom_encoding, codec_name, declared_encoding, decode, detect_encoding,
+)
+
+body = b"\xef\xbb\xbf<p>caf\xc3\xa9</p>"
+assert detect_encoding(body, "cp1252") == "UTF-8"  # a BOM outranks the label
+assert bom_encoding(body) == ("UTF-8", 3)  # the encoding and the BOM length
+assert decode(body[3:], "UTF-8") == "<p>café</p>"
+
+assert declared_encoding(b"<meta charset=utf-16>") == "UTF-8"
+assert autodetect_encoding(b"<p>\x82\xa0</p>", url="https://example.jp/") == "Shift_JIS"
+assert decode(b"\xa1\xc1 \xad\xa1", "euc_jp") == "～ ①"  # Python's euc_jp codec gives "〜 ��"
+assert codec_name("Shift_JIS") == "cp932"
+```
+
+Every step returns a WHATWG name, and `codec_name()` gives the Python codec name for any label
+`resolve_label()` resolves. Importing `frostwork.encoding`, which the first access to
+`frostwork.detect_encoding` or `frostwork.resolve_label` also does, registers Python codecs for
+`x-user-defined` and `replacement`, the two names `codec_name()` can return that Python lacks, in the
+whole process.
+
+### Base URL and meta refresh — `frostwork.navigation`
+
+`navigation()` reads the base URL and meta refresh of a document as a browser does, and
+`Page.extract_with_navigation()` reads them with the fields: in the fields' pass for an lxml-mode page,
+and in a second, lxml-mode pass for a browser-mode one, since navigation's rules were measured against
+browsers through lxml mode's scan:
+
+<!-- doc-test: navigation -->
+```python
+from frostwork import Page, navigation
+
+html = b'<base href="/shop/"><meta http-equiv="refresh" content="5;url=sale"><h1>Mug</h1>'
+assert navigation(html, "https://example.com/p") == (
+    "https://example.com/shop/", (5.0, "https://example.com/shop/sale"),
+)
+
+page = Page().field("title", "h1::text")
+item, nav = page.extract_with_navigation(html, "https://example.com/p", meta_refresh=False)
+assert item.value("title") == "Mug" and nav.meta_refresh is None
+```
+
+The whole document counts. Of several refreshes, the one with the shortest delay wins, and of equal
+delays, the later one. `<noscript>` content is ignored as by a browser running scripts, unless you pass
+`scripting=False`. Where Chromium and Firefox disagree, the answer is Firefox's. URLs come back serialized
+as the URL standard does, e.g. `https://example.com/` for `https://EXAMPLE.com`.
 
 ## 2. Declarative `Page` / `Item`
 

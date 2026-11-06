@@ -3,7 +3,7 @@
 All notable user-facing changes will be recorded here. Frostwork will follow semantic versioning after its
 first public release.
 
-## 0.1.7 (unreleased)
+## 0.3.0 (unreleased)
 
 ### Parse modes
 
@@ -44,9 +44,9 @@ first public release.
 
 - In both modes, a `::` inside an XPath string literal is part of the value, not an axis:
   `//*[@id="a::b"]//a` answers where it was refused.
-- Lxml mode no longer counts a deferred winner as its own descendant: `div:has(b) div`,
-  `li:contains("x") li` and `//li[text()="x"]//li` returned the winner itself, and a winner the page
-  never wrote (`*:has(r) li` matching the `<body>`) now roots its tail correctly.
+- Lxml mode roots a deferred selector's tail at its winner when the winner is an element the page never
+  wrote, such as `*:has(r) li` matching the implied `<body>`, and no longer lets the tail match the
+  `<html>` or `<body>` its re-scan implies around the winner (`li:last-child body`).
 - Lxml mode compares an `::attr()` name exactly with libxml2's lowercased attribute name, as Parsel
   does, so `div::attr(ID)` is `[]` where it returned the id.
 - In both modes, a raw-text, RCDATA or script end tag that the input ends on right after its name is
@@ -62,21 +62,96 @@ first public release.
 
 ### Python API and tooling
 
-- `content_type=` on `extract`, `extract_grouped`, `detect_encoding`, `Page.extract` and
-  `Plan.extract`/`extract_grouped` takes a raw `Content-Type` header value. Its charset ranks below
+- `content_type=` on `extract`, `extract_grouped`, `detect_encoding`, `navigation`, `Page.extract`,
+  `Page.extract_with_navigation` and `Plan` takes a raw `Content-Type` header value. Its charset ranks below
   `encoding=` and above the document's declarations, is resolved with the WHATWG label table, and is
   ignored when unusable rather than raising. See "Encoding inputs" in docs/PYTHON.md for the precedence
   table and what an integration should pass.
 - `detect_encoding(..., explain=True)` returns `(name, source)`, where `source` names the rank that
   decided: `"bom"`, `"utf16-prefix"`, `"encoding"`, `"content-type"`, `"xml-declaration"`, `"meta"`,
   `"utf8"` or `"autodetect"`, or `"str"` for already-decoded text.
-- Every entry point makes the same encoding decision. `detect_encoding` and `Plan`, which `FrostPage`
-  calls, now raise `ValueError` on a label no codec knows, as `extract` already did, instead of
-  ignoring it.
+- `Plan`, which `FrostPage` calls, now raises `ValueError` on an `encoding=` label no codec knows, as
+  `extract` and `Page` already did. `detect_encoding` and `navigation` still ignore one, as a browser
+  does.
+- On a browser-mode `Page`, `extract_with_navigation()` reads the base URL and meta refresh in a second,
+  lxml-mode pass, whose rules are the ones measured against browsers. An lxml-mode `Page` still reads
+  them in the fields' pass.
 - `frostwork_input()` may return a `frostwork.webpoet.FrostInput(html, encoding, content_type, url)` to
   pass a response's header and URL with its body. An `(html, encoding)` pair still works.
-- Rust: `EncodingHints`, `EncodingSource`, `resolve_encoding` and `Plan::extract_with` take the same
-  inputs.
+- Rust: `EncodingHints`, `EncodingSource`, `resolve_encoding`, `Plan::extract_with`,
+  `Plan::extract_with_navigation_hints` and `navigation_with` take the same inputs.
+
+## 0.2.2 (2026-11-05)
+
+### Performance
+
+- `navigation()` no longer takes quadratic time on a document with many unclosed `<meta` tags, e.g.
+  `"<meta " * 80000`, which took over 30 seconds in 0.2.1.
+
+## 0.2.1 (2026-11-05)
+
+### Correctness
+
+- `navigation()` no longer reads a `<base>` or meta refresh written after a self-closed element whose
+  content browsers read as text, e.g. `<script/><base href="…">`: unless it is an SVG or MathML
+  element, browsers ignore the `/` of `<script/>`, `<style/>`, `<title/>`, `<textarea/>`,
+  `<noscript/>` (with scripting enabled), … and read the markup up to the matching end tag as text.
+
+### Performance
+
+- `navigation()` no longer tokenizes a document that cannot hold what was asked for: a `<base>` for
+  the base URL, a `<meta>` with an `http-equiv` attribute for the meta refresh.
+- `frostwork.encoding.bom_encoding()`, `codec_name()` and `decode()` have less call overhead.
+
+## 0.2.0 (2026-11-05)
+
+### Backward-incompatible changes
+
+- A document with no BOM, label or declaration is no longer assumed to be UTF-8: it is UTF-8 if it is
+  valid UTF-8, and otherwise its encoding is autodetected, as Firefox does. Pass the response URL as
+  `url` to `extract`, `extract_grouped`, `detect_encoding`, `Plan`, `Page.extract` and
+  `frostwork.encoding.autodetect_encoding` so that its top-level domain informs the guess (`.jp`
+  favours Shift_JIS, `.ru` windows-1251, …), as it does in browsers.
+
+- In Rust, `extract`, `extract_grouped`, `detect_encoding`, `Plan::extract`,
+  `Page::extract_with_encoding` and `CompiledPage::extract_with_encoding` take the response URL as a new
+  `url: Option<&str>` argument after the encoding. Pass `None` when there is no URL.
+
+- `bgsound`, `embed`, `keygen`, `source`, `track` and `wbr` are now void elements, matching libxml2
+  2.15, the oracle Frostwork now targets. Markup after one of them is no longer its child, e.g.
+  `<div><source><span>x</span></div>` matches `div > span` instead of `source span`.
+
+### Python API and tooling
+
+- `frostwork.encoding` exposes each step of `detect_encoding()` (`bom_encoding()`,
+  `declared_encoding()`, `autodetect_encoding()`), plus `decode()`, which decodes as browsers do where
+  Python's codecs differ (e.g. `euc_jp`), and `codec_name()`, which gives the Python codec name of any
+  label `resolve_label()` resolves. It lets a library that keeps its own encoding API, such as w3lib,
+  give browser answers. Importing it registers Python codecs for `x-user-defined` and `replacement`.
+  See [PYTHON.md](docs/PYTHON.md#encoding-steps--frostworkencoding).
+
+- `frostwork.navigation()` reads the base URL and meta refresh of a document as a browser does, and
+  `Page.extract_with_navigation()` reads them in the same pass as the fields; in Rust, `navigation()`
+  and `Plan::extract_with_navigation()`. See
+  [PYTHON.md](docs/PYTHON.md#base-url-and-meta-refresh--frostworknavigation).
+
+- The refusal reason of a selector with an unsupported pseudo-class or pseudo-element now names it,
+  e.g. ``pseudo-class `:hover` is unsupported``, also when it sits next to a supported one
+  (`li:nth-child(2):hover`).
+
+- `frostwork.page.detect_encoding()` and `frostwork.page.resolve_label()` are deprecated; use
+  `frostwork.detect_encoding()` and `frostwork.resolve_label()`.
+
+### Correctness
+
+- The `<meta>` prescan skips other tags together with their attributes, as browsers do, so a
+  `<meta charset>` inside an attribute value (`<img alt="<meta charset=big5>">`) no longer declares the
+  encoding.
+
+- A selector deferred on an ancestor (`:has()`, `:contains()`, a reverse position such as `:last-child`
+  or `[last()]`) followed by a descendant step that the ancestor itself could match, such as `*` or its
+  own tag, no longer returns that ancestor, e.g. `li:last-child *` returned the `<li>` as well as its
+  descendants, and `//li[last()]//*/@class` its `class`.
 
 ## 0.1.6 (2026-09-23)
 

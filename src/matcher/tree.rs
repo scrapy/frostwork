@@ -83,6 +83,9 @@ impl<'a, B: TreeBuilder<'a>> Scan<'a, B> {
         let mut m = Matcher::new(schema, input);
         m.marks = marks;
         m.root = root;
+        if !root.is_empty() {
+            m.floor = usize::MAX;
+        }
         let mut scan = Scan { m, builder };
         crate::tokenizer::tokenize(input.bytes(), &mut scan);
         scan

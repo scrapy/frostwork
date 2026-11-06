@@ -86,8 +86,9 @@ oracle:
 	$(PY) -c "import sys; sys.path.insert(0, 'tools'); import lxml.etree as e, oracle; \
 	  assert e.LIBXML_VERSION[:2] >= oracle.MIN_LIBXML2, e.LIBXML_VERSION; print('libxml2', e.LIBXML_VERSION)"
 
-# The competitor parsers `bench-engines` measures against. Separate from `bootstrap` because they are
-# not oracles — nothing gated depends on them, and `make ci` runs without them installed.
+# The competitors `bench-engines` and `tools/bench_encoding.py` measure against. Separate from
+# `bootstrap` because they are not oracles — nothing gated depends on them, and `make ci` runs without
+# them installed.
 bootstrap-bench:
 	.venv/bin/pip install -r requirements-bench.txt
 

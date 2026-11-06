@@ -1,7 +1,8 @@
 # Releasing Frostwork
 
-The release is tag-driven, but the tag is the last local step, not a repair mechanism. A release tag is
-an immutable public identifier shared by GitHub, PyPI provenance and users' lock files.
+The release is tag-driven, but the tag is the last local step, not a repair mechanism. Once its version
+is on PyPI, a release tag is an immutable public identifier shared by GitHub, PyPI provenance and users'
+lock files.
 
 ## One-time repository controls
 
@@ -12,8 +13,8 @@ The public settings are part of the release boundary even though they do not liv
 - The GitHub `pypi` environment must exist, because the Trusted Publisher names it, and it carries no
   required reviewers: creating the release tag is the authorization to publish. Its deployment-branch
   rule, if any, has to admit tags.
-- A GitHub repository ruleset should prevent updates and deletion of tags matching `[0-9]+.[0-9]+.[0-9]+`
-  and restrict who can create them. That restriction is what limits who can publish.
+- A GitHub repository ruleset should restrict who can create, update and delete tags matching
+  `[0-9]+.[0-9]+.[0-9]+`. That restriction is what limits who can publish.
 
 Review those settings when a maintainer leaves. Trusted Publishers belong to the PyPI project rather than
 to the account that originally configured them.
@@ -66,10 +67,22 @@ commits, and creates the annotated `X.Y.Z` tag. The atomic push makes the releas
 `main` at the same time as the tag. Push only the exact release tag; `--follow-tags` can publish another
 local annotated tag unintentionally.
 
-Never delete, recreate or force-move a published tag. If the workflow or metadata is wrong, fix it on
-`main` and release the next version. Do not delete or yank an installable PyPI release merely to repair
-its description; deletion breaks pinned installs, while the next version becomes the default project
-page.
+Once any file of a version is on PyPI, never delete, recreate or force-move its tag. If the workflow or
+metadata is wrong, fix it on `main` and release the next version. Do not delete or yank an installable
+PyPI release merely to repair its description; deletion breaks pinned installs, while the next version
+becomes the default project page.
+
+If the release fails before anything reaches PyPI, re-tag instead of spending a version nobody could
+install. Fix the problem in a commit on top of the release commit, so the version stays `X.Y.Z`, then
+move the tag to it. No bump runs, so if the fix touches what the release checks cover, rerun them first,
+`make corpus-fresh` included.
+
+```bash
+curl -sf https://pypi.org/pypi/frostwork/X.Y.Z/json   # must fail: nothing was uploaded
+git push origin :refs/tags/X.Y.Z
+git tag -f -a X.Y.Z -m "Bump version: A.B.C → X.Y.Z"
+git push --atomic origin main X.Y.Z
+```
 
 ## What automation proves
 

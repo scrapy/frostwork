@@ -85,8 +85,8 @@ def detect_encoding(
 ) -> str:
     """The encoding ``extract`` would scan this document with, as a WHATWG name: BOM → BOM-less UTF-16
     prefix → ``encoding`` label → ``content_type`` charset → XML declaration or ``<meta>`` → UTF-8 if
-    valid, else autodetected, informed by the top-level domain of ``url``. Raises as ``extract`` does. A
-    ``str`` is already-decoded text, so the answer is ``"UTF-8"`` without sniffing."""
+    valid, else autodetected, informed by the top-level domain of ``url``. A label that names
+    no encoding is ignored. A ``str`` is already-decoded text, so the answer is ``"UTF-8"`` without sniffing."""
 @overload
 def detect_encoding(
     html: Union[bytes, str],
@@ -106,6 +106,28 @@ def detect_encoding(
     url: Optional[str] = ...,
     explain: bool = ...,
 ) -> Union[str, Tuple[str, EncodingSource]]: ...
+
+def bom_encoding(body: bytes) -> Optional[Tuple[str, int]]:
+    """``(encoding, bom_length)`` from the start of ``body``, or ``None``."""
+def declared_encoding(body: bytes) -> Optional[str]:
+    """The encoding the ``<meta>``/XML-declaration prescan finds, or ``None``."""
+def autodetect_encoding(body: bytes, *, url: Optional[str] = ...) -> str:
+    """``"UTF-8"`` if ``body`` is valid UTF-8, else a guess informed by the top-level domain of
+    ``url``."""
+def navigation(
+    html: Union[bytes, str],
+    url: str,
+    encoding: Optional[str] = ...,
+    *,
+    content_type: Optional[str] = ...,
+    base_url: bool = ...,
+    meta_refresh: bool = ...,
+    scripting: bool = ...,
+) -> Tuple[Optional[str], Optional[Tuple[float, str]]]:
+    """``(base_url, meta_refresh)`` as a browser reads them."""
+def decode(body: bytes, label: str) -> str:
+    """``body`` decoded with the WHATWG decoder, BOM included; ``LookupError`` unless ``label`` is a
+    WHATWG label."""
 
 class Plan:
     """A schema compiled once (budget validated at construction) and reused across pages."""
@@ -141,3 +163,16 @@ class Plan:
         content_type: Optional[str] = ...,
         url: Optional[str] = ...,
     ) -> Tuple[List[List[str]], List[List[List[List[str]]]]]: ...
+    def extract_with_navigation(
+        self,
+        html: Union[bytes, str],
+        url: str,
+        encoding: Optional[str] = ...,
+        *,
+        content_type: Optional[str] = ...,
+        base_url: bool = ...,
+        meta_refresh: bool = ...,
+        scripting: bool = ...,
+    ) -> Tuple[
+        List[List[str]], List[List[List[List[str]]]], Tuple[Optional[str], Optional[Tuple[float, str]]]
+    ]: ...

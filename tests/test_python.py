@@ -9,7 +9,9 @@ parsel cross-check that values survive the FFI boundary unchanged.
 import asyncio
 import contextlib
 import re
+import subprocess
 import sys
+import types
 
 import pytest
 
@@ -213,6 +215,26 @@ def test_resolve_label_is_public():
     assert frostwork.resolve_label("cp874") == "windows-874"
     assert frostwork.resolve_label("latin-1") == "windows-1252"
     assert frostwork.resolve_label("cp437") is None
+
+
+def test_page_resolve_label_is_deprecated():
+    with pytest.warns(DeprecationWarning, match=r"frostwork\.resolve_label\(\)"):
+        assert frostwork.page.resolve_label("cp874") == "windows-874"
+
+
+def test_page_detect_encoding_is_deprecated():
+    with pytest.warns(DeprecationWarning, match=r"frostwork\.detect_encoding\(\)"):
+        assert frostwork.page.detect_encoding(b"<p>x", "cp874") == "windows-874"
+
+
+def test_submodules_are_attributes():
+    code = "import frostwork; frostwork.encoding.decode, frostwork.page.extract, frostwork.validation.ValidationReport"
+    subprocess.check_call([sys.executable, "-c", code])
+
+
+def test_dir_lists_the_public_api():
+    names = {name for name in dir(frostwork) if not isinstance(getattr(frostwork, name), types.ModuleType)}
+    assert {name for name in names if not name.startswith("_")} == set(frostwork.__all__) - {"__version__"}
 
 
 def test_every_python_text_codec_is_a_whatwg_encoding_or_declared_not_one():
@@ -2879,9 +2901,10 @@ def test_detect_encoding_reports_what_extract_will_use():
     ]:
         assert frostwork.detect_encoding(body, label) == want, (body[:40], label)
 
-    # a label no codec knows is the caller's mistake, refused here exactly as `extract` refuses it
+    # a label no codec knows is ignored here, as a browser ignores it, where `extract` refuses it
+    assert frostwork.detect_encoding(b"<meta charset=gbk><p>x</p>", "bogus-label") == "GBK"
     with pytest.raises(ValueError, match="unknown encoding label"):
-        frostwork.detect_encoding(b"<p>x</p>", "bogus-label")
+        frostwork.extract(b"<p>x</p>", ["p::text"], "bogus-label")
 
     # ...and it is the encoding `extract` actually decoded with, not a second opinion
     b = b"<meta charset=windows-1252><p>caf\xe9</p>"

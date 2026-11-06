@@ -42,7 +42,9 @@ jobs:
       matrix:
         platform:
           - { runner: ubuntu-latest, target: x86_64, libc: manylinux, manylinux: auto }
-          - { runner: ubuntu-latest, target: x86, libc: manylinux, manylinux: auto }
+          # Docker on the Ubuntu 26.04 image blocks socketcall(2), so i386 glibc containers have no network.
+          # https://github.com/actions/runner-images/issues/14790
+          - { runner: ubuntu-24.04, target: x86, libc: manylinux, manylinux: auto }
           - { runner: ubuntu-24.04-arm, target: aarch64, libc: manylinux, manylinux: auto }
           - { runner: ubuntu-latest, target: armv7, libc: manylinux, manylinux: auto }
           - { runner: ubuntu-latest, target: ppc64le, libc: manylinux, manylinux: auto }

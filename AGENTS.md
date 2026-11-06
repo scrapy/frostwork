@@ -175,8 +175,9 @@ git push --atomic origin main X.Y.Z
 ```
 
 The annotated tag runs `.github/workflows/publish.yml`: the whole CI workflow, abi3 wheels and an sdist,
-artifact checks, a smoke install, PyPI Trusted Publishing and a GitHub Release. Tags are immutable: never
-delete, recreate or move one; fix a failed release with a new version. [docs/RELEASING.md](docs/RELEASING.md)
+artifact checks, a smoke install, PyPI Trusted Publishing and a GitHub Release. Once any file of a version
+is on PyPI its tag is immutable: never delete, recreate or move it, and fix a failed release with a new
+version. A release that failed before uploading anything is re-tagged instead. [docs/RELEASING.md](docs/RELEASING.md)
 has the full process.
 
 ## Conventions

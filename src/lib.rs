@@ -24,7 +24,7 @@ mod tokenizer;
 mod xpath;
 
 pub use encoding::{EncodingHints, EncodingSource};
-pub use matcher::{MAX_MEMBERS, MAX_SIB_BITS};
+pub use matcher::{NavOptions, Navigation, MAX_MEMBERS, MAX_SIB_BITS};
 pub use page::{CompiledPage, Field, Item, Page};
 pub use selector::Selector;
 
@@ -616,7 +616,8 @@ pub fn audit_schema_with<Q: AsQuery>(
 }
 
 /// Resolve the page encoding and prepare the buffer the scan tokenizes: `(bytes, value_encoding,
-/// keeps_nul)`. A non-ASCII-compatible encoding is transcoded to a fresh UTF-8 `Vec` once (owned `Cow`);
+/// keeps_nul, document_encoding)`, where the last is the page's own encoding, which a transcoded page no
+/// longer shares with its values. A non-ASCII-compatible encoding is transcoded to a fresh UTF-8 `Vec` once (owned `Cow`);
 /// everything else borrows the input, with a document-leading UTF-8 BOM stripped — libxml2 and browsers
 /// strip ONLY the leading BOM (a U+FEFF elsewhere is real content), and per-value decoding must not
 /// re-strip it (see `matcher::finalize`), so it is handled here, once per page.
@@ -636,7 +637,7 @@ fn prepare_bytes<'h>(
     html: &'h [u8],
     hints: EncodingHints<'_>,
     mode: ParseMode,
-) -> (Cow<'h, [u8]>, &'static encoding_rs::Encoding, bool) {
+) -> (Cow<'h, [u8]>, &'static encoding_rs::Encoding, bool, &'static encoding_rs::Encoding) {
     let (enc, _) = encoding::resolve_explained(html, hints);
     if !enc.is_ascii_compatible() {
         // Transcode FIRST: in UTF-16 every ASCII character carries a 0x00 byte, so deleting NUL bytes
@@ -646,19 +647,19 @@ fn prepare_bytes<'h>(
         // documented under Encoding in docs/COMPATIBILITY.md.) `decode` consumes the BOM.
         let utf8 = Cow::Owned(enc.decode(html).0.into_owned().into_bytes());
         return match mode {
-            ParseMode::Lxml => (normalize(utf8, true), encoding_rs::UTF_8, false),
+            ParseMode::Lxml => (normalize(utf8, true), encoding_rs::UTF_8, false, enc),
             ParseMode::Browser => {
                 let keeps_nul = memchr::memchr(0, &utf8).is_some();
-                (utf8, encoding_rs::UTF_8, keeps_nul)
+                (utf8, encoding_rs::UTF_8, keeps_nul, enc)
             }
         };
     }
     let utf8 = enc == encoding_rs::UTF_8;
     match mode {
-        ParseMode::Lxml => (normalize(Cow::Borrowed(html), utf8), enc, false),
+        ParseMode::Lxml => (normalize(Cow::Borrowed(html), utf8), enc, false, enc),
         ParseMode::Browser => {
             let body = if utf8 { html.strip_prefix(UTF8_BOM).unwrap_or(html) } else { html };
-            (Cow::Borrowed(body), enc, memchr::memchr(0, body).is_some())
+            (Cow::Borrowed(body), enc, memchr::memchr(0, body).is_some(), enc)
         }
     }
 }
@@ -842,9 +843,105 @@ impl Plan {
     /// included (see [`EncodingHints`] and [`resolve_encoding`]).
     pub fn extract_with(&self, html: &[u8], hints: EncodingHints<'_>) -> (FlatColumns, Vec<GroupRows>) {
         // Keep the prepared `Cow` alive here: the matcher borrows its bytes for the whole scan.
-        let (bytes, value_enc, keeps_nul) = prepare_bytes(html, hints, self.mode());
+        let (bytes, value_enc, keeps_nul, _) = prepare_bytes(html, hints, self.mode());
         self.schema.run(matcher::EncodedInput::new(&bytes, value_enc, keeps_nul))
     }
+
+    /// [`extract`](Plan::extract), also reading the document's base URL and meta refresh, as a browser
+    /// does (see [`Navigation`]). `url` is the document URL, which a relative `<base href>` or refresh URL
+    /// resolves against. When it is not absolute, only absolute URLs in the document resolve, and a
+    /// relative refresh URL is ignored.
+    ///
+    /// Navigation is read off lxml mode's scan whatever the plan's mode, because its rules are measured
+    /// against browsers through that scan. An lxml-mode plan reads it in the same pass as the fields; a
+    /// browser-mode plan takes a second, field-less scan.
+    pub fn extract_with_navigation(
+        &self,
+        html: &[u8],
+        encoding: Option<&str>,
+        url: &str,
+        options: NavOptions,
+    ) -> (FlatColumns, Vec<GroupRows>, Navigation) {
+        let hints = EncodingHints { encoding, content_type: None, url: Some(url) };
+        self.extract_with_navigation_hints(html, hints, url, options)
+    }
+
+    /// [`extract_with_navigation`](Plan::extract_with_navigation) with every input a response carries
+    /// (see [`EncodingHints`]).
+    pub fn extract_with_navigation_hints(
+        &self,
+        html: &[u8],
+        hints: EncodingHints<'_>,
+        url: &str,
+        options: NavOptions,
+    ) -> (FlatColumns, Vec<GroupRows>, Navigation) {
+        match self.mode() {
+            ParseMode::Lxml => self.lxml_navigation(html, hints, url, options),
+            ParseMode::Browser => {
+                let (flat, grouped) = self.extract_with(html, hints);
+                (flat, grouped, navigation_with(html, hints, url, options))
+            }
+        }
+    }
+
+    /// The fields of an lxml-mode plan and the navigation, in one lxml-mode scan.
+    fn lxml_navigation(
+        &self,
+        html: &[u8],
+        hints: EncodingHints<'_>,
+        url: &str,
+        options: NavOptions,
+    ) -> (FlatColumns, Vec<GroupRows>, Navigation) {
+        let doc_url = url::Url::parse(url).ok();
+        let (bytes, value_enc, keeps_nul, doc_enc) = prepare_bytes(html, hints, ParseMode::Lxml);
+        // With no fields to extract, a document that never spells what can change the answer needs no
+        // scan. Checked on the prepared bytes, where NUL deletion can have joined a name, and which are
+        // ASCII-compatible. A `<base>` only matters to the refresh when there is one.
+        if self.schema.is_empty() && !may_change(&bytes, options.base_url, options.meta_refresh) {
+            let base_url = options.base_url.then(|| matcher::document_url(doc_url.as_ref(), url));
+            let nav = Navigation { base_url, meta_refresh: None };
+            return (Vec::new(), Vec::new(), nav);
+        }
+        let nav = matcher::NavCollector::new(doc_url, doc_enc, options);
+        let input = matcher::EncodedInput::new(&bytes, value_enc, keeps_nul);
+        let (flat, grouped, nav) = self.schema.run_with_navigation(input, nav);
+        (flat, grouped, nav.finish(url))
+    }
+}
+
+/// Whether `bytes` can hold a `<base>`, when `base`, or a `<meta>` with an `http-equiv` attribute,
+/// which every meta refresh needs, when `refresh`. Tags are matched ASCII-case-insensitively wherever
+/// `<name` is followed by the end of a tag name, a superset of the start tags named `name`, and
+/// `http-equiv` anywhere after the first `<meta`, a superset of its attributes. Linear in `bytes`.
+fn may_change(bytes: &[u8], base: bool, refresh: bool) -> bool {
+    let tag_at = |i: usize, name: &[u8]| {
+        let end = i + 1 + name.len();
+        bytes.get(i + 1..end).is_some_and(|candidate| candidate.eq_ignore_ascii_case(name))
+            && bytes.get(end).is_some_and(|&c| !tokenizer::is_name_char(c))
+    };
+    let tags = || memchr::memchr_iter(b'<', bytes);
+    (base && tags().any(|i| tag_at(i, b"base")))
+        || (refresh
+            && tags().find(|&i| tag_at(i, b"meta")).is_some_and(|i| {
+                // `q` is the rarest byte of `http-equiv` in markup, so few candidates reach the comparison.
+                let rest = &bytes[i..];
+                memchr::memchr2_iter(b'q', b'Q', rest).any(|q| {
+                    q >= 6 && rest.get(q - 6..q + 4).is_some_and(|w| w.eq_ignore_ascii_case(b"http-equiv"))
+                })
+            }))
+}
+
+/// The base URL and meta refresh of `html`, as a browser reads them; see
+/// [`Plan::extract_with_navigation`].
+pub fn navigation(html: &[u8], encoding: Option<&str>, url: &str, options: NavOptions) -> Navigation {
+    navigation_with(html, EncodingHints { encoding, content_type: None, url: Some(url) }, url, options)
+}
+
+/// [`navigation`] with every input a response carries (see [`EncodingHints`]).
+pub fn navigation_with(html: &[u8], hints: EncodingHints<'_>, url: &str, options: NavOptions) -> Navigation {
+    static EMPTY: std::sync::OnceLock<Plan> = std::sync::OnceLock::new();
+    let plan = EMPTY.get_or_init(|| Plan::compile_with::<&str>(&[], &[], CompileOptions { mode: ParseMode::Lxml, first_only: &[] }));
+    plan.lxml_navigation(html, hints, url, options).2
 }
 
 impl Plan {
@@ -853,7 +950,7 @@ impl Plan {
     /// adds an attribute this plan's selectors ask about. For `tools/retro_census.py`.
     #[doc(hidden)]
     pub fn retro_census(&self, html: &[u8], hints: EncodingHints<'_>) -> u8 {
-        let (bytes, value_enc, keeps_nul) = prepare_bytes(html, hints, ParseMode::Browser);
+        let (bytes, value_enc, keeps_nul, _) = prepare_bytes(html, hints, ParseMode::Browser);
         self.schema.retro_census(matcher::EncodedInput::new(&bytes, value_enc, keeps_nul))
     }
 }
@@ -1408,6 +1505,22 @@ mod tests {
         assert_eq!(ex(d, "div:has(a) > p::text"), Vec::<String>::new());
         // two deferred predicates in one selector remain out of tier
         assert_eq!(ex(d, "div:has(a) p:has(b)::text"), Vec::<String>::new());
+    }
+
+    /// A tail matches only proper descendants of the deferred element, even when the element itself
+    /// (`*`, its own tag) or the frame its span re-scan synthesizes (`body`) would satisfy it.
+    #[test]
+    fn deferred_tails_exclude_the_deferred_element() {
+        let l = "<ul><li class=a>1</li><li class=b>2<b class=c>B</b></li></ul>";
+        assert_eq!(ex(l, "li:last-child *"), v(&["<b class=c>B</b>"]));
+        assert_eq!(ex(l, "//li[last()]//*/@class"), v(&["c"]));
+        assert_eq!(ex(l, "li:last-child li::text"), Vec::<String>::new());
+        assert_eq!(ex(l, "li:last-child body"), Vec::<String>::new());
+        assert_eq!(ex(l, "li:last-child ::text"), v(&["2", "B"]));
+        let d = "<div id=d><p>x</p><div id=e><a>y</a></div></div>";
+        assert_eq!(ex(d, "div:has(a) div::attr(id)"), v(&["e"]));
+        assert_eq!(ex(d, "div:has(a) *"), v(&["<p>x</p>", "<div id=e><a>y</a></div>", "<a>y</a>"]));
+        assert_eq!(ex(d, "//div[contains(.,\"y\")]//div/@id"), v(&["e"]));
     }
 
     #[test]

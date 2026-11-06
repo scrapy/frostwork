@@ -2,7 +2,8 @@
 
 Every document `tools/enc_check.py` grades (`tools/enc_cases.every_input()`) goes through `extract`,
 `extract_grouped`, `detect_encoding`, `Plan.extract*`, `Page.extract`, `Page.extract_response` and a real
-web-poet `FrostPage`, and each must give the same answer, a raised error included. The precedence table and
+web-poet `FrostPage`, and each must give the same answer, a raised error included. `detect_encoding` makes
+the same decision, except that it ignores a label no codec knows where the extraction functions refuse it. The precedence table and
 the integrator contract they implement are in docs/PYTHON.md ("Encoding inputs").
 """
 
@@ -99,6 +100,12 @@ def test_every_entry_point_makes_the_same_decision(name, body, encoding, content
 
     detected = _answer(lambda: frostwork.detect_encoding(
         body, encoding, content_type=content_type, url=URL, explain=True))
+    if want[0] == "raise" and "unknown encoding label" in want[2]:
+        # detect_encoding ignores a label no codec knows, as a browser does, where extract refuses it
+        unlabelled = _answer(lambda: frostwork.detect_encoding(
+            body, None, content_type=content_type, url=URL, explain=True))
+        assert detected == unlabelled, f"{name}: detect_encoding must ignore an unknown label"
+        return
     if want[0] == "raise":
         assert detected == want, f"{name}: detect_encoding must raise exactly as extract does"
         return

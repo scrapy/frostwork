@@ -236,7 +236,7 @@ pub(super) fn normalize_space(s: &str) -> String {
 /// entities, mirroring `finalize`), then entity-decode. For UTF-8 (the overwhelming common case) it
 /// borrows when the value is clean (zero allocation); other encodings transcode this value only. Only
 /// "interesting" attrs reach here, so per-value cost is negligible.
-fn decode_attr<'a>(av: &'a [u8], enc: &'static Encoding) -> Cow<'a, str> {
+pub(super) fn decode_attr<'a>(av: &'a [u8], enc: &'static Encoding) -> Cow<'a, str> {
     match normalize_crlf(decode_bytes(av, enc)) {
         Cow::Borrowed(s) => entities::decode(s, true), // clean UTF-8, no CR: still zero-copy
         Cow::Owned(s) => Cow::Owned(entities::decode(&s, true).into_owned()),
