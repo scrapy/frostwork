@@ -366,10 +366,8 @@ impl EncodingSource {
 fn content_type_charset(value: &str) -> Option<String> {
     let (_essence, mut rest) = value.split_once(';')?;
     loop {
-        let (name, after) = match rest.find(['=', ';']) {
-            Some(i) => (&rest[..i], &rest[i..]),
-            None => return None,
-        };
+        let i = rest.find(['=', ';'])?;
+        let (name, after) = (&rest[..i], &rest[i..]);
         let name = name.trim_matches(is_http_ws);
         if let Some(after) = after.strip_prefix(';') {
             rest = after;
