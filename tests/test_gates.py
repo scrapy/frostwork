@@ -14,6 +14,7 @@ Run: .venv/bin/python -m pytest tests/test_gates.py
 
 import json
 import os
+import re
 import sys
 
 import pytest
@@ -21,6 +22,13 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools"))
 
 pytest.importorskip("parsel")  # the harness modules import parsel at module level
+
+
+def _lxml_mode():
+    """`parser="lxml"` when the extension takes the keyword: these gates grade lxml mode explicitly."""
+    import seq_sweep
+
+    return seq_sweep.parser_kwargs("lxml")
 
 
 # --------------------------------------------------------------- corpus gate (tools/bench_corpus.py)
@@ -236,7 +244,7 @@ def test_meta_prescan_matches_w3lib():
         doc = b"<html><head>" + head + b"</head><body>" + body + b"</body></html>"
         _, txt = html_to_unicode(None, doc, auto_detect_fun=None, default_encoding="utf8")
         want = parsel.Selector(text=txt).css("p.c::text").getall()
-        got = frostwork.extract(doc, ["p.c::text"], strict=False)[0]
+        got = frostwork.extract(doc, ["p.c::text"], strict=False, **_lxml_mode())[0]
         assert got == want, f"prescan disagrees with w3lib for {head!r}"
 
 
@@ -265,7 +273,7 @@ def test_the_browser_difference_list_is_two_sided():
     _, txt = html_to_unicode(None, doc, auto_detect_fun=None, default_encoding="utf8")
     assert parsel.Selector(text=txt).css("p.c::text").getall() != ["café"], \
         "w3lib now honours a <meta charset> after <body> — that row of the list is stale"
-    assert frostwork.extract(doc, ["p.c::text"], strict=False)[0] == ["café"], \
+    assert frostwork.extract(doc, ["p.c::text"], strict=False, **_lxml_mode())[0] == ["café"], \
         "the prescan must not stop at <body> (browser behaviour)"
 
 
@@ -347,7 +355,7 @@ def test_the_decoder_sweep_is_exhaustive_not_sampled():
         _, txt = html_to_unicode(None, doc, auto_detect_fun=None, default_encoding="utf8")
         assert parsel.Selector(text=txt).css("p.c::text").getall() == [theirs], \
             f"Parsel now decodes euc-jp {seq.hex()} differently — that row is stale"
-        assert frostwork.extract(doc, ["p.c::text"], strict=False)[0] == [mine], \
+        assert frostwork.extract(doc, ["p.c::text"], strict=False, **_lxml_mode())[0] == [mine], \
             f"euc-jp {seq.hex()} must follow the WHATWG index, which is what browsers show"
 
 
@@ -477,9 +485,12 @@ def test_the_element_universe_sees_every_engine_owned_name():
 
     # ...and that is not a formality: names live outside the rule tables. Derived, not listed, so the
     # test keeps discriminating as code moves.
-    tables = [p for p in every if "implied_close" in p or p.endswith("tokenizer.rs")]
-    elsewhere = [p for p in every if p not in tables]
-    only_elsewhere = (G.names_in(elsewhere) & set(G.ELEMENTS)) - G.names_in(tables)
+    # `generated_html5.rs` is left out of both sides: it lists the whole universe, so it cannot show where
+    # a name lives.
+    scanned = [p for p in every if not p.endswith("generated_html5.rs")]
+    tables = [p for p in scanned if "implied_close" in p or p.endswith("tokenizer.rs")]
+    elsewhere = [p for p in scanned if p not in tables]
+    only_elsewhere = (G.names_in(elsewhere, skip_tests=True) & set(G.ELEMENTS)) - G.names_in(tables, skip_tests=True)
     assert only_elsewhere, "every element name is in the rule tables — this test no longer discriminates"
     assert only_elsewhere <= G.engine_names(), f"unscanned engine names: {only_elsewhere}"
 
@@ -517,7 +528,7 @@ def test_the_sequence_gate_fails_on_a_tree_difference():
     # the span stops being the div's child while every text node stays exactly where it was.
     doc, ids = seq_sweep.build(("<div{}>", "<span{}>", "x"))
     sels = seq_sweep.fingerprint_selectors(ids)
-    mine = frostwork.extract(doc, sels, "utf-8")
+    mine = frostwork.extract(doc, sels, "utf-8", **seq_sweep.parser_kwargs("lxml"))
     assert seq_sweep.compare(sels, mine, mine) is None, "identical answers are not a difference"
 
     nested = sels.index('//*[@id="0"]//*/@id')
@@ -529,6 +540,546 @@ def test_the_sequence_gate_fails_on_a_tree_difference():
     # ...and it is invisible to the text columns, which is why this gate compares the whole tree
     texts = [i for i, s in enumerate(sels) if s.endswith("/text()")]
     assert texts and all(mine[i] == reshaped[i] for i in texts)
+
+
+# ------------------------------------------------- the browser gate (tools/browser_oracle, diff_browser.py)
+# Chrome 156's trees for two documents, in probe.cjs's `__ser` format, as `probe.cjs serve` returned them.
+# Literal, so these tests need no browser: they pin what the COMPARISON can see.
+CHROME_TBODY = ["#d", [["html", 0, [], [["head", 0, [], []], ["body", 0, [], [
+    ["table", 0, ["id", "0"], [["tbody", 0, [], [
+        ["tr", 0, ["id", "1"], [["td", 0, ["id", "2"], ["x"]]]]]]]]]]]]]]
+CHROME_CLONE = ["#d", [["html", 0, [], [["head", 0, [], []], ["body", 0, [], [
+    ["p", 0, ["id", "0"], [["b", 0, ["id", "1"], ["1"]]]], ["b", 0, ["id", "1"], ["2"]]]]]]]]
+
+
+def _splice(tree, name, index=0):
+    """`tree` with its `index`-th element named `name` replaced by that element's children."""
+    import copy
+
+    tree, seen = copy.deepcopy(tree), [0]
+
+    def walk(kids):
+        out = []
+        for k in kids:
+            if isinstance(k, list) and k[0] == name and seen[0] == index:
+                seen[0] += 1
+                out.extend(k[3])
+                continue
+            if isinstance(k, list) and k[0] == name:
+                seen[0] += 1
+            if isinstance(k, list) and k[0] == "#d":
+                k[1] = walk(k[1])
+            elif isinstance(k, list) and not k[0].startswith("#"):
+                k[3] = walk(k[3])
+            out.append(k)
+        return out
+
+    tree[1] = walk(tree[1])
+    return tree
+
+
+def test_the_sequence_fingerprint_sees_an_implied_tbody():
+    """An element with no id is invisible to every per-id column, and HTML5's builder creates them.
+
+    `<table id=0><tr id=1><td id=2>x` with and without its `<tbody>` answered all 13 of the old
+    fingerprint's selectors identically, so a browser mode with no implied `<tbody>` at all would have
+    passed the sequence gate. Seed exactly that regression into an oracle tree and require a difference.
+    """
+    import seq_sweep
+    from browser_oracle import tree as T
+
+    ids = ["0", "1", "2"]
+    sels = seq_sweep.fingerprint_selectors(ids)
+    oracle = T.fingerprint(CHROME_TBODY, sels)
+    regressed = _splice(CHROME_TBODY, "tbody")
+    assert regressed != CHROME_TBODY
+    diff = seq_sweep.compare(sels, T.fingerprint(regressed, sels), oracle)
+    assert diff, "a tree that lost its implied <tbody> must be a difference"
+
+    # the blind spot this closes: the old fingerprint's columns cannot tell the two trees apart
+    old = ["//*/@id"] + [c for i in ids for c in (f'//*[@id="{i}"]//*/@id', f'//*[@id="{i}"]/text()')] + [
+        "//html/*/@id", "//html//*/@id", "//head//*/@id", "//body//*/@id", "//body/text()", "//html/text()"]
+    assert len(old) == 13 and set(old) <= set(sels)
+    assert T.fingerprint(regressed, old) == T.fingerprint(CHROME_TBODY, old)
+
+
+def test_the_sequence_fingerprint_sees_a_removed_formatting_clone():
+    """A reconstructed formatting element copies its original's attributes, id included, so it shows as
+    a REPEATED id. A builder that forgot to reconstruct it leaves the `2` in the body instead; the
+    document-order column must be a list, not a set, for that to be a difference."""
+    import seq_sweep
+    from browser_oracle import tree as T
+
+    sels = seq_sweep.fingerprint_selectors(["0", "1"])
+    oracle = T.fingerprint(CHROME_CLONE, sels)
+    assert oracle[sels.index("//*/@id")] == ["0", "1", "1"], "the clone must read as a repeated id"
+    regressed = _splice(CHROME_CLONE, "b", index=1)
+    diff = seq_sweep.compare(sels, T.fingerprint(regressed, sels), oracle)
+    assert diff and diff[0] == "//*/@id", f"a lost clone must differ on the document-order column: {diff}"
+
+
+def test_the_native_fingerprint_answers_what_lxml_answers():
+    """The browser gate never rebuilds the browser's tree in lxml; `tree.py` evaluates the fingerprint
+    over the JSON tree itself. If that evaluator disagreed with XPath, the gate would grade its own bug
+    as the engine's. On lxml's OWN trees it must give parsel's answers exactly, and it must refuse a
+    shape it does not implement rather than answer it wrongly."""
+    import itertools
+
+    import parsel
+    import seq_sweep
+    from browser_oracle import tree as T
+
+    checked = 0
+    for n in (1, 2):
+        for seq in itertools.product(seq_sweep.ALPHABET, repeat=n):
+            doc, ids = seq_sweep.build(seq)
+            sels = seq_sweep.fingerprint_selectors(ids)
+            sel = parsel.Selector(text=doc.decode(), type="html")
+            want = [sel.xpath(s).getall() for s in sels]
+            assert T.fingerprint(T.from_lxml(sel.root), sels) == want, doc
+            checked += 1
+    assert checked > 500
+    for shape in ('//*[@id="0"]/..', "//p[last()]/@id", "//p", "count(//p)", '//*[@id="0"]/node()'):
+        with pytest.raises(ValueError):
+            T.evaluate(T.index(["#d", []]), shape)
+    # the document view is what a selector reaches: template content and shadow roots are not in it
+    view = T.document_view(["#d", [["div", 0, ["id", "h"], [["#shadow", "open", [["p", 0, ["id", "s"], []]]]]],
+                                   ["template", 0, ["id", "t"], [["#d", [["p", 0, ["id", "y"], []]]]]]]])
+    assert T.evaluate(T.index(view), "//*/@id") == ["h", "t"]
+
+
+def test_the_browser_gate_fails_on_novel_and_on_coverage():
+    """`diff_browser --gate` is green only when every divergence is attributed AND the run measured
+    something. Each of these alone reads exactly like a clean run, so each is seeded."""
+    import diff_browser as B
+
+    clean = dict(graded=10, selfcheck_checked=5, bridge_checked=10, value_graded=10, css_mirror_checked=10,
+                 alone_checked=10)
+    assert B.gate_failures(B.Report(**clean)) == []
+    explained = B.Report(**clean, buckets={"implied <tbody>": [B.Divergence((), "//*/@id", ("engine", "chrome"))]})
+    assert B.gate_failures(explained) == [], "an attributed divergence is expected until its rule lands"
+    value = B.Divergence(((0, "<p{}>"),), '[id="0"]::text', ("engine", "chrome"))
+    explained_values = B.Report(**clean, value_on_tree=[value], value_unseen_tree={"stray </p>": [value]},
+                                value_buckets={"raw-source outer HTML": [value]})
+    assert B.gate_failures(explained_values) == [], "a value column the tree or a value construct explains"
+    seeded = {
+        "novel": B.Report(**clean, novel=[B.Divergence(((0, "<td{}>"),), "//*/@id", ("engine", "chrome"))]),
+        "nothing graded": B.Report(**{**clean, "graded": 0}),
+        "token never emitted": B.Report(**clean, missing_tokens=["<col{}>"]),
+        "oracle error": B.Report(**clean, oracle_errors=[{"doc": "<p>", "error": "load timeout"}]),
+        "self-check ran on nothing": B.Report(**{**clean, "selfcheck_checked": 0}),
+        "fast path differs from a page load": B.Report(**clean, selfcheck_differ=["<p>"]),
+        # the bridge
+        "bridge round-tripped nothing": B.Report(**{**clean, "bridge_checked": 0}),
+        "bridge changed a tree": B.Report(**clean, bridge_failures=[("<p>", "/1/0: 'a\\x01' != 'a'")]),
+        "bridge XPath differs from the native evaluator": B.Report(**clean, bridge_xpath_differ=[("<p>", "//*/@id")]),
+        # value columns
+        "no value column graded": B.Report(**{**clean, "value_graded": 0}),
+        "no value column asked alone": B.Report(**{**clean, "alone_checked": 0}),
+        "a column answered differently alone": B.Report(**clean, alone_differ=[("<p>", 'body.a[title="b"] p::text')]),
+        "value token never emitted": B.Report(**clean, missing_value_tokens=[' lang="EN"']),
+        "value NOVEL": B.Report(**clean, value_novel=[value]),
+        "fast path's CSS differs from a page load's": B.Report(**clean, selfcheck_css_differ=["<p>"]),
+        "a value-rule selector answered nowhere": B.Report(**clean, rule_never_answered=['[lang="en"]::attr(id)']),
+        "a value-rule selector the engine refuses": B.Report(**clean, rule_refused=["//text()"]),
+        "a value column the planner cannot ask": B.Report(**clean, unplanned=["p:nth-child(2n of .a)"]),
+        "a basket selector newly answered nowhere": B.Report(**clean, basket_unlisted=["p::text"]),
+        "native CSS checked against parsel nowhere": B.Report(**{**clean, "css_mirror_checked": 0}),
+        "native CSS disagrees with parsel": B.Report(**clean, css_mirror_differ=[("<p>", "p ::text")]),
+        # the debug build's invariants
+        "debug build asked for and checked nothing": B.Report(**clean, debug_requested=True),
+        "debug build panics": B.Report(**clean, debug_requested=True, debug_checked=1,
+                                       debug_panics=[("<p>", "panicked at mod.rs:1: closing an element")]),
+    }
+    for why, report in seeded.items():
+        assert B.gate_failures(report), f"{why} must fail the gate"
+    assert B.gate_failures(B.Report(**clean, debug_requested=True, debug_checked=1)) == []
+
+
+# What Chrome 156.0.8078.80 answers on documents the browser gate's structured families emit: the frame a
+# document that ends before the body still gets (an empty `<body>`, a `<head>` that is not the last child,
+# all three for an empty document), a comment in template content written after `</head>`, a comment
+# between two runs of `<html>` whitespace in "after head", and two matches at one offset (a formatting
+# element's copy and the copy inside it).
+_SKELETON = ["<!DOCTYPE html>", "<html{}>", "<head{}>", "<title{}>T</title>", "</head>", " ", "<template{}>", "<p{}>",
+             "t", "</template>", " ", "<script{}>s</script>", " ", "<style{}>s</style>", " ", "<body{}>", "<p{}>", "t",
+             "</p>", "</body>", " ", "</html>", " "]
+_CLONES = ["<!DOCTYPE html>", "<p{}>", "<b{}>", "t", "<i{}>", "t", "</p>", "t"]
+CHROME_ANSWERS = [
+    ([], "grouped:body -> ::text", [[[]]]),
+    (["<head{}>", "</head>"], "*:last-child::attr(id)", []),
+    (["<html{}>", "<title{}>T</title>"], ":has(> body)::attr(id)", ["0"]),
+    (_SKELETON[:7] + ["<!--c-->"] + _SKELETON[7:], '[id="6"]', ['<template id="6"><!--c--><p id="8">t</p></template>']),
+    (_SKELETON[:6] + ["<!--c-->"] + _SKELETON[6:], "//html/text()", [" ", "   "]),
+    (_CLONES, "*:last-child::attr(id)", ["2", "4", "2", "4"]),
+    (_CLONES, "b, i", ['<b id="2">t<i id="4">t</i></b>', '<i id="4">t</i>', '<b id="2"><i id="4">t</i></b>',
+                       '<i id="4">t</i>']),
+]
+
+
+def test_the_structured_families_emit_the_documents_these_chrome_answers_need():
+    """A case the generator cannot emit is one the gate can never go red on. Each row's document is a
+    structured family member, its column is one the gate grades there, and the engine must give Chrome's
+    answer as the gate compares it: exactly, or by the raw-source allowance for outer HTML, which still
+    needs the same elements in the same order."""
+    import browser_answers as A
+    import browser_docs as D
+    import browser_values as V
+    import conformant
+    import seq_sweep
+
+    generated = {D.render(d) for d in D.structured_docs()}
+    run = A.Engine("browser")
+    no_quirks = ["#d", [["#dt", "html", "", ""]]]
+    wrong = []
+    for tokens, sel, chrome in CHROME_ANSWERS:
+        doc = tuple(enumerate(tokens))
+        r = D.render(doc)
+        assert r in generated, tokens
+        assert sel in D.value_selectors(doc, True, list(conformant.BASKET)) + seq_sweep.fingerprint_selectors(D.ids_of(doc))
+        engine = run.grouped(r.encode(), [sel])[0] if D.grouped_spec(sel) else run(r.encode(), [sel], strict=False)[0]
+        agrees = A.same_values(engine, chrome, sel) or (
+            sel == "b, i" and V.attribute_value(V.ValueRepro(doc, sel, engine, chrome, no_quirks)) is not None)
+        if not agrees:
+            wrong.append(f"{r}  {sel}: engine {engine}, Chrome {chrome}")
+    assert not wrong, "\n".join(wrong)
+
+
+def test_the_browser_gates_ask_about_each_selector_alone():
+    """A selector the engine refuses is never graded, so the refusal list decides what the browser gates
+    can see. Asked as ONE schema, every selector of a run sat past the engine's column ceiling, where a
+    mixed comma group cannot be routed, and conformant's `p::text, p:contains("alpha")::text` family went
+    ungraded in both modes. Both browser gates read the one helper. The deferred tails the value basket
+    holds are graded in browser mode, which is the point of their rows."""
+    import browser_answers as A
+    import browser_docs as D
+    import corpus_browser as CB
+
+    group = 'p::text, p:contains("alpha")::text'
+    padding = [f'[id="{i}"]::text' for i in range(130)]
+    assert A.engine_refusals(padding + [group, "p"], "browser") == {"p": A.engine_refusals(["p"], "browser")["p"]}
+    assert CB.engine_refusals is A.engine_refusals
+    tails = [s for s in D.RULE_SELECTORS if re.search(r":last-|:nth-last-|:only-|:has\(|:contains\(|last\(\)|contains\(", s)]
+    assert len(tails) >= 20 and not A.engine_refusals(tails, "browser")
+
+
+def test_browser_attribution_is_by_the_smallest_repro_and_leaves_the_rest_novel():
+    """A divergence is filed under a construct only when its REDUCED document exhibits it, and only a
+    construct browser mode does not build as the browser does has one. The five retroactive rules are
+    exact through the replay, so their repros, like a stray `<td>` or an implied `<tbody>`, must reach
+    NOVEL and fail the gate."""
+    import diff_browser as B
+
+    def repro(tokens):
+        return B.Repro(tuple(enumerate(tokens)), "//*/@id", lambda doc: True, [])
+
+    selected = ["<select{}>", "<selectedcontent{}>", "</selectedcontent>", "<option{}>", "t", "</option>"]
+    for implemented in (["<td{}>"], ["<table{}>", "<tr{}>"], ["<p{}>", "<table{}>"], ["<div{}>"],
+                        ["<p{}>", "<b{}>", "t", "</p>", "t"], ["<b{}>", "<i{}>", "</b>"], ["<a{} href=x>", "<a{} href=x>"],
+                        ["<table{}>", "<div{}>"], ["<div{}>", "<body{}>"], ["<b{}>", "<p{}>", "</b>"],
+                        ["<nobr{}>", "<div{}>", "<nobr{}>"], ["<div{}>", "<frameset{}>"], selected):
+        assert B.attribute(repro(implemented)) is None, implemented
+    assert B.CONSTRUCTS == []
+
+
+def test_the_merged_frame_allowance_excuses_only_attributes_a_later_tag_added():
+    """The raw source of a `<body>` or `<html>` that a later tag merged attributes into has only its own
+    start tag. The allowance excuses exactly that: the browser's root has the same tag and every name the
+    engine's has, plus more. Fewer names, another tag or an element other than the frame is a value NOVEL."""
+    import browser_values as V
+
+    def verdict(engine, oracle, sel='[id="3"]'):
+        return V.attribute_value(V.ValueRepro(((0, engine),), sel, [engine], [oracle], ["#d", []]))
+
+    merged = "raw-source outer HTML of a merged <html>/<body>"
+    assert verdict('<body id=3>x<body class=k>', '<body id="3" class="k">x</body>') == merged
+    assert verdict('<html id=3><p>', '<html id="3" lang="en"><head></head><body><p></p></body></html>') == merged
+    assert verdict('<body id=3>x', '<body id="3">x</body>') == "raw-source outer HTML"
+    assert verdict('<body id=3 class=k>x', '<body id="3">x</body>') is None
+    assert verdict('<div id=3>x', '<div id="3" class="k">x</div>') is None
+    assert verdict('<body id=3>x', '<html id="3" class="k"></html>') is None
+
+
+def test_a_raw_source_value_is_made_of_the_page_bytes():
+    """A raw-source value is assembled from the page, so no start tag occurs in it more often than in the
+    page: a frame element that repeats the later tag it took its start tag from is not raw source."""
+    import browser_values as V
+
+    def verdict(page, engine, oracle):
+        return V.attribute_value(V.ValueRepro(((0, page),), "body.late", [engine], [oracle], ["#d", []]))
+
+    page = "<p>x</p><body class=late>"
+    oracle = '<body class="late"><p>x</p></body>'
+    assert verdict(page, "<body class=late><p>x</p>", oracle) == "raw-source outer HTML"
+    assert verdict(page, "<body class=late><p>x</p><body class=late>", oracle) is None
+    # a CR from `&#13;` stays a reference in the raw source, and Chrome serialises it as a literal CR
+    assert verdict("<p>a&#13;b</p>", "<p>a&#13;b</p>", "<p>a\rb</p>") == "raw-source outer HTML"
+    # ... beside the LF of the next text node, which is a second line break, not a CRLF
+    page = "<p>a&#13;<br>\nb</p>"
+    assert verdict(page, page, "<p>a\r<br>\nb</p>") == "raw-source outer HTML"
+    # the engine's raw source normalises line breaks, as the browser's input stream does
+    assert verdict('<p title="a\r\nb">x</p>', '<p title="a\nb">x</p>', '<p title="a\nb">x</p>') == "raw-source outer HTML"
+
+
+def test_a_raw_source_pair_is_read_as_the_browser_read_it():
+    """Both sides of a raw-source pair are re-parsed as the browser parsed the element: an SVG element's
+    `<style>` holds decoded text rather than raw text, a value holding the page's own `<meta charset>` is
+    still UTF-8, and a `</br>` is the source of the `<br>` a browser makes of it."""
+    import browser_values as V
+
+    raw = "raw-source outer HTML"
+    svg = "http://www.w3.org/2000/svg"
+
+    def verdict(page, sel, engine, oracle, tree):
+        return V.attribute_value(V.ValueRepro(((0, page),), sel, [engine], [oracle], tree))
+
+    def doc(*body):
+        return ["#d", [["html", 0, [], [["head", 0, [], []], ["body", 0, [], list(body)]]]]]
+
+    page = "<svg><g><style>a&quot;b</style></g></svg>"
+    in_svg = doc(["svg", svg, [], [["g", svg, [], [["style", svg, [], ['a"b']]]]]])
+    assert verdict(page, "g", "<g><style>a&quot;b</style></g>", '<g><style>a"b</style></g>', in_svg) == raw
+    assert verdict(page, "g", "<g><style>ab</style></g>", '<g><style>a"b</style></g>', in_svg) is None
+    in_html = doc(["g", 0, [], [["style", 0, [], ['a"b']]]])
+    assert verdict(page, "g", "<g><style>a&quot;b</style></g>", '<g><style>a"b</style></g>', in_html) is None
+
+    # a name in both namespaces is read in each: here the SVG `<a>`, whose `<script>` decodes references
+    page = '<a href=x>t</a><svg><a><script>&lt;b&quot;</script></a></svg>'
+    mixed = doc(["a", 0, ["href", "x"], ["t"]], ["svg", svg, [], [["a", svg, [], [["script", svg, [], ['<b"']]]]]])
+    assert V.attribute_value(V.ValueRepro(((0, page),), "a", ["<a href=x>t</a>", '<a><script>&lt;b&quot;</script></a>'],
+                                          ['<a href="x">t</a>', '<a><script>&lt;b"</script></a>'], mixed)) == raw
+
+    page = "<td><meta charset=gb2312>&middot;</td>"
+    assert verdict(page, "td", page, '<td><meta charset="gb2312">\N{MIDDLE DOT}</td>', doc()) == raw
+
+    assert verdict("<p>a</br>b", "br", "</br>", "<br>", doc()) == raw
+    # the id is compared decoded, as a browser serialises it, and a valueless one is ""
+    page = '<div id="v&#xE5;re">t</div>'
+    assert verdict(page, "div", page, '<div id="v\u00e5re">t</div>', doc()) == raw
+    assert verdict("<div id>t</div>", "div", "<div id>t</div>", '<div id="">t</div>', doc()) == raw
+    assert verdict("<p>a</br>b", "br", "</p>", "<br>", doc()) is None
+
+
+def test_the_selectedcontent_allowance_excuses_only_the_copy():
+    """A `<selectedcontent>`'s source is what the page wrote, not the option content a select copies into
+    it. The allowance excuses exactly that copy: any other content the engine's value lacks is NOVEL."""
+    import browser_values as V
+
+    def verdict(engine, oracle):
+        return V.attribute_value(V.ValueRepro(((0, engine),), '[id="1"]', [engine], [oracle], ["#d", []]))
+
+    copy = "raw-source outer HTML of a <selectedcontent> copy"
+    assert verdict('<selectedcontent id="1"></selectedcontent>', '<selectedcontent id="1">t</selectedcontent>') == copy
+    assert verdict('<button id="1"><selectedcontent>', '<button id="1"><selectedcontent><b>t</b></selectedcontent></button>') == copy
+    assert verdict('<button id="1"><selectedcontent>', '<button id="1">u<selectedcontent>t</selectedcontent></button>') is None
+    assert verdict('<div id="1"></div>', '<div id="1">t</div>') is None
+
+
+def test_the_browser_gate_reads_the_document_mode_from_the_doctype():
+    """Class and id selectors fold case in quirks mode, so the value gate must know the document's mode.
+    A doctype is not enough: an HTML 4.01 Transitional one without a system identifier is quirks, and with
+    one it is limited quirks, where they do not fold."""
+    import browser_values as V
+    from browser_oracle import tree as T
+
+    assert not T.quirks_doctype("html", "", "")
+    assert T.quirks_doctype("html", "-//W3C//DTD HTML 4.01 Transitional//EN", "")
+    assert not T.quirks_doctype("html", "-//W3C//DTD HTML 4.01 Transitional//EN", "http://www.w3.org/TR/html4/loose.dtd")
+    assert not T.quirks_doctype("html", "-//W3C//DTD XHTML 1.0 Transitional//EN", "x")
+    assert T.quirks_doctype("html", "-//IETF//DTD HTML 2.0//EN", "") and T.quirks_doctype("svg", "", "")
+    tree = ["#d", [["#dt", "html", "-//W3C//DTD HTML 4.01 Transitional//EN", ""], ["html", 0, [], []]]]
+    assert V.ValueRepro((), ".a", [], [], tree).quirks()
+    assert not V.ValueRepro((), ".a", [], [], ["#d", [["#dt", "html", "", ""], ["html", 0, [], []]]]).quirks()
+
+
+# A browser tree holding what lxml cannot: control characters in text and attribute values, a `p"x` tag
+# name and a `{x}y` attribute name, comments with `--` and a trailing `-`, a processing instruction, SVG
+# with its namespace, a doctype, an open shadow root and HTML template content.
+BROWSER_ODD = ["#d", [["#dt", "html", "", ""], ["#c", "top--"], ["html", 0, [], [["head", 0, [], []], ["body", 0, [], [
+    ['p"x', 0, ["id", "0", "title", "a\x01b", "{x}y", "1"], ["t\x0bu"]],
+    ["svg", "http://www.w3.org/2000/svg", ["id", "1", "viewBox", "0 0 1 1"], [
+        ["foreignObject", "http://www.w3.org/2000/svg", ["id", "2"], ["z"]]]],
+    ["#7", "pi", "d"], ["#c", "a--b-"],
+    ["div", 0, ["id", "3"], ["a", ["#shadow", "open", [["p", 0, ["id", "s"], []]]]]],
+    ["template", 0, ["id", "4"], [["#d", [["p", 0, ["id", "y"], ["q\x0c<"]]]]]]]]]]]]
+
+
+def test_the_xpath_bridge_answers_lxml_xpath_on_what_lxml_cannot_hold():
+    """Browser-mode XPath is lxml's XPath over the BROWSER's tree (docs/BROWSER_MODE.md, decision 5), so the
+    tree is rebuilt in lxml through a reversible map rather than sanitised. On a tree full of what lxml
+    refuses it must round-trip exactly, answer every fingerprint column as the native evaluator does, match a
+    literal holding a control character, keep lxml's name semantics, and serialise an element as the
+    browser's `outerHTML` does, template content included."""
+    import seq_sweep
+    from browser_oracle import bridge as Br
+    from browser_oracle import tree as T
+
+    assert Br.round_trip_failures([BROWSER_ODD]) == ([], [])
+    b = Br.Bridge(BROWSER_ODD)
+    assert b.mapped_names, "p\"x and {x}y cannot be lxml names as they are"
+    assert b.xpath('//*[@title="a\x01b"]/@id') == ["0"]
+    assert b.xpath("//svg/@id") == ["1"] and b.xpath("//P") == [] and b.xpath("//foreignobject") == []
+    assert b.xpath('//*[@id="0"]/text()') == ["t\x0bu"]
+    assert b.xpath('//*[@id="y"]') == [] and b.xpath('//*[@id="s"]') == [], "outside the document view"
+    assert b.xpath('//*[@id="4"]') == ['<template id="4"><p id="y">q\x0c&lt;</p></template>']
+    assert b.xpath("//processing-instruction()") == ["<?pi d?>"]
+    sels = seq_sweep.fingerprint_selectors(["0", "1", "2", "3", "4"])
+    assert [b.xpath(s) for s in sels] == T.fingerprint(BROWSER_ODD, sels)
+
+    # lxml merges adjacent text nodes, so a tree with two is REPORTED, never graded through lxml
+    adjacent = ["#d", [["html", 0, [], [["body", 0, [], ["a", "b"]]]]]]
+    failures, unrepresentable = Br.round_trip_failures([adjacent])
+    assert failures == [] and len(unrepresentable) == 1
+
+
+def test_the_round_trip_gate_fails_on_a_lossy_bridge():
+    """Each seeded bridge loses something lxml cannot hold, the way a sanitising rebuild would. The round
+    trip must catch every one; a bridge that only ever saw clean trees reads exactly like a lossless one."""
+    from browser_oracle import bridge as Br
+    from browser_oracle import tree as T
+
+    original_to_json = Br.Bridge.to_json
+    seeded = {
+        "drops control characters": ("encode", lambda self, s: Br._VALUE_RE.sub("", s)),
+        "maps nothing, so lxml refuses": ("encode", lambda self, s: s),
+        "never decodes": ("decode", lambda self, s: s),
+        "forgets template content and shadow roots": ("to_json", lambda self: T.document_view(original_to_json(self))),
+    }
+    for why, (name, fn) in seeded.items():
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(Br.Bridge, name, fn)
+            failures, _unrepresentable = Br.round_trip_failures([BROWSER_ODD])
+        assert failures, f"a bridge that {why} must fail the round trip"
+
+
+def test_the_css_plan_mirrors_parsels_pseudo_elements():
+    """Native CSS answers parsel's selectors with querySelectorAll, so what parsel defines on top (`::text`,
+    `::attr()`, the subtree form after a descendant combinator, `:contains()`, comma groups) is planned from
+    parsel's own translator and checked against it. A form the planner cannot verify is refused, so a
+    lost rewrite is an `Unplannable`, never a wrong answer."""
+    import re
+
+    import conformant
+    from browser_oracle import css as C
+
+    def one(sel):
+        (m,) = C.plan(sel)["members"]
+        return m["css"], m["value"], m["scope"], m["attr"]
+
+    assert one("p::text") == ("p", "text", "self", None)
+    assert one("p ::text") == ("p", "text", "subtree", None)
+    assert one("div *::text") == ("div", "text", "subtree", None), "parsel: div/descendant-or-self::text()"
+    assert one("div * ::text") == ("div *", "text", "subtree", None)
+    assert one("div > *::text") == ("div > *", "text", "self", None)
+    assert one("dt + ::text") == ("dt + *", "text", "self", None)
+    assert one("p ::attr(href)") == ("p", "attr", "subtree", "href")
+    assert one("a") == ("a", "outer", "self", None)
+    (m,) = C.plan('p:contains("a\\"b")::text')["members"]
+    assert m["css"] == "p[data-fw-contains-0]" and m["contains"] == [("data-fw-contains-0", 'a"b')]
+    assert len(C.plan("h1::text, :is(p, span)::text")["members"]) == 2
+    for bad in ("p::foo", "p[", "::attr(1 2)"):
+        with pytest.raises(C.Unplannable):
+            C.plan(bad)
+    for s in conformant.BASKET:
+        if C.is_css(s):
+            C.plan(s)  # every basket selector plans
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(C, "_PSEUDO", re.compile("(?!)"))  # a planner that cannot find the pseudo-element
+        with pytest.raises(C.Unplannable):
+            C.plan("p ::text")
+
+
+def test_value_columns_split_by_the_tree_and_attribute_by_the_oracle_tree():
+    """A value column that differs where the fingerprint already differs is a TREE divergence and must not
+    reach the value verdict. Where the fingerprint agrees, a value construct explains it only from the
+    oracle's own tree: case folding applies to listed attributes on HTML elements and never to XPath, the
+    quirks-mode class rule needs a quirks-mode document, and raw-source outer HTML needs the same element."""
+    import browser_docs as D
+    import browser_values as V
+    import diff_browser as B
+    import seq_sweep
+    from browser_oracle import tree as T
+
+    report, items = B.Report(), []
+    d = B.Divergence(((0, "<p{}>"),), "p::text", ("engine", "chrome"))
+    B.split_value(d, {D.render(d.doc)}, report, items)
+    assert report.value_on_tree == [d] and items == []
+    B.split_value(d, set(), report, items)
+    assert items == [d]
+
+    def page(kids, doctype=True):
+        frame = [["html", 0, [], [["head", 0, [], []], ["body", 0, [], kids]]]]
+        return ["#d", ([["#dt", "html", "", ""]] if doctype else []) + frame]
+
+    def r(sel, tree, engine=(), oracle=("0",)):
+        return V.ValueRepro(tuple(enumerate(engine)), sel, list(engine), list(oracle), tree)
+
+    p_en = ["p", 0, ["lang", "EN", "id", "0"], []]
+    svg_en = ["svg", "http://www.w3.org/2000/svg", ["lang", "EN", "id", "0"], []]
+    # browser mode folds HTML's listed attribute values for CSS, so a column that differs there is NOVEL
+    for sel, tree in (('[lang="en"]::attr(id)', page([p_en])), ('//*[@lang="en"]/@id', page([p_en])),
+                      ('[lang="en"]::attr(id)', page([svg_en]))):
+        assert V.attribute_value(r(sel, tree)) is None, sel
+    upper = ["p", 0, ["class", "A", "id", "0"], []]
+    assert V.attribute_value(r(".a::attr(id)", page([upper], doctype=False))) == \
+        "quirks-mode class and id matching (deferred)"
+    assert V.attribute_value(r(".a::attr(id)", page([upper]))) is None, "no-quirks mode matches exactly"
+    raw = ['<table id="0"><tr><td>x</table>']
+    serial = ['<table id="0"><tbody><tr><td>x</td></tr></tbody></table>']
+    assert V.attribute_value(r("table", page([]), raw, serial)) == "raw-source outer HTML"
+    assert V.attribute_value(r("table", page([]), ['<table id="1"><tr></table>'], serial)) is None
+    # the source may hold text the browser moved out, but must hold the browser's text, in order
+    fostered = ['<table id="0">y<tr><td>x</table>']
+    assert V.attribute_value(r("table", page([]), fostered, serial)) == "raw-source outer HTML"
+    assert V.attribute_value(r("b", page([]), ['<b id="0"></b>'], ['<b id="0">2</b>'])) is None
+    assert V.attribute_value(r("b", page([]), ['<b id="0">ba</b>'], ['<b id="0">ab</b>'])) is None
+    # an <html> is compared by its start tag too, and <image> is the <img> a browser makes of it
+    full = ['<html id="0"><head></head><body></body></html>']
+    assert V.attribute_value(r('[id="0"]', page([]), ['<html id="0">'], full)) == "raw-source outer HTML"
+    assert V.attribute_value(r('[id="0"]', page([]), ['<image id="0">'], ['<img id="0">'])) == "raw-source outer HTML"
+    assert V.attribute_value(r('[id="0"]', page([]), ['x<b id="0">'], ['<b id="0">x</b>'])) is None
+
+    # an empty id-less element answers every fingerprint column like no element at all, so only a value
+    # column that names it can show it
+    with_p = page([["div", 0, ["id", "0"], [["p", 0, [], []]]]])
+    sels = seq_sweep.fingerprint_selectors(["0"])
+    assert T.fingerprint(with_p, sels) == T.fingerprint(page([["div", 0, ["id", "0"], []]]), sels)
+    assert r("p", with_p, oracle=["<p></p>"]).unseen_elements() == ["p"]
+    assert r("span", with_p, oracle=[]).unseen_elements() == []
+
+
+def test_value_documents_keep_their_decorations_through_attribution_edits():
+    """Tree attribution reads ALPHABET tokens, so a value document is undecorated for it and every
+    counterfactual edit is decorated again, by id, before the oracle is asked. An edit to the token itself
+    (dropping a `/>`) must survive that, and a counterfactual must not lose the attributes it is about."""
+    import browser_docs as D
+    import diff_browser as B
+
+    docs, _used = D.value_docs(40, 0)
+    decorated = next(d for d in docs if any(t != D.undecorate(d)[0][k][1] for k, (_i, t) in enumerate(d)))
+    plain, decos = D.undecorate(decorated)
+    assert D.redecorate(plain, decos) == decorated
+    assert all(t in D.ALPHABET + D.VALUE_STRUCTURE + [D.DOCTYPE, D.PLAIN_HEAD] for _i, t in plain)
+    slashed = ((0, '<p{}/>'),)
+    deco = {0: ("attrs", ' title="t"')}
+    assert D.redecorate(B.Repro(slashed, "", lambda d: True, []).deslashed(), deco) == ((0, '<p title="t"{}>'),)
+
+
+def test_the_browser_corpus_report_splits_tree_from_value_only_where_the_fingerprint_can():
+    """`make gate-corpus-browser` is report-only, but its split decides what the worklist calls a value
+    bug. A refusal and an oracle that cannot answer are never graded; a differing column is TREE where the
+    page's fingerprint differs, VALUE only where it agrees over at least one id, and UNSPLIT on a page
+    with no ids, whose fingerprint agrees about almost nothing."""
+    import corpus_browser as CB
+    from browser_oracle.client import Refused
+
+    assert CB.column_verdict("p::text", True, ["a"], ["b"], False, 3) == "REFUSED"
+    assert CB.column_verdict("p::text", False, ["a"], Refused("x", "plan"), False, 3) == "ORACLE"
+    assert CB.column_verdict("p::text", False, ["a"], ["a"], True, 3) == "AGREE"
+    assert CB.column_verdict("p", False, ["<p>a"], ["<p>a</p>"], False, 3) == "AGREE", "raw source, same tree"
+    assert CB.column_verdict("p::text", False, ["a"], ["b"], True, 3) == "TREE"
+    assert CB.column_verdict("p::text", False, ["a"], ["b"], False, 3) == "VALUE"
+    assert CB.column_verdict("p::text", False, ["a"], ["b"], False, 0) == "UNSPLIT"
 
 
 def test_the_rule_audit_has_no_bypass_for_a_start_close_divergence():
@@ -794,6 +1345,51 @@ def test_every_required_column_comes_from_the_fixed_schemas_not_from_a_lucky_see
         assert witnessed.get(case.field_name, 0), (
             f"the fixed schemas never showed {case.processor} CHANGING its field's value"
         )
+
+
+def test_the_browser_mode_webpoet_gate_refuses_as_node_and_files_engine_divergences():
+    """`make gate-webpoet-browser` grades browser-mode page objects against values from the browser. Three of
+    its decisions are seeded here with no browser: `.as_node()` must be REFUSED at class definition, and a
+    build that accepts it is counted (and fails the gate); a field whose engine column already differs from
+    the browser's is ENGINE, which gate-browser owns, while one whose column agrees stays DIVERGE; and a run
+    that never provoked a refusal is a coverage failure, not a quiet pass."""
+    from collections import defaultdict
+
+    import diff_webpoet as W
+
+    schema = W.contract_schemas()[0][1]
+    nodes = W._as_node_fields(schema)
+    assert nodes, "the contract schema declares node-taking processors"
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(W, "PARSER", "browser")
+        stat, refused, examples = defaultdict(int), defaultdict(int), []
+        graded = W._browser_schema(schema, "plain", "http", stat, refused, examples, "contract/http")
+        assert stat["REFUSED"] == 1 and stat["ACCEPTED"] == 0
+        assert not nodes & {n for n, _s, _p in graded["fields"]}, "a refused field is not graded as a value"
+        mp.setattr(W, "build_page", lambda *a, **k: None)  # a page object that accepts .as_node()
+        W._browser_schema(schema, "plain", "http", stat, refused, examples, "contract/http")
+        assert stat["ACCEPTED"] == 1
+
+    class Oracle:
+        def __init__(self, col):
+            self.col = col
+
+        def column(self, text, sel):
+            return self.col
+
+    html, one = b"<h1>Roomy Bag</h1>", {"fields": [("name", "h1::text", None)], "group": None}
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(W, "PARSER", "browser")
+        mp.setattr(W, "ORACLE", Oracle(["Roomy Bag"]))
+        assert W._browser_verdict("DIVERGE", html, "name", one) == "DIVERGE", "the column agrees"
+        mp.setattr(W, "ORACLE", Oracle(["Another Bag"]))
+        assert W._browser_verdict("DIVERGE", html, "name", one) == "ENGINE"
+        assert W._browser_verdict("AGREE", html, "name", one) == "AGREE"
+
+    assert "breadcrumbs" in {m for m, _w, _e in W.required_columns()}
+    assert "breadcrumbs" not in {m for m, _w, _e in W.required_columns("browser")}
+    failures = W.coverage_failures({}, {}, {}, {}, cells=[], kinds=(), parser="browser", refused={})
+    assert any("never seen refused" in f for f in failures)
 
 
 def webpoet_cases_module():
@@ -1124,3 +1720,213 @@ def test_the_competitive_benchmark_translates_parsel_text_pseudos_faithfully():
     assert bench_engines.css_plan("h1::text, h2::text") == ("h1, h2", CHILD, None)
     assert bench_engines.css_translate("h1::text, img::attr(src)")[1].startswith("comma list")
     assert bench_engines.css_translate("//div/text()")[1].startswith("xpath")
+
+
+# ------------------------------------------------------- HTML5 categories (tools/gen_html5_rules.py)
+class _Libxml2AsAnOracle:
+    """The same probes against a parser that does NOT implement the HTML5 tree builder: libxml2 through
+    lxml, with the interface `derive` needs from a `BrowserOracle`."""
+
+    browser, build = "libxml2", "libxml2 (lxml)"
+    errors: list = []
+    selfcheck_checked, selfcheck_differ = 0, []
+
+    def trees(self, docs, *, selfcheck=False):
+        from browser_oracle.tree import from_lxml
+        from lxml import etree
+
+        return [from_lxml(etree.fromstring(d.encode(), etree.HTMLParser())) for d in docs]
+
+
+def _html5_snapshot():
+    import gen_html5_rules as H
+
+    return H, H.load_snapshot()
+
+
+def test_the_html5_probes_read_the_parser_and_not_the_document():
+    """A probe that answers the same whatever parser it is given measures its own document. Run against
+    libxml2, which has no adoption agency, no scope lists and no ruby rules, the derivation must come out
+    visibly different from Chrome's, and its controls must fail."""
+    H, snap = _html5_snapshot()
+    chrome = H.Derivation.from_json(snap["browsers"]["chrome"])
+    libxml2 = H.derive(_Libxml2AsAnOracle())
+    assert H.control_failures(chrome) == []
+    failed = H.control_failures(libxml2)
+    assert failed, "libxml2 must fail the HTML5 controls"
+    # the formatting probe in particular reads reconstruction, which libxml2 never does
+    assert not H.resolve(libxml2, "formatting") & set(H.SPEC["formatting"])
+    assert any(f.startswith("formatting:") for f in failed)
+    # and a category can come out differently without the others moving: libxml2's `</div>` is not
+    # ignored for any element in scope, so the default scope loses names Chrome keeps
+    assert H.resolve(chrome, "scope") != H.resolve(libxml2, "scope")
+
+
+def test_every_html5_category_reads_both_ways_and_agrees_with_its_witness():
+    H, snap = _html5_snapshot()
+    chrome = H.Derivation.from_json(snap["browsers"]["chrome"])
+    for cat in H.CATEGORIES:
+        seen = {v for v in chrome.answers[cat].values() if v is not None}
+        assert seen == {True, False}, f"{cat} answered {seen} over the whole universe"
+    for cat, wit in H.WITNESS.items():
+        both = [n for n in H.PROBE_NAMES
+                if chrome.answers[cat][n] is not None and chrome.answers[wit][n] is not None]
+        assert len(both) > 20, f"the {wit} witness reads too few of {cat}'s names to be a check"
+    assert H.witness_disagreements(chrome) == []
+    assert set(H.WITNESS) <= set(H.CATEGORIES)
+    # every name the spec lists is in the universe, or its cell could never be probed
+    for cat, names in H.SPEC.items():
+        assert names <= set(H.PROBE_NAMES), f"{cat}: spec names outside the universe: {names - set(H.PROBE_NAMES)}"
+
+
+def test_the_html5_decision_functions_answer_from_the_tree():
+    """Each reader is run on hand-built trees, one per outcome, so a probe that always says True or always
+    says False cannot pass."""
+    H = pytest.importorskip("gen_html5_rules")
+
+    def doc(*body):
+        return H.load(["#d", [["html", 0, [], [["body", 0, [], list(body)]]]]])
+
+    def el(name, ident, *kids):
+        return [name, 0, ["id", ident], list(kids)]
+
+    # formatting: a clone with the same id means the element was reconstructed
+    popped = doc(el("div", "d", el("b", "x", "t")), el("b", "x", "u"))
+    single = doc(el("div", "d", el("b", "x", "t")), "u")
+    not_popped = doc(el("div", "d", el("b", "x", "t", "u")))
+    assert H.read_formatting("b", {H.formatting_doc("b"): popped}, None).value is True
+    assert H.read_formatting("b", {H.formatting_doc("b"): single}, None).value is False
+    assert H.read_formatting("b", {H.formatting_doc("b"): not_popped}, None).value is None
+    assert H.read_formatting("b", {H.formatting_doc("b"): popped}, "void").value is None
+
+    # end-tag probes: equal marker ancestry with and without the end tag means the end tag was ignored
+    with_end, without = H.end_tag_docs("scope", "x", H.DOCTYPE)
+    inside = doc(el("div", "d", el("x", "x", "t", el("zmark", "Z"))))
+    outside = doc(el("div", "d", el("x", "x", "t")), el("zmark", "Z"))
+    ignored = {with_end: inside, without: inside}
+    honoured = {with_end: outside, without: inside}
+    assert H.read_end_tag("scope", "x", ignored, None).value is True
+    assert H.read_end_tag("scope", "x", honoured, None).value is False
+    # a name that is not a direct child of the wrapper cannot be read, in either compat mode
+    stray = doc(el("div", "d"), el("x", "x"), el("zmark", "Z"))
+    both = {d: stray for pair in (H.end_tag_docs("scope", "x", p) for p in H.PREFIXES) for d in pair}
+    assert H.read_end_tag("scope", "x", both, None).value is None
+
+    # void: no child, and the whitespace written after it is its next sibling
+    void_tree = doc(el("x", "x"), " ")
+    open_tree = doc(el("x", "x", " "))
+    trees = {H.place_doc("x", c): H.load(["#d", []]) for c in H.CONTEXTS}
+    trees[H.place_doc("x", "<body>")] = void_tree
+    assert H.read_place("x", trees)[1].value is True
+    trees[H.place_doc("x", "<body>")] = open_tree
+    assert H.read_place("x", trees)[1].value is False
+    trees[H.place_doc("x", "<body>")] = H.load(["#d", []])
+    assert H.read_place("x", trees)[1].value is None
+
+
+def test_the_html5_check_fails_on_a_wrong_cell_a_stale_probe_and_a_moved_browser():
+    """`--check` is the gate on the generated file, so each way it can be wrong is seeded."""
+    H, snap = _html5_snapshot()
+    rust = open(H.RUST_SRC).read()
+    assert H.check_generated(snap, rust) == [], "the committed file must match its stored derivation"
+
+    # a wrong category cell in the Rust file: a name dropped from the formatting arm, and a flag swapped
+    assert 'b"nobr" | ' in rust
+    assert H.check_generated(snap, rust.replace('b"nobr" | ', "", 1)), "a dropped member must fail"
+    assert H.check_generated(snap, rust.replace("SPECIAL | LIST_ITEM_SCOPE", "SPECIAL", 1)), \
+        "a dropped flag must fail"
+
+    # a wrong stored answer: the file no longer renders from it
+    import copy
+
+    wrong = copy.deepcopy(snap)
+    wrong["browsers"]["chrome"]["answers"]["formatting"]["span"] = True
+    failures = H.check_generated(wrong, rust)
+    assert failures, "a flipped stored answer must fail"
+    assert any("formatting" in f for f in failures), "...and the control for it must be named"
+
+    # a probe edited without re-deriving
+    stale = copy.deepcopy(snap)
+    stale["fingerprint"] = "0" * 64
+    assert any("probe documents changed" in f for f in H.check_generated(stale, rust))
+
+    # a universe name added without re-deriving
+    grown = copy.deepcopy(snap)
+    grown["universe"] = grown["universe"][:-1]
+    assert any("universe" in f for f in H.check_generated(grown, rust))
+
+    # --live: the same answers pass, a moved browser does not
+    stored = H.Derivation.from_json(snap["browsers"]["chrome"])
+    assert H.compare_live(stored, H.Derivation.from_json(snap["browsers"]["chrome"])) == []
+    moved = H.Derivation.from_json(copy.deepcopy(snap["browsers"]["chrome"]))
+    moved.answers["scope"]["div"] = True
+    moved.modes["div"] = "rcdata"
+    assert len(H.compare_live(stored, moved)) == 2
+
+
+def test_the_browser_decoder_gate_fails_on_a_new_difference_and_on_a_stale_bug():
+    """`browser_decoders.gate_failures`: a difference BROWSER_BUGS does not list fails, as does a listed one
+    with another answer and a listed one for a browser that ran which no longer occurs. A browser that did
+    not run leaves its entries alone, and a page decoded with another encoding, or a label the engine does
+    not resolve to itself, fails."""
+    import browser_decoders as D
+
+    bugs = dict(D.BROWSER_BUGS)
+    ok = {"Big5": "Big5"}
+    assert D.gate_failures(bugs, ["chrome"], {}, ok) == []
+    assert D.gate_failures({}, ["firefox"], {}, ok) == []
+    assert D.gate_failures({**bugs, ("chrome", "GBK", "8140"): "�"}, ["chrome"], {}, ok)
+    assert D.gate_failures({**bugs, ("chrome", "EUC-JP", "a1a1"): "、"}, ["chrome"], {}, ok)
+    stale = {k: v for k, v in bugs.items() if k[2] != "a1a1"}
+    assert any("stale" in f for f in D.gate_failures(stale, ["chrome"], {}, ok))
+    assert D.gate_failures(bugs, ["chrome"], {("chrome", "Big5"): "windows-1252"}, ok)
+    assert D.gate_failures(bugs, ["chrome"], {}, {"Big5": "Big5-HKSCS"})
+    # the comparison itself: one changed line is one difference, keyed by its sequence
+    seqs = D.sequences("windows-1252")
+    engine = [chr(b) for b in range(0x80, 0x100)]
+    browser = list(engine)
+    browser[1] = "�"
+    assert D.differences("windows-1252", browser, engine) == {seqs[1].hex(): "�"}
+    assert "lines" in D.differences("windows-1252", browser[:-1], engine)
+
+
+def test_chromes_big5_bug_is_excused_only_where_it_is_the_whole_difference():
+    """A value that differs from Chrome's only by Chrome's reading of the four two-code-point Big5
+    pointers is that bug; any other difference beside it is not."""
+    import browser_values as V
+
+    def verdict(engine, oracle):
+        return V.attribute_value(V.ValueRepro(((0, "x"),), "p::text", [engine], [oracle], ["#d", []]))
+
+    assert verdict("xê̌y", "x\xb3\udf0cy") == "Chrome's Big5 decoder bug (not followed)"
+    assert verdict("xÊ̄", "x\x93\udf04") == "Chrome's Big5 decoder bug (not followed)"
+    assert verdict("xQy", "x\xb3\udf0cy") is None
+    assert verdict("xê̌z", "x\xb3\udf0cy") is None
+
+
+def test_unlabelled_utf8_is_excused_only_as_its_exact_windows_1252_reading():
+    """A value Chrome decoded as windows-1252 where Frostwork read unlabelled UTF-8 is the documented
+    exception; a value that differs any other way is not."""
+    import browser_values as V
+
+    def verdict(engine, oracle):
+        return V.attribute_value(V.ValueRepro(((0, "x"),), "title::text", engine, oracle, ["#d", []]))
+
+    name = "unlabelled UTF-8 Chrome reads as windows-1252 (documented)"
+    assert verdict(["Madden® Česko", "same"], ["MaddenÂ® ÄŒesko", "same"]) == name
+    assert verdict(["café"], ["cafÃ©"]) == name
+    assert verdict(["café"], ["cafÃ¨"]) is None
+    assert verdict(["café", "x"], ["cafÃ©", "y"]) is None
+    assert verdict(["a"], ["a", "b"]) is None
+
+
+def test_the_quirks_construct_sees_a_class_inside_a_pseudo_class():
+    """A class selector inside `:not()` is still a class selector, which quirks mode folds."""
+    import browser_values as V
+
+    quirks = ["#d", [["html", 0, [], [["head", 0, [], []], ["body", 0, [], [
+        ["table", 0, [], [["tbody", 0, [], [["tr", 0, [], [["td", 0, ["class", "Japanese12"], [" "]]]]]]]]]]]]]]
+    r = V.ValueRepro(((0, '<table><td class="Japanese12"> '),), "td:not(.japanese12)::text", [" "], [], quirks)
+    assert V.attribute_value(r) == "quirks-mode class and id matching (deferred)"
+    r = V.ValueRepro(((0, '<table><td class="Japanese12"> '),), "td:not([class=x])::text", [" "], [], quirks)
+    assert V.attribute_value(r) is None

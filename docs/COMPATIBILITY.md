@@ -1,7 +1,7 @@
 # Frostwork compatibility contract
 
-Frostwork executes supported selectors itself, without a DOM or parser fallback. This reference describes
-four kinds of behavior:
+Frostwork is a streaming parser that executes supported selectors itself, without parser fallback. This
+reference describes four kinds of behavior:
 
 | bucket | meaning |
 |---|---|
@@ -9,6 +9,11 @@ four kinds of behavior:
 | ≈ **divergent** | runs, but may differ from lxml on specific documented and bounded constructs |
 | ➕ **beyond** | runs, and answers where lxml/Parsel refuses or loses the value — collected in [Beyond lxml](#beyond-lxml) |
 | ∅ **unsupported** | the engine produces an **empty result**; public Python APIs raise by default and expose this behavior with `strict=False` |
+
+This contract is **lxml mode**'s (`parser="lxml"`), the one every gate here proves. The default mode,
+`parser="browser"`, is graded against real browsers instead. At this stage it differs from lxml mode in
+what [Parse modes](#parse-modes) lists and otherwise uses libxml2's tree rules; its full design is
+[BROWSER_MODE.md](BROWSER_MODE.md).
 
 The promise is *close to lxml, always one streaming pass, never a DOM*. Unless a row marks an exception,
 the correctness bar is non-whitespace value parity with lxml (libxml2 2.15), not the HTML5 spec. A ✅ row
@@ -27,6 +32,56 @@ level, public Python APIs validate schemas and raise `UnsupportedSelector` by de
 `frostwork.check` report selector support (with an advisory refusal reason) and budget usage. A green
 audit does not classify a page's values into the four buckets or prove parity on that page; use the
 [saved-response workflow](MIGRATION.md) for that. See the [Python audit API](PYTHON.md#4-auditing-a-schema--check--strict-validation).
+
+### Parse modes
+
+| | lxml mode | browser mode (default) |
+|---|---|---|
+| input | Parsel's `text.strip().replace("\x00", "")` | the bytes as served; only a BOM at offset 0 is consumed, so a leading vertical tab or an indented U+FEFF is a character and opens the body |
+| NUL | deleted before tokenizing, so `<di\0v>` is a `div` | kept: a NUL in a tag or attribute name never matches an ASCII selector, body text drops it, every other value reads it as U+FFFD; before the body it is ignored |
+| `<noscript>` | markup (libxml2 parses with scripting off) | raw text, as a browser with scripting on reads it; head content |
+| HTML `<template>` | an ordinary element | the element matches; its content is not in the document, and is no element's child, sibling or text. An SVG `<template>` stays ordinary |
+| tree construction | libxml2 2.15's rules, below | HTML5 tree construction as Chrome 156 builds it: the insertion modes, a head that is always built, the scopes and implied end tags, tables with an implied `<tbody>`, `<tr>` and `<colgroup>` and foster parenting, customisable `<select>`, foreign content and its integration points, the active formatting elements and the adoption agency, the form pointer, the document mode from the doctype, declarative shadow roots, and a depth cap of 512 open elements |
+| `/>` on a non-void HTML element | closes it: `<title/>` holds no text, `<div/>` is empty | ignored, so `<div/>x` puts `x` in the div; honoured on an SVG or MathML element |
+| attribute names | lowercased, as libxml2 names them. A CSS attribute selector compares ASCII-case-insensitively; `::attr()` compares exactly, as parsel's XPath `@` does, so a capital in its name matches nothing (`div::attr(ID)` is `[]`) | as the browser's DOM names them: lowercased, with SVG's camel case (`viewBox`, `textLength`) and MathML's `definitionURL` restored, and `xlink:`/`xml:` attributes and `xmlns` of an SVG or MathML element in a namespace. `::attr()` reads an attribute as `getAttribute()` does: the name is ASCII-lowercased on an HTML element and compared with the DOM name exactly on an SVG or MathML one, so `div::attr(ID)` and `div::attr(viewBox)` answer, `svg::attr(viewBox)` answers and `svg::attr(viewbox)` does not. XPath's `@` compares the DOM name exactly; a CSS attribute selector compares it ASCII-case-insensitively and never names a namespaced one (`[xmlns]` misses `<svg xmlns=…>`). An XPath name is lowercase in both modes, so XPath reaches no camel-cased name: `//clippath` misses an SVG `<clipPath>`, and `@viewBox` is refused |
+| CSS attribute values | compared exactly unless the selector says `i` | the values of HTML's 46 listed attributes (`type`, `lang`, `rel`, `align`...) compare ASCII-case-insensitively on an HTML element, as in a browser; XPath compares exactly in both modes |
+| deferred predicate whose value is inside the selected element (`div:has(a) ::text`, `li:last-child b::text`) | supported, by re-scanning the element's source on its own | supported, by a second pass over the whole document that finds each winner again, so its content keeps the context the page gave it: `li:last-child b::text` is `["two"]` in `<p><b>x</p><ul><li>one<li>two</ul>`, where a browser copies the `<b>` into each `<li>`, and `[]` in lxml mode. The pass runs only on a document where such a winner arose, once for all of a schema's tail columns |
+| outer HTML of a selector that can match an element the page never wrote | supported: the value is the element's content | unsupported: there is no source of its own to return. Besides `<html>`/`<head>`/`<body>`, browser mode builds an implied `<tbody>`, `<tr>` and `<colgroup>` and an empty `<p>` for a stray `</p>`, none with attributes, so `tr`, `p` and `*` are refused and `tr.row`, `p.lead` are not. A formatting element the builder reopens as a copy (`<p><b class=k>1</p>2`) is supported: its raw source is the start tag it was copied from, then its own content (`<b class=k>2`) |
+| `.as_node()` in `frostwork.webpoet` | supported | refused at class definition: the reparse is lxml's |
+
+Encoding resolution and value decoding are the same in both modes. `frostwork.check(..., parser=...)` reports
+support per mode.
+
+### Browser mode's divergences from Chrome
+
+`make gate-browser` (`tools/diff_browser.py`) grades the whole tree and the value columns against Chrome,
+reduces every divergence to its smallest token sequence and fails on any. No tree construct is a
+divergence. Five rules change a decision the one-pass matcher has already made: a second `<html>` or
+`<body>` tag's attributes, the document order of fostered content, a `<frameset>` that removes a body,
+the adoption agency with a furthest block, and the copy of an `<option>` into `<selectedcontent>`. A
+document where one of them fires is answered by a second pass over the finished tree, so in
+`<b>1<p>2</b>3` `b p::text` is `[]` and `b::text` is `["1", "2"]`, `x<table>y` gives `body::text`
+`["xy"]`, `<p>x</p><body class=late>` matches `body.late p`, and so on, as in Chrome. That pass costs
+time, not values: on 30,000 Common Crawl pages it ran on 1.6% (`tools/retro_census.py`). Early exit
+(`first_only`) waits while a later token could still change a value it has taken: while a table is open,
+while a formatting element holds an open block, while a `<frameset>` could still remove the body, and
+while the rest of the page holds anything that could be an `<html>` or `<body>` start tag.
+
+What remains are not tree divergences:
+
+- Class and id selectors in a quirks-mode document (no doctype) match ASCII-case-insensitively in a
+  browser, and exactly here: `.a` misses `<p class=A>` (deferred, docs/BROWSER_MODE.md section 8).
+- Outer HTML is the raw source, as in lxml mode, so it is not Chrome's serialisation. That includes
+  attributes a later `<html>` or `<body>` tag merged into the element: its source has only its own. An
+  `<html>` or `<body>` the page never wrote reads its start tag from the first later tag that gave it
+  attributes, followed by its content without that tag. The same holds for the content a `<select>` copies from its selected option into a
+  `<selectedcontent>`: the element's source is empty, so its outer HTML and an ancestor's have it empty,
+  while `selectedcontent::text` is the copy, as in Chrome.
+
+Where Chrome and Firefox build different trees, browser mode follows Chrome. The gate's
+`--browsers chrome,firefox` table lists them; the ones it finds are Firefox making `<search>` and
+`<dialog>` special, `</br>` leaving the frameset-ok flag set, a `</p>` inside a MathML integration point,
+and processing instructions, which Firefox parses as comments.
 
 ---
 
@@ -341,9 +396,10 @@ DOM, no full tree construction). These rules were derived empirically against li
 ## Value semantics
 
 - `::text` / `text()` — one value per text node, whitespace preserved, entities decoded. Matches Parsel.
-- `::attr(name)` / `@attr` — entity-decoded attribute value. HTML4 minimized boolean attributes use
-  their lowercased name as the value (`<input DISABLED>` → `"disabled"`), while `disabled=""` remains
-  explicitly empty, matching libxml2/Parsel.
+- `::attr(name)` / `@attr` — entity-decoded attribute value. In lxml mode, HTML4 minimized boolean
+  attributes use their lowercased name as the value (`<input DISABLED>` → `"disabled"`), while
+  `disabled=""` remains explicitly empty, matching libxml2/Parsel. In browser mode every valueless
+  attribute is `""`, as in Chrome.
 - **Outer HTML** (bare element / node query) — the element's **raw source bytes**, a *deliberate*
   divergence from lxml's tree reflow (lxml normalizes attribute quotes/case/whitespace and synthesizes
   omitted end tags). Raw source is cheaper, faithful to the page, and **re-parse-equivalent** (parsing
@@ -428,7 +484,7 @@ tree can come back empty here.
 
 | construct | Parsel / w3lib | Frostwork | gate |
 |---|---|---|---|
-| **sniffing a `<meta charset>` at all** | `parsel.Selector(body=…)` never looks: it defaults to UTF-8 and every value carries U+FFFD. Scrapy users get sniffing from w3lib, one layer up | BOM → BOM-less UTF-16 → caller label → a `<meta>` prescan bounded the way a BROWSER bounds it → autodetection, with no caller label needed | `tools/enc_check.py` |
+| **sniffing a `<meta charset>` at all** | `parsel.Selector(body=…)` never looks: it defaults to UTF-8 and every value carries U+FFFD. Scrapy users get sniffing from w3lib, one layer up | BOM → BOM-less UTF-16 → forced label → `Content-Type` charset → a `<meta>` prescan bounded the way a BROWSER bounds it → autodetection, with no label needed | `tools/enc_check.py` |
 | a declaration **after `<body>`**, or **after an unsupported label** | w3lib's regex has a `\|body` alternative and gives up there, and it stops at its first hit rather than continuing past a label it cannot resolve | honoured — browsers do not stop at `<body>`, and WHATWG treats an unsupported label as "failure, continue" | the difference table under [Encoding](#deliberate-differences-from-w3lib), each row asserted in **both** directions so an upstream fix fails as stale |
 | a declaration **deep in the `<head>`** | ignored past 4096 bytes | honoured at any depth — measured in Chrome at 1KB/4KB/16KB/64KB/256KB **and 1MB**. A browser meeting the `<meta>` after its prescan budget runs "change the encoding" and re-decodes, so the budget is not a correctness cap. Legacy pages put `Content-Type` at byte ~1100–1600 behind a producer comment or a block of `og:` metas | `src/encoding.rs`; reasoning under [Encoding](#encoding) |
 | a **UTF-16 response body** | lxml's HTML parser cannot parse UTF-16 bytes at all — `Selector(body=…, encoding="utf-16")` returns `[]`/errors | decoded, matching the decode-first result Scrapy uses | `src/lib.rs::encoding_utf16_bom_transcode`, `src/encoding.rs::bomless_utf16_is_detected_from_the_xml_prefix` |
@@ -456,7 +512,7 @@ construction.
   no equivalent for (`utf-7`, `utf-32`, `cp437`, …) is ignored the way a browser ignores it, "failure,
   continue": the document is sniffed instead, and `detect_encoding` reports what that landed on.
 - **`frostwork.navigation()`** reads the base URL and meta refresh as browsers do, over the whole
-  document, and in the same pass as the fields with `Page.extract_with_navigation()`; see
+  document, in either parse mode, and with the fields through `Page.extract_with_navigation()`; see
   [PYTHON.md](PYTHON.md#base-url-and-meta-refresh--frostworknavigation).
 - **`frostwork.check` / `frostwork-audit`** answer "will this schema run?" *before* a scrape, per selector,
   with a reason. lxml has no equivalent question to ask — every selector "works", and a wrong one is an
@@ -588,7 +644,9 @@ answer. The reason is what a scraper is *for*: a price, a title or an address is
 matches what the site shows a person, so a value that differs from the browser is wrong even when
 every Python library agrees with it. There is no divergence budget here and no "acceptable local
 difference" — those exist for tree construction (foster parenting, the adoption agency), not for
-this.
+this. The rule has one named exception, unlabelled valid UTF-8, listed under
+[deliberate differences from browsers](#deliberate-differences-from-browsers) with the one place where
+the browsers themselves disagree.
 
 What that means in practice, for anyone porting a scraper *to* Frostwork: **where Frostwork's text
 differs from Scrapy's, on a page whose encoding is at all unusual, Frostwork is very likely the one
@@ -619,8 +677,8 @@ Encoding *sniffing* is still oracled against `w3lib.encoding.html_to_unicode` (w
 everything the two agree on, because Parsel itself never looks at `<meta>` — `parsel.Selector(body=…)`
 just defaults to UTF-8, so oracling a prescan against it is vacuous. But w3lib is **evidence, not the
 target**. Claims about "what browsers do" are settled by measuring a browser, not by quoting the
-standard at it: `~/src/encoding-hacks` runs exact bytes and exact HTTP headers past a real browser
-and twelve scraper stacks side by side, and that is where a row in the table below comes from.
+standard at it: exact bytes and exact HTTP headers are run past a real browser and twelve scraper
+stacks side by side, and that is where a row in the table below comes from.
 
 Resolution order (`src/encoding.rs`):
 
@@ -629,8 +687,14 @@ Resolution order (`src/encoding.rs`):
    encoded as UTF-16 (XML 1.0 Appendix F, and what libxml2's own `xmlDetectEncoding` does). Grouped with
    the BOM checks on the same reasoning WHATWG gives a BOM priority: the bytes are unambiguous, and no
    ASCII-compatible document can begin with a NUL.
-3. **caller / HTTP charset label**.
-4. **prescan, bounded the way a browser bounds it** — an XML declaration's `encoding=` (only at offset
+3. **a label the caller forced** (`encoding=`). A label no codec knows raises in Python; a real encoding
+   WHATWG lacks (`utf-7`) is ignored. It ranks below a BOM, because in a browser a BOM outranks every
+   label. Scrapy and web-poet rank their forced `_encoding` above the BOM, so a forced label on a
+   BOM-marked body is the one input where they and Frostwork disagree.
+4. **the `charset` parameter of the `Content-Type` header** (`content_type=`), case-insensitive, quoted or
+   not, resolved with the WHATWG label table and taken literally, so `x-user-defined` and the
+   `replacement` labels keep their meaning. An unusable value is ignored and never raises.
+5. **prescan, bounded the way a browser bounds it** — an XML declaration's `encoding=` (only at offset
    0) and `<meta charset>` / `<meta http-equiv=content-type>`, in document order. The bound is **the
    first 1024 bytes unconditionally, and past that only while still inside `<head>`**. It is two rules
    because a browser has two, and both were measured rather than read off the standard:
@@ -647,11 +711,12 @@ Resolution order (`src/encoding.rs`):
    head declarations real pages carry, and honoured body declarations no browser honours. Bounding at
    the head is also what makes this free — an unbounded scan measured a flat ~35µs per label-less page,
    one extra pass over the document, and the head bound gives all of it back.
-5. **autodetection** — UTF-8 if the whole document is valid UTF-8 (a sequence cut off at the end
-   still counts), otherwise [chardetng](https://crates.io/crates/chardetng)'s guess, which is what
-   Firefox uses for this step. UTF-8 and ISO-2022-JP are excluded from its guesses, as in Firefox,
-   and the top-level domain of the response URL, when the caller passes one, weighs the guess as it
-   does there (`.jp` favours Shift_JIS, `.ru` windows-1251, …).
+6. **autodetection** — UTF-8 if the whole document is valid UTF-8 (a sequence cut off at the end
+   still counts; see [the exception](#deliberate-differences-from-browsers)), otherwise
+   [chardetng](https://crates.io/crates/chardetng)'s guess, which is what Firefox uses for this step.
+   UTF-8 and ISO-2022-JP are excluded from its guesses, as in Firefox, and the top-level domain of the
+   response URL, when the caller passes one, weighs the guess as it does there (`.jp` favours
+   Shift_JIS, `.ru` windows-1251, …).
 
 Structural tokenization runs on raw bytes for every ASCII-compatible encoding — a byte below 0x80 *is*
 that ASCII character there, so the delimiters are unambiguous — and only the small emitted values are
@@ -661,6 +726,49 @@ which encodings those are is asked of `Encoding::is_ascii_compatible` rather tha
 to decode at all — one U+FFFD for the whole document). ISO-2022-JP is the one that bites: inside its
 `ESC $ B` mode a JIS pair is two bytes below 0x80, so `社` is the pair `<R`, and a crawled Japanese page
 tokenized as raw bytes grew an `<r>` start tag out of the middle of a word.
+
+Each rank that has nothing usable hands over to the next. [PYTHON.md](PYTHON.md#encoding-inputs) has
+the integrator contract: what to pass for each input, and what goes wrong otherwise.
+
+### Deliberate differences from browsers
+
+Three places where Frostwork's encoding is not the one a browser shows. All are decided, and all are
+measured against Chrome 156.
+
+**Unlabelled valid UTF-8 is read as UTF-8.** This is the encoding rule's one named exception. On a page
+with no BOM, no label and no declaration, browsers refuse to detect UTF-8 by policy: Chrome 156 shows
+windows-1252 mojibake on the lab's `no-declaration` case, and chardetng documents
+`Utf8Detection::Deny` as what Firefox passes for `text/html` from the network. Frostwork reads UTF-8,
+because the browser's answer is text nobody intended: a scraper that stores `cafÃ©` has a wrong value by
+any standard. A page cannot exploit this either, since every multi-byte UTF-8 sequence starts with a
+byte from 0xC2 to 0xF4, which windows-1252 shows as `Â` to `ô` followed by junk, so a page relying on the
+browser's reading would look broken to its own users. `tools/enc_check.py` asserts the exception against
+the recorded Chrome answer and fails if Frostwork ever starts agreeing with it. Chrome can also switch
+partway through a page: on a 4 MB page whose only declaration came 3 MB in, Chrome 156 decoded the first
+few hundred text nodes as windows-1252 and the rest as UTF-8, while Firefox and Frostwork read it all as
+UTF-8.
+
+**Autodetection follows Firefox.** When the bytes are not valid UTF-8 and nothing declares an encoding,
+Frostwork asks chardetng, the detector Firefox runs, with the top-level domain of the response URL as its
+hint. Chrome uses a different detector (Compact Encoding Detection) and the two disagree: on the lab's
+`body-meta-512k` case Chrome 156 guesses windows-874 and Frostwork windows-1252, so the price reads
+`1.299,00 ค` in one and `1.299,00 ¤` in the other. Chrome's guess also moves with the build and with a
+single byte of payload, so Frostwork does not chase it.
+
+**Three Chrome decoder bugs are not followed.** Frostwork decodes as WHATWG's Encoding Standard does, which
+Firefox matches on every byte `tools/browser_decoders.py` sweeps. Chrome 156 breaks it in three places:
+
+- Big5 `88 62`, `88 64`, `88 A3` and `88 A5`, which WHATWG maps to a letter and a combining mark (`Ê̄`,
+  `Ê̌`, `ê̄`, `ê̌`), come out of Chrome as a C1 control and a lone surrogate, text that is not well formed
+  and that no Rust string can hold.
+- In EUC-JP, after a `8F` lead and a malformed trail, Chrome keeps the JIS X 0212 flag that WHATWG clears,
+  so the next two-byte sequence is read from JIS X 0212: `8F A1 58 B0 A1` ends in `亜` in Frostwork and
+  Firefox, and in `丂` in Chrome.
+
+- A UTF-16 page that ends on half a code unit or on a lead surrogate: Chrome drops it, where WHATWG, and
+  Chrome itself for every other encoding, gives U+FFFD.
+
+`make gate-browser` asserts each against Chrome's answers and fails when one stops occurring.
 
 ### Extended characters in a SELECTOR
 

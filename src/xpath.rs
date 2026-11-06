@@ -263,7 +263,7 @@ fn build_upward(steps: &[(Comb, String)], terminal: Terminal) -> Option<Vec<Sele
         return None; // only `//INNER/axis::E` (INNER `//`-anchored, single `/` before the axis)
     }
     let s = &steps[1].1;
-    let p = s.find("::")?;
+    let p = axis_end(s)?;
     let rel = match &s[..p] {
         "ancestor" => Comb::Descendant, // E is an ANCESTOR of INNER -> E has INNER as a descendant
         "parent" => Comb::Child,        // E is the PARENT of INNER   -> E has INNER as a direct child
@@ -283,6 +283,29 @@ fn build_upward(steps: &[(Comb, String)], terminal: Terminal) -> Option<Vec<Sele
     let mut subject = one_plain(&s[p + 2..])?;
     subject.has = Some(Has { rel, inner: Box::new(inner) });
     Some(vec![Selector { parts: vec![subject], combs: Vec::new(), terminal, strict_desc: false, context_depth: None }])
+}
+
+/// Where a step's axis name ends: the offset of its `::`, when the step opens with a name followed by
+/// `::`. A `::` anywhere else is inside a predicate, such as the literal in `*[@id="a::b"]`.
+fn axis_end(step: &str) -> Option<usize> {
+    let k = step.bytes().position(|c| !(c.is_ascii_alphabetic() || c == b'-')).unwrap_or(step.len());
+    (k > 0 && step[k..].starts_with("::")).then_some(k)
+}
+
+/// Does `q` name an axis (`name::`) outside its quoted literals? See [`axis_end`].
+pub(crate) fn has_axis(q: &str) -> bool {
+    let b = q.as_bytes();
+    let mut quote = None;
+    for (i, &c) in b.iter().enumerate() {
+        match quote {
+            Some(qc) if c == qc => quote = None,
+            Some(_) => {}
+            None if c == b'"' || c == b'\'' => quote = Some(c),
+            None if c == b':' && b.get(i + 1) == Some(&b':') => return true,
+            None => {}
+        }
+    }
+    false
 }
 
 /// Split an absolute/relative path into `(combinator, step)` pairs. The first pair's combinator is
@@ -343,7 +366,7 @@ fn tokenize_path(path: &str) -> Option<Vec<(Comb, String)>> {
 /// sibling-axis step (`following-sibling::td[1]`) is also rejected — "first following sibling of type"
 /// has no faithful `~` lowering — so it stays unsupported rather than over-matching.
 fn parse_step(step: &str) -> Option<(Option<Comb>, Vec<Compound>)> {
-    let (axis_comb, step) = match step.find("::") {
+    let (axis_comb, step) = match axis_end(step) {
         Some(p) => match &step[..p] {
             "following-sibling" => (Some(Comb::General), &step[p + 2..]),
             _ => return None, // any other axis specifier -> unsupported
@@ -368,6 +391,7 @@ fn parse_step(step: &str) -> Option<(Option<Comb>, Vec<Compound>)> {
             return None; // uppercase tag name-test never matches libxml2's lowercased tree
         }
         base.tag = Some(name.to_string());
+        base.exact_tag = true;
     } else {
         return None; // node() / comment() / other node tests unsupported
     }
@@ -601,10 +625,10 @@ fn parse_predicate_alts(pred: &str) -> Option<Vec<Vec<AttrPred>>> {
 fn parse_one_attr(t: &str, out: &mut Vec<AttrPred>) -> Option<()> {
     if let Some(inner) = t.strip_prefix("contains(").and_then(|r| r.strip_suffix(")")) {
         let (name, val) = fn_args(inner)?;
-        out.push(AttrPred::new(name, AttrOp::Substr, val));
+        out.push(AttrPred::new(name, AttrOp::Substr, val).exact());
     } else if let Some(inner) = t.strip_prefix("starts-with(").and_then(|r| r.strip_suffix(")")) {
         let (name, val) = fn_args(inner)?;
-        out.push(AttrPred::new(name, AttrOp::Prefix, val));
+        out.push(AttrPred::new(name, AttrOp::Prefix, val).exact());
     } else {
         // not `@name…` -> positional / text() / function predicate -> unsupported
         let rest = t.strip_prefix('@')?;
@@ -614,13 +638,13 @@ fn parse_one_attr(t: &str, out: &mut Vec<AttrPred>) -> Option<()> {
                 return None;
             }
             let val = single_literal(rest[eq + 1..].trim())?;
-            out.push(AttrPred::new(name, AttrOp::Eq, val));
+            out.push(AttrPred::new(name, AttrOp::Eq, val).exact());
         } else {
             let name = rest.trim();
             if !valid_attr_name(name) {
                 return None;
             }
-            out.push(AttrPred::exists(name));
+            out.push(AttrPred::exists(name).exact());
         }
     }
     Some(())

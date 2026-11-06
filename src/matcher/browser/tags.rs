@@ -1,0 +1,412 @@
+//! Tag names as browser mode's tree builder dispatches on them, and the foreign-content name rules.
+
+/// An HTML-namespace tag name the insertion modes treat specially, or [`Tag::Other`]. A foreign
+/// element is always `Other`, so a rule that asks "is this a `<title>`" means the HTML one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Tag {
+    A,
+    Address,
+    Applet,
+    Area,
+    Article,
+    Aside,
+    B,
+    Base,
+    Basefont,
+    Bgsound,
+    Big,
+    Blockquote,
+    Body,
+    Br,
+    Button,
+    Caption,
+    Center,
+    Code,
+    Col,
+    Colgroup,
+    Dd,
+    Details,
+    Dialog,
+    Dir,
+    Div,
+    Dl,
+    Dt,
+    Em,
+    Embed,
+    Fieldset,
+    Figcaption,
+    Figure,
+    Font,
+    Footer,
+    Form,
+    Frame,
+    Frameset,
+    H1,
+    H2,
+    H3,
+    H4,
+    H5,
+    H6,
+    Head,
+    Header,
+    Hgroup,
+    Hr,
+    Html,
+    I,
+    Iframe,
+    Image,
+    Img,
+    Input,
+    Keygen,
+    Li,
+    Link,
+    Listing,
+    Main,
+    Malignmark,
+    Marquee,
+    Math,
+    Menu,
+    Meta,
+    Mglyph,
+    Nav,
+    Nobr,
+    Noembed,
+    Noframes,
+    Noscript,
+    Object,
+    Ol,
+    Optgroup,
+    Option,
+    P,
+    Param,
+    Plaintext,
+    Pre,
+    Rb,
+    Rp,
+    Rt,
+    Rtc,
+    Ruby,
+    S,
+    Script,
+    Search,
+    Section,
+    Select,
+    Selectedcontent,
+    Small,
+    Source,
+    Span,
+    Strike,
+    Strong,
+    Style,
+    Sub,
+    Summary,
+    Sup,
+    Svg,
+    Table,
+    Tbody,
+    Td,
+    Template,
+    Textarea,
+    Tfoot,
+    Th,
+    Thead,
+    Title,
+    Tr,
+    Track,
+    Tt,
+    U,
+    Ul,
+    Var,
+    Wbr,
+    Xmp,
+    Other,
+}
+
+/// How many [`Tag`]s there are, [`Tag::Other`] included.
+pub(super) const TAGS: usize = Tag::Other as usize + 1;
+
+/// The longest name [`lower`] keeps: longer than every name a table here is keyed by.
+pub(in crate::matcher) const MAX_NAME: usize = 24;
+
+/// `name` ASCII-lowercased into `buf`, or `None` when it is too long to be any name these tables know.
+pub(in crate::matcher) fn lower<'b>(name: &[u8], buf: &'b mut [u8; MAX_NAME]) -> Option<&'b [u8]> {
+    let out = buf.get_mut(..name.len())?;
+    for (o, &c) in out.iter_mut().zip(name) {
+        *o = c.to_ascii_lowercase();
+    }
+    Some(out)
+}
+
+/// The [`Tag`] of a raw (any-case) tag name.
+pub(super) fn tag_of(name: &[u8]) -> Tag {
+    let mut buf = [0; MAX_NAME];
+    lower(name, &mut buf).map_or(Tag::Other, tag_of_lower)
+}
+
+/// The [`Tag`] of an ASCII-lowercased tag name.
+pub(super) fn tag_of_lower(name: &[u8]) -> Tag {
+    match name {
+        b"a" => Tag::A,
+        b"address" => Tag::Address,
+        b"applet" => Tag::Applet,
+        b"area" => Tag::Area,
+        b"article" => Tag::Article,
+        b"aside" => Tag::Aside,
+        b"b" => Tag::B,
+        b"base" => Tag::Base,
+        b"basefont" => Tag::Basefont,
+        b"bgsound" => Tag::Bgsound,
+        b"big" => Tag::Big,
+        b"blockquote" => Tag::Blockquote,
+        b"body" => Tag::Body,
+        b"br" => Tag::Br,
+        b"button" => Tag::Button,
+        b"caption" => Tag::Caption,
+        b"center" => Tag::Center,
+        b"code" => Tag::Code,
+        b"col" => Tag::Col,
+        b"colgroup" => Tag::Colgroup,
+        b"dd" => Tag::Dd,
+        b"details" => Tag::Details,
+        b"dialog" => Tag::Dialog,
+        b"dir" => Tag::Dir,
+        b"div" => Tag::Div,
+        b"dl" => Tag::Dl,
+        b"dt" => Tag::Dt,
+        b"em" => Tag::Em,
+        b"embed" => Tag::Embed,
+        b"fieldset" => Tag::Fieldset,
+        b"figcaption" => Tag::Figcaption,
+        b"figure" => Tag::Figure,
+        b"font" => Tag::Font,
+        b"footer" => Tag::Footer,
+        b"form" => Tag::Form,
+        b"frame" => Tag::Frame,
+        b"frameset" => Tag::Frameset,
+        b"h1" => Tag::H1,
+        b"h2" => Tag::H2,
+        b"h3" => Tag::H3,
+        b"h4" => Tag::H4,
+        b"h5" => Tag::H5,
+        b"h6" => Tag::H6,
+        b"head" => Tag::Head,
+        b"header" => Tag::Header,
+        b"hgroup" => Tag::Hgroup,
+        b"hr" => Tag::Hr,
+        b"html" => Tag::Html,
+        b"i" => Tag::I,
+        b"iframe" => Tag::Iframe,
+        b"image" => Tag::Image,
+        b"img" => Tag::Img,
+        b"input" => Tag::Input,
+        b"keygen" => Tag::Keygen,
+        b"li" => Tag::Li,
+        b"link" => Tag::Link,
+        b"listing" => Tag::Listing,
+        b"main" => Tag::Main,
+        b"malignmark" => Tag::Malignmark,
+        b"marquee" => Tag::Marquee,
+        b"math" => Tag::Math,
+        b"menu" => Tag::Menu,
+        b"meta" => Tag::Meta,
+        b"mglyph" => Tag::Mglyph,
+        b"nav" => Tag::Nav,
+        b"nobr" => Tag::Nobr,
+        b"noembed" => Tag::Noembed,
+        b"noframes" => Tag::Noframes,
+        b"noscript" => Tag::Noscript,
+        b"object" => Tag::Object,
+        b"ol" => Tag::Ol,
+        b"optgroup" => Tag::Optgroup,
+        b"option" => Tag::Option,
+        b"p" => Tag::P,
+        b"param" => Tag::Param,
+        b"plaintext" => Tag::Plaintext,
+        b"pre" => Tag::Pre,
+        b"rb" => Tag::Rb,
+        b"rp" => Tag::Rp,
+        b"rt" => Tag::Rt,
+        b"rtc" => Tag::Rtc,
+        b"ruby" => Tag::Ruby,
+        b"s" => Tag::S,
+        b"script" => Tag::Script,
+        b"search" => Tag::Search,
+        b"section" => Tag::Section,
+        b"select" => Tag::Select,
+        b"selectedcontent" => Tag::Selectedcontent,
+        b"small" => Tag::Small,
+        b"source" => Tag::Source,
+        b"span" => Tag::Span,
+        b"strike" => Tag::Strike,
+        b"strong" => Tag::Strong,
+        b"style" => Tag::Style,
+        b"sub" => Tag::Sub,
+        b"summary" => Tag::Summary,
+        b"sup" => Tag::Sup,
+        b"svg" => Tag::Svg,
+        b"table" => Tag::Table,
+        b"tbody" => Tag::Tbody,
+        b"td" => Tag::Td,
+        b"template" => Tag::Template,
+        b"textarea" => Tag::Textarea,
+        b"tfoot" => Tag::Tfoot,
+        b"th" => Tag::Th,
+        b"thead" => Tag::Thead,
+        b"title" => Tag::Title,
+        b"tr" => Tag::Tr,
+        b"track" => Tag::Track,
+        b"tt" => Tag::Tt,
+        b"u" => Tag::U,
+        b"ul" => Tag::Ul,
+        b"var" => Tag::Var,
+        b"wbr" => Tag::Wbr,
+        b"xmp" => Tag::Xmp,
+        _ => Tag::Other,
+    }
+}
+
+/// The start tags that end foreign content: an HTML element written inside `<svg>` or `<math>` is
+/// HTML, and the foreign elements around it close first (a `<font>` only with a presentational
+/// attribute, see [`font_breaks_out`]).
+pub(super) fn breaks_out(tag: Tag) -> bool {
+    use Tag::*;
+    matches!(
+        tag,
+        B | Big | Blockquote | Body | Br | Center | Code | Dd | Div | Dl | Dt | Em | Embed | H1 | H2 | H3 | H4
+            | H5 | H6 | Head | Hr | I | Img | Li | Listing | Menu | Meta | Nobr | Ol | P | Pre | Ruby | S
+            | Small | Span | Strong | Strike | Sub | Sup | Table | Tt | U | Ul | Var
+    )
+}
+
+/// Does a `<font>` start tag with these attributes end foreign content?
+pub(super) fn font_breaks_out(attrs: &[(&[u8], Option<&[u8]>)]) -> bool {
+    attrs.iter().any(|(n, _)| {
+        n.eq_ignore_ascii_case(b"color") || n.eq_ignore_ascii_case(b"face") || n.eq_ignore_ascii_case(b"size")
+    })
+}
+
+/// The local name of an SVG element: HTML5 restores the camel case of the SVG names that have it.
+pub(in crate::matcher) fn svg_local_name(name: &[u8]) -> Option<&'static [u8]> {
+    let mut buf = [0; MAX_NAME];
+    svg_camel_case(lower(name, &mut buf)?)
+}
+
+/// [`svg_local_name`] of an ASCII-lowercased name.
+pub(super) fn svg_camel_case(low: &[u8]) -> Option<&'static [u8]> {
+    Some(match low {
+        b"altglyph" => b"altGlyph",
+        b"altglyphdef" => b"altGlyphDef",
+        b"altglyphitem" => b"altGlyphItem",
+        b"animatecolor" => b"animateColor",
+        b"animatemotion" => b"animateMotion",
+        b"animatetransform" => b"animateTransform",
+        b"clippath" => b"clipPath",
+        b"feblend" => b"feBlend",
+        b"fecolormatrix" => b"feColorMatrix",
+        b"fecomponenttransfer" => b"feComponentTransfer",
+        b"fecomposite" => b"feComposite",
+        b"feconvolvematrix" => b"feConvolveMatrix",
+        b"fediffuselighting" => b"feDiffuseLighting",
+        b"fedisplacementmap" => b"feDisplacementMap",
+        b"fedistantlight" => b"feDistantLight",
+        b"fedropshadow" => b"feDropShadow",
+        b"feflood" => b"feFlood",
+        b"fefunca" => b"feFuncA",
+        b"fefuncb" => b"feFuncB",
+        b"fefuncg" => b"feFuncG",
+        b"fefuncr" => b"feFuncR",
+        b"fegaussianblur" => b"feGaussianBlur",
+        b"feimage" => b"feImage",
+        b"femerge" => b"feMerge",
+        b"femergenode" => b"feMergeNode",
+        b"femorphology" => b"feMorphology",
+        b"feoffset" => b"feOffset",
+        b"fepointlight" => b"fePointLight",
+        b"fespecularlighting" => b"feSpecularLighting",
+        b"fespotlight" => b"feSpotLight",
+        b"fetile" => b"feTile",
+        b"feturbulence" => b"feTurbulence",
+        b"foreignobject" => b"foreignObject",
+        b"glyphref" => b"glyphRef",
+        b"lineargradient" => b"linearGradient",
+        b"radialgradient" => b"radialGradient",
+        b"textpath" => b"textPath",
+        _ => return None,
+    })
+}
+
+/// The DOM name HTML5 gives an SVG element's attribute whose lowercased name is `low` ("adjust SVG
+/// attributes"), when it is not the lowercased name itself.
+pub(in crate::matcher) fn svg_attr_name(low: &[u8]) -> Option<&'static [u8]> {
+    Some(match low {
+        b"attributename" => b"attributeName",
+        b"attributetype" => b"attributeType",
+        b"basefrequency" => b"baseFrequency",
+        b"baseprofile" => b"baseProfile",
+        b"calcmode" => b"calcMode",
+        b"clippathunits" => b"clipPathUnits",
+        b"diffuseconstant" => b"diffuseConstant",
+        b"edgemode" => b"edgeMode",
+        b"filterunits" => b"filterUnits",
+        b"glyphref" => b"glyphRef",
+        b"gradienttransform" => b"gradientTransform",
+        b"gradientunits" => b"gradientUnits",
+        b"kernelmatrix" => b"kernelMatrix",
+        b"kernelunitlength" => b"kernelUnitLength",
+        b"keypoints" => b"keyPoints",
+        b"keysplines" => b"keySplines",
+        b"keytimes" => b"keyTimes",
+        b"lengthadjust" => b"lengthAdjust",
+        b"limitingconeangle" => b"limitingConeAngle",
+        b"markerheight" => b"markerHeight",
+        b"markerunits" => b"markerUnits",
+        b"markerwidth" => b"markerWidth",
+        b"maskcontentunits" => b"maskContentUnits",
+        b"maskunits" => b"maskUnits",
+        b"numoctaves" => b"numOctaves",
+        b"pathlength" => b"pathLength",
+        b"patterncontentunits" => b"patternContentUnits",
+        b"patterntransform" => b"patternTransform",
+        b"patternunits" => b"patternUnits",
+        b"pointsatx" => b"pointsAtX",
+        b"pointsaty" => b"pointsAtY",
+        b"pointsatz" => b"pointsAtZ",
+        b"preservealpha" => b"preserveAlpha",
+        b"preserveaspectratio" => b"preserveAspectRatio",
+        b"primitiveunits" => b"primitiveUnits",
+        b"refx" => b"refX",
+        b"refy" => b"refY",
+        b"repeatcount" => b"repeatCount",
+        b"repeatdur" => b"repeatDur",
+        b"requiredextensions" => b"requiredExtensions",
+        b"requiredfeatures" => b"requiredFeatures",
+        b"specularconstant" => b"specularConstant",
+        b"specularexponent" => b"specularExponent",
+        b"spreadmethod" => b"spreadMethod",
+        b"startoffset" => b"startOffset",
+        b"stddeviation" => b"stdDeviation",
+        b"stitchtiles" => b"stitchTiles",
+        b"surfacescale" => b"surfaceScale",
+        b"systemlanguage" => b"systemLanguage",
+        b"tablevalues" => b"tableValues",
+        b"targetx" => b"targetX",
+        b"targety" => b"targetY",
+        b"textlength" => b"textLength",
+        b"viewbox" => b"viewBox",
+        b"viewtarget" => b"viewTarget",
+        b"xchannelselector" => b"xChannelSelector",
+        b"ychannelselector" => b"yChannelSelector",
+        b"zoomandpan" => b"zoomAndPan",
+        _ => return None,
+    })
+}
+
+/// Is `low` (lowercased) one of the attributes HTML5 puts in a namespace on a foreign element ("adjust
+/// foreign attributes")? A CSS attribute selector names a no-namespace attribute, so it never matches one.
+pub(in crate::matcher) fn namespaced_foreign_attr(low: &[u8]) -> bool {
+    matches!(
+        low,
+        b"xlink:actuate" | b"xlink:arcrole" | b"xlink:href" | b"xlink:role" | b"xlink:show" | b"xlink:title"
+            | b"xlink:type" | b"xml:lang" | b"xml:space" | b"xmlns" | b"xmlns:xlink"
+    )
+}

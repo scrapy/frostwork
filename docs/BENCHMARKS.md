@@ -1,6 +1,6 @@
 # Frostwork benchmarks
 
-Frostwork answers a fixed set of CSS/XPath selectors in **one streaming pass, with no DOM**. These are
+Frostwork answers a fixed set of CSS/XPath selectors in **one streaming pass**. These are
 its measured numbers against the parsers scraping actually uses.
 
 | on a real production corpus | Frostwork |
@@ -23,7 +23,9 @@ outside its timed loop, and `bench_engines.py` / `bench_corpus.py` / `bench_mem.
 page object.
 
 **Provenance, because the sections are not all the same vintage.** The page-shape matrix, size sweep,
-grouped and deferred-tail figures below are from an earlier `tools/bench_matrix.py` run on Apple arm64.
+grouped and deferred-tail figures below are from an earlier `tools/bench_matrix.py` run on Apple arm64,
+in lxml mode; the generator now also times browser mode, which that table predates. The browser-mode
+section counts instructions, not time, from 2026-11-04.
 The **production-corpus** and **competitive-field** tables in the next two sections are older: their
 corpus is not distributed and is not present on the machine this build was measured on, so they were
 not re-run. They predate subsequent engine changes and are historical measurements, not a guaranteed performance
@@ -105,7 +107,7 @@ swapping in.
 
 | engine | what it is |
 | --- | --- |
-| **Frostwork** | one streaming pass, no DOM |
+| **Frostwork** | streaming parser, one pass |
 | **Parsel** | what Scrapy uses; also this run's parity oracle |
 | **lxml + cssselect** | Parsel's tree and translation without Parsel's Python wrapper |
 | **selectolax (lexbor)** | the fastest CSS-selector HTML parser in Python scraping |
@@ -243,10 +245,11 @@ selectolax's row pays for value parity: its C-level `node.text()` returns one co
 element where Parsel's `::text` is one value per text node, and producing the latter costs a
 Python-level walk.
 
-## Memory profile — what "no DOM" buys
+## Memory profile — what streaming buys
 
-Frostwork's defining property is invisible to a throughput chart. It builds no tree, so peak memory
-tracks open-element state and extracted output, not a materialized page. Measured as
+Frostwork's defining property is invisible to a throughput chart. On a page it streams, which is every
+page in lxml mode and about 98% in browser mode, it builds no tree, so peak memory tracks open-element
+state and extracted output, not a materialized page. Measured as
 subprocess-isolated peak RSS, reported as work − baseline so interpreter, imports and document bytes
 cancel out (`.venv/bin/python tools/bench_mem.py`).
 
@@ -264,6 +267,45 @@ For a fixed-output schema Frostwork's memory is flat while Parsel's tracks the p
 scales with the values you asked for instead: across the 12 largest corpus pages the median ratio is
 **31×**, narrowing to ~2× on the value-heavy ones (42 selectors, or a big inline-JSON `script::text`,
 where Frostwork's RSS *is* the returned data). It never pays for a tree either way.
+
+## Browser mode against lxml mode
+
+The same build and the same selectors, each page parsed in both modes. The measure is instructions
+retired per page (`/usr/bin/time -l`, Apple arm64, 2026-11-04): a 250-page run of `bench` minus a 50-page
+run, divided by 200, so start-up and schema compilation cancel out. Instruction counts repeat to within
+about 0.1% on a loaded machine where wall-clock time swings by half, which is why they are used here.
+They are not time, though: a count says nothing about cache misses or branch prediction. This document
+has no wall-clock figures for browser mode yet.
+
+| pages | count | browser / lxml instructions, p10 – median – p90 |
+| --- | --- | --- |
+| `fixtures/realweb`, each with its own selectors | 31 | 1.14× – 1.18× – 1.24× |
+| Common Crawl pages browser mode streams | 60 | 1.01× – 1.06× – 1.09× |
+| Common Crawl pages browser mode replays | 60 | 1.19× – 1.61× – 2.06× |
+
+The Common Crawl rows are pages over 2 KB from one 10 000-page CC-MAIN-2026-30 sample in a private lab,
+each with 32 selectors generated from its own markup, and the streamed set is matched by size to the
+replayed one. A page replays when one of five HTML5 rules changes an answer (docs/BROWSER_MODE.md,
+section 4), about 1.6% of real pages, so the replayed row is the tail and the streamed row the common case.
+
+On those replayed pages, building and walking the tree from the start would cost a median 1.11× lxml
+mode; stopping a streaming pass where the rule fires and starting again costs the 1.61× above, so a median
+81% of a replay's extra cost is the streamed prefix it throws away. The tree itself, over the 639 replays
+in a 40 000-page sample, holds a median 1 100 nodes and 150 KB (p90 500 KB, max 4 MB), about 2.3 times the
+page's bytes, and is freed with its page.
+
+The cost is in the scan. On the generated pages below with no selectors, browser mode retires 1.63× lxml
+mode's instructions; with 16 to 32 selectors the ratio is 1.08× to 1.19×, because matching, which the two
+modes share, then dominates.
+
+| generated page (≈196 KB), selectors | lxml, M instructions | browser, M instructions | browser / lxml |
+| --- | ---: | ---: | ---: |
+| utility-CSS, none (pure scan) | 6.7 | 10.9 | 1.63× |
+| attribute-heavy, 16 attribute-predicate | 26.2 | 31.1 | 1.19× |
+| utility-CSS, 32 descendant-led | 46.5 | 50.5 | 1.09× |
+| utility-CSS, 32 class-led | 48.0 | 52.1 | 1.08× |
+| table, 32 tag-led | 140.5 | 159.6 | 1.14× |
+| product listing, 16 tag-led | 71.9 | 80.4 | 1.12× |
 
 ## Page shape — the synthetic matrix
 
@@ -446,10 +488,10 @@ trades accuracy — see the compatibility contract's
 
 ### Where the design trades off
 
-Two shapes where the curve above does not hold. Reproduce with
+One shape where the curve above does not hold. Reproduce with
 `make bench-webpoet BENCH_ARGS="--boundaries"`.
 
-**1. A node-taking processor (`.as_node()`) on a many-match field loses to Parsel.** The processor
+**A node-taking processor (`.as_node()`) on a many-match field loses to Parsel.** The processor
 contract is an lxml node, so each match is re-parsed on its own, where Parsel hands over elements from
 a tree it has already built.
 
@@ -465,13 +507,6 @@ Near parity at one to three matches, behind by ten. One `.as_node()` field per p
 since most zyte item fields are scalars — costs nothing measurable, and subtree size is not the
 problem: one match over a 1 KB, 30 KB and 250 KB subtree stays slightly ahead. It is the per-match
 repetition that costs.
-
-**2. A response with no charset anywhere costs a page-sized decode.** `frostwork_input()` reads
-`resp.encoding` so the bytes are scanned with the label Parsel would have decoded with; with no
-`Content-Type` charset, no BOM and no `<meta>`, web-poet falls through to `w3lib.html_to_unicode` over
-the whole body. The time is negligible (0.01 → 0.03 ms) but the decoded text is retained. Keeping it
-is deliberate: inference answers `cp1252` where Frostwork's own sniffer would default to `utf-8`, so
-*not* reading `resp.encoding` would decode some pages differently from Parsel.
 
 ## Method
 

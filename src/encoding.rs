@@ -1,5 +1,13 @@
-//! Encoding resolution: BOM -> explicit override (HTTP/caller) -> `<meta>` charset prescan -> UTF-8
-//! default.
+//! Encoding resolution, one precedence table for every entry point (see [`resolve_explained`]):
+//!
+//! 1. a BOM (UTF-8, UTF-16LE, UTF-16BE);
+//! 2. BOM-less UTF-16, from the `<?` prefix;
+//! 3. the caller's own label (`encoding=`);
+//! 4. the `charset` parameter of the response's `Content-Type` header (`content_type=`);
+//! 5. the document's declarations: an XML declaration at offset 0, then `<meta>` in document order;
+//! 6. autodetection: UTF-8 if the document is valid UTF-8, else chardetng with the URL's TLD.
+//!
+//! A label a rank cannot use is ignored and resolution continues with the next rank.
 //!
 //! An ASCII-compatible encoding is never transcoded. The tokenizer runs on raw bytes and the matcher
 //! decodes only emitted *values* with the resolved encoding, which works because in an ASCII-compatible
@@ -241,9 +249,6 @@ fn start_tag_name(head: &[u8], lt: usize) -> Option<&[u8]> {
 /// body declarations no browser does. It also costs ~35µs on every label-less page, a whole extra pass
 /// over the document, which stopping at the real head boundary does not.
 pub(crate) fn meta_prescan(head: &[u8]) -> Option<&'static Encoding> {
-    if let Some(enc) = xml_decl_encoding(head) {
-        return enc.into();
-    }
     let mut mfrom = 0usize;
     // Raised to `max(PRESCAN_FLOOR, here)` the moment a tag ends the head; `MAX` while still inside it.
     let mut limit = usize::MAX;
@@ -305,35 +310,169 @@ pub(crate) fn meta_prescan(head: &[u8]) -> Option<&'static Encoding> {
     None
 }
 
-/// BOM → BOM-less UTF-16 XML prefix → caller/HTTP label → `<meta>`/XML-declaration prescan (the whole
-/// document) → UTF-8 if the document is valid UTF-8, otherwise a guess from its bytes, informed by
-/// the top-level domain of `url` when given. The intentional differences from w3lib (Scrapy's decoder)
-/// are in the encoding section of docs/COMPATIBILITY.md and gated in `tools/enc_check.py`; each one is
-/// a place where w3lib and browsers disagree and Frostwork follows the browser.
-pub fn resolve(html: &[u8], override_label: Option<&str>, url: Option<&str>) -> &'static Encoding {
-    if let Some((enc, _)) = bom(html) {
-        return enc;
-    }
-    if let Some(label) = override_label {
-        if let Some(enc) = Encoding::for_label(label.as_bytes()) {
-            return enc;
+/// What a caller knows about a response besides its bytes: the inputs to ranks 3, 4 and 6 of the
+/// precedence table in [`resolve_explained`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EncodingHints<'a> {
+    /// The caller's own label, for a user who forced an encoding. Never a framework's resolved
+    /// encoding: that is a decision, and passed here it would outrank the document's declarations.
+    pub encoding: Option<&'a str>,
+    /// The raw `Content-Type` header value. Only its `charset` parameter is read.
+    pub content_type: Option<&'a str>,
+    /// The response URL. The top-level domain of its host informs autodetection.
+    pub url: Option<&'a str>,
+}
+
+/// Which rank of the precedence table decided an encoding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EncodingSource {
+    /// A UTF-8, UTF-16LE or UTF-16BE byte order mark.
+    Bom,
+    /// A BOM-less UTF-16 document, recognised by `<?` encoded as UTF-16.
+    Utf16Prefix,
+    /// The caller's label ([`EncodingHints::encoding`]).
+    Encoding,
+    /// The `charset` parameter of [`EncodingHints::content_type`].
+    ContentType,
+    /// An XML declaration at offset 0.
+    XmlDeclaration,
+    /// A `<meta charset>` or `<meta http-equiv=content-type>`.
+    Meta,
+    /// No label or declaration, and the document is valid UTF-8.
+    Utf8,
+    /// No label or declaration, and chardetng's guess.
+    Autodetect,
+}
+
+impl EncodingSource {
+    /// The name the Python binding reports (`detect_encoding(..., explain=True)`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EncodingSource::Bom => "bom",
+            EncodingSource::Utf16Prefix => "utf16-prefix",
+            EncodingSource::Encoding => "encoding",
+            EncodingSource::ContentType => "content-type",
+            EncodingSource::XmlDeclaration => "xml-declaration",
+            EncodingSource::Meta => "meta",
+            EncodingSource::Utf8 => "utf8",
+            EncodingSource::Autodetect => "autodetect",
         }
     }
-    // The prescan is NOT bounded by a byte window, because a browser's is not. WHATWG's 1024 is a
-    // STREAMING budget — user agents are "encouraged to use the prescan algorithm ... on the first 1024
-    // bytes, but not to stall beyond that", i.e. do not block first paint waiting for more bytes off the
-    // network — and a browser that meets a `<meta charset>` after it simply runs "change the encoding"
-    // and re-decodes what it already has. Measured rather than assumed: Chrome honours a declaration at
-    // 1 KB, 4 KB, 16 KB, 64 KB, 256 KB and 1 MB alike, so there is no bound to match. Frostwork holds the
-    // whole document and has nothing to stall on either.
-    //
-    // A window is therefore a divergence from the browser, and this subsystem has no budget for one (see
-    // the encoding rule in AGENTS.md). A fixed window would miss declarations on pages that open with a
-    // producer comment or a block of metadata, decoding their values with the wrong encoding.
-    //
-    // Deliberately NOT stopped at `<body>` (w3lib's regex does), because a real page can carry a late
-    // `<meta charset>` inside the body and browsers still honour it.
-    meta_prescan(html).unwrap_or_else(|| autodetect(html, url))
+}
+
+/// The `charset` parameter of a `Content-Type` header value: the first non-empty parameter whose name
+/// is `charset` in any case, quoted or not, with whitespace around the name, the `=` and the value
+/// ignored. `None` when there is none. The header is server data, so nothing here can fail.
+fn content_type_charset(value: &str) -> Option<String> {
+    let (_essence, mut rest) = value.split_once(';')?;
+    loop {
+        let i = rest.find(['=', ';'])?;
+        let (name, after) = (&rest[..i], &rest[i..]);
+        let name = name.trim_matches(is_http_ws);
+        if let Some(after) = after.strip_prefix(';') {
+            rest = after;
+            continue;
+        }
+        let after = after[1..].trim_start_matches(is_http_ws);
+        let (param, next) = if let Some(quoted) = after.strip_prefix('"') {
+            let mut param = String::new();
+            let mut chars = quoted.char_indices();
+            let mut end = quoted.len();
+            while let Some((i, c)) = chars.next() {
+                match c {
+                    '"' => {
+                        end = i + 1;
+                        break;
+                    }
+                    '\\' => match chars.next() {
+                        Some((_, escaped)) => param.push(escaped),
+                        None => param.push('\\'),
+                    },
+                    c => param.push(c),
+                }
+            }
+            let tail = &quoted[end..];
+            (param, tail.find(';').map(|i| &tail[i + 1..]))
+        } else {
+            match after.find(';') {
+                Some(i) => (after[..i].trim_end_matches(is_http_ws).to_string(), Some(&after[i + 1..])),
+                None => (after.trim_end_matches(is_http_ws).to_string(), None),
+            }
+        };
+        if name.eq_ignore_ascii_case("charset") && !param.is_empty() {
+            return Some(param);
+        }
+        rest = next?;
+    }
+}
+
+fn is_http_ws(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '\n' | '\r')
+}
+
+/// The encoding `html` is scanned with, and the rank that decided it. Each rank either decides or, if it
+/// has nothing usable, hands over to the next:
+///
+/// 1. a BOM;
+/// 2. BOM-less UTF-16 from the `<?` prefix;
+/// 3. `hints.encoding`, resolved with the WHATWG label table (a label it does not know is ignored here;
+///    the Python binding refuses one no codec knows before it reaches this point);
+/// 4. the `charset` parameter of `hints.content_type`, resolved the same way and taken literally, so
+///    `x-user-defined` and the `replacement` labels keep their meaning;
+/// 5. the document's own declarations ([`declaration`]);
+/// 6. autodetection, with the top-level domain of `hints.url`.
+///
+/// The intentional differences from w3lib (Scrapy's decoder) are in the encoding section of
+/// docs/COMPATIBILITY.md and gated in `tools/enc_check.py`; each one is a place where w3lib and browsers
+/// disagree and Frostwork follows the browser.
+///
+/// No UTF-32: the WHATWG Encoding Standard has no UTF-32, and neither does any browser, so a UTF-32 BOM
+/// is not a BOM here. w3lib does recognize it (its BOM table predates the standard).
+pub fn resolve_explained(html: &[u8], hints: EncodingHints<'_>) -> (&'static Encoding, EncodingSource) {
+    if let Some((enc, len)) = bom(html) {
+        let source = if len == 0 { EncodingSource::Utf16Prefix } else { EncodingSource::Bom };
+        return (enc, source);
+    }
+    if let Some(enc) = hints.encoding.and_then(|label| Encoding::for_label(label.as_bytes())) {
+        return (enc, EncodingSource::Encoding);
+    }
+    let header = hints.content_type.and_then(content_type_charset);
+    if let Some(enc) = header.and_then(|label| Encoding::for_label(label.as_bytes())) {
+        return (enc, EncodingSource::ContentType);
+    }
+    if let Some(found) = declaration(html) {
+        return found;
+    }
+    autodetect(html, hints.url.and_then(tld).as_deref())
+}
+
+/// [`resolve_explained`] with a caller label and a URL, for the unit tests below.
+#[cfg(test)]
+fn resolve(html: &[u8], label: Option<&str>, url: Option<&str>) -> &'static Encoding {
+    resolve_explained(html, EncodingHints { encoding: label, content_type: None, url }).0
+}
+
+/// The document's own declaration: an XML declaration at offset 0, else the first usable `<meta>`.
+///
+/// The prescan is NOT bounded by a byte window, because a browser's is not. WHATWG's 1024 is a
+/// STREAMING budget — user agents are "encouraged to use the prescan algorithm ... on the first 1024
+/// bytes, but not to stall beyond that", i.e. do not block first paint waiting for more bytes off the
+/// network — and a browser that meets a `<meta charset>` after it simply runs "change the encoding"
+/// and re-decodes what it already has. Measured rather than assumed: Chrome honours a declaration at
+/// 1 KB, 4 KB, 16 KB, 64 KB, 256 KB and 1 MB alike, so there is no bound to match. Frostwork holds the
+/// whole document and has nothing to stall on either.
+///
+/// A window is therefore a divergence from the browser, and this subsystem has no budget for one (see
+/// the encoding rule in AGENTS.md). A fixed window would miss declarations on pages that open with a
+/// producer comment or a block of metadata, decoding their values with the wrong encoding.
+///
+/// Deliberately NOT stopped at `<body>` (w3lib's regex does), because a real page can carry a late
+/// `<meta charset>` inside the body and browsers still honour it.
+pub(crate) fn declaration(html: &[u8]) -> Option<(&'static Encoding, EncodingSource)> {
+    if let Some(enc) = xml_decl_encoding(html) {
+        return Some((enc, EncodingSource::XmlDeclaration));
+    }
+    meta_prescan(html).map(|enc| (enc, EncodingSource::Meta))
 }
 
 /// The encoding the start of `html` fixes before any label is consulted, with the length of the BOM
@@ -370,23 +509,28 @@ pub(crate) fn bom(html: &[u8]) -> Option<(&'static Encoding, usize)> {
 /// front by a strict decode, as Chrome and Scrapy do. A body cut off inside a UTF-8 sequence is still
 /// UTF-8. The guess is informed by the top-level domain of `url` when given.
 ///
+/// The UTF-8 check is the one place the encoding subsystem knowingly differs from browsers: Chrome
+/// reads an unlabelled valid UTF-8 page as windows-1252 by policy, and chardetng documents the same
+/// policy for Firefox (`Utf8Detection::Deny`). The result is text nobody intended, so Frostwork reads
+/// UTF-8 here; see "Deliberate differences from browsers" in docs/COMPATIBILITY.md.
+///
 /// The decode is `simdutf8::compat`, which returns what `std::str::from_utf8` does. Not `basic`: it
 /// reads the whole document before failing and has no `error_len()` to tell a truncated tail apart.
-pub(crate) fn autodetect(html: &[u8], url: Option<&str>) -> &'static Encoding {
+pub(crate) fn autodetect(html: &[u8], tld: Option<&[u8]>) -> (&'static Encoding, EncodingSource) {
     match simdutf8::compat::from_utf8(html) {
-        Ok(_) => encoding_rs::UTF_8,
-        Err(e) if e.error_len().is_none() => encoding_rs::UTF_8,
+        Ok(_) => (encoding_rs::UTF_8, EncodingSource::Utf8),
+        Err(e) if e.error_len().is_none() => (encoding_rs::UTF_8, EncodingSource::Utf8),
         Err(_) => {
             let mut detector = chardetng::EncodingDetector::new(chardetng::Iso2022JpDetection::Deny);
             detector.feed(html, true);
-            detector.guess(url.and_then(tld).as_deref(), chardetng::Utf8Detection::Deny)
+            (detector.guess(tld, chardetng::Utf8Detection::Deny), EncodingSource::Autodetect)
         }
     }
 }
 
 /// The last label of `url`'s host, lowercased, in the form chardetng accepts: ASCII without periods.
 /// An IP address or a non-ASCII host yields `None`, as does a string without a scheme.
-fn tld(url: &str) -> Option<Vec<u8>> {
+pub(crate) fn tld(url: &str) -> Option<Vec<u8>> {
     let (_, rest) = url.split_once("://")?;
     let authority = rest.split(['/', '\\', '?', '#']).next()?;
     let host = authority.rsplit('@').next()?;
@@ -436,6 +580,50 @@ mod tests {
     }
 
     #[test]
+    fn the_content_type_charset_parameter_is_parsed_leniently() {
+        let cs = content_type_charset;
+        assert_eq!(cs("text/html; charset=windows-1252"), Some("windows-1252".into()));
+        assert_eq!(cs("text/html;CHARSET=Big5"), Some("Big5".into()));
+        assert_eq!(cs("text/html; charset=\"utf-8\""), Some("utf-8".into()));
+        assert_eq!(cs("text/html; charset = shift_jis ; q=1"), Some("shift_jis".into()));
+        assert_eq!(cs("text/html; foo=\"a;charset=big5\"; charset=koi8-r"), Some("koi8-r".into()));
+        assert_eq!(cs("text/html; charset=\"a\\\"b\""), Some("a\"b".into()));
+        assert_eq!(cs("text/html; charset=; charset=gbk"), Some("gbk".into()));
+        assert_eq!(cs("text/html; charset=euc-jp; charset=big5"), Some("euc-jp".into()));
+        assert_eq!(cs("text/html"), None);
+        assert_eq!(cs("text/html; charset"), None);
+        assert_eq!(cs("windows-1252"), None); // a bare label is not a header value
+        assert_eq!(cs(""), None);
+    }
+
+    #[test]
+    fn one_precedence_table_decides_every_encoding() {
+        use EncodingSource as S;
+        let r = |html: &[u8], encoding, content_type| {
+            let (enc, src) = resolve_explained(html, EncodingHints { encoding, content_type, url: None });
+            (enc.name(), src)
+        };
+        let meta = b"<meta charset=koi8-r><p>caf\xe9</p>";
+        assert_eq!(r(b"\xef\xbb\xbf<p>x</p>", Some("windows-1252"), None), ("UTF-8", S::Bom));
+        let le: Vec<u8> = "<?xml version='1.0'?>".encode_utf16().flat_map(u16::to_le_bytes).collect();
+        assert_eq!(r(&le, Some("big5"), Some("text/html; charset=big5")), ("UTF-16LE", S::Utf16Prefix));
+        assert_eq!(r(meta, Some("big5"), Some("text/html; charset=gbk")), ("Big5", S::Encoding));
+        assert_eq!(r(meta, None, Some("text/html; charset=gbk")), ("GBK", S::ContentType));
+        // an unusable label at rank 3 or 4 hands over to the next rank
+        assert_eq!(r(meta, Some("utf-7"), Some("text/html; charset=gbk")), ("GBK", S::ContentType));
+        assert_eq!(r(meta, None, Some("text/html; charset=nonsense")), ("KOI8-R", S::Meta));
+        assert_eq!(r(meta, None, Some("text/html")), ("KOI8-R", S::Meta));
+        assert_eq!(r(b"<?xml version='1.0' encoding='big5'?><p>x</p>", None, None), ("Big5", S::XmlDeclaration));
+        assert_eq!(r("<p>café</p>".as_bytes(), None, None), ("UTF-8", S::Utf8));
+        let french = b"<p>Le caf\xe9 est d\xe9j\xe0 pr\xeat, tr\xe8s chaud et tr\xe8s bon.</p>";
+        assert_eq!(r(french, None, None), ("windows-1252", S::Autodetect));
+        // the header label is taken literally: no `<meta>` rewrite of x-user-defined or utf-16
+        assert_eq!(r(b"<p>x</p>", None, Some("text/html; charset=x-user-defined")), ("x-user-defined", S::ContentType));
+        assert_eq!(r(b"<p>x</p>", None, Some("text/html; charset=utf-16")), ("UTF-16LE", S::ContentType));
+        assert_eq!(r(b"<p>x</p>", None, Some("text/html; charset=iso-2022-kr")), ("replacement", S::ContentType));
+    }
+
+    #[test]
     fn the_tld_is_the_last_label_of_the_host() {
         let t = |url| tld(url).map(|t| String::from_utf8(t).unwrap());
         assert_eq!(t("https://www.Example.CO.JP/a.b?c.d#e.f"), Some("jp".into()));
@@ -476,8 +664,8 @@ mod tests {
         let russian = "<p>Привет мир, это страница.</p>\n".repeat(10_000);
         let (japanese, _, _) = encoding_rs::SHIFT_JIS.encode(&japanese);
         let (russian, _, _) = encoding_rs::WINDOWS_1251.encode(&russian);
-        assert_eq!(autodetect(&japanese, None), encoding_rs::SHIFT_JIS);
-        assert_eq!(autodetect(&[&japanese[..], &russian[..]].concat(), None), encoding_rs::WINDOWS_1251);
+        assert_eq!(autodetect(&japanese, None).0, encoding_rs::SHIFT_JIS);
+        assert_eq!(autodetect(&[&japanese[..], &russian[..]].concat(), None).0, encoding_rs::WINDOWS_1251);
     }
 }
 
@@ -490,7 +678,7 @@ mod w3lib_oracle_tests {
     use super::*;
 
     fn scan(head: &[u8]) -> Option<&'static Encoding> {
-        meta_prescan(head)
+        declaration(head).map(|(enc, _)| enc)
     }
 
     /// FALSE POSITIVES: shapes that declare nothing, but a substring search for `http-equiv`/`charset=`
@@ -778,7 +966,7 @@ mod w3lib_oracle_tests {
         assert_eq!(resolve(&le32, None, None), encoding_rs::UTF_16LE);
         // UTF-32BE begins 00 00 FE FF, which is no BOM at all -> the ordinary prescan/autodetect path
         let be32: Vec<u8> = [0x00u8, 0x00, 0xFE, 0xFF].into_iter().collect();
-        assert_eq!(resolve(&be32, None, None), autodetect(&be32, None));
+        assert_eq!(resolve(&be32, None, None), autodetect(&be32, None).0);
     }
 }
 

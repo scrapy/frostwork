@@ -41,6 +41,8 @@ except Exception:
     gen_grammar, GENERIC = None, []
 
 BIN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "target", "release", "differ")
+# The bridge in lxml mode: this gate, and every tool that drives the bridge through it, grades lxml parity.
+ENGINE = [BIN, "--parser", "lxml"]
 
 
 def _parse_lines(out):
@@ -80,6 +82,9 @@ ORACLE_EMPTY_BASKET = frozenset({
     # a row and an optgroup hold their text in descendants, and `<input>` is void so it has no text at all.
     "table > thead::text", "table > tbody::text", "table > tfoot::text", "table > tr::text",
     "thead > tr::text", "tbody > tr::text", "select > optgroup::text", 'input[value|="v"]::text',
+    # INTENDED — parsel's `::attr()` is XPath's case-sensitive `@`, and libxml2 lowercases every attribute
+    # name, so a capital in the name matches nothing; a value here is the engine folding the case.
+    "a::attr(HREF)", "[data-k]::attr(Data-K)", "[id]::attr(ID)", "img::attr(Src)",
 })
 
 
@@ -123,7 +128,7 @@ def run_engine(cases, strict_budget=True, enc=""):
         env["FROSTWORK_DIFFER_BUDGET_STRICT"] = "1"
     else:
         env.pop("FROSTWORK_DIFFER_BUDGET_STRICT", None)
-    proc = subprocess.Popen([BIN], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+    proc = subprocess.Popen(ENGINE, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, env=env)
     # protocol: ENC \t HEXHTML \t sels...   (empty ENC = sniff)
     payload = "".join(
@@ -141,7 +146,7 @@ def run_support(selectors):
     One audit probe per line keeps arbitrary selector text isolated and returns a bool per selector.
     A bridge crash is treated as unsupported here and will be caught separately by engine runs.
     """
-    proc = subprocess.Popen([BIN], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    proc = subprocess.Popen(ENGINE, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     payload = "".join("A\t" + sel + "\n" for sel in selectors).encode()
     out, _err = proc.communicate(payload)
     rows = _parse_lines(out)
@@ -283,7 +288,7 @@ def run_grouped(cases):
     """cases: list of (html, groups) where groups=[(container, subs), ...] -> (out, crashed, diag).
 
     out[i] is [group][row][sub][values] for cases[i] (truncated on a mid-batch engine crash)."""
-    proc = subprocess.Popen([BIN], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    proc = subprocess.Popen(ENGINE, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     lines = []
     for html, groups in cases:
         parts = ["G2", "", html.hex(), str(len(groups))]
@@ -370,6 +375,30 @@ def main():
             fam_div["(conformant)"][v] += 1
             if v in ("DIVERGE", "CRASH") and len(examples) < args.show:
                 examples.append(("conformant", sel, mine[:5], (theirs or [])[:5], body.decode()[:240]))
+
+    # ---- RAW END AT EOF: conformant pages cut right after a raw-text, RCDATA or script end tag's NAME ----
+    # A page that ends there keeps `</name` as text (`<title>a</title` is the title `a</title`), which a
+    # complete page never shows, so each page is cut at one such end tag and graded on the same basket.
+    raw_cases = []
+    for page in (conformant.generate(rng) for _ in range(args.conformant // 4)):
+        ends = [m.end() for m in re.finditer(rb"</(?:title|script|style|textarea)(?=>)", page)]
+        if ends:
+            cut = page[: rng.choice(ends)]
+            raw_cases += [(cut, batch) for batch in basket_batches]
+    engine_out, crashed, diag = run_engine(raw_cases)
+    stat["CRASH"] += crashed
+    if diag:
+        crash_diags.append(("raw end at EOF", diag))
+    for (body, sels), mine_cols in zip(raw_cases, engine_out):
+        for si, sel in enumerate(sels):
+            mine = mine_cols[si] if si < len(mine_cols) else []
+            theirs = parsel_vals(body, sel)
+            v = verdict(mine, theirs, "CONTROL", sel)
+            stat[v] += 1
+            stat["pairs"] += 1
+            fam_div["(raw end at EOF)"][v] += 1
+            if v in ("DIVERGE", "CRASH") and len(examples) < args.show:
+                examples.append(("raw end at EOF", sel, mine[:5], (theirs or [])[:5], body.decode()[-160:]))
 
     # ---- ENCODING: the same document in a legacy charset, asked with non-ASCII selector literals ----
     # The one axis this harness did not have. Both selector-construction sites hardcoded utf-8, so no

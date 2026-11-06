@@ -19,6 +19,9 @@ It discovers, in the target module's namespace:
   * ``frostwork.webpoet.FrostPage`` subclasses (if web-poet is installed), audited with
     :meth:`FrostPage.check_schema`.
 
+Support is per parse mode, so each schema is audited in its own (``Page(parser=...)``, ``FrostPage``'s
+``parser=`` class keyword) and the report names it; ``--scan`` audits literals in ``--parser``'s mode.
+
 Or pass ``module:REGISTRY`` / ``path.py:REGISTRY`` where the attribute is a mapping or iterable of
 specific ``Page``/``FrostPage`` objects. This avoids namespace discovery and lets projects expose a
 small import-safe audit surface explicitly.
@@ -138,7 +141,7 @@ def _format(label: str, report: SchemaReport, verbose: bool) -> str:
     status = "OK" if report.ok else "PROBLEMS"
     head = (
         f"{status:9} {label}  "
-        f"(members {report.members}/{report.max_members}, "
+        f"(parser {report.parser}, members {report.members}/{report.max_members}, "
         f"sib-bits {report.sib_bits}/{report.max_sib_bits})"
     )
     lines = [head]
@@ -170,6 +173,7 @@ def _field_dict(f) -> dict:
 def _report_dict(label: str, report: SchemaReport) -> dict:
     return {
         "name": label,
+        "parser": report.parser,
         "ok": report.ok,
         "over_budget": report.over_budget,
         "budget": {
@@ -190,8 +194,11 @@ def _report_dict(label: str, report: SchemaReport) -> dict:
     }
 
 
-def _scan_report(targets: List[str], verbose: bool, as_json: bool, require_complete: bool = False) -> int:
-    """``--scan`` mode: audit selector literals mined from source, reported per ``file:line``."""
+def _scan_report(
+    targets: List[str], verbose: bool, as_json: bool, require_complete: bool = False, parser: str = "browser"
+) -> int:
+    """``--scan`` mode: audit selector literals mined from source in the ``parser`` mode, reported per
+    ``file:line``."""
     from .scan import judge, scan_path, summarize
 
     sites = []
@@ -204,7 +211,7 @@ def _scan_report(targets: List[str], verbose: bool, as_json: bool, require_compl
             return 2
         sites.extend(scan_path(target))
 
-    verdicts = judge(sites)
+    verdicts = judge(sites, parser)
     summary = summarize(verdicts)
 
     clean = summary["unsupported"] == 0 and summary["errors"] == 0
@@ -216,6 +223,7 @@ def _scan_report(targets: List[str], verbose: bool, as_json: bool, require_compl
                 {
                     "ok": clean,
                     "mode": "scan",
+                    "parser": parser,
                     "sites": [
                         {
                             "file": v.site.path,
@@ -285,6 +293,9 @@ def main(argv: List[str] | None = None) -> int:
     parser.add_argument("--version", action="version", version=f"%(prog)s {_version()}")
     parser.add_argument("--require-complete", action="store_true",
                         help="with --scan, fail if selectors are dynamic, files cannot be parsed, or no literals are found")
+    parser.add_argument("--parser", choices=("browser", "lxml"), default=None,
+                        help="with --scan, the parse mode to audit in (default browser; support is per mode). "
+                        "A schema audit uses each page object's own parser")
     args = parser.parse_args(argv)
 
     # Keep the report printable on narrow terminal encodings (e.g. Windows cp1252 when piped).
@@ -298,9 +309,11 @@ def main(argv: List[str] | None = None) -> int:
         return 2
 
     if args.scan:
-        return _scan_report(args.target, args.verbose, args.json, args.require_complete)
+        return _scan_report(args.target, args.verbose, args.json, args.require_complete, args.parser or "browser")
     if args.require_complete:
         return _usage_error("--require-complete applies to --scan")
+    if args.parser is not None:
+        return _usage_error("--parser applies to --scan; a schema audit uses each page object's own parser")
     if len(args.target) > 1:
         return _usage_error(
             "the schema audit takes ONE module target (several paths are only for --scan)"

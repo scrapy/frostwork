@@ -1,7 +1,9 @@
 # Representative selector support snapshot
 
-Generated/verified by `tools/support_snapshot.py` against the real compiler. The exhaustive
-contract remains in `COMPATIBILITY.md`; this table is a drift tripwire for headline features.
+Generated/verified by `tools/support_snapshot.py` against the real compiler, in lxml mode
+(`parser="lxml"`); browser mode refuses a few of these shapes, which `frostwork.check(...,
+parser="browser")` reports. The exhaustive contract remains in `COMPATIBILITY.md`; this table
+is a drift tripwire for headline features.
 
 | feature | context | selector | supported |
 |---|---|---|---|

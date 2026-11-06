@@ -9,6 +9,11 @@ identical binaries produce per-cell deltas up to +/-2.3% here. Calibrate by pass
 
 Usage:
     ab_bench.py --a <bench-binary-A> --b <bench-binary-B> [--reps N] [--iters N] [--tables ...] [--counts ...]
+                [--parser lxml|browser] [--b-parser lxml|browser]
+
+Both sides run in lxml mode unless told otherwise, because the pools' values are lxml's; `--b-parser`
+sets B's mode alone, which compares the two modes of one build. A build older than the mode flag ignores
+it and runs lxml mode, the only one it has.
 
 Page generators and selector pools come from bench_matrix, so each workload is defined once.
 """
@@ -28,11 +33,14 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bench_matrix as bm  # noqa: E402  (page generators + selector pools, single-sourced)
 
 
-def run_bench(binary, html_path, sels, iters):
-    """One `bench` invocation -> µs/page. Selectors go on stdin (shell quoting can't corrupt them)."""
+def run_bench(side, html_path, sels, iters):
+    """One `bench` invocation -> µs/page. `side` is `(binary, parse mode)`. Selectors go on stdin (shell
+    quoting can't corrupt them)."""
+    binary, parser = side
     env = dict(os.environ, FROSTWORK_BENCH_ITERS=str(iters))
     p = subprocess.run(
-        [binary, html_path], input="\n".join(sels), capture_output=True, text=True, env=env
+        [binary, html_path, "--parser", parser], input="\n".join(sels), capture_output=True, text=True,
+        env=env,
     )
     if p.returncode != 0:
         raise SystemExit(f"{binary} failed: {p.stderr.strip()}")
@@ -165,7 +173,7 @@ def corpus_cells(corpus_dir, limit):
         for q in raw:
             if q not in supported:
                 try:
-                    supported[q] = not frostwork.check([q]).unsupported
+                    supported[q] = not frostwork.check([q], parser="lxml").unsupported
                 except Exception:
                     supported[q] = False
             if supported[q]:
@@ -203,7 +211,12 @@ def main():
                     help="A/B over a REAL page corpus (each page with its own selectors) instead of "
                          "the generated tables — the workload the corpus number is measured on")
     ap.add_argument("--limit", type=int, default=40, help="corpus mode: size-spread sample of N pages")
+    ap.add_argument("--parser", default="lxml", choices=("lxml", "browser"), help="parse mode of both sides")
+    ap.add_argument("--b-parser", default=None, choices=("lxml", "browser"),
+                    help="parse mode of B alone (compare the two modes of one build)")
     args = ap.parse_args()
+    a = (args.a, args.parser)
+    b = (args.b, args.b_parser or args.parser)
 
     which = [w.strip() for w in args.tables.split(",") if w.strip()]
     bad = [w for w in which if w not in ALL]
@@ -212,18 +225,18 @@ def main():
 
     print("=" * 72)
     print(f"A/B interleaved  reps={args.reps} iters={args.iters}  (min-of-reps per side)")
-    print(f"  A = {args.a}")
-    print(f"  B = {args.b}")
+    print(f"  A = {a[0]}  (parser={a[1]})")
+    print(f"  B = {b[0]}  (parser={b[1]})")
     print("  delta < 0  =>  B (candidate) is FASTER")
     print("=" * 72)
 
     override = [int(c) for c in args.counts.split(",") if c.strip()] if args.counts else None
     out = []
     if args.corpus:
-        corpus_sweep(args.corpus, args.limit, args.a, args.b, args.iters, args.reps, out)
+        corpus_sweep(args.corpus, args.limit, a, b, args.iters, args.reps, out)
     else:
         for name, html, counts, pool in tables(which):
-            sweep(name, html, override or counts, pool, args.a, args.b, args.iters, args.reps, out)
+            sweep(name, html, override or counts, pool, a, b, args.iters, args.reps, out)
 
     print("\n" + "=" * 72)
     ok = all(same for *_, _, same, _ in out)

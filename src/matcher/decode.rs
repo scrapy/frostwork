@@ -12,6 +12,7 @@ use std::ops::Range;
 use encoding_rs::Encoding;
 
 use crate::entities;
+use crate::tokenizer::DataMode;
 
 /// A document's bytes together with the encoding that decodes **those bytes**.
 ///
@@ -28,18 +29,39 @@ use crate::entities;
 ///
 /// [`sub`](Self::sub) and [`raw_source`](Self::raw_source) always slice this input rather than accept
 /// an independently supplied byte buffer. A value that already arrives as a slice (an attribute
-/// value, a text run) passes [`encoding`](Self::encoding) to the free functions below.
+/// value, a text run) is decoded through [`text_value`](Self::text_value) /
+/// [`attr_value`](Self::attr_value), which apply the buffer's NUL rule.
 #[derive(Clone, Copy)]
 pub(crate) struct EncodedInput<'a> {
     bytes: &'a [u8],
     encoding: &'static Encoding,
+    /// Does the buffer still hold NUL bytes? Only browser mode leaves them in; lxml mode deleted them
+    /// before tokenizing, as Parsel does. Kept NUL follows HTML5 in a value: dropped from markup-mode
+    /// text (`<p>a\0b` is `ab`), U+FFFD in raw-text and RCDATA content, attribute values and raw source.
+    keeps_nul: bool,
 }
 
 impl<'a> EncodedInput<'a> {
-    /// Pair a prepared buffer with the encoding that decodes it. Called once per page, by the entry
-    /// point that produced both.
-    pub(crate) fn new(bytes: &'a [u8], encoding: &'static Encoding) -> Self {
-        Self { bytes, encoding }
+    /// Pair a prepared buffer with the encoding that decodes it, and say whether it still holds NUL
+    /// bytes. Called once per page, by the entry point that produced the buffer.
+    pub(crate) fn new(bytes: &'a [u8], encoding: &'static Encoding, keeps_nul: bool) -> Self {
+        Self { bytes, encoding, keeps_nul }
+    }
+
+    /// Is a run read in `mode` no text node at all? Markup-mode text that is nothing but NUL is dropped
+    /// by a browser (`<p>\0` has no text node), and only browser mode keeps NUL in the buffer.
+    pub(super) fn is_dropped_nul(self, text: &[u8], mode: DataMode) -> bool {
+        self.keeps_nul && mode == DataMode::Normal && text.iter().all(|&b| b == 0) && !self.follows_lt(text, 0)
+    }
+
+    /// Does the byte at `i` of `run`, a slice of this buffer, follow a `<`? A NUL there follows a `<` the
+    /// tokenizer read as text, and Chrome makes that one NUL U+FFFD where body text drops every other.
+    fn follows_lt(self, run: &[u8], i: usize) -> bool {
+        if i > 0 {
+            return run[i - 1] == b'<';
+        }
+        let at = (run.as_ptr() as usize).wrapping_sub(self.bytes.as_ptr() as usize);
+        at > 0 && at <= self.bytes.len() && self.bytes[at - 1] == b'<'
     }
 
     /// The whole buffer — for the tokenizer, which reads bytes and never decodes.
@@ -58,12 +80,67 @@ impl<'a> EncodedInput<'a> {
     /// The same document narrowed to `range`, same encoding: one element's span, re-scanned by a
     /// sub-schema to recover a deferred value.
     pub(super) fn sub(self, range: Range<usize>) -> Self {
-        Self { bytes: &self.bytes[range], encoding: self.encoding }
+        Self { bytes: &self.bytes[range], ..self }
     }
 
     /// Decode `range` of this document as an outer-HTML value (see the free `raw_source` below).
     pub(super) fn raw_source(self, range: Range<usize>) -> String {
-        raw_source(&self.bytes[range], self.encoding)
+        let s = raw_source(&self.bytes[range], self.encoding);
+        if self.keeps_nul && s.contains('\0') {
+            s.replace('\0', "\u{FFFD}")
+        } else {
+            s
+        }
+    }
+
+    /// One text node's value from a run read in `mode` (see [`finalize`]).
+    pub(super) fn text_value(self, bytes: &[u8], mode: DataMode) -> String {
+        if self.keeps_nul && bytes.contains(&0) {
+            if mode != DataMode::Normal {
+                let t = replace_nul(normalize_crlf(decode_bytes(bytes, self.encoding)));
+                return if mode.decodes_entities() { entities::decode(&t, false).into_owned() } else { t.into_owned() };
+            }
+            // Markup-mode text drops NUL, except one after a `<` (see `follows_lt`). A reference never
+            // spans a `<`, so the text either side of that NUL decodes on its own.
+            let kept: Vec<usize> = memchr::memchr_iter(0, bytes).filter(|&i| self.follows_lt(bytes, i)).collect();
+            if !kept.is_empty() {
+                let mut out = String::new();
+                let mut from = 0;
+                for i in kept {
+                    out.push_str(&finalize(&bytes[from..i], true, self.encoding));
+                    out.push('\u{FFFD}');
+                    from = i + 1;
+                }
+                out.push_str(&finalize(&bytes[from..], true, self.encoding));
+                return out;
+            }
+        }
+        finalize(bytes, mode.decodes_entities(), self.encoding)
+    }
+
+    /// One attribute's value (see [`decode_attr`]).
+    pub(super) fn attr_value(self, av: &'a [u8]) -> Cow<'a, str> {
+        // With no reference, CR or NUL in it, a value is its own text: valid UTF-8 in a UTF-8 buffer,
+        // and ASCII in any other, since every encoding a buffer can have maps ASCII to itself.
+        if memchr::memchr3(b'&', b'\r', 0, av).is_none() && (self.encoding == encoding_rs::UTF_8 || av.is_ascii()) {
+            if let Ok(s) = std::str::from_utf8(av) {
+                return Cow::Borrowed(s);
+            }
+        }
+        if self.keeps_nul && av.contains(&0) {
+            let t = replace_nul(normalize_crlf(decode_bytes(av, self.encoding)));
+            return Cow::Owned(entities::decode(&t, true).into_owned());
+        }
+        decode_attr(av, self.encoding)
+    }
+}
+
+/// HTML5's U+FFFD for a NUL character, in every value but markup-mode text.
+fn replace_nul(s: Cow<str>) -> Cow<str> {
+    if s.contains('\0') {
+        Cow::Owned(s.replace('\0', "\u{FFFD}"))
+    } else {
+        s
     }
 }
 
@@ -102,12 +179,13 @@ fn normalize_crlf(s: Cow<str>) -> Cow<str> {
 /// entity-decode. Called ONLY for values that actually match, a small fraction of the document, so no
 /// whole-document decode or UTF-8 validation happens up front.
 ///
-/// The NUL filtering below is a backstop, not the mechanism. Raw NUL is deleted from the whole document
-/// before tokenizing (`crate::strip_nul`), because dropping it only from emitted values would make the
-/// engine and lxml disagree about the document's STRUCTURE. It stays because it costs one
-/// `contains(&0)` on a path that already scans the value, and because a decoded U+0000 arriving from
-/// somewhere else must not reach a column.
-pub(super) fn finalize(bytes: &[u8], allows_entities: bool, enc: &'static Encoding) -> String {
+/// The NUL filtering below is lxml mode's backstop and browser mode's rule for markup-mode text. lxml
+/// mode deletes raw NUL from the whole document before tokenizing (`crate::strip_nul`), because
+/// dropping it only from emitted values would make the engine and lxml disagree about the document's
+/// STRUCTURE; a decoded U+0000 arriving from somewhere else must still not reach a column. Browser mode
+/// keeps NUL, and body text drops it exactly here; [`EncodedInput::text_value`] routes the values where
+/// HTML5 keeps it as U+FFFD around this function.
+fn finalize(bytes: &[u8], allows_entities: bool, enc: &'static Encoding) -> String {
     // `decode` (not `decode_without_bom_handling`) would strip a leading U+FEFF from every value —
     // wrong: the document BOM is already removed up front, and a U+FEFF mid-text is real content
     // that libxml2 preserves. UTF-8: == from_utf8_lossy; else transcode this value only.
@@ -131,7 +209,7 @@ pub(super) fn finalize(bytes: &[u8], allows_entities: bool, enc: &'static Encodi
 /// inconsistency rather than a divergence — one CRLF-authored crawled page put `\r\n` in all eight of
 /// its node columns. What stays divergent here is RE-SERIALIZATION (attribute order and quoting,
 /// minimized booleans, entity escaping), because the engine has no tree to re-serialize from.
-pub(super) fn raw_source(bytes: &[u8], enc: &'static Encoding) -> String {
+fn raw_source(bytes: &[u8], enc: &'static Encoding) -> String {
     normalize_crlf(decode_bytes(bytes, enc)).into_owned()
 }
 

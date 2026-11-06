@@ -3,7 +3,7 @@
 //! (stack maintenance, value emission, group routing) lives in the parent module and calls into these.
 //! Keeping the predicates separate makes the matcher's *logic* legible apart from its *bookkeeping*.
 
-use crate::selector::{AttrOp, Comb, Compound, Nth, ReversePos};
+use crate::selector::{AttrOp, AttrPred, Comb, Compound, Nth, ReversePos};
 
 use super::{CSel, OpenElem, Segment};
 
@@ -42,6 +42,32 @@ fn substr(a: &str, v: &str, ci: bool) -> bool {
     }
     let (a, v) = (a.as_bytes(), v.as_bytes());
     a.len() >= v.len() && (0..=a.len() - v.len()).any(|i| a[i..i + v.len()].eq_ignore_ascii_case(v))
+}
+
+/// Does attribute predicate `p` hold, given the lookup of the attribute it names and whether its value
+/// compares ASCII-case-insensitively? `found` runs inside each arm, so an existence test never reads
+/// the value.
+///
+/// Substring/prefix/suffix ops with an EMPTY operand match nothing (CSS spec, verified vs lxml); `~=`
+/// with an empty/whitespace operand also never matches (no empty token).
+#[inline(always)]
+fn pred_holds<'e>(p: &AttrPred, ci: bool, found: impl Fn() -> Option<&'e str>) -> bool {
+    let v = p.value.as_str();
+    match p.op {
+        AttrOp::Exists => found().is_some(),
+        AttrOp::Eq => found().is_some_and(|a| eq(a, v, ci)),
+        AttrOp::Prefix => !v.is_empty() && found().is_some_and(|a| starts(a, v, ci)),
+        AttrOp::Suffix => !v.is_empty() && found().is_some_and(|a| ends(a, v, ci)),
+        AttrOp::Substr => !v.is_empty() && found().is_some_and(|a| substr(a, v, ci)),
+        // ASCII whitespace only, for the reason spelled out on `OpenElem::has_class`: `[rel~=x]`
+        // tokenizes the same way `.x` does, so a U+3000 in the value must not separate tokens.
+        AttrOp::Includes => {
+            !v.is_empty() && found().is_some_and(|a| a.split_ascii_whitespace().any(|t| eq(t, v, ci)))
+        }
+        AttrOp::DashMatch => found().is_some_and(|a| {
+            eq(a, v, ci) || (a.len() > v.len() && starts(a, v, ci) && a.as_bytes()[v.len()] == b'-')
+        }),
+    }
 }
 
 /// Does 1-based position `p` satisfy `∃k ≥ 0: a·k + b == p`? (the `An+B` membership test)
@@ -86,22 +112,31 @@ pub(super) fn compound_matches(c: &Compound, el: &OpenElem) -> bool {
 }
 
 /// [`compound_matches`] with the signature filter off at every level — the reference the filtered path is
-/// proven equal to (`filter_never_rejects_a_match`). A const generic rather than a second body, so the
-/// two cannot drift.
-#[cfg(test)]
+/// proven equal to (`filter_never_rejects_a_match`), and the test for an element whose signature was
+/// never built. A const generic rather than a second body, so the two cannot drift.
 pub(super) fn compound_matches_unfiltered(c: &Compound, el: &OpenElem) -> bool {
     compound_matches_impl::<false>(c, el)
 }
 
+/// The signature filter, then [`compound_compare`]. Always inlined, so the filter runs in the caller
+/// and a pair it rejects never enters the comparison's frame: the filter decides most pairs, and the
+/// comparison saves a dozen registers before it can test anything.
+#[inline(always)]
 fn compound_matches_impl<const FILTER: bool>(c: &Compound, el: &OpenElem) -> bool {
     // One-sided: a `req` bit the element lacks proves no match, so this can only turn a `false` into a
     // faster `false`. `req` covers only the compound's own positive tag/id/classes — `:not()` args and
     // `:is()` alternatives contribute nothing here and are filtered by their own recursive call below.
-    if FILTER && el.sig & c.req != c.req {
-        return false;
-    }
+    (!FILTER || el.sig & c.req == c.req) && compound_compare::<FILTER>(c, el)
+}
+
+/// The exact comparisons of [`compound_matches_impl`], for a pair the signature filter let through.
+#[inline(never)]
+fn compound_compare<const FILTER: bool>(c: &Compound, el: &OpenElem) -> bool {
     if let Some(t) = &c.tag {
-        if t != "*" && !el.tag.eq_ignore_ascii_case(t.as_bytes()) {
+        // An XPath name is lowercase (`xpath::valid_name`), so it never names a camel-cased SVG element.
+        if t != "*"
+            && (!el.tag.eq_ignore_ascii_case(t.as_bytes()) || (c.exact_tag && el.camel_cased_svg()))
+        {
             return false;
         }
     }
@@ -115,27 +150,24 @@ fn compound_matches_impl<const FILTER: bool>(c: &Compound, el: &OpenElem) -> boo
             return false;
         }
     }
-    for p in &c.attrs {
-        // Substring/prefix/suffix ops with an EMPTY operand match nothing (CSS spec, verified vs
-        // lxml); `~=` with an empty/whitespace operand also never matches (no empty token).
-        let (n, v, ci) = (p.name.as_str(), p.value.as_str(), p.ci);
-        let ok = match p.op {
-            AttrOp::Exists => el.attr(n).is_some(),
-            AttrOp::Eq => el.attr(n).is_some_and(|a| eq(a, v, ci)),
-            AttrOp::Prefix => !v.is_empty() && el.attr(n).is_some_and(|a| starts(a, v, ci)),
-            AttrOp::Suffix => !v.is_empty() && el.attr(n).is_some_and(|a| ends(a, v, ci)),
-            AttrOp::Substr => !v.is_empty() && el.attr(n).is_some_and(|a| substr(a, v, ci)),
-            // ASCII whitespace only, for the reason spelled out on `OpenElem::has_class` — `[rel~=x]`
-            // tokenizes the same way `.x` does, so a U+3000 in the value must not separate tokens.
-            AttrOp::Includes => {
-                !v.is_empty() && el.attr(n).is_some_and(|a| a.split_ascii_whitespace().any(|t| eq(t, v, ci)))
+    // Browser mode's DOM names and HTML value fold apply only to the elements its builder made. On an
+    // lxml-mode element both name lookups are `attr` (an XPath name is lowercase, see
+    // `xpath::valid_attr_name`) and no value folds, so that path asks neither question.
+    if c.attrs.is_empty() {
+        // nothing to look up
+    } else if el.is_browser_element() {
+        for p in &c.attrs {
+            let ci = p.ci || (p.html_ci && el.scid == super::HTML_ELEMENT);
+            let found = || if p.exact { el.named_attr(&p.name) } else { el.css_attr(&p.name) };
+            if !pred_holds(p, ci, found) {
+                return false;
             }
-            AttrOp::DashMatch => el.attr(n).is_some_and(|a| {
-                eq(a, v, ci) || (a.len() > v.len() && starts(a, v, ci) && a.as_bytes()[v.len()] == b'-')
-            }),
-        };
-        if !ok {
-            return false;
+        }
+    } else {
+        for p in &c.attrs {
+            if !pred_holds(p, p.ci, || el.attr(&p.name)) {
+                return false;
+            }
         }
     }
     // `:not(<compound>)` — excluded if the element matches any negation arg
@@ -301,13 +333,14 @@ pub(super) fn gate_open(seen: u64, prev: u64, bit: usize, adjacent: bool) -> boo
 /// segment's sibling gate is checked at its own first compound (inside [`seg_match_anchored`]), so a
 /// descendant/child step after a sibling combinator (`a + b c`) resolves against the sibling element's
 /// parent, not the subject's.
+#[inline(always)]
 pub(super) fn eval_one(cs: &CSel, stack: &[OpenElem], top: usize, floor: usize) -> (bool, u64) {
     // An over-budget entry never matches and (crucially) has no `seg_bits`, so short-circuit BEFORE
     // any `1 << seg_bits[..]` shift could run — that is the whole point of the DEAD flag.
     if cs.dead {
         return (false, 0);
     }
-    // Flat/container selectors are unscoped (`floor` 0), except in a span re-scan (see `Matcher::floor`).
+    // Flat/container selectors are rooted at `floor`: 0, or a span schema's root.
     if cs.segments.len() == 1 {
         return (seg_match(&cs.segments[0], stack, top, floor), 0);
     }

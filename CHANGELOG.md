@@ -3,6 +3,84 @@
 All notable user-facing changes will be recorded here. Frostwork will follow semantic versioning after its
 first public release.
 
+## 0.3.0 (unreleased)
+
+### Parse modes
+
+- **Breaking: browser mode is the default.** Frostwork now answers selectors against the tree a browser
+  builds: HTML5 tree construction as Chrome 156 implements it, streamed inside the same one-pass
+  matcher and graded against Chrome. `parser="lxml"` keeps the libxml2 tree and the value
+  parity with Parsel that earlier releases had. A port that must reproduce Parsel's items exactly passes
+  `parser="lxml"`. The two modes can build different trees from the same markup: an implied `<tbody>`,
+  `<noscript>` read as raw text, inert `<template>` content, foster parenting, the adoption agency,
+  foreign content and quirks mode among others. docs/COMPATIBILITY.md lists every difference.
+- `parser="browser" | "lxml"` on `extract`, `extract_grouped`, `check`, `audit_schema`, `Page` and
+  `Plan`, and as a class keyword on `FrostPage` that subclasses inherit. An unknown value raises
+  `ValueError`. Rust: `ParseMode`, `CompileOptions`, `Plan::compile_with` and `audit_schema_with`.
+- Browser mode does not strip the input or delete NUL. NUL follows HTML5 instead: U+FFFD in tag and
+  attribute names, raw text, RCDATA and attribute values, and dropped from body text.
+- In browser mode a valueless attribute is `""`, as in Chrome; lxml mode keeps libxml2's rule that a
+  minimized boolean such as `<input disabled>` has its own name as its value.
+- Browser mode follows Chrome where it departs from the spec: whitespace after `</body>` reconstructs no
+  formatting element, a NUL right after a `<` read as text is U+FFFD rather than dropped, and a tag whose
+  whitespace before `>` has a CR second swallows the LF after it. A formatting element with an `is`
+  attribute is never an active formatting element, as in Chrome.
+- Browser-mode CSS matches the values of the 46 attributes HTML lists case-insensitively on HTML
+  elements, as browsers do (`input[type=submit]` matches `type="SUBMIT"`). XPath and lxml mode compare
+  exactly.
+- Five HTML5 rules change elements a forward scan has already passed (a second `<html>` or `<body>`
+  merging attributes, the adoption agency with a furthest block, foster parenting's document order, a
+  `<frameset>` replacing the body, and `<selectedcontent>`). On a page where one changes an answer, about
+  1.6% of real pages, browser mode answers from a compact tree of the finished page instead of the stream.
+- Browser mode refuses, with a reason, the outer HTML of an element the page never wrote (the frame, an
+  implied `<tbody>`, `<tr>` or `<colgroup>`, the `<p>` a stray `</p>` inserts) and `.as_node()` handoffs.
+  Deferred selectors with a tail (`li:last-child b::text`, `div:has(a) ::text`) are supported, read by a
+  second pass over the page.
+- `::attr()` reads an attribute as `getAttribute()` does in browser mode: the name is lowercased on an
+  HTML element (`div::attr(ID)` answers) and compared exactly on an SVG or MathML one
+  (`svg::attr(viewBox)` answers, `svg::attr(viewbox)` does not).
+
+### Correctness
+
+- In both modes, a `::` inside an XPath string literal is part of the value, not an axis:
+  `//*[@id="a::b"]//a` answers where it was refused.
+- Lxml mode roots a deferred selector's tail at its winner when the winner is an element the page never
+  wrote, such as `*:has(r) li` matching the implied `<body>`, and no longer lets the tail match the
+  `<html>` or `<body>` its re-scan implies around the winner (`li:last-child body`).
+- Lxml mode compares an `::attr()` name exactly with libxml2's lowercased attribute name, as Parsel
+  does, so `div::attr(ID)` is `[]` where it returned the id.
+- In both modes, a raw-text, RCDATA or script end tag that the input ends on right after its name is
+  text, as in libxml2 and browsers: `<title>a</title` is the title `a</title`, where it was `a`.
+- `FrostPage` and `Page.extract_response` give the engine the response's raw `Content-Type` header, its
+  URL and any encoding the user forced (the framework's `_encoding`), instead of the framework's resolved
+  `response.encoding`. Frostwork's own prescan and autodetection now run behind a web-poet or Scrapy
+  response, so a `<meta charset>` deep in the head or early in the body, a stray quote in a charset value,
+  `<meta charset=utf-16>`, an XML declaration after offset 0 and an HTTP `charset=x-user-defined` decode
+  as a browser decodes them. Over 48 encoding cases measured in Chrome, a web-poet response now differs from
+  Chrome on 2, both deliberate (docs/COMPATIBILITY.md), where it differed on 21. A forced encoding
+  is still honoured, below a BOM.
+
+### Python API and tooling
+
+- `content_type=` on `extract`, `extract_grouped`, `detect_encoding`, `navigation`, `Page.extract`,
+  `Page.extract_with_navigation` and `Plan` takes a raw `Content-Type` header value. Its charset ranks below
+  `encoding=` and above the document's declarations, is resolved with the WHATWG label table, and is
+  ignored when unusable rather than raising. See "Encoding inputs" in docs/PYTHON.md for the precedence
+  table and what an integration should pass.
+- `detect_encoding(..., explain=True)` returns `(name, source)`, where `source` names the rank that
+  decided: `"bom"`, `"utf16-prefix"`, `"encoding"`, `"content-type"`, `"xml-declaration"`, `"meta"`,
+  `"utf8"` or `"autodetect"`, or `"str"` for already-decoded text.
+- `Plan`, which `FrostPage` calls, now raises `ValueError` on an `encoding=` label no codec knows, as
+  `extract` and `Page` already did. `detect_encoding` and `navigation` still ignore one, as a browser
+  does.
+- On a browser-mode `Page`, `extract_with_navigation()` reads the base URL and meta refresh in a second,
+  lxml-mode pass, whose rules are the ones measured against browsers. An lxml-mode `Page` still reads
+  them in the fields' pass.
+- `frostwork_input()` may return a `frostwork.webpoet.FrostInput(html, encoding, content_type, url)` to
+  pass a response's header and URL with its body. An `(html, encoding)` pair still works.
+- Rust: `EncodingHints`, `EncodingSource`, `resolve_encoding`, `Plan::extract_with`,
+  `Plan::extract_with_navigation_hints` and `navigation_with` take the same inputs.
+
 ## 0.2.2 (2026-11-05)
 
 ### Performance

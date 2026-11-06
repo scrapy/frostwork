@@ -1,6 +1,8 @@
 //! Engine-only throughput (no subprocess/IO/JSON overhead). Reads selectors from stdin (one per
 //! line, blank lines ignored) so shell quoting can't corrupt `>`/`[]`/`()`.
-//! Usage: `bench HTML_FILE < selectors.txt` (empty stdin = 0 selectors = pure scan).
+//! Usage: `bench HTML_FILE [--parser browser|lxml] < selectors.txt` (empty stdin = 0 selectors = pure
+//! scan). The parse mode defaults to the engine's default; a harness comparing against Parsel passes
+//! `--parser lxml`.
 //!   Flat mode:    each line is a flat selector.
 //!                 `F <selector>` declares a first-value field; other columns retain every value.
 //!   Grouped mode: a line `G <container>` makes ALL remaining lines sub-fields of one `Many` group
@@ -12,6 +14,12 @@ use std::time::Instant;
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let html = std::fs::read(&args[1]).expect("read html file");
+    let mode = match &args[2..] {
+        [] => frostwork::ParseMode::default(),
+        [flag, name] if flag == "--parser" => frostwork::ParseMode::from_name(name)
+            .unwrap_or_else(|| panic!("bench: --parser must be 'browser' or 'lxml', got {name:?}")),
+        other => panic!("bench: usage: bench HTML_FILE [--parser browser|lxml], got {other:?}"),
+    };
     let mut sel_text = String::new();
     std::io::stdin().read_to_string(&mut sel_text).expect("read selectors");
 
@@ -62,7 +70,8 @@ fn main() {
     // `FrostPage` compiles them into a `Plan` there — once per process, not once per response. Timing
     // `extract_grouped` in the loop re-parsed every selector string per page, which measures a program
     // nobody writes and taxes the high-selector-count cells hardest.
-    let plan = frostwork::Plan::compile_first_only(flat_queries, &groups, &first_only);
+    let options = frostwork::CompileOptions { mode, first_only: &first_only };
+    let plan = frostwork::Plan::compile_with(flat_queries, &groups, options);
     let warmup = 200.min(iters.max(1));
     for _ in 0..warmup {
         let _ = plan.extract(&html, None, None);

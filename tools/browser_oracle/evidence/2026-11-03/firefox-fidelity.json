@@ -1,0 +1,61 @@
+{
+ "browser": "firefox/159.0",
+ "mode": "fidelity",
+ "date": "2026-11-03",
+ "fidelity": {
+  "page load, scripts run": {
+   "scriptRan": true,
+   "noscriptRawtext": true,
+   "templateInert": true,
+   "fosteredOutOfTable": true,
+   "tbodyInserted": true,
+   "selfCloseIgnored": true,
+   "divKeptInSelect": true
+  },
+  "page load, CSP script-src 'none'": {
+   "scriptRan": false,
+   "noscriptRawtext": true,
+   "templateInert": true,
+   "fosteredOutOfTable": true,
+   "tbodyInserted": true,
+   "selfCloseIgnored": true,
+   "divKeptInSelect": true
+  },
+  "page load, CSP sandbox": {
+   "scriptRan": false,
+   "noscriptRawtext": false,
+   "templateInert": true,
+   "fosteredOutOfTable": true,
+   "tbodyInserted": true,
+   "selfCloseIgnored": true,
+   "divKeptInSelect": true
+  },
+  "srcdoc iframe in a CSP page": {
+   "scriptRan": false,
+   "noscriptRawtext": true,
+   "templateInert": true,
+   "fosteredOutOfTable": true,
+   "tbodyInserted": true,
+   "selfCloseIgnored": true,
+   "divKeptInSelect": true
+  },
+  "DOMParser": {
+   "scriptRan": false,
+   "noscriptRawtext": false,
+   "templateInert": true,
+   "fosteredOutOfTable": true,
+   "tbodyInserted": true,
+   "selfCloseIgnored": true,
+   "divKeptInSelect": true
+  },
+  "Document.parseHTMLUnsafe": {
+   "scriptRan": false,
+   "noscriptRawtext": false,
+   "templateInert": true,
+   "fosteredOutOfTable": true,
+   "tbodyInserted": true,
+   "selfCloseIgnored": true,
+   "divKeptInSelect": true
+  }
+ }
+}

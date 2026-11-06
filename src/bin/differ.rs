@@ -5,14 +5,37 @@
 //!            for sniff; html hex-encoded so arbitrary bytes round-trip; selectors are plain)
 //!            grouped case  = `G2 \t ENC \t HEXHTML \t k \t (CONTAINER \t m \t sub_1 … sub_m)×k`
 //!            (k groups in ONE pass, so cross-group routing gets differential coverage)
+//!            encoding case = `T \t ENC \t CONTENT_TYPE \t HEXHTML \t sel1 \t ...` (CONTENT_TYPE = a
+//!            raw `Content-Type` header value or empty; used by tools/enc_check.py's precedence rows)
+//!            census case   = `R \t PATH \t sel1 \t ...`: which of browser mode's retroactive rules fire
+//!            on the file at PATH (tools/retro_census.py)
 //!   stdout : flat    -> a JSON array of value-columns (arrays of strings)
 //!            grouped -> a JSON array of `k` groups, each an array of rows, each row an array of
 //!                       sub-field value-columns  (`[group][row][sub][value]`)
+//!            encoding -> `{"encoding": NAME, "source": RANK, "values": [value-columns]}`
+//!            census   -> the rule bits as a number, or `null` for an unreadable file
 //!
 //! One long-running process streams the whole batch, so the Python driver (which owns lxml/Parsel)
 //! can diff millions of (page × selector) pairs without a PyO3 build or a process-per-case.
+//!
+//! `differ [--parser lxml|browser]` picks the parse mode every case runs in. The default is lxml,
+//! because every harness that drives this bridge grades against lxml.
 
 use std::io::{self, BufRead, Write};
+
+use frostwork::{CompileOptions, ParseMode, Plan};
+
+/// The `--parser` argument, or lxml mode when there is none. Anything else is a usage error: a parity
+/// run in the wrong mode would grade the wrong contract and could still read green.
+fn parse_mode() -> ParseMode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.as_slice() {
+        [] => ParseMode::Lxml,
+        [flag, name] if flag == "--parser" => ParseMode::from_name(name)
+            .unwrap_or_else(|| panic!("differ: --parser must be 'lxml' or 'browser', got {name:?}")),
+        other => panic!("differ: usage: differ [--parser lxml|browser], got {other:?}"),
+    }
+}
 
 fn hex_decode(s: &str) -> Vec<u8> {
     let b = s.as_bytes();
@@ -58,6 +81,8 @@ fn json_col(col: &[String], out: &mut String) {
 }
 
 fn main() {
+    let mode = parse_mode();
+    let options = CompileOptions { mode, first_only: &[] };
     // Opt-in (set by the parity harnesses, NOT by the budget-bomb selector fuzzer): treat a schema over
     // the fixed-width bitset budget as a harness error rather than silently answering empty columns.
     let budget_strict = std::env::var_os("FROSTWORK_DIFFER_BUDGET_STRICT").is_some();
@@ -84,7 +109,7 @@ fn main() {
             // Keeping this in the Rust bridge means CI can make empty-result verdicts support-aware
             // before the Python extension is built.
             let sels: Vec<String> = parts.map(str::to_string).collect();
-            let audit = frostwork::audit_schema(&sels, &[]);
+            let audit = frostwork::audit_schema_with(&sels, &[], mode);
             out.push('[');
             for (i, support) in audit.flat.iter().enumerate() {
                 if i > 0 {
@@ -93,6 +118,45 @@ fn main() {
                 out.push_str(if support.is_supported() { "true" } else { "false" });
             }
             out.push(']');
+        } else if first == "R" {
+            // retroactive census (tools/retro_census.py): R \t PATH \t sel1 ... -> the rule bits that
+            // fire on the file's bytes in browser mode (frostwork::Plan::retro_census)
+            let path = parts.next().unwrap_or("");
+            let sels: Vec<String> = parts.map(str::to_string).collect();
+            let browser = CompileOptions { mode: ParseMode::Browser, first_only: &[] };
+            let bits = match std::fs::read(path) {
+                Ok(html) => Plan::compile_with(&sels, &[], browser)
+                    .retro_census(&html, frostwork::EncodingHints::default())
+                    .to_string(),
+                Err(_) => "null".to_string(),
+            };
+            out.push_str(&bits);
+        } else if first == "T" {
+            // encoding: T \t ENC \t CONTENT_TYPE \t HEX \t sel1 ...
+            let non_empty = |s: &'_ str| -> Option<String> { (!s.is_empty()).then(|| s.to_string()) };
+            let enc = non_empty(parts.next().unwrap_or(""));
+            let ctype = non_empty(parts.next().unwrap_or(""));
+            let html = hex_decode(parts.next().unwrap_or(""));
+            let sels: Vec<String> = parts.map(str::to_string).collect();
+            let hints = frostwork::EncodingHints {
+                encoding: enc.as_deref(),
+                content_type: ctype.as_deref(),
+                url: None,
+            };
+            let (name, source) = frostwork::resolve_encoding(&html, hints);
+            let (cols, _) = Plan::compile_with(&sels, &[], options).extract_with(&html, hints);
+            out.push_str("{\"encoding\":");
+            json_str(name, &mut out);
+            out.push_str(",\"source\":");
+            json_str(source.as_str(), &mut out);
+            out.push_str(",\"values\":[");
+            for (i, col) in cols.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                json_col(col, &mut out);
+            }
+            out.push_str("]}");
         } else if first == "G2" {
             // grouped: G2 \t ENC \t HEX \t k \t (CONTAINER \t m \t sub_1 … sub_m)×k
             let enc_label = parts.next().unwrap_or("");
@@ -108,7 +172,7 @@ fn main() {
             }
             let html = hex_decode(hex);
             let enc = if enc_label.is_empty() { None } else { Some(enc_label) };
-            let (_flat, grouped) = frostwork::extract_grouped(&html, &[], &groups, enc, None);
+            let (_flat, grouped) = Plan::compile_with(&[], &groups, options).extract(&html, enc, None);
             // [ group0_rows, group1_rows, ... ]  where group_rows = [ [ [values]*sub ]*row ]
             out.push('[');
             for (gi, rows) in grouped.iter().enumerate() {
@@ -157,7 +221,7 @@ fn main() {
                 }
                 budget_ok.push(sels.clone());
             }
-            let res = frostwork::extract(&html, &sels, enc, None);
+            let res = Plan::compile_with(&sels, &[], options).extract(&html, enc, None).0;
             out.push('[');
             for (i, col) in res.iter().enumerate() {
                 if i > 0 {

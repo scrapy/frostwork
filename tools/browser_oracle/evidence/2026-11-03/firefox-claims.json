@@ -1,0 +1,637 @@
+{
+ "browser": "firefox/159.0",
+ "mode": "claims",
+ "date": "2026-11-03",
+ "claims": [
+  {
+   "name": "svg title holds HTML",
+   "exprs": [
+    "__q(d, \"#x\")",
+    "__q(d, \"svg title\")"
+   ],
+   "pageLoad": [
+    [
+     "t"
+    ],
+    [
+     ""
+    ]
+   ],
+   "domparser": [
+    [
+     "t"
+    ],
+    [
+     ""
+    ]
+   ],
+   "parseHTMLUnsafe": [
+    [
+     "t"
+    ],
+    [
+     ""
+    ]
+   ]
+  },
+  {
+   "name": "html title is RCDATA",
+   "exprs": [
+    "__q(d, \"#x\")",
+    "__q(d, \"title\")"
+   ],
+   "pageLoad": [
+    [],
+    [
+     "<b id=x>t</b>"
+    ]
+   ],
+   "domparser": [
+    [],
+    [
+     "<b id=x>t</b>"
+    ]
+   ],
+   "parseHTMLUnsafe": [
+    [],
+    [
+     "<b id=x>t</b>"
+    ]
+   ]
+  },
+  {
+   "name": "svg template is ordinary",
+   "exprs": [
+    "__q(d, \"#t\")",
+    "__q(d, \"#y\")",
+    "__q(d, \"svg template text\")"
+   ],
+   "pageLoad": [
+    [
+     ""
+    ],
+    [
+     "z"
+    ],
+    [
+     "z"
+    ]
+   ],
+   "domparser": [
+    [
+     ""
+    ],
+    [
+     "z"
+    ],
+    [
+     "z"
+    ]
+   ],
+   "parseHTMLUnsafe": [
+    [
+     ""
+    ],
+    [
+     "z"
+    ],
+    [
+     "z"
+    ]
+   ]
+  },
+  {
+   "name": "html template content",
+   "exprs": [
+    "__q(d, \"#t\")",
+    "__q(d, \"#y\")"
+   ],
+   "pageLoad": [
+    [
+     ""
+    ],
+    []
+   ],
+   "domparser": [
+    [
+     ""
+    ],
+    []
+   ],
+   "parseHTMLUnsafe": [
+    [
+     ""
+    ],
+    []
+   ]
+  },
+  {
+   "name": "form ancestry after </form>",
+   "exprs": [
+    "__q(d, \"#f #after\")",
+    "__q(d, \"#d #after\")",
+    "__q(d, \"#f > #d\")"
+   ],
+   "pageLoad": [
+    [
+     "x"
+    ],
+    [
+     "x"
+    ],
+    [
+     "a"
+    ]
+   ],
+   "domparser": [
+    [
+     "x"
+    ],
+    [
+     "x"
+    ],
+    [
+     "a"
+    ]
+   ],
+   "parseHTMLUnsafe": [
+    [
+     "x"
+    ],
+    [
+     "x"
+    ],
+    [
+     "a"
+    ]
+   ]
+  },
+  {
+   "name": "td in a table",
+   "exprs": [
+    "__q(d, \"td b\")",
+    "__q(d, \"td\")"
+   ],
+   "pageLoad": [
+    [
+     "cell"
+    ],
+    [
+     ""
+    ]
+   ],
+   "domparser": [
+    [
+     "cell"
+    ],
+    [
+     ""
+    ]
+   ],
+   "parseHTMLUnsafe": [
+    [
+     "cell"
+    ],
+    [
+     ""
+    ]
+   ]
+  },
+  {
+   "name": "td span standalone",
+   "exprs": [
+    "__q(d, \"td b\")",
+    "__q(d, \"td\")",
+    "__q(d, \"b\")"
+   ],
+   "pageLoad": [
+    [],
+    [],
+    [
+     "cell"
+    ]
+   ],
+   "domparser": [
+    [],
+    [],
+    [
+     "cell"
+    ]
+   ],
+   "parseHTMLUnsafe": [
+    [],
+    [],
+    [
+     "cell"
+    ]
+   ]
+  },
+  {
+   "name": "declarative shadow root",
+   "exprs": [
+    "d.querySelectorAll('#h > template').length",
+    "d.querySelectorAll('#s').length",
+    "__q(d, 'div p')",
+    "!!d.getElementById('h').shadowRoot"
+   ],
+   "pageLoad": [
+    0,
+    0,
+    [],
+    true
+   ],
+   "domparser": [
+    1,
+    0,
+    [],
+    false
+   ],
+   "parseHTMLUnsafe": [
+    0,
+    0,
+    [],
+    true
+   ]
+  },
+  {
+   "name": "raw control chars and p<img",
+   "exprs": [
+    "[...d.body.querySelectorAll('*')].map(e => e.localName)",
+    "__codes(d.getElementById('c').textContent)"
+   ],
+   "pageLoad": [
+    [
+     "p<img",
+     "p"
+    ],
+    [
+     "61",
+     "b",
+     "62",
+     "1",
+     "63"
+    ]
+   ],
+   "domparser": [
+    [
+     "p<img",
+     "p"
+    ],
+    [
+     "61",
+     "b",
+     "62",
+     "1",
+     "63"
+    ]
+   ],
+   "parseHTMLUnsafe": [
+    [
+     "p<img",
+     "p"
+    ],
+    [
+     "61",
+     "b",
+     "62",
+     "1",
+     "63"
+    ]
+   ]
+  },
+  {
+   "name": "reconstruction only",
+   "exprs": [
+    "__q(d, 'b')",
+    "__q(d, 'p b')",
+    "__q(d, 'body > b')"
+   ],
+   "pageLoad": [
+    [
+     "1",
+     "2"
+    ],
+    [
+     "1"
+    ],
+    [
+     "2"
+    ]
+   ],
+   "domparser": [
+    [
+     "1",
+     "2"
+    ],
+    [
+     "1"
+    ],
+    [
+     "2"
+    ]
+   ],
+   "parseHTMLUnsafe": [
+    [
+     "1",
+     "2"
+    ],
+    [
+     "1"
+    ],
+    [
+     "2"
+    ]
+   ]
+  },
+  {
+   "name": "adoption agency",
+   "exprs": [
+    "__q(d, 'b')",
+    "d.querySelectorAll('b p').length",
+    "__q(d, 'p')"
+   ],
+   "pageLoad": [
+    [
+     "1",
+     "2"
+    ],
+    0,
+    [
+     "3"
+    ]
+   ],
+   "domparser": [
+    [
+     "1",
+     "2"
+    ],
+    0,
+    [
+     "3"
+    ]
+   ],
+   "parseHTMLUnsafe": [
+    [
+     "1",
+     "2"
+    ],
+    0,
+    [
+     "3"
+    ]
+   ]
+  },
+  {
+   "name": "quirks <p><table>",
+   "exprs": [
+    "d.compatMode",
+    "d.querySelectorAll('#p > #t').length"
+   ],
+   "pageLoad": [
+    "BackCompat",
+    1
+   ],
+   "domparser": [
+    "BackCompat",
+    1
+   ],
+   "parseHTMLUnsafe": [
+    "BackCompat",
+    1
+   ]
+  },
+  {
+   "name": "no-quirks <p><table>",
+   "exprs": [
+    "d.compatMode",
+    "d.querySelectorAll('#p > #t').length"
+   ],
+   "pageLoad": [
+    "CSS1Compat",
+    0
+   ],
+   "domparser": [
+    "CSS1Compat",
+    0
+   ],
+   "parseHTMLUnsafe": [
+    "CSS1Compat",
+    0
+   ]
+  },
+  {
+   "name": "initial newline",
+   "exprs": [
+    "JSON.stringify(d.getElementById('p').firstChild.data)",
+    "JSON.stringify(d.getElementById('t').firstChild.data)",
+    "JSON.stringify(d.getElementById('l').firstChild.data)"
+   ],
+   "pageLoad": [
+    "\"x\"",
+    "\"y\"",
+    "\"z\""
+   ],
+   "domparser": [
+    "\"x\"",
+    "\"y\"",
+    "\"z\""
+   ],
+   "parseHTMLUnsafe": [
+    "\"x\"",
+    "\"y\"",
+    "\"z\""
+   ]
+  },
+  {
+   "name": "form pointer: nested form",
+   "exprs": [
+    "d.querySelectorAll('#b').length",
+    "d.querySelectorAll('#a #i').length"
+   ],
+   "pageLoad": [
+    0,
+    1
+   ],
+   "domparser": [
+    0,
+    1
+   ],
+   "parseHTMLUnsafe": [
+    0,
+    1
+   ]
+  },
+  {
+   "name": "form pointer: form in table",
+   "exprs": [
+    "d.querySelectorAll('#f #i').length",
+    "d.getElementById('f').parentNode.localName",
+    "d.getElementById('i').form && d.getElementById('i').form.id"
+   ],
+   "pageLoad": [
+    0,
+    "table",
+    "f"
+   ],
+   "domparser": [
+    0,
+    "table",
+    "f"
+   ],
+   "parseHTMLUnsafe": [
+    0,
+    "table",
+    "f"
+   ]
+  },
+  {
+   "name": "CSS vs XPath case folding",
+   "exprs": [
+    "d.querySelectorAll('input[type=submit]').length",
+    "__x(d, \"//input[@type='submit']\").length",
+    "d.querySelectorAll('[lang=en]').length",
+    "d.querySelectorAll('[id=S]').length"
+   ],
+   "pageLoad": [
+    1,
+    0,
+    1,
+    0
+   ],
+   "domparser": [
+    1,
+    0,
+    1,
+    0
+   ],
+   "parseHTMLUnsafe": [
+    1,
+    0,
+    1,
+    0
+   ]
+  },
+  {
+   "name": "frameset replaces body (no text)",
+   "exprs": [
+    "d.querySelectorAll('#x').length",
+    "d.querySelectorAll('frameset').length",
+    "d.querySelectorAll('body').length"
+   ],
+   "pageLoad": [
+    0,
+    1,
+    0
+   ],
+   "domparser": [
+    0,
+    1,
+    0
+   ],
+   "parseHTMLUnsafe": [
+    0,
+    1,
+    0
+   ]
+  },
+  {
+   "name": "frameset after text (ignored)",
+   "exprs": [
+    "d.querySelectorAll('#x').length",
+    "d.querySelectorAll('frameset').length"
+   ],
+   "pageLoad": [
+    1,
+    0
+   ],
+   "domparser": [
+    1,
+    0
+   ],
+   "parseHTMLUnsafe": [
+    1,
+    0
+   ]
+  },
+  {
+   "name": "parseHTMLUnsafe vs page load: <option><svg><p></i><b><!--c-->",
+   "exprs": [
+    "JSON.stringify(__ser(d.documentElement))"
+   ],
+   "pageLoad": [
+    "[\"html\",0,[],[[\"head\",0,[],[]],[\"body\",0,[],[[\"option\",0,[],[[\"svg\",\"http://www.w3.org/2000/svg\",[],[]],[\"p\",0,[],[[\"b\",0,[],[[\"#c\",\"c\"]]]]]]]]]]]"
+   ],
+   "domparser": [
+    "[\"html\",0,[],[[\"head\",0,[],[]],[\"body\",0,[],[[\"option\",0,[],[[\"svg\",\"http://www.w3.org/2000/svg\",[],[]],[\"p\",0,[],[[\"b\",0,[],[[\"#c\",\"c\"]]]]]]]]]]]"
+   ],
+   "parseHTMLUnsafe": [
+    "[\"html\",0,[],[[\"head\",0,[],[]],[\"body\",0,[],[[\"option\",0,[],[[\"svg\",\"http://www.w3.org/2000/svg\",[],[]],[\"p\",0,[],[[\"b\",0,[],[[\"#c\",\"c\"]]]]]]]]]]]"
+   ]
+  },
+  {
+   "name": "parseHTMLUnsafe vs page load: <!DOCTYPE html><p><frameset><mi><!--c--><!--c-->",
+   "exprs": [
+    "JSON.stringify(__ser(d.documentElement))"
+   ],
+   "pageLoad": [
+    "[\"html\",0,[],[[\"head\",0,[],[]],[\"frameset\",0,[],[[\"#c\",\"c\"],[\"#c\",\"c\"]]]]]"
+   ],
+   "domparser": [
+    "[\"html\",0,[],[[\"head\",0,[],[]],[\"frameset\",0,[],[[\"#c\",\"c\"],[\"#c\",\"c\"]]]]]"
+   ],
+   "parseHTMLUnsafe": [
+    "[\"html\",0,[],[[\"head\",0,[],[]],[\"frameset\",0,[],[[\"#c\",\"c\"],[\"#c\",\"c\"]]]]]"
+   ]
+  },
+  {
+   "name": "parseHTMLUnsafe vs page load: <!DOCTYPE html><caption><frame><title>T</title><option><option><!--c--><marquee>",
+   "exprs": [
+    "JSON.stringify(__ser(d.documentElement))"
+   ],
+   "pageLoad": [
+    "[\"html\",0,[],[[\"head\",0,[],[]],[\"body\",0,[],[[\"title\",0,[],[\"T\"]],[\"option\",0,[],[]],[\"option\",0,[],[[\"#c\",\"c\"],[\"marquee\",0,[],[]]]]]]]]"
+   ],
+   "domparser": [
+    "[\"html\",0,[],[[\"head\",0,[],[]],[\"body\",0,[],[[\"title\",0,[],[\"T\"]],[\"option\",0,[],[]],[\"option\",0,[],[[\"#c\",\"c\"],[\"marquee\",0,[],[]]]]]]]]"
+   ],
+   "parseHTMLUnsafe": [
+    "[\"html\",0,[],[[\"head\",0,[],[]],[\"body\",0,[],[[\"title\",0,[],[\"T\"]],[\"option\",0,[],[]],[\"option\",0,[],[[\"#c\",\"c\"],[\"marquee\",0,[],[]]]]]]]]"
+   ]
+  },
+  {
+   "name": "xpath and svg",
+   "exprs": [
+    "__x(d, '//svg').length",
+    "__x(d, '//circle').length",
+    "__x(d, \"//*[local-name()='svg']\").length",
+    "__x(d, '//P').length",
+    "__x(d, '//p').length",
+    "d.querySelectorAll('svg').length"
+   ],
+   "pageLoad": [
+    0,
+    0,
+    1,
+    1,
+    1,
+    1
+   ],
+   "domparser": [
+    0,
+    0,
+    1,
+    1,
+    1,
+    1
+   ],
+   "parseHTMLUnsafe": [
+    0,
+    0,
+    1,
+    1,
+    1,
+    1
+   ]
+  }
+ ]
+}

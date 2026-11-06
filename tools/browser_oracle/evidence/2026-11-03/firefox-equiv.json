@@ -1,0 +1,50 @@
+{
+ "browser": "firefox/159.0",
+ "mode": "equiv",
+ "date": "2026-11-03",
+ "coverage": {
+  "seed": 12345,
+  "tokens": 70,
+  "minUses": 245,
+  "maxUses": 309
+ },
+ "equiv": {
+  "docs": 5002,
+  "eligible": 4478,
+  "containsShadowrootmode": 524,
+  "pageLoadFailures": 0,
+  "domparser": {
+   "differ": 112,
+   "differEligible": 0,
+   "examples": [
+    "<!DOCTYPE html><br><template shadowrootmode=open><div/><dt><frameset><i>",
+    "<!DOCTYPE html><p><tbody><template shadowrootmode=closed><head><dd></table><annotation-xml encoding=\"text/html\">",
+    "<tr><template shadowrootmode=open></html><body><selectedcontent><selectedcontent>",
+    "<!DOCTYPE html><?pi?><colgroup><template shadowrootmode=open><select>"
+   ],
+   "eligibleExamples": []
+  },
+  "parseHTMLUnsafe": {
+   "differ": 0,
+   "differEligible": 0,
+   "examples": [],
+   "eligibleExamples": []
+  },
+  "srcdoc": {
+   "differ": 7,
+   "differEligible": 7,
+   "examples": [
+    "<li></br><style>s</style><div><p><table>",
+    "<math><mi><p></i><table>",
+    "<p/></body><table><td><colgroup>t<marquee>",
+    "<foreignObject><p><style>s</style><table>"
+   ],
+   "eligibleExamples": [
+    "<li></br><style>s</style><div><p><table>",
+    "<math><mi><p></i><table>",
+    "<p/></body><table><td><colgroup>t<marquee>",
+    "<foreignObject><p><style>s</style><table>"
+   ]
+  }
+ }
+}
