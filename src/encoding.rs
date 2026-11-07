@@ -5,7 +5,8 @@
 //! 3. the caller's own label (`encoding=`);
 //! 4. the `charset` parameter of the response's `Content-Type` header (`content_type=`);
 //! 5. the document's declarations: an XML declaration at offset 0, then `<meta>` in document order;
-//! 6. autodetection: UTF-8 if the document is valid UTF-8, else chardetng with the URL's TLD.
+//! 6. autodetection: for valid UTF-8, windows-1252 when the URL is http(s), as browsers read it, else
+//!    UTF-8; for anything else, chardetng with the URL's TLD.
 //!
 //! A label a rank cannot use is ignored and resolution continues with the next rank.
 //!
@@ -319,7 +320,8 @@ pub struct EncodingHints<'a> {
     pub encoding: Option<&'a str>,
     /// The raw `Content-Type` header value. Only its `charset` parameter is read.
     pub content_type: Option<&'a str>,
-    /// The response URL. The top-level domain of its host informs autodetection.
+    /// The response URL. An http(s) scheme makes a valid UTF-8 document that declares nothing
+    /// windows-1252, and the top-level domain of its host informs chardetng's guess.
     pub url: Option<&'a str>,
 }
 
@@ -340,6 +342,9 @@ pub enum EncodingSource {
     Meta,
     /// No label or declaration, and the document is valid UTF-8.
     Utf8,
+    /// No label or declaration, the document is valid UTF-8, and its URL is http(s), for which browsers
+    /// refuse to detect UTF-8: the locale default, windows-1252.
+    Default,
     /// No label or declaration, and chardetng's guess.
     Autodetect,
 }
@@ -355,6 +360,7 @@ impl EncodingSource {
             EncodingSource::XmlDeclaration => "xml-declaration",
             EncodingSource::Meta => "meta",
             EncodingSource::Utf8 => "utf8",
+            EncodingSource::Default => "default",
             EncodingSource::Autodetect => "autodetect",
         }
     }
@@ -420,7 +426,7 @@ fn is_http_ws(c: char) -> bool {
 /// 4. the `charset` parameter of `hints.content_type`, resolved the same way and taken literally, so
 ///    `x-user-defined` and the `replacement` labels keep their meaning;
 /// 5. the document's own declarations ([`declaration`]);
-/// 6. autodetection, with the top-level domain of `hints.url`.
+/// 6. autodetection ([`autodetect`]), with `hints.url`.
 ///
 /// The intentional differences from w3lib (Scrapy's decoder) are in the encoding section of
 /// docs/COMPATIBILITY.md and gated in `tools/enc_check.py`; each one is a place where w3lib and browsers
@@ -443,13 +449,13 @@ pub fn resolve_explained(html: &[u8], hints: EncodingHints<'_>) -> (&'static Enc
     if let Some(found) = declaration(html) {
         return found;
     }
-    autodetect(html, hints.url.and_then(tld).as_deref())
+    autodetect(html, hints.url)
 }
 
 /// [`resolve_explained`] with a caller label and a URL, for the unit tests below.
 #[cfg(test)]
 fn resolve(html: &[u8], label: Option<&str>, url: Option<&str>) -> &'static Encoding {
-    resolve_explained(html, EncodingHints { encoding: label, content_type: None, url }).0
+    resolve_explained(html, EncodingHints { encoding: label, url, ..EncodingHints::default() }).0
 }
 
 /// The document's own declaration: an XML declaration at offset 0, else the first usable `<meta>`.
@@ -505,27 +511,49 @@ pub(crate) fn bom(html: &[u8]) -> Option<(&'static Encoding, usize)> {
     None
 }
 
-/// WHATWG's optional frequency-analysis step, as Firefox runs it: chardetng, with UTF-8 decided up
-/// front by a strict decode, as Chrome and Scrapy do. A body cut off inside a UTF-8 sequence is still
-/// UTF-8. The guess is informed by the top-level domain of `url` when given.
+/// WHATWG's optional frequency-analysis step.
 ///
-/// The UTF-8 check is the one place the encoding subsystem knowingly differs from browsers: Chrome
-/// reads an unlabelled valid UTF-8 page as windows-1252 by policy, and chardetng documents the same
-/// policy for Firefox (`Utf8Detection::Deny`). The result is text nobody intended, so Frostwork reads
-/// UTF-8 here; see "Deliberate differences from browsers" in docs/COMPATIBILITY.md.
+/// A valid UTF-8 document (a body cut off inside a UTF-8 sequence still counts) is windows-1252 when
+/// `url` is http(s) and UTF-8 otherwise. That is what Chrome and Firefox show: both refuse to detect
+/// UTF-8 for a page from the network, keeping the locale default (windows-1252 in English locales),
+/// and both read a `file:` page as UTF-8. Without a URL, Frostwork reads the document as a file, since
+/// such a document is most often one stored on disk. Anything else goes to chardetng, Firefox's
+/// detector, with the top-level domain of `url` as its hint.
+///
+/// Chrome runs its own detector (CED) instead, on each network chunk until one gives a verdict, so its
+/// guess for the same bytes moves with how they arrive: chardetng over the whole document is the
+/// deterministic answer, and Firefox's. See "Deliberate differences from browsers" in
+/// docs/COMPATIBILITY.md.
 ///
 /// The decode is `simdutf8::compat`, which returns what `std::str::from_utf8` does. Not `basic`: it
 /// reads the whole document before failing and has no `error_len()` to tell a truncated tail apart.
-pub(crate) fn autodetect(html: &[u8], tld: Option<&[u8]>) -> (&'static Encoding, EncodingSource) {
-    match simdutf8::compat::from_utf8(html) {
-        Ok(_) => (encoding_rs::UTF_8, EncodingSource::Utf8),
-        Err(e) if e.error_len().is_none() => (encoding_rs::UTF_8, EncodingSource::Utf8),
-        Err(_) => {
-            let mut detector = chardetng::EncodingDetector::new(chardetng::Iso2022JpDetection::Deny);
-            detector.feed(html, true);
-            (detector.guess(tld, chardetng::Utf8Detection::Deny), EncodingSource::Autodetect)
-        }
+pub(crate) fn autodetect(html: &[u8], url: Option<&str>) -> (&'static Encoding, EncodingSource) {
+    let valid_utf8 = match simdutf8::compat::from_utf8(html) {
+        Ok(_) => true,
+        Err(e) => e.error_len().is_none(),
+    };
+    if valid_utf8 {
+        return if url.is_some_and(is_http_url) {
+            (encoding_rs::WINDOWS_1252, EncodingSource::Default)
+        } else {
+            (encoding_rs::UTF_8, EncodingSource::Utf8)
+        };
     }
+    let mut detector = chardetng::EncodingDetector::new(chardetng::Iso2022JpDetection::Deny);
+    detector.feed(html, true);
+    let tld = url.and_then(tld);
+    (detector.guess(tld.as_deref(), chardetng::Utf8Detection::Deny), EncodingSource::Autodetect)
+}
+
+/// Whether `url`'s scheme is `http` or `https`, in any case, read as the WHATWG URL parser reads it:
+/// leading C0 controls and spaces stripped, and ASCII tab and newline removed wherever they are.
+fn is_http_url(url: &str) -> bool {
+    let url = url.trim_start_matches(|c: char| c <= ' ');
+    let Some((scheme, _)) = url.split_once(':') else {
+        return false;
+    };
+    let scheme: String = scheme.chars().filter(|c| !matches!(c, '\t' | '\n' | '\r')).collect();
+    scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
 }
 
 /// The last label of `url`'s host, lowercased, in the form chardetng accepts: ASCII without periods.
@@ -600,7 +628,8 @@ mod tests {
     fn one_precedence_table_decides_every_encoding() {
         use EncodingSource as S;
         let r = |html: &[u8], encoding, content_type| {
-            let (enc, src) = resolve_explained(html, EncodingHints { encoding, content_type, url: None });
+            let hints = EncodingHints { encoding, content_type, ..EncodingHints::default() };
+            let (enc, src) = resolve_explained(html, hints);
             (enc.name(), src)
         };
         let meta = b"<meta charset=koi8-r><p>caf\xe9</p>";
@@ -656,6 +685,40 @@ mod tests {
         assert_ne!(resolve(&[&long[..], b"\xe9t\xe9</p>"].concat(), None, None), encoding_rs::UTF_8);
     }
 
+    /// Measured in Chrome 156 and Firefox 159 (en-GB, top-level loads): each of these pages, served with
+    /// no label, is windows-1252 over http and UTF-8 from a `file:` URL.
+    #[test]
+    fn valid_utf8_over_http_is_windows_1252() {
+        use EncodingSource as S;
+        let r = |html: &[u8], url| {
+            let (enc, src) = resolve_explained(html, EncodingHints { url, ..EncodingHints::default() });
+            (enc.name(), src)
+        };
+        for text in ["café", "日本語のテキストです。東京都", "Съешь же ещё этих мягких французских булок", "这是一个中文网页", "price 10€ 😀"] {
+            let page = format!("<!DOCTYPE html><html><head></head><body><p id=\"t\">{text}</p></body></html>");
+            let page = page.as_bytes();
+            assert_eq!(r(page, Some("http://127.0.0.1:8765/c/x")), ("windows-1252", S::Default), "{text}");
+            assert_eq!(r(page, Some("https://mojibake.wtf/c/x")), ("windows-1252", S::Default), "{text}");
+            assert_eq!(r(page, Some("file:///tmp/x.html")), ("UTF-8", S::Utf8), "{text}");
+            assert_eq!(r(page, None), ("UTF-8", S::Utf8), "{text}");
+        }
+        // ASCII and a truncated tail are valid UTF-8 too
+        assert_eq!(r(b"<p>x</p>", Some("http://example.com/")), ("windows-1252", S::Default));
+        assert_eq!(r(b"<p>caf\xc3", Some("http://example.com/")), ("windows-1252", S::Default));
+        // the scheme is read as a URL parser reads it
+        assert_eq!(r(b"<p>x</p>", Some(" HTTPS://example.com/")), ("windows-1252", S::Default));
+        assert_eq!(r(b"<p>x</p>", Some("httpx://example.com/")), ("UTF-8", S::Utf8));
+        assert_eq!(r(b"<p>x</p>", Some("example.com/http:")), ("UTF-8", S::Utf8));
+        // tab and newline vanish from a URL wherever they are, and a special scheme needs no slashes
+        assert_eq!(r(b"<p>x</p>", Some("ht\ntp\ts://example.com/")), ("windows-1252", S::Default));
+        assert_eq!(r(b"<p>x</p>", Some("http:example.com")), ("windows-1252", S::Default));
+        assert_eq!(r(b"<p>x</p>", Some("ht tp://example.com/")), ("UTF-8", S::Utf8));
+        // a declaration outranks the rule, and invalid UTF-8 goes to chardetng
+        assert_eq!(r("<meta charset=utf-8><p>café</p>".as_bytes(), Some("http://a.com/")), ("UTF-8", S::Meta));
+        let french = b"<p>Le caf\xe9 est d\xe9j\xe0 pr\xeat, tr\xe8s chaud et tr\xe8s bon.</p>";
+        assert_eq!(r(french, Some("http://a.com/")), ("windows-1252", S::Autodetect));
+    }
+
     #[test]
     fn autodetection_reads_the_whole_document() {
         // Firefox 144 reports windows-1251 for this page: the 46 000 Shift_JIS bytes at the start do not
@@ -664,8 +727,9 @@ mod tests {
         let russian = "<p>Привет мир, это страница.</p>\n".repeat(10_000);
         let (japanese, _, _) = encoding_rs::SHIFT_JIS.encode(&japanese);
         let (russian, _, _) = encoding_rs::WINDOWS_1251.encode(&russian);
-        assert_eq!(autodetect(&japanese, None).0, encoding_rs::SHIFT_JIS);
-        assert_eq!(autodetect(&[&japanese[..], &russian[..]].concat(), None).0, encoding_rs::WINDOWS_1251);
+        let guess = |html: &[u8]| autodetect(html, None).0;
+        assert_eq!(guess(&japanese), encoding_rs::SHIFT_JIS);
+        assert_eq!(guess(&[&japanese[..], &russian[..]].concat()), encoding_rs::WINDOWS_1251);
     }
 }
 

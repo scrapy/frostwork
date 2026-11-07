@@ -10,9 +10,10 @@ BIN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "target", "
 ENGINE = [BIN, "--parser", "lxml"]
 
 from enc_cases import (  # noqa: E402
-    BODY_META_CASES, BROWSER_DIFFERENCES, BROWSER_EXCEPTIONS, C1_LABELS, DECOY, LABEL_CASES, PRECEDENCE,
+    BODY_META_CASES, BROWSER_DIFFERENCES, C1_LABELS, DECOY, LABEL_CASES, PRECEDENCE,
     SELS, SHARED_DOC_CASES, SHARED_PRESCAN_CASES, UTF16_BOM, UTF16_BOM_DOC, UTF16_META_LABELS,
-    WHATWG_ONLY_BYTES, body_meta_page, c1_probe, label_page, prescan_doc, sweep_docs, utf16_meta_doc,
+    UTF8_DETECTION, WHATWG_ONLY_BYTES, body_meta_page, c1_probe, label_page, prescan_doc, sweep_docs,
+    utf16_meta_doc, utf8_detection_failures,
 )
 
 
@@ -23,9 +24,10 @@ def engine(body, sels, label):
     return json.loads(out.decode().splitlines()[0])
 
 
-def engine_inputs(body, sels, encoding, content_type):
-    """`{"encoding", "source", "values"}` for a document given both caller inputs (differ's `T` line)."""
-    line = "\t".join(["T", encoding or "", content_type or "", body.hex(), *sels]) + "\n"
+def engine_inputs(body, sels, encoding, content_type, url=None):
+    """`{"encoding", "source", "values"}` for a document given the caller's inputs (differ's `T` line)."""
+    fields = [encoding, content_type, url]
+    line = "\t".join(["T", *(f or "" for f in fields), body.hex(), *sels]) + "\n"
     p = subprocess.Popen(ENGINE, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
     out, _ = p.communicate(line.encode())
     return json.loads(out.decode().splitlines()[0])
@@ -144,26 +146,18 @@ for _pad, _want, _why in BODY_META_CASES:
         fails.append(("body-depth", f"a BODY declaration at ~{_pad} bytes ({_why})", _mine, _want))
     print(f"body declaration at ~{_pad} bytes ({_why}): mine={_mine} -> {'OK' if _ok else 'MISMATCH'}")
 
-# ---- DELIBERATE differences from the BROWSER: the encoding rule's named exceptions ---------------
-# The browser column is a recorded measurement, so each row is checked two ways rather than re-measured:
-# decoding the document with the browser's encoding must reproduce the browser's values, and Frostwork
-# must still answer differently. A row Frostwork stops differing on is STALE and fails.
-for name, doc, want_enc, want_mine, browser_enc, browser_vals, build, why in BROWSER_EXCEPTIONS:
-    got = engine_inputs(doc, ["p.c::text"], None, None)
-    as_browser = PS(text=doc.decode(browser_enc)).css("p.c::text").getall()
-    row = []
-    if (got["encoding"], got["values"][0]) != (want_enc, want_mine):
-        row.append(("browser-exception", f"{name}: Frostwork must read {want_enc}",
-                    [got["encoding"], got["values"][0]], [want_enc, want_mine]))
-    if as_browser != browser_vals:
-        row.append(("browser-exception", f"{name}: {browser_enc} does not reproduce the recorded "
-                                         f"{build} answer", as_browser, browser_vals))
-    if got["values"][0] == browser_vals:
-        row.append(("browser-exception", f"{name}: Frostwork now agrees with {build}, so the exception "
-                                         f"is STALE", got["values"][0], browser_vals))
-    fails += row
-    print(f"browser exception [{name}]: mine={got['values'][0]} ({got['encoding']}) "
-          f"{build}={browser_vals} ({browser_enc}) -> {'OK' if not row else 'MISMATCH'}")
+# ---- autodetection of valid UTF-8: the measured browser answers by kind of URL ------------------
+# A browser record is a measurement, so each row is checked two ways rather than re-measured: decoding
+# the document with the browser's encoding must reproduce the browser's values, and Frostwork must
+# return them (`enc_cases.utf8_detection_failures`).
+for row in UTF8_DETECTION:
+    name, doc, url, *_rest, browsers, why = row
+    got = engine_inputs(doc, ["p.c::text"], None, None, url)
+    as_browser = [PS(text=doc.decode(enc)).css("p.c::text").getall() for enc, *_ in browsers]
+    row_fails = utf8_detection_failures(row, got, as_browser)
+    fails += [("utf8-detection", msg, got, None) for msg in row_fails]
+    print(f"utf8 detection [{name}]: {got['encoding']} from {got['source']}, mine={got['values'][0]} "
+          f"-> {'OK' if not row_fails else 'MISMATCH'}")
     print(f"    why: {why}")
 
 # ---- the PRECEDENCE table: which caller input wins -----------------------------------------------

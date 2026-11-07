@@ -12,9 +12,12 @@ w3lib integration.
 
 In short:
 
-- **Encoding** follows the browser through every entry point. Over 48 encoding cases measured in
-  Chrome as exact bytes and headers, the engine differs on 2, both decided: unlabelled valid UTF-8 stays
-  UTF-8 (E2), and autodetection follows Firefox's detector (E3).
+- **Encoding** follows the browser through every entry point, and matches all 48 recorded Chrome
+  answers for encoding cases measured as exact bytes and headers. One of them varies between loads in
+  Chrome itself, and its record is the most common answer from the deployed site (E3). Valid UTF-8 that
+  declares nothing is windows-1252 when it came over http(s), as Chrome and Firefox read it (E2).
+  Anything else undeclared goes to Firefox's detector, because Chrome's judges whatever network chunk
+  first gives it a verdict (E3).
 - **The parse modes** share the tokenizer, the matcher, encoding and value decoding, and differ only in
   the tree builder behind one interface (section 4).
 - **The oracle is the browsers themselves**: a page load served with `Content-Security-Policy:
@@ -33,9 +36,10 @@ In short:
 
 The encoding decision is the same in both parse modes, and the browser is its standard.
 `tools/browser_oracle/lab_compare.py` grades the engine against 48 cases of exact bytes and headers
-whose rendering was recorded in Chrome: 2 differ, given the header or through `Page.extract_response`,
-and they are the two decisions below. The fallback-dependent cases are Chrome 156 top-level loads; the
-other 32 are a Chrome 148 iframe capture that Chrome 156 reproduces.
+whose rendering was recorded in Chrome, and none differ, given the header or through
+`Page.extract_response`. The fallback-dependent cases are Chrome 156 top-level loads; the other 32 are a
+Chrome 148 iframe capture that Chrome 156 reproduces. One of them, `body-meta-512k`, depends on how the
+bytes arrive, and its record is the deployed site's most common answer (E3).
 
 ### E1. The engine takes the transport label, not a decision
 
@@ -51,7 +55,7 @@ other 32 are a Chrome 148 iframe capture that Chrome 156 reproduces.
   | 3 | `encoding=`, the caller's own label | unknown to every codec: raise. A real encoding WHATWG lacks (`utf-7`): ignored, continue |
   | 4 | `content_type=`, its charset parameter | ignored, continue. It is server data, so it never raises |
   | 5 | document declarations: an XML declaration at offset 0, then `<meta>` in document order, in the head at any depth or within the first 1024 bytes of the body | unsupported labels are skipped, and the scan continues |
-  | 6 | autodetection: UTF-8 if valid (E2), else chardetng with the TLD of `url=` | n/a |
+  | 6 | autodetection: valid UTF-8 is windows-1252 with an http(s) `url=`, else UTF-8 (E2); anything else is chardetng's guess with the TLD of `url=` (E3) | n/a |
 
   `encoding=` ranks below a BOM, because a BOM-marked document read as anything else is mojibake. Scrapy
   and web-poet rank a forced `_encoding` first, so a forced label on a BOM-marked body is the one shape
@@ -64,31 +68,50 @@ other 32 are a Chrome 148 iframe capture that Chrome 156 reproduces.
   `.encoding` from the same decision.
 - `Page.extract_response` and `FrostPage` pass the header and the URL, and a forced `_encoding` as
   `encoding=`. They never pass web-poet's resolved `.encoding`: it is always a string, it outranks the
-  prescan, and passing it loses 14 of the 48 cases. PYTHON.md ("Encoding inputs") is the integrator
+  prescan, and passing it loses 13 of the 48 cases. PYTHON.md ("Encoding inputs") is the integrator
   contract.
 - `diff_webpoet` grades against parsel built from `response.text`, which is w3lib's decision, so its
   generator stays out of the shapes where the two decisions differ.
 
-### E2. Unlabelled valid UTF-8 stays UTF-8 (decided 2026-11-03)
+### E2. Valid UTF-8 from an http(s) URL is windows-1252 (decided 2026-11-07)
 
-`encoding::autodetect` returns UTF-8 whenever the whole document is valid UTF-8, and only then asks
-chardetng. Browsers do not: chardetng's documentation says browsers pass `Utf8Detection::Deny` for
-`text/html`, and Chrome 156 shows such a page as windows-1252 mojibake. This is the encoding subsystem's
-one named exception to the browser rule, asserted in `tools/enc_check.py` against the measured browser
-answer. Browsers reach their answer by policy rather than by reading the bytes differently, and a scraper
-that stores `cafÃ©` has a wrong value by any standard. A page cannot rely on the browser's reading
-either, since every multi-byte UTF-8 sequence would look broken to its own users.
+Both browsers refuse to detect UTF-8 for a page from the network and keep the locale's default encoding,
+windows-1252 in English locales. Blink's `DetectTextEncoding` refuses its detector's UTF-8 verdict for any
+URL that is not a local scheme, and chardetng documents the same policy for Firefox. Measured in Chrome
+156 and Firefox 159: five unlabelled valid UTF-8 pages (Latin, Japanese, Russian, Chinese and emoji
+text) and the lab's `no-declaration` case are windows-1252 over http, and the same bytes loaded as
+`file:` URLs are UTF-8. Frostwork used to read every valid UTF-8 page as UTF-8, and that was the lab's
+`no-declaration` mismatch.
 
-### E3. Autodetection follows Firefox (decided 2026-11-03)
+So in rank 6 a valid UTF-8 document (a sequence cut off at the very end still counts) is windows-1252,
+reported as source `"default"`, when `url=` is `http` or `https`, and UTF-8 otherwise. A page with no URL
+is most often one stored on disk, so Frostwork reads it as both browsers read a file. That, and UTF-8 for
+schemes other than `http`, `https` and `file`, which the browsers would refuse, are Frostwork's choices.
+Frostwork fixes the English default rather than reading a locale. There is no switch: a framework that
+wants UTF-8 for these pages, as scraping stacks have traditionally read them, overrides the answer in its
+own code. w3lib passes the response URL, so Scrapy's `response.text` follows the browsers unless w3lib
+does that. `tools/enc_check.py` asserts the http and `file:` answers against both browsers'
+measurements.
 
-Autodetection runs only when there is no BOM, label or declaration and the bytes are not valid UTF-8.
-Frostwork uses chardetng, Firefox's detector, with the response URL's TLD as the hint (Gecko calls it from
-`nsHtml5StreamParser::GuessEncoding`). Chrome uses its own detector (Compact Encoding Detection) plus
-Blink's rules around it, and its guess moves with the build and with single bytes: on `body-meta-512k`
-Chrome 156 guesses windows-874 where Frostwork reads windows-1252. Matching Chrome would mean binding an
-archived C++ library and re-implementing Blink's wrapper; matching Firefox costs nothing, because
-encoding_rs and chardetng are Firefox's own libraries. COMPATIBILITY.md lists Chrome's disagreement as
-measured. The URL is the only lever on this step, so integrations pass it wherever one exists.
+### E3. Autodetection follows Firefox's detector (decided 2026-11-03, measured again 2026-11-07)
+
+Autodetection of a document that is not valid UTF-8 uses chardetng, Firefox's detector, with the
+response URL's TLD as the hint (Gecko calls it from `nsHtml5StreamParser::GuessEncoding`). Chrome uses
+Compact Encoding Detection (CED), and Blink's `TextResourceDecoder` calls it on each network chunk as it
+arrives until one gives a verdict, so it judges whatever arrived first. Measured in Chrome 156 with 1.1 KB
+of windows-1251 text placed in a 600 KB ASCII page: from the lab's server, which writes the body in one
+call, Chrome detects windows-1251 when the text starts at byte 262,000 and reads windows-1252 when it
+starts at 263,000. With the server writing 8 KB every 20 ms, it detects the text at byte 7,000 and not at
+9,000.
+
+The lab's `body-meta-512k` case shows the same boundary. From the lab's server Chrome reads it as
+windows-874 once the page holds at least 262,944 bytes. From the deployed mojibake.wtf it read
+windows-1252, Frostwork's answer, on 42 of 46 loads and windows-874 on 4, so Chrome itself has no single
+answer for these bytes. Firefox 159 reads it as windows-1252 from the lab's server too. Binding CED would
+not reproduce Chrome, because the answer depends on delivery, which the bytes do not record. chardetng
+over the whole document is deterministic, is what Firefox shows, and costs nothing: encoding_rs and
+chardetng are Firefox's own libraries. The URL is
+the only other input to this step, so integrations pass it wherever one exists.
 
 ### E4. NUL and the strip are parse-mode behaviour
 
@@ -397,9 +420,10 @@ reports the columns where they disagree in a table of their own; the last run he
 frameset-ok, `search` and `dialog` being special in Firefox, `</p>` inside a MathML integration point, and
 processing instructions, which Firefox parses as comments.
 
-Encoding and tree construction pin to different browsers for different reasons: autodetection follows
-Firefox because Chrome's detector cannot be run outside Chrome, and tree construction follows Chrome
-because both browsers can be run as oracles, so the larger audience wins.
+Encoding and tree construction pin to different browsers for different reasons: autodetection of
+legacy bytes follows Firefox because Chrome's detector judges the first network chunk, which complete
+bytes do not record, and tree construction follows Chrome because both browsers can be run as oracles,
+so the larger audience wins.
 
 Two alternatives to running browsers were rejected. Chrome's parser cannot be lifted out (Blink's
 `HTMLConstructionSite` depends on Oilpan and WTF). Firefox's can: Gecko's C++ parser is generated from
@@ -455,12 +479,14 @@ and when it fails. The lxml-mode gates all pin `parser="lxml"`.
    a second whole-document pass.
 5. Browser-mode XPath has lxml's XPath semantics over the browser's tree, so `//svg` still finds SVG.
 6. `encoding=` stays below the BOM, with no BOM-beating override.
-7. Unlabelled valid UTF-8 stays UTF-8 (E2), and autodetection follows Firefox (E3).
+7. Valid UTF-8 from an http(s) URL is windows-1252, as in both browsers (E2), and autodetection of
+   anything else follows Firefox (E3).
 8. Browser mode is the default, and where Chrome and Firefox build different trees it follows Chrome.
 9. The replay builds a tree of the page where a retroactive rule changes an answer, rather than leaving
    those rules as documented divergences, because it is needed for correctness.
 
-Decisions 1 to 8 were taken on 2026-11-03 and decision 9 on 2026-11-04.
+Decisions 1 to 8 were taken on 2026-11-03 and decision 9 on 2026-11-04. Decision 7 was revised on
+2026-11-07: until then valid UTF-8 stayed UTF-8 for every URL.
 
 ## Sources and versions
 
@@ -486,7 +512,9 @@ Taken from upstream sources and not re-measured here:
   [`html_construction_site.h`](https://github.com/chromium/chromium/blob/05d7bd634b/third_party/blink/renderer/core/html/parser/html_construction_site.h).
   Chrome's encoding detector:
   [`text_encoding_detector.cc`](https://github.com/chromium/chromium/blob/05d7bd634b/third_party/blink/renderer/platform/text/text_encoding_detector.cc)
-  and [google/compact_enc_det](https://github.com/google/compact_enc_det).
+  and [google/compact_enc_det](https://github.com/google/compact_enc_det), and its per-chunk caller,
+  [`text_resource_decoder.cc`](https://chromium.googlesource.com/chromium/src/+/refs/tags/156.0.8078.80/third_party/blink/renderer/core/html/parser/text_resource_decoder.cc)
+  at the Chrome 156.0.8078.80 tag.
 - The move of the tree-construction tests to WPT:
   [html5lib-tests 224991ec10](https://github.com/html5lib/html5lib-tests/commit/224991ec10) and
   [web-platform-tests/wpt#59976](https://github.com/web-platform-tests/wpt/pull/59976).

@@ -172,21 +172,48 @@ BROWSER_DIFFERENCES = [
      "decode for BMP text; w3lib recognizes UTF-32 explicitly"),
 ]
 
-# ---- DELIBERATE differences from the BROWSER: the encoding rule's named exceptions ---------------
-# Each row is (name, document, Frostwork's encoding, Frostwork's values, the browser's encoding, the
-# browser's values, the browser build that was measured, why). The browser column is a recorded
-# browser measurement, so the gate checks it two ways instead of re-measuring it:
-# decoding the document with the browser's encoding must give the browser's values (the record is
-# self-consistent), and Frostwork must still differ from them (the exception is still real).
-BROWSER_EXCEPTIONS = [
-    ("unlabelled valid UTF-8 is read as UTF-8",
-     b"<html><head></head><body>" + U8 + b"</body></html>",
-     "UTF-8", ["café"], "windows-1252", ["cafÃ©"], "Chrome 156",
-     "browsers refuse to detect UTF-8 on a text/html page from the network, by policy: Chrome 156 "
-     "shows windows-1252 mojibake on the lab's `no-declaration` case, and chardetng documents "
-     "`Utf8Detection::Deny` as what Firefox passes. The result is text nobody intended, and a page "
-     "relying on it would look broken to its own users, so Frostwork reads UTF-8 (BROWSER_MODE.md, E2)"),
+# ---- autodetection of valid UTF-8: what browsers show, by the kind of URL ------------------------
+# Each row is (name, document, url=, Frostwork's encoding, the rank that decides it, Frostwork's values,
+# the browser records, why). A browser record is (encoding, values, what was measured); each one must
+# decode to its own values, and Frostwork must return them. A row without one is Frostwork's own policy.
+_UTF8_PAGE = b"<html><head></head><body>" + U8 + b"</body></html>"
+UTF8_DETECTION = [
+    ("valid UTF-8 from an http URL is windows-1252",
+     _UTF8_PAGE, "http://example.com/",
+     "windows-1252", "default", ["cafÃ©"],
+     [("windows-1252", ["cafÃ©"], "Chrome 156, top-level http loads (the lab's no-declaration case)"),
+      ("windows-1252", ["cafÃ©"], "Firefox 159, top-level http loads")],
+     "both browsers refuse to detect UTF-8 for a page from the network and keep the locale default"),
+    ("valid UTF-8 from a file: URL is UTF-8",
+     _UTF8_PAGE, "file:///tmp/page.html",
+     "UTF-8", "utf8", ["café"],
+     [("UTF-8", ["café"], "Chrome 156, the same bytes as a file: URL"),
+      ("UTF-8", ["café"], "Firefox 159, the same bytes as a file: URL")],
+     "both browsers accept UTF-8 for a local file"),
+    ("valid UTF-8 with no URL is UTF-8",
+     _UTF8_PAGE, None,
+     "UTF-8", "utf8", ["café"], [],
+     "Frostwork's policy: a page with no URL is read as browsers read a file, the common case being a "
+     "page stored on disk"),
 ]
+
+
+def utf8_detection_failures(row, got, as_browser):
+    """What is wrong with one `UTF8_DETECTION` row: `got` is the engine's `{"encoding", "source",
+    "values"}` and `as_browser[i]` the document decoded with the i-th browser record's encoding. An
+    empty list means the row holds."""
+    name, _doc, _url, want_enc, want_src, want_vals, browsers, _why = row
+    out = []
+    if (got["encoding"], got["source"], got["values"][0]) != (want_enc, want_src, want_vals):
+        out.append(f"{name}: Frostwork must read {want_enc} from {want_src}, giving {want_vals!r}; got "
+                   f"{got['encoding']} from {got['source']}, {got['values'][0]!r}")
+    for (browser_enc, browser_vals, measured), decoded in zip(browsers, as_browser):
+        if decoded != browser_vals:
+            out.append(f"{name}: {browser_enc} does not reproduce the recorded answer ({measured})")
+        if got["values"][0] != browser_vals:
+            out.append(f"{name}: Frostwork disagrees with the browser ({measured})")
+    return out
+
 
 # ---- the PRECEDENCE table: which input wins when several are present -----------------------------
 # Each row is (name, document, encoding=, content_type=, the encoding that must win, the rank that must
@@ -315,7 +342,7 @@ def every_input() -> list[tuple[str, bytes, str | None, str | None]]:
             for n, head, body in SHARED_PRESCAN_CASES]
     out += [(f"shared document: {n}", doc, None, None) for n, doc in SHARED_DOC_CASES]
     out += [(f"browser difference: {n}", doc, None, None) for n, doc, *_ in BROWSER_DIFFERENCES]
-    out += [(f"browser exception: {n}", doc, None, None) for n, doc, *_ in BROWSER_EXCEPTIONS]
+    out.append(("unlabelled valid UTF-8", _UTF8_PAGE, None, None))
     out += [(f"precedence: {n}", doc, enc, ctype) for n, doc, enc, ctype, *_ in PRECEDENCE]
     out += [(f"body declaration at {pad}", body_meta_page(pad), None, None)
             for pad, _want, _why in BODY_META_CASES]

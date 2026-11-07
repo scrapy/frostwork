@@ -132,16 +132,17 @@ fn main() {
             };
             out.push_str(&bits);
         } else if first == "T" {
-            // encoding: T \t ENC \t CONTENT_TYPE \t HEX \t sel1 ...
+            // encoding: T \t ENC \t CONTENT_TYPE \t URL \t HEX \t sel1 ... (an empty field is absent)
             let non_empty = |s: &'_ str| -> Option<String> { (!s.is_empty()).then(|| s.to_string()) };
             let enc = non_empty(parts.next().unwrap_or(""));
             let ctype = non_empty(parts.next().unwrap_or(""));
+            let url = non_empty(parts.next().unwrap_or(""));
             let html = hex_decode(parts.next().unwrap_or(""));
             let sels: Vec<String> = parts.map(str::to_string).collect();
             let hints = frostwork::EncodingHints {
                 encoding: enc.as_deref(),
                 content_type: ctype.as_deref(),
-                url: None,
+                url: url.as_deref(),
             };
             let (name, source) = frostwork::resolve_encoding(&html, hints);
             let (cols, _) = Plan::compile_with(&sels, &[], options).extract_with(&html, hints);

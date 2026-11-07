@@ -16,8 +16,8 @@ Parser = Literal["browser", "lxml"]
 string raises ``ValueError``."""
 
 EncodingSource = Literal[
-    "bom", "utf16-prefix", "encoding", "content-type", "xml-declaration", "meta", "utf8", "autodetect",
-    "str",
+    "bom", "utf16-prefix", "encoding", "content-type", "xml-declaration", "meta", "utf8", "default",
+    "autodetect", "str",
 ]
 """The rank that decided an encoding (``detect_encoding(..., explain=True)``); ``"str"`` for decoded text."""
 
@@ -84,8 +84,9 @@ def detect_encoding(
     explain: Literal[False] = ...,
 ) -> str:
     """The encoding ``extract`` would scan this document with, as a WHATWG name: BOM → BOM-less UTF-16
-    prefix → ``encoding`` label → ``content_type`` charset → XML declaration or ``<meta>`` → UTF-8 if
-    valid, else autodetected, informed by the top-level domain of ``url``. A label that names
+    prefix → ``encoding`` label → ``content_type`` charset → XML declaration or ``<meta>`` →
+    autodetection: valid UTF-8 is windows-1252 when ``url`` is http(s), as browsers read it, and UTF-8
+    otherwise; anything else is guessed, informed by the top-level domain of ``url``. A label that names
     no encoding is ignored. A ``str`` is already-decoded text, so the answer is ``"UTF-8"`` without sniffing."""
 @overload
 def detect_encoding(
@@ -112,8 +113,8 @@ def bom_encoding(body: bytes) -> Optional[Tuple[str, int]]:
 def declared_encoding(body: bytes) -> Optional[str]:
     """The encoding the ``<meta>``/XML-declaration prescan finds, or ``None``."""
 def autodetect_encoding(body: bytes, *, url: Optional[str] = ...) -> str:
-    """``"UTF-8"`` if ``body`` is valid UTF-8, else a guess informed by the top-level domain of
-    ``url``."""
+    """For valid UTF-8, ``"windows-1252"`` when ``url`` is http(s), else ``"UTF-8"``; for anything else,
+    a guess informed by the top-level domain of ``url``."""
 def navigation(
     html: Union[bytes, str],
     url: str,

@@ -10,10 +10,12 @@ the integrator contract they implement are in docs/PYTHON.md ("Encoding inputs")
 import asyncio
 import os
 import sys
+import typing
 
 import pytest
 
 import frostwork
+import frostwork.encoding
 from frostwork._frostwork import Plan
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools"))
@@ -22,12 +24,13 @@ import enc_cases  # noqa: E402
 web_poet = pytest.importorskip("web_poet")
 from web_poet import HttpResponse  # noqa: E402
 
-from frostwork.webpoet import FrostPage, field  # noqa: E402
+from frostwork.webpoet import FrostPage, Many, field  # noqa: E402
 
 URL = "http://example.com/"
 SELS = enc_cases.SELS
 INPUTS = enc_cases.every_input()
-SOURCES = {"bom", "utf16-prefix", "encoding", "content-type", "xml-declaration", "meta", "utf8", "autodetect"}
+# What a `bytes` input can report: the published literal, less "str".
+SOURCES = set(typing.get_args(frostwork.encoding.EncodingSource)) - {"str"}
 
 # Applied to every document on top of the label the gate gives it, so the raising and the ignored paths
 # of ranks 3 and 4 reach every entry point too.
@@ -212,3 +215,75 @@ def test_a_str_ignores_content_type_and_refuses_a_conflicting_label():
             entry()
     with pytest.raises(ValueError, match="unknown encoding label"):
         PLAN.extract(text, "not-a-charset")
+
+
+# Valid UTF-8 that declares nothing, with the value in a group and in a relative <base href>, so that the
+# rule is seen by grouped columns and by the navigation pass as well as by flat columns.
+GROUP_PAGE = ('<html><head><base href="/café/"></head><body><div class="g"><p class="c">café</p></div>'
+              '</body></html>').encode()
+GROUPS = [("div.g", [("c", "p.c::text")])]
+
+
+class GroupPage(FrostPage):
+    flat = field("p.c::text", all=True)
+    group = Many("div.g", c=field("p.c::text"))
+
+
+CAFE, MOJIBAKE = "café", "cafÃ©"
+FILE_URL = "file:///tmp/page.html"
+
+
+@pytest.mark.parametrize("url,want,want_enc", [
+    (URL, MOJIBAKE, "windows-1252"),
+    (FILE_URL, CAFE, "UTF-8"),
+    (None, CAFE, "UTF-8"),
+])
+def test_every_entry_point_reads_unlabelled_utf8_by_its_url(url, want, want_enc):
+    """Valid UTF-8 with no label anywhere: windows-1252 from an http(s) URL, as Chrome and Firefox read
+    it, and UTF-8 from a file: URL or with no URL. Every entry point, flat and grouped columns alike."""
+    page = frostwork.Page()
+    page.field_all("flat", "p.c::text")
+    page.many("group", "div.g", {"c": "p.c::text"})
+    plan = Plan(["p.c::text"], GROUPS)
+
+    def item(d):
+        return d["flat"] + [row["c"] for row in d["group"]]
+
+    got = {
+        "extract": frostwork.extract(GROUP_PAGE, ["p.c::text"], url=url)[0],
+        "extract_grouped": [v for g in frostwork.extract_grouped(GROUP_PAGE, [], GROUPS, url=url)[1][0]
+                            for v in g[0]],
+        "Plan.extract": plan.extract(GROUP_PAGE, url=url)[0],
+        "Plan.extract_grouped": [v for g in plan.extract_grouped(GROUP_PAGE, url=url)[1][0] for v in g[0]],
+        "Page.extract": item(page.extract(GROUP_PAGE, url=url).to_dict()),
+    }
+    two = {"Page.extract"}
+    if url is not None:
+        response = HttpResponse(url=url, body=GROUP_PAGE, headers={})
+        got["Page.extract_response"] = item(page.extract_response(response).to_dict())
+        got["Page.extract_with_navigation"] = item(page.extract_with_navigation(GROUP_PAGE, url)[0].to_dict())
+        got["FrostPage"] = item(asyncio.run(GroupPage(response=response).to_item()))
+        two |= {"Page.extract_response", "Page.extract_with_navigation", "FrostPage"}
+    assert got == {name: [want, want] if name in two else [want] for name in got}
+    assert frostwork.detect_encoding(GROUP_PAGE, url=url) == want_enc
+    assert frostwork.encoding.autodetect_encoding(GROUP_PAGE, url=url) == want_enc
+
+
+@pytest.mark.parametrize("parser", ["browser", "lxml"])
+@pytest.mark.parametrize("url,want", [
+    (URL, "http://example.com/caf%C3%83%C2%A9/"),
+    (FILE_URL, "file:///caf%C3%A9/"),
+])
+def test_navigation_reads_the_document_as_the_fields_do(parser, url, want):
+    """The base URL is read from the decoded document, so `/café/` resolves differently once the page is
+    windows-1252: navigation, alone and alongside a page's fields in either parse mode, must decode as the
+    fields do."""
+    nav = frostwork.navigation(GROUP_PAGE, url)
+    page = frostwork.Page(parser=parser).field("c", "p.c::text")
+    _, combined = page.extract_with_navigation(GROUP_PAGE, url)
+    assert (nav.base_url, combined.base_url) == (want, want)
+
+
+def test_the_source_names_the_rule():
+    assert frostwork.detect_encoding(GROUP_PAGE, url=URL, explain=True) == ("windows-1252", "default")
+    assert frostwork.detect_encoding(GROUP_PAGE, explain=True) == ("UTF-8", "utf8")

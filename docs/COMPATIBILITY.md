@@ -644,9 +644,8 @@ answer. The reason is what a scraper is *for*: a price, a title or an address is
 matches what the site shows a person, so a value that differs from the browser is wrong even when
 every Python library agrees with it. There is no divergence budget here and no "acceptable local
 difference" — those exist for tree construction (foster parenting, the adoption agency), not for
-this. The rule has one named exception, unlabelled valid UTF-8, listed under
-[deliberate differences from browsers](#deliberate-differences-from-browsers) with the one place where
-the browsers themselves disagree.
+this. Where the browsers themselves disagree, or Chrome's answer depends on how the bytes arrive, the
+choice is listed under [deliberate differences from browsers](#deliberate-differences-from-browsers).
 
 What that means in practice, for anyone porting a scraper *to* Frostwork: **where Frostwork's text
 differs from Scrapy's, on a page whose encoding is at all unusual, Frostwork is very likely the one
@@ -711,11 +710,12 @@ Resolution order (`src/encoding.rs`):
    head declarations real pages carry, and honoured body declarations no browser honours. Bounding at
    the head is also what makes this free — an unbounded scan measured a flat ~35µs per label-less page,
    one extra pass over the document, and the head bound gives all of it back.
-6. **autodetection** — UTF-8 if the whole document is valid UTF-8 (a sequence cut off at the end
-   still counts; see [the exception](#deliberate-differences-from-browsers)), otherwise
-   [chardetng](https://crates.io/crates/chardetng)'s guess, which is what Firefox uses for this step.
-   UTF-8 and ISO-2022-JP are excluded from its guesses, as in Firefox, and the top-level domain of the
-   response URL, when the caller passes one, weighs the guess as it does there (`.jp` favours
+6. **autodetection**. A document that is valid UTF-8 (a sequence cut off at the end still counts) is
+   windows-1252 when `url=` is `http` or `https`, as Chrome and Firefox read it, and UTF-8 otherwise,
+   including when there is no `url=`, as they read a file. Any other document
+   gets [chardetng](https://crates.io/crates/chardetng)'s guess, which is what Firefox uses for this
+   step. UTF-8 and ISO-2022-JP are excluded from its guesses, as in Firefox, and the top-level domain of
+   the response URL, when the caller passes one, weighs the guess as it does there (`.jp` favours
    Shift_JIS, `.ru` windows-1251, …).
 
 Structural tokenization runs on raw bytes for every ASCII-compatible encoding — a byte below 0x80 *is*
@@ -735,25 +735,27 @@ the integrator contract: what to pass for each input, and what goes wrong otherw
 Three places where Frostwork's encoding is not the one a browser shows. All are decided, and all are
 measured against Chrome 156.
 
-**Unlabelled valid UTF-8 is read as UTF-8.** This is the encoding rule's one named exception. On a page
-with no BOM, no label and no declaration, browsers refuse to detect UTF-8 by policy: Chrome 156 shows
-windows-1252 mojibake on the lab's `no-declaration` case, and chardetng documents
-`Utf8Detection::Deny` as what Firefox passes for `text/html` from the network. Frostwork reads UTF-8,
-because the browser's answer is text nobody intended: a scraper that stores `cafÃ©` has a wrong value by
-any standard. A page cannot exploit this either, since every multi-byte UTF-8 sequence starts with a
-byte from 0xC2 to 0xF4, which windows-1252 shows as `Â` to `ô` followed by junk, so a page relying on the
-browser's reading would look broken to its own users. `tools/enc_check.py` asserts the exception against
-the recorded Chrome answer and fails if Frostwork ever starts agreeing with it. Chrome can also switch
-partway through a page: on a 4 MB page whose only declaration came 3 MB in, Chrome 156 decoded the first
-few hundred text nodes as windows-1252 and the rest as UTF-8, while Firefox and Frostwork read it all as
-UTF-8.
+**Unlabelled valid UTF-8 without a URL is UTF-8.** Over http(s), Chrome 156 and Firefox 159 refuse to
+detect UTF-8 and show windows-1252, and so does Frostwork; loaded as a `file:` URL, both read the same
+bytes as UTF-8, and so does Frostwork (`tools/enc_check.py` asserts all four). Frostwork reads a
+document with no `url=` the way the browsers read a file, since such a document is most often one stored
+on disk; that mapping is Frostwork's choice, as is UTF-8 for a scheme other than `http`, `https` or
+`file`, where the browsers would refuse it. Chrome can also
+switch encoding partway through a page: on a 4 MB page whose only declaration came 3 MB in, Chrome 156
+decoded the first few hundred text nodes as windows-1252 and the rest as UTF-8, while Firefox and
+Frostwork read it all as UTF-8.
 
-**Autodetection follows Firefox.** When the bytes are not valid UTF-8 and nothing declares an encoding,
-Frostwork asks chardetng, the detector Firefox runs, with the top-level domain of the response URL as its
-hint. Chrome uses a different detector (Compact Encoding Detection) and the two disagree: on the lab's
-`body-meta-512k` case Chrome 156 guesses windows-874 and Frostwork windows-1252, so the price reads
-`1.299,00 ค` in one and `1.299,00 ¤` in the other. Chrome's guess also moves with the build and with a
-single byte of payload, so Frostwork does not chase it.
+**Autodetection follows Firefox's detector.** When the bytes are not valid UTF-8 and nothing declares
+an encoding, Frostwork asks chardetng, the detector Firefox runs, with the top-level domain of the
+response URL as its hint. Chrome runs Compact Encoding Detection on the first network chunk that gives a
+verdict, so its answer for the same bytes depends on how they arrive. On the lab's `body-meta-512k` case,
+a 536 KB page with one byte above 0x7F, Chrome 156 reads windows-874 (`1.299,00 ค`) from a local server
+that writes the page in one call. From the deployed mojibake.wtf it read windows-1252 (`1.299,00 ¤`,
+Frostwork's answer) on 42 of 46 loads and windows-874 on 4; Firefox 159 reads windows-1252 from both.
+With 1.1 KB of windows-1251 text in a 600 KB ASCII page, Chrome detects the text from the local server
+when it starts at byte 262,000 and not at 263,000, and, when the server writes 8 KB at a time, at byte
+7,000 and not at 9,000. Complete bytes do not record how they arrived, so Frostwork judges the whole
+document, as Firefox does.
 
 **Three Chrome decoder bugs are not followed.** Frostwork decodes as WHATWG's Encoding Standard does, which
 Firefox matches on every byte `tools/browser_decoders.py` sweeps. Chrome 156 breaks it in three places:
@@ -809,6 +811,7 @@ gated in `tools/enc_check.py`.
 | `<meta charset=x-user-defined>` | label not resolved at all → falls back to the default | **windows-1252** | "get an encoding from a meta element", step 5. Taken literally the label maps every high byte into the private use area (`caf\xe9` → `caf\u{f7e9}`) |
 | BOM-less UTF-16 | not detected | detected from the `<?` prefix (row 2 above) | libxml2 reads these files correctly, so this is parity with the *value* oracle as well as with browsers |
 | a non-UTF-8 document with **no declaration** | decoded as the default (UTF-8), unless the caller passes an `auto_detect_fun`, as Scrapy does | autodetected | WHATWG lets a user agent autodetect after the prescan, and browsers do |
+| a valid UTF-8 document with **no declaration**, from an http(s) URL | UTF-8 | **windows-1252** | measured in Chrome 156 and Firefox 159, which both refuse to detect UTF-8 for a page from the network; asserted in `enc_check.py`'s `UTF8_DETECTION` rows |
 | `<?xml … encoding=…?>` **not** at offset 0 | honoured (regex search anywhere in the window) | ignored | a `<?` after the start of the document is a bogus comment to a browser and declares nothing |
 
 An XML declaration **at** offset 0 *is* honoured, by both, including its precedence over a later

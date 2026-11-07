@@ -201,8 +201,10 @@ def extract(
     ``html`` is bytes (preferred — Frostwork tokenizes raw bytes) or ``str`` (encoded UTF-8).
     ``queries`` is an iterable of CSS/XPath selectors. ``encoding`` is a label the user forced, ranked
     below a BOM; a label no codec knows raises ``ValueError``. ``content_type`` is the response's raw
-    ``Content-Type`` header value, whose charset ranks below ``encoding``. ``url`` is the response URL;
-    the top-level domain of its host informs autodetection. With none of them the engine sniffs (BOM →
+    ``Content-Type`` header value, whose charset ranks below ``encoding``. ``url`` is the response URL,
+    and it informs autodetection: a valid UTF-8 page from an http(s) URL that declares nothing is read
+    as windows-1252, as browsers read it, and the top-level domain of its host weighs the guess for
+    anything else. With none of them the engine sniffs (BOM →
     ``<meta>`` → autodetection); :func:`detect_encoding` reports the decision.
     Unsupported queries raise :class:`UnsupportedSelector` before scanning. Pass ``strict=False``
     to use the engine's permissive empty-column behavior. There is never a parser fallback.

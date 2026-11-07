@@ -489,11 +489,12 @@ fn declared_encoding(py: Python<'_>, body: &[u8]) -> Option<&'static str> {
     py.detach(|| crate::encoding::declaration(body).map(|(enc, _)| enc.name()))
 }
 
-/// The last step of [`detect_encoding`] alone: UTF-8 if `body` is valid UTF-8, else a guess.
+/// The last step of [`detect_encoding`] alone: for valid UTF-8, windows-1252 when `url` is http(s),
+/// else UTF-8; for anything else, chardetng's guess.
 #[pyfunction]
 #[pyo3(signature = (body, *, url=None))]
 fn autodetect_encoding(py: Python<'_>, body: &[u8], url: Option<&str>) -> &'static str {
-    py.detach(|| crate::encoding::autodetect(body, url.and_then(crate::encoding::tld).as_deref()).0.name())
+    py.detach(|| crate::encoding::autodetect(body, url).0.name())
 }
 
 /// `body` decoded with the WHATWG decoder of the encoding the WHATWG label `label` names, BOM

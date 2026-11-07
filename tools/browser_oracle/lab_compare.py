@@ -23,6 +23,10 @@ import sys
 from pathlib import Path
 
 
+# The lab serves every case over http, so each mode passes an http URL, as an integration would.
+URL = "http://example.com/"
+
+
 def header_label(ctype):
     m = re.search(r"charset\s*=\s*([^;\s]+)", ctype or "", re.I)
     return m.group(1).strip("\"'") if m else None
@@ -32,7 +36,7 @@ def response(case):
     from web_poet import HttpResponse
 
     headers = {"Content-Type": case["ctype"]} if case["ctype"] else {}
-    return HttpResponse(url="http://example.com/", body=case["body"], headers=headers)
+    return HttpResponse(url=URL, body=case["body"], headers=headers)
 
 
 def labels(case):
@@ -73,7 +77,7 @@ def main() -> int:
             continue
         row = {"case": case["id"], "browser": want}
         for mode, label in labels(case).items():
-            got = values_of(lambda: frostwork.extract(case["body"], [case["sel"]], label)[0])
+            got = values_of(lambda: frostwork.extract(case["body"], [case["sel"]], label, url=URL)[0])
             row[mode] = {"label": label, "values": got, "agrees": got == want}
         got = values_of(lambda: frostwork.Page().field_all("v", case["sel"]).extract_response(response(case)).value("v"))
         row["extract_response"] = {"label": None, "values": got, "agrees": got == want}

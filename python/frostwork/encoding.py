@@ -31,8 +31,8 @@ __all__ = [
 ]
 
 EncodingSource = Literal[
-    "bom", "utf16-prefix", "encoding", "content-type", "xml-declaration", "meta", "utf8", "autodetect",
-    "str",
+    "bom", "utf16-prefix", "encoding", "content-type", "xml-declaration", "meta", "utf8", "default",
+    "autodetect", "str",
 ]
 """The rank that decided an encoding, as ``detect_encoding(..., explain=True)`` reports it."""
 
@@ -139,7 +139,7 @@ def detect_encoding(
 
     With ``explain=True`` it returns ``(name, source)``, where ``source`` names the rank that decided:
     ``"bom"``, ``"utf16-prefix"``, ``"encoding"``, ``"content-type"``, ``"xml-declaration"``,
-    ``"meta"``, ``"utf8"`` or ``"autodetect"``, or ``"str"`` for already-decoded text.
+    ``"meta"``, ``"utf8"``, ``"default"`` or ``"autodetect"``, or ``"str"`` for already-decoded text.
     """
     body = html if isinstance(html, (bytes, str)) else bytes(html)
     return _detect_encoding(body, encoding, content_type=content_type, url=url, explain=explain)
@@ -164,8 +164,10 @@ def declared_encoding(body: Buffer) -> Optional[str]:
 
 
 def autodetect_encoding(body: Buffer, *, url: Optional[str] = None) -> str:
-    """``"UTF-8"`` if *body* is valid UTF-8, else the encoding guessed from its bytes and from the
-    top-level domain of *url*, as Firefox does for a page that declares none."""
+    """The encoding of a page that declares none, as browsers read it. If *body* is valid UTF-8:
+    ``"windows-1252"`` when *url* is http(s), because Chrome and Firefox refuse to detect UTF-8 for a
+    page from the network, else ``"UTF-8"``, as they read a local file. Otherwise the encoding
+    chardetng, Firefox's detector, guesses from the bytes and the top-level domain of *url*."""
     return _autodetect_encoding(bytes(body), url=url)
 
 

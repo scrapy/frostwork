@@ -1172,6 +1172,31 @@ def test_encoding_gate_exits_nonzero_on_mismatch():
     assert "raise SystemExit(1)" in src, "enc_check must exit nonzero on mismatch"
 
 
+def test_utf8_detection_rows_catch_either_regression():
+    """Seed both ways to get the browsers' UTF-8 rule wrong into `enc_check`'s row check: accepting UTF-8
+    from an http URL, and refusing it from a file: URL. Each must fail its row, and the engine's real
+    answers must pass every row."""
+    import enc_cases
+
+    rows = {row[0]: row for row in enc_cases.UTF8_DETECTION}
+    http = rows["valid UTF-8 from an http URL is windows-1252"]
+    local = rows["valid UTF-8 from a file: URL is UTF-8"]
+    utf8 = {"encoding": "UTF-8", "source": "utf8", "values": [["café"]]}
+    cp1252 = {"encoding": "windows-1252", "source": "default", "values": [["cafÃ©"]]}
+    assert enc_cases.utf8_detection_failures(http, utf8, [["cafÃ©"]] * 2)
+    assert enc_cases.utf8_detection_failures(local, cp1252, [["café"]] * 2)
+    # a browser record that does not decode to its own values is caught too
+    assert enc_cases.utf8_detection_failures(http, cp1252, [["café"]] * 2)
+
+    frostwork = pytest.importorskip("frostwork")
+    for row in enc_cases.UTF8_DETECTION:
+        name, doc, url, *_rest, browsers, _why = row
+        enc, source = frostwork.detect_encoding(doc, url=url, explain=True)
+        got = {"encoding": enc, "source": source, "values": frostwork.extract(doc, ["p.c::text"], url=url)}
+        as_browser = [frostwork.extract(doc, ["p.c::text"], browser_enc)[0] for browser_enc, *_ in browsers]
+        assert not enc_cases.utf8_detection_failures(row, got, as_browser), name
+
+
 # ------------------------------------------------- web-poet differential (tools/diff_webpoet.py)
 def test_webpoet_gate_flags_a_processor_receiving_a_string():
     """The defect this gate exists for: a zyte processor gated on `isinstance(value, Selector|HtmlElement)`

@@ -110,8 +110,9 @@ Resolution cases are split into:
 
 - cases where browsers and w3lib agree;
 - named differences where Frostwork must keep the browser/WHATWG answer and w3lib must keep the other one;
-- named exceptions where Frostwork deliberately differs from a recorded browser answer, which fail as stale
-  if Frostwork starts agreeing; and
+- the `UTF8_DETECTION` rows, which read valid UTF-8 that declares nothing with each kind of `url=`; a
+  row carrying recorded browser answers (Chrome and Firefox over http and from `file:`) fails unless
+  Frostwork returns them and each record decodes to its values; and
 - the precedence table, one row per pair of competing inputs (BOM, `encoding=`, `content_type=`, the
   document's declarations), checking the winning encoding and the rank that decided it.
 

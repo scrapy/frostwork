@@ -85,8 +85,9 @@ pub type GroupRows = Vec<Vec<Vec<String>>>;
 ///
 /// `encoding` is an optional caller label for an encoding the user forced; a BOM still outranks it. When
 /// `None` the encoding is sniffed (BOM -> `<meta>` -> autodetection). `url` is the URL of the response,
-/// if known: the top-level domain of its host informs autodetection. To pass a response's `Content-Type`
-/// header as well, use [`Plan::extract_with`]. Structural tokenization runs on raw bytes for every
+/// if known: an http(s) URL makes a valid UTF-8 page that declares nothing windows-1252, as browsers
+/// read it, and the top-level domain of its host informs autodetection. To pass a response's
+/// `Content-Type` header as well, use [`Plan::extract_with`]. Structural tokenization runs on raw bytes for every
 /// ASCII-compatible encoding; only the small emitted values are decoded with the resolved encoding.
 /// UTF-16LE/BE are transcoded to UTF-8 up front (rare).
 pub fn extract<Q: AsQuery>(
