@@ -12,6 +12,11 @@ pub trait TokenSink<'a> {
     /// `attrs` are RAW (name, optional value) byte slices — not lowercased or entity-decoded. `None`
     /// distinguishes a minimized attribute (`disabled`) from an explicitly empty one (`disabled=""`).
     /// `span_start` is the offset of the `<`; `open_end` is just past the start tag's `>`/`/>`.
+    ///
+    /// Returns the state the tag's CONTENT is tokenized in. That is the tree builder's decision, not
+    /// the tag name's: under HTML5 the same name can hold markup in one place and character data in
+    /// another (an SVG `<title>` against an HTML one), and whether `/>` cancels the mode differs
+    /// between the two parsers. `Normal` hands the next byte straight back to markup scanning.
     fn start_tag(
         &mut self,
         name: &'a [u8],
@@ -19,14 +24,14 @@ pub trait TokenSink<'a> {
         self_closing: bool,
         span_start: usize,
         open_end: usize,
-    );
+    ) -> DataMode;
     /// `close_start` is the offset of the end tag's `<`; `close_end` is just past its `>`.
     fn end_tag(&mut self, name: &'a [u8], close_start: usize, close_end: usize);
-    /// One text RUN. `allows_entities` is false for RAWTEXT/PLAINTEXT. `start` is the
-    /// run's offset in the document — the sink needs it both to rank the value in document order and
-    /// to detect two runs separated by nothing but a DROPPED end tag (which libxml2 coalesces into a
-    /// single text node; see `Matcher::text`). A run is NOT always a text node on its own.
-    fn text(&mut self, text: &'a [u8], allows_entities: bool, start: usize);
+    /// One text RUN, read in `mode` (`Normal` outside the raw-text elements). `start` is the run's
+    /// offset in the document — the sink needs it both to rank the value in document order and to
+    /// detect two runs separated by nothing but a DROPPED end tag (which libxml2 coalesces into a
+    /// single text node; see `Matcher::buffer_text`). A run is NOT always a text node on its own.
+    fn text(&mut self, text: &'a [u8], mode: DataMode, start: usize);
     /// Markup over `[from, to)` that libxml2 keeps NO node for and that does not end the surrounding
     /// text node either, so `<div>a…b</div>` is the single text node `ab`. The sink is told so it can
     /// re-join across it, exactly as it does across a dropped end tag.
@@ -38,13 +43,37 @@ pub trait TokenSink<'a> {
         let _ = (from, to);
     }
 
-    /// May [`tokenize`] stop? Asked once per markup token, and answered `false` by every sink that has
-    /// no notion of "enough" — including this default, which the optimizer folds away.
+    /// A `<!DOCTYPE …>` over `[from, to)`, whose bytes the sink may parse: HTML5 decides the document's
+    /// quirks mode from it. It leaves no node and does not end a text node, so by default it is
+    /// [`Self::invisible_markup`].
+    fn doctype(&mut self, raw: &'a [u8], from: usize, to: usize) {
+        let _ = raw;
+        self.invisible_markup(from, to)
+    }
+
+    /// A comment node over `[from, to)`: `<!--…-->`, or a bogus comment (`<!x>`, `<?x>`, `</%>`, and
+    /// a CDATA section where it is not character data). It ends the text node before it unless the
+    /// sink puts it somewhere else, so the default does nothing.
+    fn comment(&mut self, from: usize, to: usize) {
+        let _ = (from, to);
+    }
+
+    /// May [`tokenize`] stop? Asked once per markup token, with the offset the next token starts at,
+    /// and answered `false` by every sink that has no notion of "enough" — including this default,
+    /// which the optimizer folds away.
     ///
     /// Stopping is the sink's decision alone: the tokenizer has no idea what a schema wants, and a sink
     /// that answers `true` while its answer could still change would silently truncate the document.
     /// See `matcher::CompiledSchema::arm_early_exit` for the only implementation that ever does.
-    fn done(&self) -> bool {
+    fn done(&self, at: usize) -> bool {
+        let _ = at;
+        false
+    }
+
+    /// Is `<![CDATA[…]]>` character data here, rather than a bogus comment? HTML5 reads it as text
+    /// inside foreign (SVG/MathML) content only, and libxml2 never does. Asked only when a CDATA
+    /// section starts, so the default costs nothing.
+    fn cdata_is_text(&self) -> bool {
         false
     }
 }
@@ -117,9 +146,10 @@ pub(crate) fn is_name_char(c: u8) -> bool {
     !cls::is(c, cls::TAG_NAME_END)
 }
 
-/// How libxml2 tokenizes an element's CONTENT. Which names take which mode is DERIVED from the oracle —
-/// the table is [`crate::implied_close::data_mode`], written by `tools/gen_tree_rules.py` — so the
-/// variants are documented here and the name list is not written anywhere by hand.
+/// How an element's CONTENT is tokenized. The tree builder picks the mode per start tag (see
+/// [`TokenSink::start_tag`]); libxml2's names for each mode are DERIVED from the oracle — the table is
+/// [`crate::implied_close::data_mode`], written by `tools/gen_tree_rules.py` — so the variants are
+/// documented here and the name list is not written anywhere by hand.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DataMode {
     /// Ordinary markup.
@@ -131,6 +161,16 @@ pub(crate) enum DataMode {
     Rcdata,
     /// Character data to END OF FILE. The element's own end tag does not end it; nothing can.
     Plaintext,
+}
+
+impl DataMode {
+    /// Are character references decoded in text read in this mode?
+    pub(crate) fn decodes_entities(self) -> bool {
+        match self {
+            DataMode::Normal | DataMode::Rcdata => true,
+            DataMode::Rawtext | DataMode::Plaintext => false,
+        }
+    }
 }
 
 enum Markup {
@@ -194,7 +234,8 @@ fn skip_to_gt(b: &[u8], from: usize) -> usize {
 }
 
 /// Scan RAWTEXT/RCDATA content for the matching `</name` end tag (case-insensitive). Returns
-/// (text_end, after_end_tag).
+/// (text_end, after_end_tag). A name the input ends right after is text, as in HTML5's end tag name
+/// states and libxml2: `<title>a</title` is the title `a</title`.
 ///
 /// The end tag has a start tag's ATTRIBUTE states here too (see `scan_attrs`), so a quoted value can
 /// carry the `>`. Ending the tag at the first `>` instead would keep markup libxml2 discards: in
@@ -225,7 +266,7 @@ fn find_raw_end<'a>(
                             q += 1;
                         }
                     }
-                    if ok && (q >= n || is_ws(b[q]) || b[q] == b'>' || b[q] == b'/') {
+                    if ok && q < n && (is_ws(b[q]) || b[q] == b'>' || b[q] == b'/') {
                         return (p, scan_attrs(b, q, attr_buf).0);
                     }
                 }
@@ -255,7 +296,8 @@ pub(crate) fn raw_text_end<'a>(
     }
 }
 
-/// Case-insensitive tag-name match at `p`, including the delimiter required after the name.
+/// Case-insensitive tag-name match at `p`, including the delimiter required after the name: a name the
+/// input ends right after is not a tag (see [`find_raw_end`]).
 fn tag_name_at(b: &[u8], p: usize, prefix: &[u8], name: &[u8]) -> Option<usize> {
     if p + prefix.len() + name.len() > b.len()
         || !b[p..].starts_with(prefix)
@@ -269,7 +311,7 @@ fn tag_name_at(b: &[u8], p: usize, prefix: &[u8], name: &[u8]) -> Option<usize> 
         }
         q += 1;
     }
-    (q >= b.len() || is_ws(b[q]) || b[q] == b'>' || b[q] == b'/').then_some(q)
+    (q < b.len() && (is_ws(b[q]) || b[q] == b'>' || b[q] == b'/')).then_some(q)
 }
 
 /// libxml2-compatible SCRIPT scan, including the legacy escaped/double-escaped states used by old IE
@@ -367,7 +409,7 @@ pub fn tokenize<'a, S: TokenSink<'a>>(b: &'a [u8], sink: &mut S) {
                     }
                     Some(kind) => {
                         if p > text_from {
-                            sink.text(&b[text_from..p], true, text_from);
+                            sink.text(&b[text_from..p], DataMode::Normal, text_from);
                         }
                         let after = handle_markup(kind, b, p, sink, &mut attr_buf);
                         i = after;
@@ -383,7 +425,7 @@ pub fn tokenize<'a, S: TokenSink<'a>>(b: &'a [u8], sink: &mut S) {
                         // branch compiled out, `ab_bench.py` reports median -0.1% over 26 cells, one cell
                         // above its own jitter and that one FASTER. Unarmed it is a `u128` comparison
                         // against a zero mask (`Matcher::done`).
-                        if sink.done() {
+                        if sink.done(after) {
                             return;
                         }
                     }
@@ -392,8 +434,26 @@ pub fn tokenize<'a, S: TokenSink<'a>>(b: &'a [u8], sink: &mut S) {
         }
     }
     if n > text_from {
-        sink.text(&b[text_from..n], true, text_from);
+        sink.text(&b[text_from..n], DataMode::Normal, text_from);
     }
+}
+
+/// A CDATA section the sink reads as character data (`<![CDATA[` at `p`): its content up to `]]>`, or
+/// to end of input, is one RAWTEXT run, since nothing inside a CDATA section is markup or a reference.
+/// The two delimiters leave no node of their own, so they are reported as invisible.
+fn scan_cdata<'a, S: TokenSink<'a>>(b: &'a [u8], p: usize, sink: &mut S) -> usize {
+    const OPEN: usize = b"<![CDATA[".len();
+    let from = p + OPEN;
+    let (to, after) = match memchr::memmem::find(&b[from..], b"]]>") {
+        Some(k) => (from + k, from + k + 3),
+        None => (b.len(), b.len()),
+    };
+    sink.invisible_markup(p, from);
+    if to > from {
+        sink.text(&b[from..to], DataMode::Rawtext, from);
+    }
+    sink.invisible_markup(to, after);
+    after
 }
 
 fn handle_markup<'a, S: TokenSink<'a>>(
@@ -406,19 +466,29 @@ fn handle_markup<'a, S: TokenSink<'a>>(
     match kind {
         Markup::Decl => {
             if b[p..].starts_with(b"<!--") {
-                scan_comment(b, p)
+                let after = scan_comment(b, p);
+                sink.comment(p, after);
+                after
+            } else if b[p..].starts_with(b"<![CDATA[") && sink.cdata_is_text() {
+                scan_cdata(b, p, sink)
             } else {
                 let after = skip_to_gt(b, p);
                 // ONLY a doctype is invisible to the text node either side of it (measured against the
                 // oracle: `<!foo>`, `<![CDATA[…]]>`, `<?x?>` and `<!>` all break the run, a doctype
                 // does not). Case-insensitive, and the name has to be complete.
                 if b[p..].len() > 9 && b[p + 2..p + 9].eq_ignore_ascii_case(b"doctype") {
-                    sink.invisible_markup(p, after);
+                    sink.doctype(&b[p..after], p, after);
+                } else {
+                    sink.comment(p, after);
                 }
                 after
             }
         }
-        Markup::Bogus => skip_to_gt(b, p),
+        Markup::Bogus => {
+            let after = skip_to_gt(b, p);
+            sink.comment(p, after);
+            after
+        }
         Markup::End => {
             // HTML5's end-tag-open state, which libxml2 follows exactly (verified case by case). Only
             // an ASCII ALPHA starts an end tag; the other two branches are not end tags at all, and
@@ -456,10 +526,14 @@ fn handle_markup<'a, S: TokenSink<'a>>(
                 // them (`<span>a</` is the single node `a</` in libxml2). The one shape of truncated
                 // input where the engine LOST a value rather than keeping an extra one.
                 None => {
-                    sink.text(&b[p..], true, p);
+                    sink.text(&b[p..], DataMode::Normal, p);
                     b.len()
                 }
-                _ => skip_to_gt(b, p),
+                _ => {
+                    let after = skip_to_gt(b, p);
+                    sink.comment(p, after);
+                    after
+                }
             }
         }
         Markup::Start => handle_start(b, p, sink, attr_buf),
@@ -591,13 +665,12 @@ fn handle_start<'a, S: TokenSink<'a>>(
         return n;
     }
 
-    let mode = crate::implied_close::data_mode_of(name);
-    sink.start_tag(name, attr_buf, self_closing, p, i);
+    let mode = sink.start_tag(name, attr_buf, self_closing, p, i);
 
-    if mode != DataMode::Normal && !self_closing {
+    if mode != DataMode::Normal {
         let (text_end, after) = raw_text_end(b, i, name, mode, attr_buf);
         if text_end > i {
-            sink.text(&b[i..text_end], mode == DataMode::Rcdata, i);
+            sink.text(&b[i..text_end], mode, i);
         }
         if after > text_end {
             sink.end_tag(name, text_end, after);
@@ -614,9 +687,14 @@ mod tests {
     /// A `TokenSink` that records the event stream in a compact readable form, so L1 vectors can pin
     /// the exact tokenization of the "prevent global desync" states (docs/TESTING.md L1). A mistake in
     /// any of these is a *global* failure (offset desync), so they get locked here at the source.
+    ///
+    /// It answers the tokenizer's two tree-builder questions with libxml2's rules (the content mode is
+    /// the name's, cancelled by `/>`; CDATA is never text) unless `cdata` asks otherwise, so the vectors
+    /// here pin what the lxml-mode engine is fed.
     #[derive(Default)]
     struct Rec {
         ev: Vec<String>,
+        cdata: bool,
     }
     impl<'a> TokenSink<'a> for Rec {
         fn start_tag(
@@ -626,7 +704,7 @@ mod tests {
             self_closing: bool,
             _s: usize,
             _e: usize,
-        ) {
+        ) -> DataMode {
             let a: Vec<String> = attrs
                 .iter()
                 .map(|(n, v)| {
@@ -643,13 +721,27 @@ mod tests {
                 if self_closing { "/" } else { "" },
                 a.join(",")
             ));
+            if self_closing {
+                DataMode::Normal
+            } else {
+                crate::implied_close::data_mode_of(name)
+            }
         }
         fn end_tag(&mut self, name: &'a [u8], _s: usize, _e: usize) {
             self.ev.push(format!("E:{}", String::from_utf8_lossy(name)));
         }
-        fn text(&mut self, t: &'a [u8], allows_entities: bool, _start: usize) {
+        fn text(&mut self, t: &'a [u8], mode: DataMode, _start: usize) {
             // `!` marks RAWTEXT (script/style): entities are NOT expanded downstream
-            self.ev.push(format!("T{}:{}", if allows_entities { "" } else { "!" }, String::from_utf8_lossy(t)));
+            let raw = if mode.decodes_entities() { "" } else { "!" };
+            self.ev.push(format!("T{raw}:{}", String::from_utf8_lossy(t)));
+        }
+        fn invisible_markup(&mut self, from: usize, to: usize) {
+            if self.cdata {
+                self.ev.push(format!("I:{from}-{to}"));
+            }
+        }
+        fn cdata_is_text(&self) -> bool {
+            self.cdata
         }
     }
 
@@ -657,6 +749,21 @@ mod tests {
         let mut r = Rec::default();
         tokenize(html, &mut r);
         r.ev
+    }
+
+    /// The CDATA hook: a sink that says CDATA is text here gets its content as one RAWTEXT run between
+    /// two invisible delimiters, and one that does not (the default, and libxml2's answer) gets the
+    /// bogus comment it always got.
+    #[test]
+    fn cdata_is_text_only_where_the_sink_says_so() {
+        let mut r = Rec { cdata: true, ..Rec::default() };
+        tokenize(b"a<![CDATA[x<b>&amp;]]>c", &mut r);
+        assert_eq!(r.ev, ["T:a", "I:1-10", "T!:x<b>&amp;", "I:19-22", "T:c"]);
+        // unterminated: the section runs to end of input
+        let mut r = Rec { cdata: true, ..Rec::default() };
+        tokenize(b"<![CDATA[x", &mut r);
+        assert_eq!(r.ev, ["I:0-9", "T!:x", "I:10-10"]);
+        assert_eq!(toks(b"a<![CDATA[x<b>]]>c"), ["T:a", "T:]]>c"]);
     }
 
     /// HTML5's END-TAG-OPEN state, pinned at the TOKEN layer where it belongs.
@@ -708,6 +815,31 @@ src="http:></a><div id='HTML3'><i>" >y"#),
         // element anyway. Pinned so the shared scanner's `terminated` flag can't quietly change it.
         assert_eq!(toks(br#"a</p x="y"#), ["T:a", "E:p"]);
         assert_eq!(toks(b"a</p"), ["T:a", "E:p"]);
+    }
+
+    /// In RAWTEXT, RCDATA and script data an end tag needs a byte after its name, so one the input ends
+    /// right after is text; past the name it is dropped, as in the data state. Chrome and libxml2 agree
+    /// on every row.
+    #[test]
+    fn a_raw_end_tag_the_input_ends_on_is_text() {
+        for (doc, text) in [
+            ("<title>a</title", "a</title"),
+            ("<textarea>a</TEXTAREA", "a</TEXTAREA"),
+            ("<style>a</style", "a</style"),
+            ("<xmp>a<b>b</xmp", "a<b>b</xmp"),
+            ("<iframe>a</iframe", "a</iframe"),
+            ("<noembed>a</noembed", "a</noembed"),
+            ("<script>a</script", "a</script"),
+            ("<script><!--a</script", "<!--a</script"),
+        ] {
+            let got = toks(doc.as_bytes());
+            assert_eq!(got.len(), 2, "{doc}: {got:?}");
+            assert!(got[1].ends_with(&format!(":{text}")), "{doc}: {got:?}");
+        }
+        for doc in ["<title>a</title ", "<style>a</style/", "<xmp>a</xmp x", "<script>a</script x="] {
+            let got = toks(doc.as_bytes());
+            assert!(got[1].ends_with(":a"), "{doc}: {got:?}");
+        }
     }
 
     /// ...and the RAWTEXT/RCDATA and SCRIPT closers use the same attribute states.

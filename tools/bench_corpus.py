@@ -144,8 +144,8 @@ def _plan_for(queries):
     this — an unsupported selector would become a silently empty column the gate reads as a value bug, or
     as a legitimate empty answer.
     """
-    frostwork.check(list(queries)).raise_for_status()
-    return Plan(list(queries), [])
+    frostwork.check(list(queries), parser="lxml").raise_for_status()
+    return Plan(list(queries), [], parser="lxml")  # graded against Parsel, so lxml mode
 
 
 def parsel_extract(body, queries):
@@ -267,7 +267,7 @@ def main():
     med_speed = statistics.median(speedups) if speedups else 0
     mean_speed = statistics.mean(speedups) if speedups else 0
     print("\n" + "=" * 60)
-    print("CORPUS PERFORMANCE — Frostwork (1 pass, no DOM) vs Parsel")
+    print("CORPUS PERFORMANCE — Frostwork (streaming) vs Parsel")
     print("=" * 60)
     print(f"pages measured   : {n_pages}  across {len(n_pageobjs)} page objects")
     print(f"total bytes      : {total_bytes/1048576:.1f} MB   "

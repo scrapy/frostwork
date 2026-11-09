@@ -7,16 +7,22 @@ import pytest
 from frostwork import FieldProcessingError, ItemValidationError, Page, check
 
 
-def test_response_adapter_preserves_bytes_and_encoding():
+def test_response_adapter_preserves_bytes_and_encoding_inputs():
     class Response:
-        body = '<h1>café</h1>'.encode('windows-1252')
-        encoding = 'windows-1252'
+        body = '<meta charset=koi8-r><h1>café</h1>'.encode('windows-1252')
+        headers = {'Content-Type': 'text/html; charset=windows-1252'}
+        url = 'http://example.com/'
+        @property
+        def encoding(self):
+            raise AssertionError("must not read the framework's own encoding decision")
         @property
         def text(self):
             raise AssertionError('must not decode or construct a selector')
     page = Page().field('title', 'h1::text')
     assert page.extract_response(Response()).value('title') == 'café'
-    assert page.extract_response(SimpleNamespace(body=b'<h1>x</h1>', encoding=None)).value('title') == 'x'
+    assert page.extract_response(SimpleNamespace(body=b'<h1>x</h1>')).value('title') == 'x'
+    forced = SimpleNamespace(body=b'<meta charset=koi8-r><h1>caf\xe9</h1>', _encoding='windows-1252')
+    assert page.extract_response(forced).value('title') == 'café'
     bad = Page().field('x', '//a/following::b')
     assert bad.extract_response(Response(), strict=False).value('x') is None
     assert check(**{'queries': page.frost_schema()['fields'], 'groups': page.frost_schema()['groups']}).ok

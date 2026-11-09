@@ -37,6 +37,7 @@ def navigation(
     url: str,
     encoding: Optional[str] = None,
     *,
+    content_type: Optional[str] = None,
     base_url: bool = True,
     meta_refresh: bool = True,
     scripting: bool = True,
@@ -49,14 +50,18 @@ def navigation(
     with JavaScript enabled does, which ignores the content of ``<noscript>``; pass ``False`` to read
     it as one with JavaScript disabled.
 
-    *encoding* is a charset label, as Scrapy passes from ``Content-Type``; ``None``, or a label that
-    names no encoding, detects it from the document. When *url* is not absolute, only absolute URLs
+    *encoding* is a charset label the user forced, and *content_type* the raw ``Content-Type`` header,
+    as in :func:`~frostwork.detect_encoding`; with neither, or a label that names no encoding, the
+    encoding is detected from the document. When *url* is not absolute, only absolute URLs
     in the document resolve, and a relative refresh URL is ignored.
     """
     if not isinstance(html, (bytes, str)):
         html = bytes(html)
     return _from_native(
-        _navigation(html, url, encoding, base_url=base_url, meta_refresh=meta_refresh, scripting=scripting)
+        _navigation(
+            html, url, encoding, content_type=content_type,
+            base_url=base_url, meta_refresh=meta_refresh, scripting=scripting,
+        )
     )
 
 

@@ -70,10 +70,10 @@ ROWS = [
 
 def verdict(context: str, selector: str) -> bool:
     if context == "flat":
-        return frostwork.check([selector]).fields[0].supported
+        return frostwork.check([selector], parser="lxml").fields[0].supported
     report = frostwork.check([], [("g", selector if context == "container" else ".card", {
         "value": "span::text" if context == "container" else selector,
-    })])
+    })], parser="lxml")
     group = report.groups[0]
     return group.container.supported if context == "container" else group.subfields[0].supported
 
@@ -82,8 +82,10 @@ def render() -> str:
     lines = [
         "# Representative selector support snapshot",
         "",
-        "Generated/verified by `tools/support_snapshot.py` against the real compiler. The exhaustive",
-        "contract remains in `COMPATIBILITY.md`; this table is a drift tripwire for headline features.",
+        "Generated/verified by `tools/support_snapshot.py` against the real compiler, in lxml mode",
+        "(`parser=\"lxml\"`); browser mode refuses a few of these shapes, which `frostwork.check(...,",
+        "parser=\"browser\")` reports. The exhaustive contract remains in `COMPATIBILITY.md`; this table",
+        "is a drift tripwire for headline features.",
         "",
         "| feature | context | selector | supported |",
         "|---|---|---|---|",

@@ -9,7 +9,7 @@ makes correct code an error in the user's CI while every runtime test here passe
 
 # mypy: warn-unused-ignores
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import attrs
 from typing_extensions import assert_type
@@ -17,11 +17,25 @@ from typing_extensions import assert_type
 # Deliberate errors: `frostwork` exports its names lazily, and if a type checker ever read them as `Any`,
 # these ignores would go unused and fail the check.
 from frostwork import NoSuchName  # type: ignore[attr-defined]
-from frostwork import MetaRefresh, Navigation, Page, extract_grouped, navigation, resolve_label
-from frostwork.webpoet import FrostBrowserPage, FrostFields, FrostPage, Many, One, field
-
+from frostwork import (
+    MetaRefresh, Navigation, Page, Parser, check, detect_encoding, extract, extract_grouped, navigation,
+    resolve_label,
+)
+from frostwork._frostwork import Plan
+from frostwork.encoding import EncodingSource
+from frostwork.webpoet import FrostBrowserPage, FrostFields, FrostInput, FrostPage, Many, One, field
 
 assert_type(extract_grouped(b'', [], [('article', {'title': './h2/text()'})]), Tuple[List[List[str]], list])
+# the parse mode is spelled the same way everywhere, and is a `Literal`, not any `str`
+assert_type(extract(b'', ['h1::text'], parser="lxml"), List[List[str]])
+assert_type(extract_grouped(b'', [], [], parser="browser"), Tuple[List[List[str]], list])
+assert_type(check(['h1::text'], parser="lxml").parser, Parser)
+assert_type(Page(parser="lxml").parser, Parser)
+assert_type(Plan(['h1::text'], [], parser="lxml").parser, Parser)
+assert_type(detect_encoding(b'', content_type='text/html; charset=big5'), str)
+assert_type(detect_encoding(b'', url='https://example.jp/', explain=True), Tuple[str, EncodingSource])
+EXPLAIN: bool = False
+assert_type(detect_encoding(b'', explain=EXPLAIN), Union[str, Tuple[str, EncodingSource]])
 resolve_label(b'utf-8')  # type: ignore[arg-type]  # deliberate, see the imports
 assert_type(navigation(b'', 'http://h/').base_url, Optional[str])
 assert_type(navigation(b'', 'http://h/').meta_refresh, Optional[MetaRefresh])
@@ -42,7 +56,9 @@ DYNAMIC_ALL: bool = True
 DYNAMIC_SEP: Optional[str] = None
 
 
-class ProductPage(FrostPage):
+# `parser=` is a class keyword. This page is lxml mode because `.as_node()` (below) re-parses with lxml,
+# which browser mode refuses at class definition.
+class ProductPage(FrostPage, parser="lxml"):
     # cardinality drives the value type
     name = field("h1::text")
     images = field("img::attr(src)", all=True)
@@ -156,6 +172,23 @@ class BytesPage(FrostFields):
 
 class CustomPage(BytesPage):
     title = field("h1::text")
+
+
+@attrs.define
+class HeaderPage(FrostFields):
+    """The same hook returning every encoding input an HTTP response carries."""
+
+    raw: bytes
+    content_type: str
+
+    def frostwork_input(self) -> FrostInput:
+        return FrostInput(self.raw, content_type=self.content_type, url="https://example.jp/")
+
+    title = field("h1::text")
+
+
+def check_header_page_types(p: HeaderPage) -> None:
+    assert_type(p.title, Optional[str])
 
 
 def check_custom_types(p: CustomPage) -> None:

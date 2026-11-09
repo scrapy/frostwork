@@ -175,3 +175,90 @@ pub(super) fn deferrable_reverse_at(sel: &Selector) -> Option<usize> {
 pub(super) fn deferrable_reverse(sel: &Selector) -> bool {
     deferrable_reverse_at(sel).is_some()
 }
+
+/// The three names a tree builder SYNTHESIZES around content the page never framed.
+const FRAME_NAMES: [&str; 3] = ["html", "head", "body"];
+
+/// The elements browser mode's tree builder inserts for a token that is not their own start tag, besides
+/// the frame.
+const IMPLIED_NAMES: [&str; 4] = ["tbody", "tr", "colgroup", "p"];
+
+/// The name test of `sel`'s subject compound, if it has one (`*` is none).
+fn subject_name(sel: &Selector) -> Option<&str> {
+    let subject = sel.parts.last().expect("a compiled selector has a subject compound");
+    subject.tag.as_deref().filter(|t| *t != "*")
+}
+
+/// Could a match of `sel` be an element named one of `names` that has no attributes? Not when its
+/// subject compound tests an id, a class or an attribute; always when it has no name test.
+fn admits_bare(sel: &Selector, names: &[&str]) -> bool {
+    let subject = sel.parts.last().expect("a compiled selector has a subject compound");
+    let attribute_bound = subject.id.is_some() || !subject.classes.is_empty() || !subject.attrs.is_empty();
+    let named = subject_name(sel).is_none_or(|name| names.iter().any(|n| n.eq_ignore_ascii_case(name)));
+    named && !attribute_bound
+}
+
+/// Could a match of `sel` be an `<html>`/`<head>`/`<body>` the page never wrote? Two conservative rules:
+/// a synthesized frame carries no attributes (see `frame.rs`), so a subject compound with an
+/// id/class/attribute cannot match one; and `:not()`, positions and `:has()` only NARROW what matches, so
+/// ignoring them over-reports the frame case, which every caller treats as a refusal.
+pub(crate) fn admits_synthesized_frame(sel: &Selector) -> bool {
+    admits_bare(sel, &FRAME_NAMES)
+}
+
+/// Could a match of `sel` be one of the other elements browser mode builds with no source of its own:
+/// an implied `<tbody>`, `<tr>` or `<colgroup>`, or the `<p>` a stray `</p>` inserts? None of them has
+/// attributes, so as with the frame an attribute test rules them out; any container can hold one, so
+/// unlike the frame this is not scoped. A formatting element's copy is not among them: its source is
+/// the start tag it was copied from followed by its own content.
+fn admits_browser_synthesized(sel: &Selector) -> bool {
+    admits_bare(sel, &IMPLIED_NAMES)
+}
+
+/// Could a match of `sel` be, or contain, a synthesized frame element? Its subtree holds one only when the
+/// match is an `<html>` or a `<frameset>` (libxml2 synthesizes a `<body>` inside a frameset for head
+/// content there), written or not and whatever its attributes, so a `<div>` container cannot.
+fn may_hold_synthesized_frame(sel: &Selector) -> bool {
+    admits_synthesized_frame(sel)
+        || subject_name(sel).is_none_or(|name| name.eq_ignore_ascii_case("html") || name.eq_ignore_ascii_case("frameset"))
+}
+
+/// Does browser mode refuse the flat member `sel` ([`Refusal::SynthesizedOuterHtml`])?
+pub(super) fn browser_refuses(sel: &Selector) -> bool {
+    matches!(sel.terminal, Terminal::OuterHtml) && (admits_synthesized_frame(sel) || admits_browser_synthesized(sel))
+}
+
+/// Does browser mode refuse the sub-field `sub` of a group whose container is `container`? A sub-field is
+/// scoped to its container, self included, so it can match a synthesized frame element only where the
+/// container can be or hold one, and `.` (depth 0) is the container itself.
+pub(super) fn browser_refuses_sub(container: Option<&Selector>, sub: &Selector) -> bool {
+    matches!(sub.terminal, Terminal::OuterHtml)
+        && ((container.is_some_and(may_hold_synthesized_frame) && admits_synthesized_frame(sub))
+            || if sub.context_depth == Some(0) {
+                container.is_some_and(admits_browser_synthesized)
+            } else {
+                admits_browser_synthesized(sub)
+            })
+}
+
+/// Why browser mode refuses a selector the lxml contract supports. It rests on a property of libxml2's
+/// tree that HTML5's does not have, so lxml mode keeps it (docs/BROWSER_MODE.md, section 4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Refusal {
+    /// The value is outer HTML, and a match can be an element the page never wrote, which has no source
+    /// of its own (see [`admits_synthesized_frame`] and [`admits_browser_synthesized`]).
+    SynthesizedOuterHtml,
+}
+
+impl Refusal {
+    pub(crate) fn reason(self) -> &'static str {
+        match self {
+            Refusal::SynthesizedOuterHtml => {
+                "unsupported in browser mode: the selector can match an element the page never wrote (an \
+                 <html>, <head> or <body>, an implied <tbody>, <tr> or <colgroup>, or the <p> a stray </p> \
+                 inserts), which has no source of its own to return as outer HTML. Constrain it with an \
+                 attribute (tr.row), select its content, or use parser=\"lxml\""
+            }
+        }
+    }
+}

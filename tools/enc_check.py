@@ -6,30 +6,35 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import oracle  # parity is defined against libxml2 >= 2.15 here too (meta sniffing moved between them)
 oracle.require()
 BIN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "target", "release", "differ")
+# Encoding resolution is the same in both parse modes; the values are graded in lxml mode, Parsel's.
+ENGINE = [BIN, "--parser", "lxml"]
+
+from enc_cases import (  # noqa: E402
+    BODY_META_CASES, BROWSER_DIFFERENCES, BROWSER_EXCEPTIONS, C1_LABELS, DECOY, LABEL_CASES, PRECEDENCE,
+    SELS, SHARED_DOC_CASES, SHARED_PRESCAN_CASES, UTF16_BOM, UTF16_BOM_DOC, UTF16_META_LABELS,
+    WHATWG_ONLY_BYTES, body_meta_page, c1_probe, label_page, prescan_doc, sweep_docs, utf16_meta_doc,
+)
+
 
 def engine(body, sels, label):
     line = (label or "") + "\t" + body.hex() + "\t" + "\t".join(sels) + "\n"
-    p = subprocess.Popen([BIN], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    p = subprocess.Popen(ENGINE, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
     out, _ = p.communicate(line.encode())
     return json.loads(out.decode().splitlines()[0])
 
-# (label, sample non-ASCII text). Labels understood by both Python codecs and encoding_rs/WHATWG.
-CASES = [
-    ("windows-1252", "café — €5 «prix» ™"),
-    ("shift_jis", "日本語のテスト"),
-    ("euc-jp", "日本語エンコード"),
-    ("gbk", "中文测试内容"),
-    ("big5", "繁體中文測試"),
-    ("koi8-r", "Привет мир"),
-    ("utf-8", "café 日本語 €"),
-]
-SELS = ["p::text", "a::attr(title)", "div::attr(data-v)", "p.c::text", "span ::text"]
+
+def engine_inputs(body, sels, encoding, content_type):
+    """`{"encoding", "source", "values"}` for a document given both caller inputs (differ's `T` line)."""
+    line = "\t".join(["T", encoding or "", content_type or "", body.hex(), *sels]) + "\n"
+    p = subprocess.Popen(ENGINE, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    out, _ = p.communicate(line.encode())
+    return json.loads(out.decode().splitlines()[0])
+
+
 tot = ok = 0
 fails = []
-for label, sample in CASES:
-    html = (f'<html><head><meta charset="{label}"></head><body>'
-            f'<p class="c">{sample}</p><a title="{sample}" href="/x">link</a>'
-            f'<div data-v="{sample}">d</div><span>a{sample}b</span></body></html>')
+for label, sample in LABEL_CASES:
+    html = label_page(label, sample)
     # A label the oracle toolchain cannot handle is an UNTESTED label, not a passing one. Both arms here
     # must not `continue` silently: a codec or parsel change would then drop a whole charset out of
     # the sweep while it went on printing a ratio of the cases that were left.
@@ -57,20 +62,17 @@ for label, s, m, t in fails[:8]:
 
 # comment decoy (T7): `charset=` in a comment/visible text must NOT switch the decode; no label -> the
 # body is real UTF-8 and must stay UTF-8, matching w3lib/Scrapy (which strip comments before sniffing).
-decoy = ('<!-- saved from url=(0037)https://x/ charset=big5 -->'
-         '<html><head></head><body><p class="c">café 日本語</p></body></html>').encode("utf-8")
-mine = engine(decoy, ["p.c::text"], None)
-oracle = PS(body=decoy, encoding="utf-8").css("p.c::text").getall()  # w3lib ignores the comment -> utf-8
+mine = engine(DECOY, ["p.c::text"], None)
+oracle = PS(body=DECOY, encoding="utf-8").css("p.c::text").getall()  # w3lib ignores the comment -> utf-8
 if mine[0] != oracle:
     fails.append(("sniffed", "comment charset= decoy", mine[0], oracle))
 print(f"comment charset= decoy (sniffed): mine={mine[0]} utf-8-oracle={oracle} "
       f"-> {'OK' if mine[0] == oracle else 'MISMATCH'}")
 
 # UTF-16 via BOM (encoding sniffed from BOM, label None)
-u16 = '<html><body><p class="c">café 日本語</p></body></html>'.encode("utf-16")  # adds BOM
-mine = engine(u16, ["p::text"], None)
+mine = engine(UTF16_BOM, ["p::text"], None)
 # oracle = decode-first (what Scrapy does); lxml's body+encoding path can't parse UTF-16 bytes
-oracle = PS(text=u16.decode("utf-16")).css("p::text").getall()
+oracle = PS(text=UTF16_BOM.decode("utf-16")).css("p::text").getall()
 if mine[0] != oracle:
     fails.append(("bom-sniffed", "UTF-16", mine[0], oracle))
 ok = "OK" if mine[0] == oracle else "MISMATCH"
@@ -89,12 +91,8 @@ print(f"UTF-16 (BOM-sniffed): mine={mine[0]} decode-first-oracle={oracle} -> {ok
 # one, so a list entry cannot rot into a silent agreement).
 from w3lib.encoding import html_to_unicode  # noqa: E402
 
-from enc_cases import (  # noqa: E402
-    BROWSER_DIFFERENCES, SHARED_DOC_CASES, SHARED_PRESCAN_CASES, W1252, prescan_document,
-)
-
 for label, head, body in SHARED_PRESCAN_CASES:
-    doc = prescan_document(head, body)
+    doc = prescan_doc(head, body)
     _, txt = html_to_unicode(None, doc, auto_detect_fun=None, default_encoding="utf8")
     oracle = PS(text=txt).css("p.c::text").getall()
     mine = engine(doc, ["p.c::text"], None)
@@ -112,7 +110,10 @@ for label, doc in SHARED_DOC_CASES:
           f"-> {'OK' if mine[0] == oracle else 'MISMATCH'}")
 
 # ---- DELIBERATE differences from w3lib: browser/WHATWG behaviour, asserted both ways --------------
-# The rows are in tools/enc_cases.py, with what each one asserts.
+# Each row of `enc_cases.BROWSER_DIFFERENCES` is (name, document, what Frostwork must produce, what w3lib
+# produces, why we differ). The "what w3lib produces" column is checked too: if w3lib ever starts
+# agreeing, the row is STALE and this fails, which is the same anti-rot discipline as WHATWG_ONLY_BYTES /
+# BIG5_INDEX_DIVERGENCE below.
 for name, doc, want_mine, want_w3, why in BROWSER_DIFFERENCES:
     mine = engine(doc, ["p.c::text"], None)[0]
     try:
@@ -136,27 +137,44 @@ for name, doc, want_mine, want_w3, why in BROWSER_DIFFERENCES:
 # and 512 and IGNORED from 1024 on, because once real content is parsed the browser will not
 # re-decode. Getting this half wrong is invisible to the head cases — an unbounded scan passes every
 # one of them while honouring body declarations no browser honours.
-#
-# The declaration names koi8-r so that an ignored one is visible: the undeclared page is then
-# autodetected as windows-1252, as a browser autodetects it, and `caf\xe9` reads `café`, not `cafИ`.
-def _body_meta_page(pad):
-    doc = b"<!DOCTYPE html><html><head><title>t</title></head><body>"
-    while len(doc) < pad:
-        doc += b"<p>lorem ipsum dolor sit amet consectetur</p>"
-    return doc + b'<meta charset="koi8-r">' + W1252 + b"</body></html>"
-
-
-for _pad, _want, _why in [(0, ["cafИ"], "inside the 1024-byte floor"),
-                          (100, ["cafИ"], "inside the floor"),
-                          (512, ["cafИ"], "inside the floor"),
-                          (1024, ["café"], "past the floor, in the body"),
-                          (4096, ["café"], "past the floor, in the body"),
-                          (64 * 1024, ["café"], "past the floor, in the body")]:
-    _mine = engine(_body_meta_page(_pad), ["p.c::text"], None)[0]
+for _pad, _want, _why in BODY_META_CASES:
+    _mine = engine(body_meta_page(_pad), ["p.c::text"], None)[0]
     _ok = _mine == _want
     if not _ok:
         fails.append(("body-depth", f"a BODY declaration at ~{_pad} bytes ({_why})", _mine, _want))
     print(f"body declaration at ~{_pad} bytes ({_why}): mine={_mine} -> {'OK' if _ok else 'MISMATCH'}")
+
+# ---- DELIBERATE differences from the BROWSER: the encoding rule's named exceptions ---------------
+# The browser column is a recorded measurement, so each row is checked two ways rather than re-measured:
+# decoding the document with the browser's encoding must reproduce the browser's values, and Frostwork
+# must still answer differently. A row Frostwork stops differing on is STALE and fails.
+for name, doc, want_enc, want_mine, browser_enc, browser_vals, build, why in BROWSER_EXCEPTIONS:
+    got = engine_inputs(doc, ["p.c::text"], None, None)
+    as_browser = PS(text=doc.decode(browser_enc)).css("p.c::text").getall()
+    row = []
+    if (got["encoding"], got["values"][0]) != (want_enc, want_mine):
+        row.append(("browser-exception", f"{name}: Frostwork must read {want_enc}",
+                    [got["encoding"], got["values"][0]], [want_enc, want_mine]))
+    if as_browser != browser_vals:
+        row.append(("browser-exception", f"{name}: {browser_enc} does not reproduce the recorded "
+                                         f"{build} answer", as_browser, browser_vals))
+    if got["values"][0] == browser_vals:
+        row.append(("browser-exception", f"{name}: Frostwork now agrees with {build}, so the exception "
+                                         f"is STALE", got["values"][0], browser_vals))
+    fails += row
+    print(f"browser exception [{name}]: mine={got['values'][0]} ({got['encoding']}) "
+          f"{build}={browser_vals} ({browser_enc}) -> {'OK' if not row else 'MISMATCH'}")
+    print(f"    why: {why}")
+
+# ---- the PRECEDENCE table: which caller input wins -----------------------------------------------
+for name, doc, enc, ctype, want_enc, want_src, want_vals, why in PRECEDENCE:
+    got = engine_inputs(doc, ["p.c::text"], enc, ctype)
+    want = {"encoding": want_enc, "source": want_src, "values": [want_vals]}
+    if got != want:
+        fails.append(("precedence", name, got, want))
+    print(f"precedence [{name}]: {got['encoding']} from {got['source']}, mine={got['values'][0]} "
+          f"-> {'OK' if got == want else 'MISMATCH'}")
+    print(f"    why: {why}")
 
 # ---------------------------------------------------------------- DECODER divergence from Parsel
 # The engine decodes with `encoding_rs` (the WHATWG Encoding Standard — what browsers do). Parsel decodes
@@ -168,15 +186,8 @@ for _pad, _want, _why in [(0, ["cafИ"], "inside the 1024-byte floor"),
 # The list is checked in BOTH directions: a byte outside it that diverges FAILS (a real regression), and a
 # listed byte that starts AGREEING also fails, so the list cannot rot. That matters because the 35 parity
 # vectors above are all ordinary text — they never touch these bytes, so nothing else here can see them.
-WHATWG_ONLY_BYTES = {
-    # byte -> the character the WHATWG windows-1252 index defines (Python's cp1252: undefined -> U+FFFD)
-    0x81: "\u0081", 0x8D: "\u008d", 0x8F: "\u008f", 0x90: "\u0090", 0x9D: "\u009d",
-}
-SKIP_BYTES = set(b"<>&\r\n\t \x00")  # HTML delimiters / whitespace: not a decoder question
-for label in ("windows-1252", "iso-8859-1"):  # WHATWG maps the iso-8859-1 LABEL to windows-1252
-    probe = [bytes([b]) for b in range(0x20, 0x100) if b not in SKIP_BYTES]
-    ps = b"".join(b'<p class="c">' + s_ + b"</p>" for s_ in probe)
-    doc = b'<html><head><meta charset="' + label.encode() + b'"></head><body>' + ps + b"</body></html>"
+for label in C1_LABELS:  # WHATWG maps the iso-8859-1 LABEL to windows-1252
+    probe, doc = c1_probe(label)
     mine = engine(doc, ["p.c::text"], None)[0]
     _, txt = html_to_unicode(None, doc, auto_detect_fun=None, default_encoding="utf8")
     theirs = PS(text=txt).css("p.c::text").getall()
@@ -202,16 +213,13 @@ for label in ("windows-1252", "iso-8859-1"):  # WHATWG maps the iso-8859-1 LABEL
 # by treating the bytes as ASCII-compatible — the declaration contradicts itself. w3lib honours the label,
 # decodes the whole document as UTF-16 and produces garbage Parsel finds nothing in. Divergence in our
 # favour, pinned here so it cannot regress into honouring the label.
-for _lab in (b"utf-16", b"utf-16le", b"utf-16be", b"UTF-16"):
-    _doc = (b'<html><head><meta charset="' + _lab + b'"></head><body><p class="c">'
-            + b"caf\xc3\xa9" + b"</p></body></html>")
-    _mine = engine(_doc, ["p.c::text"], None)[0]
+for _lab in UTF16_META_LABELS:
+    _mine = engine(utf16_meta_doc(_lab), ["p.c::text"], None)[0]
     if _mine != ["café"]:
         fails.append(("meta-prescan", f"<meta charset={_lab.decode()}> must be read as UTF-8",
                       _mine, ["café"]))
 # ...and a genuine UTF-16 document (BOM) must still decode as UTF-16
-_doc16 = '<html><head></head><body><p class="c">café</p></body></html>'.encode("utf-16")
-_m16 = engine(_doc16, ["p.c::text"], None)[0]
+_m16 = engine(UTF16_BOM_DOC, ["p.c::text"], None)[0]
 if _m16 != ["café"]:
     fails.append(("bom", "real UTF-16 document with a BOM", _m16, ["café"]))
 print(f"meta prescan [utf-16 label -> UTF-8, BOM still UTF-16]: "
@@ -228,11 +236,7 @@ import decoder_sweep  # noqa: E402
 for _label in decoder_sweep.LABELS:
     _probe = decoder_sweep.candidates()
     _diff, _counts = {}, dict.fromkeys(decoder_sweep.BULK, 0)
-    for _i in range(0, len(_probe), 4000):
-        _part = _probe[_i:_i + 4000]
-        _ps = b"".join(b'<p class="c">' + _s + b"</p>" for _s in _part)
-        _doc = (b'<html><head><meta charset="' + _label.encode() + b'"></head><body>'
-                + _ps + b"</body></html>")
+    for _part, _doc in sweep_docs(_label):
         _mine = engine(_doc, ["p.c::text"], None)[0]
         _, _txt = html_to_unicode(None, _doc, auto_detect_fun=None, default_encoding="utf8")
         _theirs = PS(text=_txt).css("p.c::text").getall()

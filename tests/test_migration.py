@@ -65,7 +65,7 @@ def test_migration_gate_goes_red_and_refuses_timing(current_oracle, monkeypatch,
 
 def test_untested_schema_is_not_counted_as_migratable(current_oracle):
     pages = registry()
-    pages['untested'] = Page().field('name', 'h1::text')
+    pages['untested'] = Page(parser='lxml').field('name', 'h1::text')
     report = vm.verify(pages, FIXTURES / 'manifest.json')
     assert not report['ok']
     assert report['complete_schemas'] == len(pages) - 1
@@ -83,7 +83,7 @@ def test_manifest_requires_original_bytes(tmp_path):
 
 def test_cli_writes_reviewable_report_and_returns_failure(tmp_path):
     target = tmp_path / 'pages.py'
-    target.write_text('from frostwork import Page\nREGISTRY = {name: Page().field("x", "//a/following::b") '
+    target.write_text('from frostwork import Page\nREGISTRY = {name: Page(parser="lxml").field("x", "//a/following::b") '
                       'for name in ["product", "listing", "article"]}\n')
     output = tmp_path / 'report.json'
     run = subprocess.run([sys.executable, str(ROOT / 'tools' / 'verify_migration.py'), f'{target}:REGISTRY',
@@ -100,7 +100,7 @@ def test_the_cli_imports_the_schema_module_only_once(tmp_path):
     target = tmp_path / 'pages.py'
     target.write_text('from pathlib import Path\nfrom frostwork import Page\n'
                       f'p = Path({str(marker)!r})\np.write_text(p.read_text() + "x" if p.exists() else "x")\n'
-                      'REGISTRY = {name: Page().field("title", "h1::text") '
+                      'REGISTRY = {name: Page(parser="lxml").field("title", "h1::text") '
                       'for name in ["product", "listing", "article"]}\n')
     assert vm.main([f'{target}:REGISTRY', str(FIXTURES / 'manifest.json'), '--json',
                     str(tmp_path / 'result.json')]) == 0
@@ -128,9 +128,16 @@ def test_oracle_first_fields_do_not_serialize_discarded_matches():
     assert vm.values(Node(), 'a::attr(href)', first=True) == ['']
 
 
+def test_a_browser_mode_schema_is_refused_rather_than_graded_against_parsel():
+    pages = registry()
+    pages['product'] = Page().field('name', 'h1::text')
+    with pytest.raises(ValueError, match=r"\['product'\] are not in lxml mode"):
+        vm.verify(pages, FIXTURES / 'manifest.json')
+
+
 def test_reference_preserves_css_escapes_and_routes_padded_xpath():
     html = b'<p id="a ">value</p>'
-    page = Page().field('id', '#a\\ ::attr(id)').many('rows', ' //p ', {'text': ' text() '})
+    page = Page(parser='lxml').field('id', '#a\\ ::attr(id)').many('rows', ' //p ', {'text': ' text() '})
     assert vm.oracle(page, html, 'utf-8').to_dict() == page.extract(html).to_dict() == {
         'id': 'a ', 'rows': [{'text': 'value'}],
     }

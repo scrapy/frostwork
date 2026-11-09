@@ -1,4 +1,4 @@
-//! The document frame — `<html>`/`<head>`/`<body>` state and the questions the rules ask about it.
+//! The libxml2 builder's document frame — `<html>`/`<head>`/`<body>` state and the questions its rules ask.
 //!
 //! **Why this is a module.** If frame state were spread across call sites as ad-hoc combinations of bare
 //! booleans, counters and inline stack scans, rules could ask PROXY questions instead of the real ones.
@@ -96,7 +96,7 @@ pub(super) fn only_html_open(stack: &[OpenElem<'_>]) -> bool {
 /// `<head>` only, not for the other two; each arm says which oracle cell it stands on, and
 /// `frame-in-element` in `tools/audit_tree_rules.py` sweeps all three over the whole
 /// element universe crossed with "is a body open". A frame the page OMITS is a different question,
-/// answered by `Matcher::ensure_frame`.
+/// answered by `Libxml2::ensure_frame` (`libxml2.rs`).
 pub(super) fn tag_is_redundant(name: &[u8], stack: &[OpenElem<'_>]) -> bool {
     if name.eq_ignore_ascii_case(b"html") {
         // A second <html> is redundant however shallow the stack is. NOT once the first has closed,
@@ -168,7 +168,7 @@ impl DocumentFrame {
 
     /// Does this end tag pop a phantom rather than the document? Consumes one if so.
     pub(super) fn absorbs_end_tag(&mut self, name: &[u8]) -> bool {
-        if frame_slot(name).is_some() && self.phantoms > 0 {
+        if self.phantoms > 0 && frame_slot(name).is_some() {
             self.phantoms -= 1;
             return true;
         }

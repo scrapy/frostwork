@@ -18,9 +18,10 @@ share a single cached :func:`frostwork.extract` call instead of one lxml parse p
 
 Three contracts worth knowing before reading further, each covered in ``docs/PYTHON.md``:
 
-* **Input.** :class:`FrostPage` scans ``response.body`` with the response's resolved ``.encoding``;
-  :class:`FrostBrowserPage` scans a ``BrowserResponse``'s ``.html``; anything else means overriding
-  :meth:`FrostFields.frostwork_input`. Known decoder differences are listed in ``docs/COMPATIBILITY.md``.
+* **Input.** :class:`FrostPage` scans ``response.body`` with its ``Content-Type`` header, its URL and any
+  encoding the user forced, and makes the encoding decision itself; :class:`FrostBrowserPage` scans a
+  ``BrowserResponse``'s ``.html``; anything else means overriding :meth:`FrostFields.frostwork_input`.
+  Known decoder differences are listed in ``docs/COMPATIBILITY.md``.
 * **Composition.** A field's column is shaped by ``all``/``join``, then ``.map()``/``.re_first()`` run, then
   web-poet's processors — ``out=`` if given, else a nested ``Processors`` entry for that field name.
 * **Processor input.** A processor receives the field's VALUE, as it does in web-poet. Most
@@ -42,6 +43,7 @@ from typing import (
     Generic,
     List,
     Literal,
+    NamedTuple,
     Optional,
     Tuple,
     TypeVar,
@@ -82,10 +84,25 @@ except ImportError as exc:  # pragma: no cover - exercised only without a usable
 from ._frostwork import Plan as _Plan
 from ._frostwork import selector_node_identity as _identity
 from ._frostwork import selector_terminals as _terminals
+from .page import _response_encoding_inputs
 from .page import _shape  # single source of cardinality shaping (first/all/join + transforms)
-from .page import SchemaReport, check  # schema audit / strict validation
+from .page import Parser, SchemaReport, _check_parser, check  # schema audit / strict validation
 
-__all__ = ["FrostPage", "FrostBrowserPage", "FrostFields", "field", "Many", "One"]
+__all__ = ["FrostPage", "FrostBrowserPage", "FrostFields", "FrostInput", "field", "Many", "One"]
+
+
+class FrostInput(NamedTuple):
+    """What a page object scans: the document and the encoding inputs :func:`frostwork.extract` takes.
+
+    ``html`` is ``bytes`` off the wire, or a ``str`` of already-decoded text. ``encoding`` is a label the
+    user forced, never a framework's resolved ``.encoding``; ``content_type`` is the raw ``Content-Type``
+    header value; ``url`` is the response URL. See the integrator contract in docs/PYTHON.md."""
+
+    html: Union[bytes, str]
+    encoding: Optional[str] = None
+    content_type: Optional[str] = None
+    url: Optional[str] = None
+
 
 # ("first", None) | ("all", None) | ("join", separator)
 _Card = Tuple[str, Optional[str]]
@@ -715,6 +732,9 @@ class FrostFields(ItemPage):
     # Resolved `strict=` for THIS class, carried on the class so a rebuild cannot lose it (see
     # `__init_subclass__`). Read from `cls.__dict__` there, never inherited.
     _frostwork_strict: bool = True
+    # Resolved `parser=`, carried on the class for the same reason. Unlike `strict`, a subclass inherits
+    # it: the base's selectors were written against that parser's tree, and the subclass's plan runs them.
+    _frostwork_parser: Parser = "browser"
 
     def __init_subclass__(cls, **kwargs) -> None:
         own: Dict[str, _Spec] = {}
@@ -764,6 +784,11 @@ class FrostFields(ItemPage):
         # an override of any shape (manual field, flat-over-group, mixin, constant) drops out — see
         # `_resolved_schema`, which asks the MRO instead of trusting the merge.
         cls._frostwork_specs, cls._frostwork_groups = _resolved_schema(cls)
+        # A class keyword exists only in the `class` statement, and a rebuild (`@attrs.define`) throws that
+        # statement away while copying the dict, so the resolved parser is carried on the class: a rebuild
+        # finds it in its own dict, a subclass through the MRO.
+        parser = _check_parser(kwargs.pop("parser", cls._frostwork_parser))
+        cls._frostwork_parser = parser
         # Compile the whole schema to ONE native Plan, ONCE, here at class creation — reused for every
         # response (an over-budget schema raises `ValueError` here, at import, not per page).
         cls._frostwork_flat_names = list(cls._frostwork_specs)
@@ -778,7 +803,7 @@ class FrostFields(ItemPage):
         # tokenizing to EOF. One `all=True`/`join=` field, one group, one deferred selector disarms it,
         # and the values are unchanged either way (see `Plan::compile_first_only`).
         first_only = [cls._frostwork_specs[n][1][0] == "first" for n in cls._frostwork_flat_names]
-        cls._frostwork_plan = _Plan(flat_queries, garg, first_only)
+        cls._frostwork_plan = _Plan(flat_queries, garg, first_only, parser=parser)
         # Validate at class-definition time, so an unsupported selector fails loudly at import rather than
         # becoming a silently empty field in production. `strict=False` explicitly opts out.
         #
@@ -806,7 +831,9 @@ class FrostFields(ItemPage):
            element SOURCE — transform the processor's output in `out=` instead;
         5. `.as_node()` on a selector that can match a synthesized frame without naming it (`field("*")`):
            such an element has no source of its own, so its value is its content. A selector that PINS the
-           name (`field("body")`) carries the identity and is fine."""
+           name (`field("body")`) carries the identity and is fine;
+        6. `.as_node()` in browser mode: the handoff re-parses the element's source with lxml, so a
+           processor would receive libxml2's subtree for a node the browser built differently."""
         names = list(cls._frostwork_specs)
         if not names:
             return
@@ -815,6 +842,13 @@ class FrostFields(ItemPage):
             selector, card, transforms, node_input = cls._frostwork_specs[name]
             is_element = terminals[name] == "outer"
             where = f"field {name!r} = {selector!r}"
+            if node_input and cls._frostwork_parser == "browser":
+                raise TypeError(
+                    f"{where} is declared .as_node(), which browser mode does not support: the node is "
+                    f"re-parsed from the element's source by lxml, which builds libxml2's tree, not the "
+                    f"browser's. Declare the class with parser=\"lxml\" (`class P(FrostPage, "
+                    f"parser=\"lxml\")`), or hand the processor the value with .as_value()."
+                )
             if node_input and not is_element:
                 raise TypeError(
                     f"{where} is declared .as_node(), but its value is not an element "
@@ -861,7 +895,7 @@ class FrostFields(ItemPage):
         # `frost_schema()` already returns the two named-mapping shapes `check` accepts, so the schema
         # is described in exactly one place — audit and introspection cannot report different selectors.
         schema = cls.frost_schema()
-        return check(schema["fields"], schema["groups"])
+        return check(schema["fields"], schema["groups"], parser=cls._frostwork_parser)
 
     @classmethod
     def frost_schema(cls) -> dict:
@@ -877,19 +911,21 @@ class FrostFields(ItemPage):
             },
         }
 
-    def frostwork_input(self) -> Tuple[Union[bytes, str], Optional[str]]:
-        """The ``(html, encoding)`` this page object scans — ``bytes`` off the wire, or a ``str`` of
-        already-decoded text (a browser snapshot). Override to source a page object from
-        something other than the two provided bases — that is the whole extension point, and it is public
-        because web-poet's input universe is larger than the shapes shipped here (``Extractor`` subclasses
-        can be given any dependency at all).
+    def frostwork_input(self) -> Union[FrostInput, Tuple[Union[bytes, str], Optional[str]]]:
+        """What this page object scans: a :class:`FrostInput`, or an ``(html, encoding)`` pair. ``html``
+        is ``bytes`` off the wire, or a ``str`` of already-decoded text (a browser snapshot). Override to
+        source a page object from something other than the two provided bases — that is the whole
+        extension point, and it is public because web-poet's input universe is larger than the shapes
+        shipped here (``Extractor`` subclasses can be given any dependency at all).
 
-        ``encoding`` may be ``None``, in which case the engine sniffs (BOM, then a ``<meta>`` prescan)
-        exactly as Parsel would. Return the ORIGINAL bytes where you have them: decoding to ``str`` and
-        re-encoding can only lose information the sniffer would otherwise use. Where only decoded text
-        exists, return the ``str`` itself — never ``str.encode("utf-8")``, which allocates a whole
-        second copy of the document; the engine borrows CPython's UTF-8 view instead. A ``str`` is
-        scanned as UTF-8, so the only ``encoding`` it accepts is ``None`` or a UTF-8 label."""
+        Return a :class:`FrostInput` when the input is an HTTP response, so the engine sees its
+        ``Content-Type`` header and URL. ``encoding`` is only for a label the user forced; with ``None``
+        the engine sniffs (BOM, then a ``<meta>`` prescan, then autodetection). Return the ORIGINAL bytes
+        where you have them: decoding to ``str`` and re-encoding can only lose information the sniffer
+        would otherwise use. Where only decoded text exists, return the ``str`` itself — never
+        ``str.encode("utf-8")``, which allocates a whole second copy of the document; the engine borrows
+        CPython's UTF-8 view instead. A ``str`` is scanned as UTF-8, so the only ``encoding`` it accepts
+        is ``None`` or a UTF-8 label."""
         raise NotImplementedError(
             f"{type(self).__name__} does not define frostwork_input(). Inherit FrostPage (HttpResponse) "
             "or FrostBrowserPage (BrowserResponse), or override frostwork_input() to return "
@@ -898,17 +934,19 @@ class FrostFields(ItemPage):
 
     @cached_method
     def _frostwork_run(self):
-        """Run the page object's whole schema — flat fields AND `Many`/`One` groups — in ONE pass
+        """Run the page object's whole schema — flat fields AND `Many`/`One` groups — in ONE run
         through the class's pre-compiled `Plan`; cached per instance so every field reads one scan."""
-        body, encoding = self.frostwork_input()
-        flat_cols, grouped = self._frostwork_plan.extract_grouped(body, encoding)
+        given = FrostInput(*self.frostwork_input())
+        flat_cols, grouped = self._frostwork_plan.extract_grouped(
+            given.html, given.encoding, content_type=given.content_type, url=given.url
+        )
         return (
             dict(zip(self._frostwork_flat_names, flat_cols)),
             dict(zip(self._frostwork_group_names, grouped)),
         )
 
     def _frostwork_columns(self) -> Dict[str, List[str]]:
-        """Flat columns from the shared one-pass run (grouped fields read `_frostwork_run()[1]`)."""
+        """Flat columns from the shared run (grouped fields read `_frostwork_run()[1]`)."""
         return self._frostwork_run()[0]
 
 
@@ -918,14 +956,17 @@ class FrostPage(FrostFields, WebPage):
     scan of ``self.response.body``. Subclass it exactly like a ``web_poet.WebPage`` (it *is* one),
     optionally with ``Returns[YourItem]`` and ``@handle_urls(...)``. Schemas are validated at class
     definition by default; declare ``class MyPage(FrostPage, strict=False)`` to allow unsupported
-    selectors as empty fields."""
+    selectors as empty fields. ``class MyPage(FrostPage, parser="lxml")`` answers against lxml's tree
+    instead of a browser's (the default, ``"browser"``); a subclass inherits its base's parser."""
 
-    def frostwork_input(self) -> Tuple[bytes, Optional[str]]:
+    def frostwork_input(self) -> FrostInput:
         resp = self.response
         # web-poet's HttpResponseBody subclasses bytes, which the native fn accepts directly —
         # avoid copying the whole body on the hot path.
         body = resp.body if isinstance(resp.body, bytes) else bytes(resp.body)
-        return body, resp.encoding
+        # Never `resp.encoding`: that is web-poet's own decision, and as `encoding=` it would outrank
+        # the document's declarations and the engine's autodetection.
+        return FrostInput(body, *_response_encoding_inputs(resp))
 
 
 class FrostBrowserPage(FrostFields, BrowserPage):

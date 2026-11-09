@@ -22,21 +22,45 @@ pub enum AttrOp {
 /// cssselect rejects the flag outright (`Expected ']', got <IDENT 'i'>`), so this is coverage the oracle
 /// refuses rather than a semantic difference — see docs/COMPATIBILITY.md, "Beyond lxml". The flag is
 /// ASCII-only by the CSS definition, which is also what keeps it cheap: no case table, no allocation.
+///
+/// `html_ci` is HTML's own fold for CSS: an attribute HTML lists (`type`, `lang`, `rel`...) has its value
+/// compared ASCII-case-insensitively on an HTML element, unless the selector says `s`. Only the CSS
+/// parser sets it, and only browser mode's tree builder marks an element HTML (see
+/// `matcher::HTML_ELEMENT`), so XPath and lxml mode compare exactly.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AttrPred {
     pub name: String,
     pub op: AttrOp,
     pub value: String,
     pub ci: bool,
+    pub html_ci: bool,
+    /// The NAME is XPath's `@name`, which browser mode compares with the DOM's name exactly; a CSS
+    /// attribute selector's name compares ASCII-case-insensitively.
+    pub exact: bool,
 }
+
+/// The attributes whose values CSS matches ASCII-case-insensitively on an HTML element (WHATWG HTML,
+/// "case-sensitivity of selectors"), the list Chrome 156 folds.
+const CASE_INSENSITIVE_VALUES: [&str; 46] = [
+    "accept", "accept-charset", "align", "alink", "axis", "bgcolor", "charset", "checked", "clear", "codetype",
+    "color", "compact", "declare", "defer", "dir", "direction", "disabled", "enctype", "face", "frame",
+    "hreflang", "http-equiv", "lang", "language", "link", "media", "method", "multiple", "nohref", "noresize",
+    "noshade", "nowrap", "readonly", "rel", "rev", "rules", "scope", "scrolling", "selected", "shape",
+    "target", "text", "type", "valign", "valuetype", "vlink",
+];
 
 impl AttrPred {
     pub fn new(name: impl Into<String>, op: AttrOp, value: impl Into<String>) -> Self {
-        Self { name: name.into(), op, value: value.into(), ci: false }
+        Self { name: name.into(), op, value: value.into(), ci: false, html_ci: false, exact: false }
     }
 
     pub fn exists(name: impl Into<String>) -> Self {
         Self::new(name, AttrOp::Exists, "")
+    }
+
+    /// The same test with XPath's name semantics (the `exact` field).
+    pub fn exact(self) -> Self {
+        Self { exact: true, ..self }
     }
 }
 
@@ -108,6 +132,9 @@ pub struct TextPred {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Compound {
     pub tag: Option<String>, // None or Some("*") = universal
+    /// The name-test is XPath's, which browser mode compares with the DOM's name exactly: a camel-cased
+    /// SVG name (`clipPath`) is not `clippath` there. A CSS type selector compares ASCII-case-insensitively.
+    pub exact_tag: bool,
     pub id: Option<String>,
     pub classes: Vec<String>,
     pub attrs: Vec<AttrPred>,
@@ -882,8 +909,10 @@ fn parse_compound_depth(s: &str, depth: u32) -> Result<Compound, ()> {
                 // so it is accepted and ignored rather than refused. Whitespace before it is required —
                 // `[a=vi]` is the two-character value `vi`, which the value scan above already consumed.
                 let mut ci = false;
+                let mut flagged = false;
                 if i < n && matches!(b[i], b'i' | b'I' | b's' | b'S') && (i + 1 >= n || b[i + 1] == b']' || is_ws(b[i + 1])) {
                     ci = matches!(b[i], b'i' | b'I');
+                    flagged = true;
                     i += 1;
                     while i < n && is_ws(b[i]) {
                         i += 1;
@@ -902,7 +931,8 @@ fn parse_compound_depth(s: &str, depth: u32) -> Result<Compound, ()> {
                     b'|' => AttrOp::DashMatch,
                     _ => unreachable!(),
                 };
-                c.attrs.push(AttrPred { name, op, value: val, ci });
+                let html_ci = !flagged && CASE_INSENSITIVE_VALUES.iter().any(|a| a.eq_ignore_ascii_case(&name));
+                c.attrs.push(AttrPred { name, op, value: val, ci, html_ci, exact: false });
             }
             b':' => {
                 // Supported pseudos: `:not(<compound>)`, the FORWARD positional pseudo-classes
@@ -1245,7 +1275,7 @@ mod tests {
         }
         assert!(matches!(
             parse("i[a=\"2\"]").unwrap().parts[0].attrs.as_slice(),
-            [AttrPred { name, op: AttrOp::Eq, value, ci: false }] if name == "a" && value == "2"
+            [AttrPred { name, op: AttrOp::Eq, value, ci: false, .. }] if name == "a" && value == "2"
         ));
     }
 

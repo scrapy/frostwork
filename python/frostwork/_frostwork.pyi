@@ -1,24 +1,36 @@
 """Type stubs for the native Frostwork core (`frostwork._frostwork`).
 
 The ergonomic, fully-typed surface is `frostwork.page` / `frostwork.webpoet`; these are the raw
-one-pass primitives crossing the PyO3 boundary. `html` must be `bytes` (or a `bytes` subclass such
+primitives crossing the PyO3 boundary. `html` must be `bytes` (or a `bytes` subclass such
 as web-poet's `HttpResponseBody`); the pure-Python wrappers accept other bytes-likes and `str`.
 """
 
-from typing import List, Optional, Sequence, Tuple, Union
+from typing import List, Literal, Optional, Sequence, Tuple, Union, overload
 
 Query = Union[str, Tuple[str, Optional[str]]]
 """A selector string, routed as CSS or XPath by its prefix, or ``(selector, syntax)`` with ``syntax``
 one of ``"css"``, ``"xpath"`` or ``None`` (auto)."""
+
+Parser = Literal["browser", "lxml"]
+"""The parse mode: ``"browser"`` (the default) builds the tree a browser builds, ``"lxml"`` lxml's. Any other
+string raises ``ValueError``."""
+
+EncodingSource = Literal[
+    "bom", "utf16-prefix", "encoding", "content-type", "xml-declaration", "meta", "utf8", "autodetect",
+    "str",
+]
+"""The rank that decided an encoding (``detect_encoding(..., explain=True)``); ``"str"`` for decoded text."""
 
 def extract(
     html: Union[bytes, str],
     queries: Sequence[Query],
     encoding: Optional[str] = ...,
     *,
+    content_type: Optional[str] = ...,
     url: Optional[str] = ...,
+    parser: Parser = ...,
 ) -> List[List[str]]:
-    """One streaming pass: one value-column per query, in query order."""
+    """One run over ``html``: one value-column per query, in query order."""
 
 def extract_grouped(
     html: Union[bytes, str],
@@ -26,19 +38,24 @@ def extract_grouped(
     groups: Sequence[Tuple[Query, Sequence[Tuple[str, Query]]]],
     encoding: Optional[str] = ...,
     *,
+    content_type: Optional[str] = ...,
     url: Optional[str] = ...,
+    parser: Parser = ...,
 ) -> Tuple[List[List[str]], List[List[List[List[str]]]]]:
-    """One streaming pass returning ``(flat_columns, grouped)`` — ``grouped[g][row][subfield][value]``."""
+    """One run returning ``(flat_columns, grouped)`` — ``grouped[g][row][subfield][value]``."""
 
 def audit_schema(
     flat_queries: Sequence[Query],
     groups: Sequence[Tuple[Query, Sequence[Tuple[str, Query]]]],
+    *,
+    parser: Parser = ...,
 ) -> Tuple[
     List[Tuple[bool, Optional[str]]],
     List[Tuple[Tuple[bool, Optional[str]], List[Tuple[bool, Optional[str]]]]],
     Tuple[int, int, int, int],
 ]:
-    """Support/reason per selector plus ``(members, max_members, sib_bits, max_sib_bits)`` — no HTML parsed."""
+    """Support/reason per selector in the ``parser`` mode, plus ``(members, max_members, sib_bits,
+    max_sib_bits)`` — no HTML parsed."""
 
 def selector_terminals(queries: Sequence[Query]) -> List[Optional[str]]:
     """The value terminal each query produces: ``"text"``, ``"attr"``, ``"outer"``, ``"normalize-space"``,
@@ -57,13 +74,38 @@ def resolve_label(label: str) -> Optional[str]:
     """Canonical WHATWG encoding name for ``label`` (e.g. ``"UTF-8"``), or ``None`` if neither WHATWG
     nor Python's codec set names a WHATWG encoding by it."""
 
+@overload
 def detect_encoding(
-    html: Union[bytes, str], encoding: Optional[str] = ..., *, url: Optional[str] = ...
+    html: Union[bytes, str],
+    encoding: Optional[str] = ...,
+    *,
+    content_type: Optional[str] = ...,
+    url: Optional[str] = ...,
+    explain: Literal[False] = ...,
 ) -> str:
     """The encoding ``extract`` would scan this document with, as a WHATWG name: BOM → BOM-less UTF-16
-    prefix → ``encoding`` label → ``<meta>``/XML-declaration prescan of the head → UTF-8 if valid, else
-    autodetected, informed by the top-level domain of ``url``. A ``str`` is already-decoded text, so
-    the answer is ``"UTF-8"`` without sniffing."""
+    prefix → ``encoding`` label → ``content_type`` charset → XML declaration or ``<meta>`` → UTF-8 if
+    valid, else autodetected, informed by the top-level domain of ``url``. A label that names
+    no encoding is ignored. A ``str`` is already-decoded text, so the answer is ``"UTF-8"`` without sniffing."""
+@overload
+def detect_encoding(
+    html: Union[bytes, str],
+    encoding: Optional[str] = ...,
+    *,
+    content_type: Optional[str] = ...,
+    url: Optional[str] = ...,
+    explain: Literal[True],
+) -> Tuple[str, EncodingSource]:
+    """``(name, source)``: the encoding and the rank that decided it."""
+@overload
+def detect_encoding(
+    html: Union[bytes, str],
+    encoding: Optional[str] = ...,
+    *,
+    content_type: Optional[str] = ...,
+    url: Optional[str] = ...,
+    explain: bool = ...,
+) -> Union[str, Tuple[str, EncodingSource]]: ...
 
 def bom_encoding(body: bytes) -> Optional[Tuple[str, int]]:
     """``(encoding, bom_length)`` from the start of ``body``, or ``None``."""
@@ -77,6 +119,7 @@ def navigation(
     url: str,
     encoding: Optional[str] = ...,
     *,
+    content_type: Optional[str] = ...,
     base_url: bool = ...,
     meta_refresh: bool = ...,
     scripting: bool = ...,
@@ -94,15 +137,31 @@ class Plan:
         flat_queries: Sequence[Query],
         groups: Sequence[Tuple[Query, Sequence[Tuple[str, Query]]]],
         first_only: Optional[List[bool]] = ...,
+        *,
+        parser: Parser = ...,
     ) -> None:
         """``first_only[c]`` declares that flat column ``c``'s consumer keeps only the FIRST value. When
         every column says so and the schema is eligible, the scan stops as soon as each has one instead
-        of running to EOF; the values a single-valued consumer sees are unchanged."""
+        of running to EOF; the values a single-valued consumer sees are unchanged. ``parser`` fixes the
+        parse mode, once."""
+    @property
+    def parser(self) -> Parser:
+        """The parse mode this plan was compiled for."""
     def extract(
-        self, html: Union[bytes, str], encoding: Optional[str] = ..., *, url: Optional[str] = ...
+        self,
+        html: Union[bytes, str],
+        encoding: Optional[str] = ...,
+        *,
+        content_type: Optional[str] = ...,
+        url: Optional[str] = ...,
     ) -> List[List[str]]: ...
     def extract_grouped(
-        self, html: Union[bytes, str], encoding: Optional[str] = ..., *, url: Optional[str] = ...
+        self,
+        html: Union[bytes, str],
+        encoding: Optional[str] = ...,
+        *,
+        content_type: Optional[str] = ...,
+        url: Optional[str] = ...,
     ) -> Tuple[List[List[str]], List[List[List[List[str]]]]]: ...
     def extract_with_navigation(
         self,
@@ -110,6 +169,7 @@ class Plan:
         url: str,
         encoding: Optional[str] = ...,
         *,
+        content_type: Optional[str] = ...,
         base_url: bool = ...,
         meta_refresh: bool = ...,
         scripting: bool = ...,

@@ -300,6 +300,13 @@ UNREACHABLE = {
         "statement, which `@attrs.define` throws away, so the opt-out has to be carried on the class. "
         "Covered by tests/test_python.py's strict-survives-recreation sweep over the attrs variants"
     ),
+    "parser-through-a-rebuild": (
+        "`kwargs.pop('parser', cls._frostwork_parser)`: the parse mode is carried on the class for the "
+        "same reason, and inherited. Covered by "
+        "tests/test_python.py::test_the_parser_class_keyword_is_carried_on_the_class (attrs, a bare "
+        "rebuild, inheritance and an override) and by make gate-webpoet, whose Frostwork side declares "
+        "lxml mode on the class nearest the root"
+    ),
 
     "injectable page bases": (
         "`FrostFields(ItemPage)` is a class statement, not a function: covered by the `is_injectable` "

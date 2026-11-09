@@ -234,10 +234,12 @@ class Verdict(NamedTuple):
 _XPATH_PREFIXES = ("/", "./", "normalize-space(")
 
 
-def judge(sites: Iterable[Site]) -> List[Verdict]:
-    """Decide each site's support. Literal selectors go through the real compiler (`frostwork.check`),
-    so the verdict is the engine's own, not a second parser."""
-    from .page import check
+def judge(sites: Iterable[Site], parser: str = "browser") -> List[Verdict]:
+    """Decide each site's support in the ``parser`` mode. Literal selectors go through the real compiler
+    (`frostwork.check`), so the verdict is the engine's own, not a second parser."""
+    from .page import _check_parser, check
+
+    mode = _check_parser(parser)
 
     out: List[Verdict] = []
     for site in sites:
@@ -264,11 +266,11 @@ def judge(sites: Iterable[Site]) -> List[Verdict]:
             continue
         syntax = None if site.kind == "auto" else site.kind
         if site.context == "group-container":
-            field = check([], [(sel, [])], syntax=syntax).groups[0].container
+            field = check([], [(sel, [])], syntax=syntax, parser=mode).groups[0].container
         elif site.context == "group-subfield":
-            field = check([], [("*", [("value", sel)])], syntax=syntax).groups[0].subfields[0]
+            field = check([], [("*", [("value", sel)])], syntax=syntax, parser=mode).groups[0].subfields[0]
         else:
-            field = check([sel], syntax=syntax).fields[0]
+            field = check([sel], syntax=syntax, parser=mode).fields[0]
         out.append(Verdict(site, field.supported, field.reason))
     return out
 

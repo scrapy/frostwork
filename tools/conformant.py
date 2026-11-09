@@ -33,7 +33,8 @@ def _attr(rng, n):
     if r < 0.95:
         # CR / CRLF in a value: HTML normalizes to \n before entity decode (T4 gate coverage)
         return f' title="a{n}\r\nb\rc"'
-    return ' title="t"'
+    # an XPath literal with `::` in it is a value, not an axis
+    return rng.choice([' title="t"', ' title="a::b"'])
 
 
 def _next(ctr):
@@ -236,7 +237,12 @@ BASKET = [
     "thead + tbody::text", "caption + thead::text",
     "table tr > td::text", "select > option::text", "table > tr::text", "tr > th::text",
     "a::attr(href)", "img::attr(src)", "input::attr(value)", "[data-k]::attr(data-k)",
+    # a capital in an `::attr()` name: parsel's is XPath's exact `@` over libxml2's lowercased names, so
+    # these answer nothing in lxml mode; a browser's getAttribute() lowercases it on an HTML element
+    "a::attr(HREF)", "[data-k]::attr(Data-K)", "[id]::attr(ID)", "img::attr(Src)",
     "[title]::attr(title)",  # exercises CR/CRLF-in-attribute normalization (T4)
+    # raw-text, RCDATA and script content, which `diff_lxml` also grades with the page cut inside an end tag
+    "title::text", "script::text", "style::text", "textarea::text",
     ".shared::text", ".shared ::text", "section p::text", "div div ::text",
     # sibling combinators (+ / ~), incl. chains and a descendant base
     "li + li::text", "li ~ li::text", "dt + dd::text", "td + td::text", "option + option::text",
@@ -250,7 +256,7 @@ BASKET = [
     "div > * ::text", "li + * ::text", "div * ::text", "p * ::text", "section ~ * ::text",
     "div > * ::attr(id)", "li * ::attr(class)",
     # attribute operators
-    'a[href^="/p"]::attr(href)', 'img[src$=".png"]::attr(src)', '[class~="shared"]::text',
+    '//*[@title="a::b"]/@title', "//*[contains(@title, '::')]//text()", 'a[href^="/p"]::attr(href)', 'img[src$=".png"]::attr(src)', '[class~="shared"]::text',
     '[data-k^="v"]::text', 'a[href*="p"]::attr(href)', '[class*="c"]::text', 'input[value|="v"]::text',
     # :not()
     "a:not([data-k])::attr(href)", "span:not(.shared)::text", "li:not([id])::text",
@@ -272,8 +278,12 @@ BASKET = [
     "div:has(a) p::text", "div:has(a) a::attr(href)", "div:has(p) span::text",
     "li:has(a) span::text", "//div[contains(.,'alpha')]//text()",
     "//div[contains(.,'alpha')]//a/@href", "//li[contains(.,'beta')]//span/text()",
+    # ... whose tail can name the winner itself, which is never its own descendant, and a winner the
+    # page never wrote (`*` matching the implied `<body>`)
+    "div:has(span) div::text", "div:has(a) div::attr(id)", "li:has(a) li::text", "div:last-child div::text",
+    "div:contains('alpha') div::text", "//div[contains(.,'alpha')]//div/text()", "*:has(li) li::text",
     # tails the winner itself would satisfy (`*`, its own tag): only proper descendants count
-    "//li[last()]//*/text()", "//div[last()]//div/@class", "div:has(a) div::text",
+    "//li[last()]//*/text()", "//div[last()]//div/@class",
     "//div[contains(.,'alpha')]//*/text()",
     # CSS `:contains()` — cssselect lowers it to `contains(., "v")`, so it shares every value location the
     # XPath text predicate above has, and each one is listed rather than assumed: own, subtree, descendant,

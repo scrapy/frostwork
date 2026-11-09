@@ -1,4 +1,4 @@
-"""Declarative page-object API over the one-pass :func:`frostwork.extract` primitive — a pure-Python
+"""Declarative page-object API over the :func:`frostwork.extract` primitive — a pure-Python
 mirror of the Rust ``Page``/``Item``. A page object is a ``{field: selector}`` schema; one
 ``extract`` call fills the whole item with one shared document scan; matching work still grows with
 the number and complexity of fields.
@@ -10,7 +10,7 @@ the number and complexity of fields.
     ...         .field("title", "h1::text")             # first match -> value or None
     ...         .field("price", ".price::text")
     ...         .field_all("images", "img::attr(src)"))  # every match -> list
-    >>> item = page.extract(html)                        # ONE streaming pass fills every field
+    >>> item = page.extract(html)                        # one run fills every field
     >>> item.get("title")
     'Widget'
     >>> item.get_all("images")
@@ -21,13 +21,14 @@ the number and complexity of fields.
 
 from __future__ import annotations
 
-import codecs
 import json
 import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass, field as _dc_field
 from functools import lru_cache
-from typing import Any, Callable, Iterable, Iterator, List, Optional, Protocol, Tuple, Union
+from typing import (
+    Any, Callable, Iterable, Iterator, List, Literal, Optional, Protocol, Tuple, Union, cast, overload,
+)
 
 from .validation import FieldProcessingError, ValidationReport, validate_item
 
@@ -41,7 +42,7 @@ from ._navigation import Navigation, _from_native
 
 __all__ = [
     "extract", "extract_grouped", "check", "Page", "Item",
-    "SchemaReport", "FieldReport", "GroupReport", "UnsupportedSelector",
+    "SchemaReport", "FieldReport", "GroupReport", "UnsupportedSelector", "Parser",
 ]
 
 # A field's cardinality: ("first", None) | ("all", None) | ("join", separator).
@@ -52,11 +53,24 @@ _Query = Union[str, Tuple[str, Optional[str]]]
 
 _SYNTAXES = (None, "css", "xpath")
 
+Parser = Literal["browser", "lxml"]
+"""The parse mode a schema is answered in. ``"browser"`` (the default) is graded against real browsers;
+``"lxml"`` is value parity with lxml/Parsel. See docs/BROWSER_MODE.md."""
+
+_PARSERS = ("browser", "lxml")
+
 
 def _check_syntax(syntax: Optional[str]) -> Optional[str]:
     if syntax not in _SYNTAXES:
         raise ValueError(f"frostwork: syntax must be 'css', 'xpath' or None, got {syntax!r}")
     return syntax
+
+
+def _check_parser(parser: str) -> Parser:
+    """``parser`` if it names a mode, else ``ValueError`` (the native layer raises the same)."""
+    if parser not in _PARSERS:
+        raise ValueError(f"frostwork: parser must be 'browser' or 'lxml', got {parser!r}")
+    return cast(Parser, parser)
 
 
 def _query(selector: str, syntax: Optional[str]) -> _Query:
@@ -74,13 +88,29 @@ Bytesish = Union[bytes, bytearray, memoryview, str]
 
 
 class Response(Protocol):
-    """The byte-response surface used by :meth:`Page.extract_response`; no Scrapy dependency."""
+    """The byte-response surface used by :meth:`Page.extract_response`; no Scrapy dependency.
+
+    Only ``body`` is required. ``headers``, ``url`` and ``_encoding`` are read when present."""
 
     @property
     def body(self) -> bytes: ...
 
-    @property
-    def encoding(self) -> Optional[str]: ...
+
+def _response_encoding_inputs(response: Any) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """``(encoding, content_type, url)`` for a Scrapy or web-poet response, without importing either.
+
+    ``encoding`` is the label the user forced, which both frameworks keep in ``_encoding``;
+    ``content_type`` is the raw ``Content-Type`` header value (web-poet's headers return ``str``,
+    Scrapy's ``bytes``); ``url`` is the response URL. ``response.encoding`` is never read: it is the
+    framework's own decision, and passed as ``encoding=`` it would outrank the document's declarations.
+    """
+    forced = getattr(response, "_encoding", None)
+    headers = getattr(response, "headers", None)
+    content_type = headers.get("Content-Type") if headers is not None else None
+    if isinstance(content_type, (bytes, bytearray)):
+        content_type = bytes(content_type).decode("latin-1")
+    url = getattr(response, "url", None)
+    return forced, content_type, None if url is None else str(url)
 
 
 def _as_scan_input(html: Bytesish) -> Union[bytes, str]:
@@ -111,45 +141,6 @@ def _query_list(queries) -> List[str]:
     return list(queries)
 
 
-def _check_encoding(html: Bytesish, encoding: Optional[str]) -> Optional[str]:
-    """Validate a caller charset label instead of letting the engine silently ignore it.
-
-    The engine accepts WHATWG charset labels; Python codec spellings (``latin-1``, ``utf_8``,
-    ``cp932``) are normalized through :mod:`codecs`. A label that names no encoding at all raises
-    rather than silently falling through to BOM/``<meta>`` sniffing, and a non-UTF-8 label combined with
-    already-decoded ``str`` input raises rather than silently double-transcoding.
-
-    A label that IS a real encoding but not a WHATWG one is a third case, and it must not raise: the
-    documented input here is what Scrapy passes from ``Content-Type``, i.e. whatever
-    ``w3lib.encoding.resolve_encoding`` returned, and that resolves against Python's codec set — which
-    has ``utf-7`` and ``utf-32`` where WHATWG deliberately does not. A crawled page whose HTTP header
-    said ``charset=UTF-7`` (its own ``<meta>`` said UTF-8) therefore made ``extract`` raise on
-    documented usage. WHATWG's rule for such a label is *failure, continue* — ignore it and go on
-    sniffing, which is what browsers do, what the Rust core already did, and what reads this page
-    correctly. Raising on publisher-controlled input is the one thing the no-fallback contract rules
-    out: never an error, never a wrong value.
-    """
-    if encoding is None:
-        return None
-    canonical = _resolve_label(encoding)
-    if canonical is None:
-        try:
-            codecs.lookup(encoding)
-        except LookupError:
-            raise ValueError(
-                f"frostwork: unknown encoding label {encoding!r} — pass a WHATWG charset label "
-                "(e.g. 'utf-8', 'windows-1252', 'shift_jis') or None to sniff from BOM/<meta>"
-            ) from None
-        return None  # real encoding, not a WHATWG one -> failure, continue (sniff)
-    if isinstance(html, str) and canonical != "UTF-8":
-        raise ValueError(
-            f"frostwork: `html` is already-decoded str (tokenized as UTF-8), but "
-            f"encoding={encoding!r} was given — pass the original bytes with the label, "
-            "or drop the label"
-        )
-    return canonical
-
-
 def _group_list(groups) -> list:
     """Normalize group shapes (tuples or lists, e.g. straight from JSON) and fail with a clear
     message on the wrong shape instead of an opaque unhashable/unpack error downstream."""
@@ -161,9 +152,9 @@ def _group_list(groups) -> list:
 
 
 @lru_cache(maxsize=256)
-def _validate_flat(selectors: Tuple[str, ...], syntax: Optional[str]) -> None:
+def _validate_flat(selectors: Tuple[str, ...], syntax: Optional[str], parser: Parser) -> None:
     """Cache successful primitive-schema validation; selectors are commonly reused per response."""
-    check(selectors, syntax=syntax).raise_for_status()
+    check(selectors, syntax=syntax, parser=parser).raise_for_status()
 
 
 @lru_cache(maxsize=128)
@@ -171,8 +162,9 @@ def _validate_grouped(
     selectors: Tuple[str, ...],
     groups: Tuple[Tuple[str, Tuple[Tuple[str, str], ...]], ...],
     syntax: Optional[str],
+    parser: Parser,
 ) -> None:
-    check(selectors, groups, syntax=syntax).raise_for_status()
+    check(selectors, groups, syntax=syntax, parser=parser).raise_for_status()
 
 
 def detect_encoding(html: Bytesish, encoding: Optional[str] = None, *, url: Optional[str] = None) -> str:
@@ -198,26 +190,35 @@ def extract(
     queries: Iterable[str],
     encoding: Optional[str] = None,
     *,
+    content_type: Optional[str] = None,
     url: Optional[str] = None,
     strict: bool = True,
     syntax: Optional[str] = None,
+    parser: Parser = "browser",
 ) -> List[List[str]]:
-    """One streaming pass over ``html``: return one value-column per query, in query order.
+    """One run over ``html`` for every query: return one value-column per query, in query order.
 
     ``html`` is bytes (preferred — Frostwork tokenizes raw bytes) or ``str`` (encoded UTF-8).
-    ``queries`` is an iterable of CSS/XPath selectors. ``encoding`` is an optional charset label
-    (as Scrapy passes from ``Content-Type``); ``None`` sniffs (BOM → ``<meta>`` → autodetection).
-    ``url`` is the response URL, if known; the top-level domain of its host informs autodetection.
+    ``queries`` is an iterable of CSS/XPath selectors. ``encoding`` is a label the user forced, ranked
+    below a BOM; a label no codec knows raises ``ValueError``. ``content_type`` is the response's raw
+    ``Content-Type`` header value, whose charset ranks below ``encoding``. ``url`` is the response URL;
+    the top-level domain of its host informs autodetection. With none of them the engine sniffs (BOM →
+    ``<meta>`` → autodetection); :func:`detect_encoding` reports the decision.
     Unsupported queries raise :class:`UnsupportedSelector` before scanning. Pass ``strict=False``
     to use the engine's permissive empty-column behavior. There is never a parser fallback.
     ``syntax`` declares every query ``"css"`` or ``"xpath"``; ``None`` routes each by its prefix
-    (``/``, ``./`` and ``normalize-space(`` are XPath).
+    (``/``, ``./`` and ``normalize-space(`` are XPath). ``parser`` is the parse mode: ``"browser"``
+    builds the tree a browser builds, ``"lxml"`` the one lxml does; which selectors are supported can
+    differ between the two (see :func:`check`).
     """
     query_list = _query_list(queries)
-    encoding = _check_encoding(html, encoding)
+    _check_parser(parser)
     if strict:
-        _validate_flat(tuple(query_list), syntax)
-    return _extract(_as_scan_input(html), [_query(q, syntax) for q in query_list], encoding, url=url)
+        _validate_flat(tuple(query_list), syntax, parser)
+    return _extract(
+        _as_scan_input(html), [_query(q, syntax) for q in query_list], encoding,
+        content_type=content_type, url=url, parser=parser,
+    )
 
 
 def extract_grouped(
@@ -226,29 +227,34 @@ def extract_grouped(
     groups: Iterable[Tuple[str, _Subfields]],
     encoding: Optional[str] = None,
     *,
+    content_type: Optional[str] = None,
     url: Optional[str] = None,
     strict: bool = True,
     syntax: Optional[str] = None,
+    parser: Parser = "browser",
 ) -> Tuple[List[List[str]], list]:
-    """One streaming pass returning ``(flat_columns, grouped)``. ``groups`` is a list of
+    """One run returning ``(flat_columns, grouped)``. ``groups`` is a list of
     ``(container_selector, [(subfield_name, subfield_selector), ...])`` (a subfield mapping is also
     accepted); for every element matching
     ``container_selector`` (document order) each sub-field is extracted **scoped to it**
     (descendant-or-self). ``grouped[g]`` is that group's rows, each a list of sub-field value-columns
     (``[group][row][subfield][value]``). Unsupported selectors raise by default; pass
-    ``strict=False`` for permissive empty columns. ``url`` and ``syntax`` apply as in :func:`extract`. Same no-DOM, no-fallback semantics as :func:`extract`."""
+    ``strict=False`` for permissive empty columns. ``encoding``, ``content_type``, ``url``, ``syntax``
+    and ``parser`` apply as in :func:`extract`. Same tree and no-fallback semantics as :func:`extract`."""
     query_list = _query_list(queries)
     group_list = _group_list(groups)
-    encoding = _check_encoding(html, encoding)
+    _check_parser(parser)
     if strict:
         group_key = tuple((container, tuple(subfields)) for container, subfields in group_list)
-        _validate_grouped(tuple(query_list), group_key, syntax)
+        _validate_grouped(tuple(query_list), group_key, syntax, parser)
     return _extract_grouped(
         _as_scan_input(html),
         [_query(q, syntax) for q in query_list],
         _tag_groups(group_list, syntax),
         encoding,
+        content_type=content_type,
         url=url,
+        parser=parser,
     )
 
 
@@ -307,8 +313,9 @@ class GroupReport:
 
 @dataclass(frozen=True)
 class SchemaReport:
-    """The result of auditing a whole schema: per-selector support plus budget usage. Use
-    :attr:`ok`, :attr:`unsupported`, and :meth:`raise_for_status`."""
+    """The result of auditing a whole schema: per-selector support plus budget usage, in the parse mode
+    named by :attr:`parser` (support is per mode). Use :attr:`ok`, :attr:`unsupported`, and
+    :meth:`raise_for_status`."""
 
     fields: List[FieldReport]
     groups: List[GroupReport]
@@ -316,6 +323,7 @@ class SchemaReport:
     max_members: int
     sib_bits: int
     max_sib_bits: int
+    parser: Parser = "browser"
 
     @property
     def over_budget(self) -> bool:
@@ -359,8 +367,8 @@ class SchemaReport:
 
     def __str__(self) -> str:
         head = (
-            f"SchemaReport: {'OK' if self.ok else 'PROBLEMS'} "
-            f"(members {self.members}/{self.max_members}, sib-bits {self.sib_bits}/{self.max_sib_bits})"
+            f"SchemaReport: {'OK' if self.ok else 'PROBLEMS'} (parser {self.parser}, "
+            f"members {self.members}/{self.max_members}, sib-bits {self.sib_bits}/{self.max_sib_bits})"
         )
         rows = [str(f) for f in self.fields]
         for g in self.groups:
@@ -376,9 +384,14 @@ def _field_reports(fields, tuples) -> List[FieldReport]:
     ]
 
 
-def check(queries=None, groups=None, *, syntax: Optional[str] = None) -> SchemaReport:
-    """Audit a schema without parsing any HTML: report which selectors the engine supports (with an
-    advisory reason for those it does not) and the budget usage.
+def check(
+    queries=None, groups=None, *, syntax: Optional[str] = None, parser: Parser = "browser"
+) -> SchemaReport:
+    """Audit a schema without parsing any HTML: report which selectors the engine supports in the
+    ``parser`` mode (with an advisory reason for those it does not) and the budget usage. Support is per
+    mode: browser mode refuses the outer HTML of a selector that can match an element the page never
+    wrote (a synthesized ``<html>``/``<head>``/``<body>``, an implied ``<tbody>``/``<tr>``/``<colgroup>``,
+    the ``<p>`` a stray ``</p>`` inserts), which lxml mode supports.
 
     ``queries`` is a ``{name: selector}`` mapping, an iterable of flat selectors (labelled ``[i]`` by
     position), or an iterable of ``(name, selector)`` pairs. ``groups`` is a
@@ -400,14 +413,16 @@ def check(queries=None, groups=None, *, syntax: Optional[str] = None) -> SchemaR
         (name, _query(container, syntax), [(sub, _query(sel, syntax)) for sub, sel in subs])
         for name, container, subs in _named_groups(groups or [])
     ]
-    return _audit(named_fields, named_groups)
+    return _audit(named_fields, named_groups, _check_parser(parser))
 
 
-def _audit(named_fields, named_groups) -> SchemaReport:
+def _audit(named_fields, named_groups, parser: Parser) -> SchemaReport:
     """:func:`check` over ``(name, query)`` fields and ``(name, container, [(sub, query)])`` groups
     whose queries are already in the native shape, so each may carry its own syntax."""
     flat_t, groups_t, (members, max_members, sib_bits, max_sib_bits) = _audit_schema(
-        [sel for _name, sel in named_fields], [(c, subs) for _name, c, subs in named_groups]
+        [sel for _name, sel in named_fields],
+        [(c, subs) for _name, c, subs in named_groups],
+        parser=parser,
     )
     fields = _field_reports(named_fields, flat_t)
     group_reports = []
@@ -415,7 +430,7 @@ def _audit(named_fields, named_groups) -> SchemaReport:
         container = FieldReport(f"{gn}<container>", _query_text(gc), ctuple[0], ctuple[1])
         subfields = _field_reports(subs, subtuples)
         group_reports.append(GroupReport(gn, container, subfields))
-    return SchemaReport(fields, group_reports, members, max_members, sib_bits, max_sib_bits)
+    return SchemaReport(fields, group_reports, members, max_members, sib_bits, max_sib_bits, parser)
 
 
 # The shapes `check` accepts, quoted verbatim in the TypeError so a wrong one names its way out. A
@@ -587,16 +602,23 @@ def _sub_spec(spec) -> Tuple[str, _Card]:
 
 class Page:
     """An ordered ``{name -> (selector, cardinality)}`` schema. Build it once with the ``field*``
-    methods (chainable), then call :meth:`extract` per page; reuse one ``Page`` across responses."""
+    methods (chainable), then call :meth:`extract` per page; reuse one ``Page`` across responses.
+    ``parser`` fixes the parse mode the schema is compiled for, as in :func:`extract`."""
 
-    __slots__ = ("_fields", "_groups", "_plan", "_strict", "_validated")
+    __slots__ = ("_fields", "_groups", "_plan", "_strict", "_validated", "_parser")
 
-    def __init__(self, *, strict: bool = True) -> None:
+    def __init__(self, *, strict: bool = True, parser: Parser = "browser") -> None:
         self._fields: dict[str, _Field] = {}
         self._groups: dict[str, _Group] = {}
         self._plan = None  # native compiled Plan, built lazily on first extract, reused after
         self._strict = strict
         self._validated = False
+        self._parser: Parser = _check_parser(parser)
+
+    @property
+    def parser(self) -> Parser:
+        """The parse mode this schema is compiled for."""
+        return self._parser
 
     def _add(
         self, name: str, selector: str, card: _Card, transforms: _Transforms, syntax: Optional[str]
@@ -637,7 +659,9 @@ class Page:
                 for g in self._groups.values()
             ]
             first_only = [f.card[0] == "first" for f in self._fields.values()]
-            self._plan = _Plan([f.query for f in self._fields.values()], garg, first_only)
+            self._plan = _Plan(
+                [f.query for f in self._fields.values()], garg, first_only, parser=self._parser
+            )
         return self._plan
 
     def field(
@@ -720,6 +744,7 @@ class Page:
                 (name, g.query, [(sn, sub.query) for sn, sub in g.subfields.items()])
                 for name, g in self._groups.items()
             ],
+            self._parser,
         )
 
     def frost_schema(self) -> dict:
@@ -731,34 +756,38 @@ class Page:
         }
 
     def extract_response(self, response: Response, *, strict: Optional[bool] = None) -> "Item":
-        """Extract original response bytes with its encoding (Scrapy or web-poet, without imports).
+        """Extract a Scrapy or web-poet response's original bytes, without importing either framework.
 
-        Never accesses ``response.text`` or its selector. To use Frostwork's own sniffing instead,
-        call ``page.extract(response.body)`` explicitly.
+        Passes the raw ``Content-Type`` header value, the URL and the encoding the user forced (the
+        framework's ``_encoding``), so the engine makes the encoding decision itself.
+        Never accesses ``response.text``, ``response.encoding`` or the response's selector.
         """
-        return self.extract(response.body, encoding=response.encoding, strict=strict)
+        encoding, content_type, url = _response_encoding_inputs(response)
+        return self.extract(
+            response.body, encoding, content_type=content_type, url=url, strict=strict
+        )
 
     def extract(
         self,
         html: Bytesish,
         encoding: Optional[str] = None,
         *,
+        content_type: Optional[str] = None,
         url: Optional[str] = None,
         strict: Optional[bool] = None,
     ) -> "Item":
-        """Fill an :class:`Item` from ``html`` in one streaming pass. ``encoding`` is an optional
-        charset label (as Scrapy passes from ``Content-Type``); ``None`` sniffs, informed by ``url``
-        as in :func:`extract`. Unsupported selectors
+        """Fill an :class:`Item` from ``html`` in one run. ``encoding``, ``content_type``
+        and ``url`` are the encoding inputs described in :func:`extract`. Unsupported selectors
         raise :class:`UnsupportedSelector` by default. Construct with ``Page(strict=False)`` or pass
         ``strict=False`` here for permissive empty results. A successful default validation is cached
         until the schema changes."""
         self._validate(strict)
-        encoding = _check_encoding(html, encoding)
         body = _as_scan_input(html)
         plan = self._get_plan()  # compiled once, reused across pages
         if not self._groups:
-            return Item._from_columns(self._fields, plan.extract(body, encoding, url=url))
-        return self._item(*plan.extract_grouped(body, encoding, url=url))
+            cols = plan.extract(body, encoding, content_type=content_type, url=url)
+            return Item._from_columns(self._fields, cols)
+        return self._item(*plan.extract_grouped(body, encoding, content_type=content_type, url=url))
 
     def extract_with_navigation(
         self,
@@ -766,18 +795,18 @@ class Page:
         url: str,
         encoding: Optional[str] = None,
         *,
+        content_type: Optional[str] = None,
         base_url: bool = True,
         meta_refresh: bool = True,
         scripting: bool = True,
         strict: Optional[bool] = None,
     ) -> Tuple["Item", Navigation]:
         """Like :meth:`extract`, also reading the base URL and meta refresh of *html*, the document at
-        *url*, in the same pass. *base_url*, *meta_refresh* and *scripting* work as in
-        :func:`~frostwork.navigation`."""
+        *url*. *base_url*, *meta_refresh* and *scripting* work as in :func:`~frostwork.navigation`, and
+        *encoding* and *content_type* as in :meth:`extract`."""
         self._validate(strict)
-        encoding = _check_encoding(html, encoding)
         flat_cols, grouped, nav = self._get_plan().extract_with_navigation(
-            _as_scan_input(html), url, encoding,
+            _as_scan_input(html), url, encoding, content_type=content_type,
             base_url=base_url, meta_refresh=meta_refresh, scripting=scripting,
         )
         return self._item(flat_cols, grouped), _from_native(nav)

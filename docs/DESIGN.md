@@ -1,19 +1,41 @@
 # Design: how Frostwork is built, and why
 
-Frostwork extracts data from HTML in **one streaming pass with no parse tree**. This is the *why* and
-*how* behind that; [COMPATIBILITY.md](COMPATIBILITY.md) is the precise contract, and the differential
-harness in `tools/` is the executable spec.
+Frostwork is a **streaming parser**: it extracts data from HTML in **one pass**, rather than building a
+complete tree and querying it. Browser mode has two exceptions to the single pass: a page where an HTML5
+rule rewrites elements already parsed is answered from a compact tree of the finished page (the replay,
+under 2% of pages), and a deferred predicate whose value is inside its element is read in a second pass
+over the document, on the pages where one arose. This is the *why* and *how* behind that;
+[COMPATIBILITY.md](COMPATIBILITY.md) is the precise contract, and the differential harness in `tools/` is
+the executable spec.
 
-## The core idea: query-directed, treeless parsing
+## The core idea: query-directed parsing
 
 A scraper knows its selectors before it sees the page. A general parser doesn't, so it builds a full
 DOM and then discards the 96–99% of nodes no selector touches — and parsing is most of the end-to-end
 cost. Frostwork treats extraction as a **query**: scan the bytes once, keep just enough structure (a
 corrected open-element stack) to answer the selectors, and materialise/decode only the values emitted.
 
-There is **no DOM** and **no fallback**: the engine answers every query itself. It stays *close to
-libxml2* (the parser Parsel/lxml use) rather than to the HTML5 spec, because libxml2 is what real
-Scrapy/Parsel output is compared against.
+It builds a **minimal tree only when needed**: browser mode's replay, for the page in hand, only where
+streaming cannot give the browser's answer. There is **no fallback**: the engine answers every query
+itself.
+
+## Two parse modes
+
+Which tree the selectors are answered against is a per-schema choice. **Browser mode**, the default,
+follows HTML5 tree construction as Chrome implements it. **Lxml mode** (`parser="lxml"`) stays *close to
+libxml2* (the parser Parsel/lxml use) rather than to the HTML5 spec, because libxml2 is what existing
+Scrapy/Parsel output is compared against. Most of this document describes the machinery the modes share
+and lxml mode's rules; [BROWSER_MODE.md](BROWSER_MODE.md) is the design of browser mode and its gates.
+
+The modes meet at one seam (`matcher/tree.rs`). A `TreeBuilder` receives the tokenizer's events and
+decides what they mean as a tree, including the tokenizer's next state, by calling a few matcher
+primitives; the matcher does all selector evaluation, capture and decoding for both. `libxml2.rs` is
+lxml mode's builder and `browser/` is browser mode's. The schema's mode picks the builder once per
+document and the scan is monomorphised over it. Browser mode keeps the matcher's stack as the DOM path
+to the insertion point, separate from its own HTML5 stack of open elements, so foster parenting, the
+form pointer and the adoption agency's copies match as the browser's tree does. On the under 2% of
+pages where a rule rewrites elements already parsed, it answers from a compact tree of the finished page
+(BROWSER_MODE.md section 4, "The replay").
 
 ## Pipeline
 
@@ -180,6 +202,20 @@ member budget has already killed neither joins a group nor is joined — a share
 column of its group from whichever entry is live, while a dead column must stay empty. What remains grows
 with the number of DISTINCT prefixes, which [BENCHMARKS.md](BENCHMARKS.md) measures against the same count
 of plain fields.
+
+All of that is **lxml mode's**, and the first bullet is why: an HTML5 span is not self-contained. A
+`<tr>` parsed alone is no row, a `<b>` that reconstruction copies into a winner was opened outside it, and
+foreign content, the form pointer and foster parenting all read state from before the span. So browser
+mode keeps the same winners and slots and reads them differently (`Matcher::resolve_tail_pass`): it parses
+the WHOLE document a second time with the same builder, whose decisions depend on the input alone, so
+the second pass opens the same elements in the same order and each winner is found again by that order
+(`OpenElem::elem`, a `u32` in padding `OpenElem` already had). Each winner carries a mark no page or
+selector can spell (an attribute with an empty name), and every slot's tail is compiled into ONE schema
+rooted at that mark, so a tail column is an ordinary flat column of the second pass: true context for
+every element, each node once, nested winners included. The cost is one extra pass for a document on
+which a winner arose, whatever the number of slots, and nothing anywhere else. A child step into the tail
+would be expressible this way (`[mark] > p`); it stays refused in both modes so the two contracts differ
+only where the trees do.
 
 For contrast, the other suspected hot spot in this tier was **rejected by measurement**: `sub_hits` with a
 subtree terminal loops `seg_match` over `floor..=top`, which looks like O(depth² × compounds) per text

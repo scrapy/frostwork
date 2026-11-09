@@ -1,0 +1,199 @@
+[
+ {
+  "name": "svg title holds HTML",
+  "doc": "<!DOCTYPE html><body><svg><title><b id=x>t</b></title></svg>",
+  "exprs": [
+   "__q(d, \"#x\")",
+   "__q(d, \"svg title\")"
+  ]
+ },
+ {
+  "name": "html title is RCDATA",
+  "doc": "<!DOCTYPE html><head><title><b id=x>t</b></title></head>",
+  "exprs": [
+   "__q(d, \"#x\")",
+   "__q(d, \"title\")"
+  ]
+ },
+ {
+  "name": "svg template is ordinary",
+  "doc": "<!DOCTYPE html><body><svg><template id=t><text id=y>z</text></template></svg>",
+  "exprs": [
+   "__q(d, \"#t\")",
+   "__q(d, \"#y\")",
+   "__q(d, \"svg template text\")"
+  ]
+ },
+ {
+  "name": "html template content",
+  "doc": "<!DOCTYPE html><body><template id=t><p id=y>z</p></template>",
+  "exprs": [
+   "__q(d, \"#t\")",
+   "__q(d, \"#y\")"
+  ]
+ },
+ {
+  "name": "form ancestry after </form>",
+  "doc": "<!DOCTYPE html><body><form id=f><div id=d>a</form><p id=after>x</p>",
+  "exprs": [
+   "__q(d, \"#f #after\")",
+   "__q(d, \"#d #after\")",
+   "__q(d, \"#f > #d\")"
+  ]
+ },
+ {
+  "name": "td in a table",
+  "doc": "<!DOCTYPE html><body><table><tr><td><b>cell</b></td></tr></table>",
+  "exprs": [
+   "__q(d, \"td b\")",
+   "__q(d, \"td\")"
+  ]
+ },
+ {
+  "name": "td span standalone",
+  "doc": "<!DOCTYPE html><td><b>cell</b></td>",
+  "exprs": [
+   "__q(d, \"td b\")",
+   "__q(d, \"td\")",
+   "__q(d, \"b\")"
+  ]
+ },
+ {
+  "name": "declarative shadow root",
+  "doc": "<!DOCTYPE html><div id=h><template shadowrootmode=\"open\"><p id=s>x</p></template></div>",
+  "exprs": [
+   "d.querySelectorAll('#h > template').length",
+   "d.querySelectorAll('#s').length",
+   "__q(d, 'div p')",
+   "!!d.getElementById('h').shadowRoot"
+  ]
+ },
+ {
+  "name": "raw control chars and p<img",
+  "doc": "<!DOCTYPE html><body><p<img id=n>x</p<img><p id=c>a\u000bb\u0001c</p>",
+  "exprs": [
+   "[...d.body.querySelectorAll('*')].map(e => e.localName)",
+   "__codes(d.getElementById('c').textContent)"
+  ]
+ },
+ {
+  "name": "reconstruction only",
+  "doc": "<!DOCTYPE html><p><b>1</p>2",
+  "exprs": [
+   "__q(d, 'b')",
+   "__q(d, 'p b')",
+   "__q(d, 'body > b')"
+  ]
+ },
+ {
+  "name": "adoption agency",
+  "doc": "<!DOCTYPE html><b>1<p>2</b>3",
+  "exprs": [
+   "__q(d, 'b')",
+   "d.querySelectorAll('b p').length",
+   "__q(d, 'p')"
+  ]
+ },
+ {
+  "name": "quirks <p><table>",
+  "doc": "<p id=p><table id=t></table>",
+  "exprs": [
+   "d.compatMode",
+   "d.querySelectorAll('#p > #t').length"
+  ]
+ },
+ {
+  "name": "no-quirks <p><table>",
+  "doc": "<!DOCTYPE html><p id=p><table id=t></table>",
+  "exprs": [
+   "d.compatMode",
+   "d.querySelectorAll('#p > #t').length"
+  ]
+ },
+ {
+  "name": "initial newline",
+  "doc": "<!DOCTYPE html><pre id=p>\nx</pre><textarea id=t>\ny</textarea><listing id=l>\nz</listing>",
+  "exprs": [
+   "JSON.stringify(d.getElementById('p').firstChild.data)",
+   "JSON.stringify(d.getElementById('t').firstChild.data)",
+   "JSON.stringify(d.getElementById('l').firstChild.data)"
+  ]
+ },
+ {
+  "name": "form pointer: nested form",
+  "doc": "<!DOCTYPE html><form id=a><form id=b><input id=i></form>",
+  "exprs": [
+   "d.querySelectorAll('#b').length",
+   "d.querySelectorAll('#a #i').length"
+  ]
+ },
+ {
+  "name": "form pointer: form in table",
+  "doc": "<!DOCTYPE html><table><form id=f><tr><td><input id=i></td></tr></form></table>",
+  "exprs": [
+   "d.querySelectorAll('#f #i').length",
+   "d.getElementById('f').parentNode.localName",
+   "d.getElementById('i').form && d.getElementById('i').form.id"
+  ]
+ },
+ {
+  "name": "CSS vs XPath case folding",
+  "doc": "<!DOCTYPE html><input id=s type=\"SUBMIT\"><div lang=\"EN\" id=l>x</div>",
+  "exprs": [
+   "d.querySelectorAll('input[type=submit]').length",
+   "__x(d, \"//input[@type='submit']\").length",
+   "d.querySelectorAll('[lang=en]').length",
+   "d.querySelectorAll('[id=S]').length"
+  ]
+ },
+ {
+  "name": "frameset replaces body (no text)",
+  "doc": "<!DOCTYPE html><div id=x></div><frameset><frame></frameset>",
+  "exprs": [
+   "d.querySelectorAll('#x').length",
+   "d.querySelectorAll('frameset').length",
+   "d.querySelectorAll('body').length"
+  ]
+ },
+ {
+  "name": "frameset after text (ignored)",
+  "doc": "<!DOCTYPE html><div id=x>a</div><frameset><frame></frameset>",
+  "exprs": [
+   "d.querySelectorAll('#x').length",
+   "d.querySelectorAll('frameset').length"
+  ]
+ },
+ {
+  "name": "parseHTMLUnsafe vs page load: <option><svg><p></i><b><!--c-->",
+  "doc": "<option><svg><p></i><b><!--c-->",
+  "exprs": [
+   "JSON.stringify(__ser(d.documentElement))"
+  ]
+ },
+ {
+  "name": "parseHTMLUnsafe vs page load: <!DOCTYPE html><p><frameset><mi><!--c--><!--c-->",
+  "doc": "<!DOCTYPE html><p><frameset><mi><!--c--><!--c-->",
+  "exprs": [
+   "JSON.stringify(__ser(d.documentElement))"
+  ]
+ },
+ {
+  "name": "parseHTMLUnsafe vs page load: <!DOCTYPE html><caption><frame><title>T</title><option><option><!--c--><marquee>",
+  "doc": "<!DOCTYPE html><caption><frame><title>T</title><option><option><!--c--><marquee>",
+  "exprs": [
+   "JSON.stringify(__ser(d.documentElement))"
+  ]
+ },
+ {
+  "name": "xpath and svg",
+  "doc": "<!DOCTYPE html><div><svg><circle id=c></circle></svg><P id=p>x</P></div>",
+  "exprs": [
+   "__x(d, '//svg').length",
+   "__x(d, '//circle').length",
+   "__x(d, \"//*[local-name()='svg']\").length",
+   "__x(d, '//P').length",
+   "__x(d, '//p').length",
+   "d.querySelectorAll('svg').length"
+  ]
+ }
+]

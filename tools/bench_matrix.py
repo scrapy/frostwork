@@ -1,9 +1,10 @@
 """
 Benchmark matrix for the Frostwork engine: page types x selector counts, engine vs Parsel.
 
-Engine: measured by the Rust `bench` binary (engine-only, no IPC in the timed loop). Parsel: timed
-in-process with its real model (parse once, then one .css() per field). Both run the SAME selectors
-on the SAME page, so each cell is a fair "extract N fields from this page" comparison.
+Engine: measured by the Rust `bench` binary (engine-only, no IPC in the timed loop), in both parse modes
+for the page-shape matrix and in lxml mode elsewhere. Parsel: timed in-process with its real model (parse
+once, then one .css() per field). Both run the SAME selectors on the SAME page, so each cell is a fair
+"extract N fields from this page" comparison.
 
 Usage:  .venv/bin/python tools/bench_matrix.py
 """
@@ -18,6 +19,9 @@ from parsel import Selector as PS
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 BIN = os.path.join(HERE, "..", "target", "release", "bench")
+# The page-shape matrix times the engine in both parse modes; the other tables compare against Parsel's
+# contract, so they run lxml mode.
+MODES = ("lxml", "browser")
 import tempfile
 TMP = tempfile.mkdtemp(prefix="frostwork-bench-")
 
@@ -219,14 +223,15 @@ def deep_nested(size):
     return f'<!DOCTYPE html><html><body>{H1}{"".join(body)}</body></html>'.encode()
 
 
-def engine_bench(html_bytes, sels):
-    """-> (us_per_page, mb_per_s, vals_per_page) via the Rust bench binary."""
+def engine_bench(html_bytes, sels, mode="lxml"):
+    """-> (us_per_page, mb_per_s, vals_per_page) via the Rust bench binary, in parse mode `mode`."""
     path = os.path.join(TMP, "_bench_page.html")
     open(path, "wb").write(html_bytes)
     env = os.environ.copy()
     if SMOKE:
         env["FROSTWORK_BENCH_ITERS"] = "200"
-    p = subprocess.run([BIN, path], input="\n".join(sels).encode(), capture_output=True, env=env)
+    p = subprocess.run([BIN, path, "--parser", mode], input="\n".join(sels).encode(), capture_output=True,
+                       env=env)
     parts = p.stderr.decode().strip().split("\t")
     return float(parts[2]), float(parts[4]), int(parts[5])
 
@@ -239,7 +244,7 @@ def engine_bench_grouped(html_bytes, container, subs):
     env = os.environ.copy()
     if SMOKE:
         env["FROSTWORK_BENCH_ITERS"] = "200"
-    p = subprocess.run([BIN, path], input=stdin, capture_output=True, env=env)
+    p = subprocess.run([BIN, path, "--parser", "lxml"], input=stdin, capture_output=True, env=env)
     parts = p.stderr.decode().strip().split("\t")
     return float(parts[2]), float(parts[4]), int(parts[5])
 
@@ -326,15 +331,18 @@ def assert_cell_extracts(name, count, vals, strict=True):
 def emit_markdown():
     """The `page type x selector count` table in docs/BENCHMARKS.md's exact shape."""
     print("\n\n<!-- BEGIN generated: tools/bench_matrix.py --markdown -->")
-    print("| page (≈196 KB) | sels | vals | engine µs | engine MB/s | Parsel µs | speedup |")
-    print("| --- | --- | --- | --- | --- | --- | --- |")
+    print("| page (≈196 KB) | sels | vals | lxml µs | browser µs | Parsel µs | speedup, lxml | speedup, browser |")
+    print("| --- | --- | --- | --- | --- | --- | --- | --- |")
     last = None
-    for name, c, eus, embs, pus, vals in MD_ROWS:
+    for name, c, us, pus, vals in MD_ROWS:
         label = f"**{name.replace('_', '&#95;')}**" if name != last else ""
         last = name
         # 0 selectors is the scan floor: there is no ratio to report, and Parsel's cell is its parse.
-        speedup = "—" if not c else f"{pus / eus:.1f}×"
-        print(f"| {label} | {c} | {vals} | {eus:.0f} | {embs:.0f} | {pus:.0f} | {speedup} |")
+        speedup = ["—" if not c else f"{pus / us[m]:.1f}×" for m in MODES]
+        # One count when the modes agree; on a page they parse differently, both.
+        nvals = str(vals["lxml"]) if vals["lxml"] == vals["browser"] else f"{vals['lxml']} / {vals['browser']}"
+        print(f"| {label} | {c} | {nvals} | {us['lxml']:.0f} | {us['browser']:.0f} | {pus:.0f} | "
+              f"{speedup[0]} | {speedup[1]} |")
     print("<!-- END generated -->")
 
 
@@ -347,16 +355,21 @@ def run_table(name, html_bytes, counts=COUNTS, pool=None, strict=True):
     assert not over, f"{name}: counts {over} exceed the {len(pool)}-selector pool"
     kb = len(html_bytes) / 1024
     print(f"\n### {name}  ({kb:.0f} KB)")
-    print(f"  {'sels':>4} | {'engine µs':>10} {'MB/s':>7} {'vals':>6} | {'parsel µs':>10} | {'speedup':>7}")
-    print("  " + "-" * 60)
+    print(f"  {'sels':>4} | {'lxml µs':>10} {'browser µs':>10} {'vals':>13} | {'parsel µs':>10} | "
+          f"{'lxml':>7} {'browser':>7}")
+    print("  " + "-" * 80)
     for c in counts:
         sels = pool[:c]
-        eus, embs, vals = engine_bench(html_bytes, sels)
+        us, vals = {}, {}
+        for m in MODES:
+            us[m], _, vals[m] = engine_bench(html_bytes, sels, m)
+            assert_cell_extracts(f"{name} ({m} mode)", c, vals[m], strict)
         pus = parsel_bench(html_bytes, sels)
-        assert_cell_extracts(name, c, vals, strict)
-        MD_ROWS.append((name, c, eus, embs, pus, vals))
-        ratio = f"{pus/eus:>6.1f}x" if c else f"{'floor':>6}"
-        print(f"  {c:>4} | {eus:>10.1f} {embs:>7.0f} {vals:>6} | {pus:>10.1f} | {ratio}")
+        MD_ROWS.append((name, c, us, pus, vals))
+        ratios = [f"{pus / us[m]:>6.1f}x" if c else f"{'floor':>7}" for m in MODES]
+        nvals = f"{vals['lxml']}/{vals['browser']}"
+        print(f"  {c:>4} | {us['lxml']:>10.1f} {us['browser']:>10.1f} {nvals:>13} | {pus:>10.1f} | "
+              f"{ratios[0]} {ratios[1]}")
 
 
 def main():

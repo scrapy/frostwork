@@ -6,17 +6,20 @@ Frostwork has no fallback parser. Correctness therefore has three parts:
 2. supported selectors must return the chosen oracle's values; and
 3. the gates must prove that the relevant rules and cases were actually exercised.
 
-`make ci` is the minimum local release check. The sections below explain what it covers, which oracle owns
-each subsystem, and which broader checks run separately.
+`make ci` is the minimum local release check, and hosted CI runs the same targets. The sections below
+explain what it covers, which oracle owns each subsystem, and which broader checks run separately.
 
 ## Oracles and pass criteria
 
-There is no single oracle for every layer:
+There is no single oracle for every layer, and two of them depend on the parse mode. Browser mode is the
+default; lxml mode is `parser="lxml"`.
 
-- **Extracted values:** Parsel/lxml, using libxml2 2.15 or newer.
-- **CSS selector acceptance:** cssselect/lxml's parser. A selector rejected by the oracle must be reported
-  unsupported, not answered with an empty value that looks legitimate.
-- **HTML tree construction:** empirical parity with libxml2, not a separate HTML5 implementation.
+- **Extracted values:** in lxml mode, Parsel/lxml using libxml2 2.15 or newer. In browser mode, Chrome:
+  CSS answered natively by `querySelectorAll` and XPath through a lossless bridge from the browser's tree.
+- **CSS selector acceptance:** cssselect/lxml's parser. A selector rejected by the oracle must be refused
+  as unsupported, never answered as if it had matched nothing.
+- **HTML tree construction:** in lxml mode, empirical parity with libxml2. In browser mode, the tree
+  Chrome builds, with Firefox run alongside on request. Every lxml-mode gate pins `parser="lxml"`.
 - **Encoding:** browser/WHATWG behavior is the target. `w3lib` is used where it agrees with browsers; known
   browser/w3lib and WHATWG/Python-decoder differences are asserted explicitly in
   [COMPATIBILITY.md](COMPATIBILITY.md).
@@ -29,11 +32,11 @@ platform. `make oracle` (run by `make bootstrap` and CI) builds the pinned lxml 
 
 The core differential assigns each input/selector pair one verdict:
 
-- `AGREE` — values are identical;
-- `WS` — values differ only by permitted surrounding whitespace;
-- `SKIP-EXPECTED` — the difference is covered by a documented compatibility exception;
-- `DIVERGE` — an unexplained value difference;
-- `CRASH` — the engine panicked or aborted.
+- `AGREE`: values are identical;
+- `WS`: values differ only by permitted surrounding whitespace;
+- `SKIP-EXPECTED`: the difference is covered by a documented compatibility exception;
+- `DIVERGE`: an unexplained value difference;
+- `CRASH`: the engine panicked or aborted.
 
 The release gate requires zero `DIVERGE` and zero `CRASH`. Expected differences are reported rather than
 hidden; [COMPATIBILITY.md](COMPATIBILITY.md) defines their scope.
@@ -52,10 +55,14 @@ make fuzz-smoke         # selector and malformed-HTML fuzz smoke tests
 make py                 # extension, Python tests, typing, generated rules and rule audit
 make gate-webpoet       # web-poet differential and upstream-surface snapshot
 make gate-webpoet-mutate
+make gate-browser       # browser mode against Chrome: trees, values, debug invariants, HTML5 categories
+make gate-webpoet-browser
 ```
 
-`make help` lists every target. The Rust test binaries must be built without the `python` feature; maturin
-owns the extension-module build used by the Python checks.
+`make ci` runs every target in that block, then `make release-check`. `make help` lists every target. The Rust test binaries must be built without the `python` feature; maturin
+owns the extension-module build used by the Python checks. The browser gates need Chrome and Node 22;
+`FROSTWORK_CHROME` names the binary, and hosted CI installs the Chrome for Testing build that
+`tools/browser_oracle/chrome_build.py` prints.
 
 ## Core engine gates
 
@@ -79,36 +86,38 @@ Its generated inputs cover:
 - **legacy-encoding pages asked with non-ASCII selector literals** (`tools/encpages.py`), one family per
   charset label.
 
-That last one is the axis a UTF-8-only generator cannot reach. A selector literal sits on a byte/UTF-8
-boundary — an attribute NAME arrives as raw page bytes while a selector's is UTF-8 — and that boundary is
-where a value is lost silently: `[data-año]` can match a UTF-8 page and return nothing for the same
+That last one is the axis a UTF-8-only generator cannot reach. An attribute name arrives as raw page
+bytes while a selector's literal is UTF-8, and that boundary is where a value is lost silently: `[data-año]` can match a UTF-8 page and return nothing for the same
 document in windows-1252. So the label is sent on both sides (the protocol's `ENC` field to the engine,
 `PS(body=…, encoding=…)` to the oracle) across eight labels, with the literals placed in every position
 that reaches the boundary: class, id, attribute name, attribute value and element text, in both the CSS
 and the XPath spelling.
 
-Two properties the family has to keep, and `tests/test_gates.py` asserts both. Its alphabet is checked to
-round-trip through the codec — a word the encoding cannot represent becomes `?` and would test ASCII while
-wearing the label — and each case carries an over-match half, because a selector the ORACLE answers nowhere
-can only catch a false positive, never a lost value.
+The family has two properties, and `tests/test_gates.py` asserts both. Its alphabet round-trips through
+each codec, since a word the encoding cannot represent becomes `?` and would test ASCII under the label.
+Each case also carries an over-match half, because a selector the oracle answers nowhere can only catch a
+false positive, never a lost value.
 
-The generator records documented exceptions separately from unexplained differences. A generated family is
-useful only if it discriminates: when adding one, run it against the pre-fix build or an equivalent mutant
-and confirm that it fails for the intended reason. The encoding family was checked that way against both
-regressions it exists for — undecoded attribute names (400 of 720 pairs per label) and ASCII-only XPath
-attribute names (160 of 720).
-
-One report-shape lesson came with it: the by-family table's row order was a hand-written closed list, so a
-new family counted toward the gate while being **invisible** in the output. The tail is derived from the
-recorded families now.
+The generator records documented exceptions separately from unexplained differences, and the by-family
+report derives its rows from the recorded families, so a new family is never counted but unseen. A
+generated family is useful only if it discriminates: when adding one, run it against the pre-fix build or
+an equivalent mutant and confirm that it fails for the intended reason.
 
 ### Encoding
 
 `tools/enc_check.py` checks label handling, BOMs, the meta/XML prescan and emitted text/attribute values.
 Resolution cases are split into:
 
-- cases where browsers and w3lib agree; and
-- named differences where Frostwork must keep the browser/WHATWG answer and w3lib must keep the other one.
+- cases where browsers and w3lib agree;
+- named differences where Frostwork must keep the browser/WHATWG answer and w3lib must keep the other one;
+- named exceptions where Frostwork deliberately differs from a recorded browser answer, which fail as stale
+  if Frostwork starts agreeing; and
+- the precedence table, one row per pair of competing inputs (BOM, `encoding=`, `content_type=`, the
+  document's declarations), checking the winning encoding and the rank that decided it.
+
+The documents live in `tools/enc_cases.py`, so `tests/test_encoding_inputs.py` can run every one of them,
+with valid, unknown and ignored labels, through each Python entry point and a real web-poet `FrostPage`,
+and require one answer, a raised error included.
 
 Legacy decoder coverage enumerates the relevant byte space rather than sampling realistic strings. This is
 necessary because `encoding_rs` follows WHATWG indexes while Parsel ultimately uses Python codecs.
@@ -204,6 +213,44 @@ The mutation sweep declares which detectors must catch each mutation. The caught
 an unexpected detector often means the patch changed a function's calling convention rather than the
 behavior under test.
 
+## Browser-mode gates
+
+Browser mode is graded against Chrome, and against Firefox as well with `BROWSERS=chrome,firefox`.
+[BROWSER_MODE.md](BROWSER_MODE.md) section 5 describes the oracle; `tools/AGENTS.md` describes the tools.
+
+- **`make gate-browser`** (`tools/diff_browser.py`) grades the whole tree and the value columns. Its
+  documents are every short sequence of the frame and table alphabet, seeded random runs over an
+  HTML5-heavy alphabet in which every start tag carries an id, decorated documents for the value rules,
+  deferred-tail contexts, and structured families a random run rarely assembles (documents ending inside a
+  tag, comments in every position, formatting copies, Noah's Ark, the depth cap, successive frame merges,
+  and every attribute value a tree rule reads spelled with and without character references). It refuses
+  to grade unless every token is emitted.
+  - The tree columns are `seq_sweep`'s whole-tree fingerprint, evaluated on Chrome's own JSON tree. The
+    value columns are a selector basket, answered natively in the browser for CSS and through the lossless
+    bridge for XPath.
+  - Every differing column is reduced to the smallest token subsequence that still differs and
+    attributed by that repro. No tree construct is a documented divergence, so every tree difference
+    fails. A value column that differs where the tree agrees may be explained only by a named value
+    construct (raw-source outer HTML, quirks-mode class matching).
+  - Every value column is also asked of the engine alone and compared with its answer beside the other
+    columns, because which columns share a schema decides what the engine tracks.
+  - It also fails on coverage (nothing graded, a token never emitted, an oracle error, a bridge round trip
+    that changed a tree, a `DOMParser` tree that differs from a page load) and on a panic in a debug
+    `differ`, whose `debug_assert!`s are the builder's invariants.
+  - It then re-measures the HTML5 element categories in Chrome (`gen_html5_rules.py --check --live`);
+    `make py` checks the generated file against the stored answers without a browser.
+  - Last, it sweeps every legacy decoder against the browser (`browser_decoders.py`): each single-byte
+    encoding's high half and each multi-byte encoding's two-byte space, in sequence, so a decoder state one
+    malformed sequence leaves reaches the next, and pages that end inside a sequence. Chrome's decoder
+    bugs are listed with Chrome's answer, and
+    the sweep fails on any other difference and on a listed one that stops occurring.
+- **`make gate-webpoet-browser`** grades browser-mode page objects against parsel page objects whose
+  values come from Chrome, and checks that `.as_node()` is refused at class definition.
+- **`make gate-corpus-browser`** is report-only and outside `make ci`. It page-loads each corpus page as
+  exact bytes with its `Content-Type` and grades every selector, split into tree and value differences.
+- **`tools/retro_census.py`** counts how often each retroactive rule fires over a corpus, which is the
+  share of pages browser mode replays.
+
 ## Gate integrity
 
 `tests/test_gates.py` seeds known failures into gate decision functions and asserts that each one turns red.
@@ -219,13 +266,13 @@ check can fail.
 The wheel is `abi3-py310`, so CPython 3.10 must keep working, and the floor job runs the same
 `pytest tests/` as every other interpreter. The floor and the test toolchain have to agree for that to be
 possible: `parsel`, `web-poet` *and* `pytest` each require ≥ 3.10, so a lower floor leaves its own job
-unable to run the real suite and covered by a stand-in instead. Exception chaining is one thing that
-costs — a marker on a non-Frostwork base raises `TypeError`, wrapped in a `RuntimeError` on every Python
-before 3.12 (see PYTHON.md) — and only the full suite on the floor interpreter sees it.
+unable to run the real suite. Some behaviour differs on the floor: a marker on a non-Frostwork base
+raises `TypeError`, wrapped in a `RuntimeError` on every Python before 3.12 (see PYTHON.md), and only the
+full suite on the floor interpreter sees it.
 
-`tools/abi3_smoke.py` runs there too, for the thing it is the only witness to: the core works with
-**no Python dependencies installed at all** — importing the extension, extraction, `Page`/`Item`, groups,
-audit and source scanning, standard library only. A venv holding parsel and web-poet cannot show that.
+`tools/abi3_smoke.py` runs there too. It is the only check that the core works with **no Python
+dependencies installed at all**: importing the extension, extraction, `Page`/`Item`, groups, audit and
+source scanning, standard library only. A venv holding parsel and web-poet cannot show that.
 Value parity remains the job of the oracle-backed jobs.
 
 ## Adding coverage
@@ -233,7 +280,9 @@ Value parity remains the job of the oracle-backed jobs.
 Use this checklist for a new selector, parser rule or integration behavior:
 
 1. Choose the oracle for that subsystem and record any deliberate difference in COMPATIBILITY.md.
-2. Assert both halves of the no-fallback contract: supported means oracle parity; unsupported means empty.
+2. Assert both halves of the no-fallback contract: supported means oracle parity; unsupported means
+   refused, so `frostwork.check` reports it, the default strict mode raises `UnsupportedSelector`, and
+   `strict=False` gives an empty column.
 3. Add the smallest focused regression vector.
 4. Add or extend the generated family, rule audit, sequence sweep or integration contract that owns the
    broader surface.

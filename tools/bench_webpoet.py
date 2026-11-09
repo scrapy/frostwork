@@ -39,6 +39,9 @@ from web_poet import field as wp_field
 from frostwork.webpoet import FrostPage, field
 
 URL = "http://example.com/p/1"
+# Both items are checked identical before either is timed, against parsel, so the page objects run in
+# lxml mode; `.as_node()`, which the boundary sweeps time, exists only there.
+PARSER = "lxml"
 
 # A realistic product/listing selector mix. Field counts below are PREFIXES of this pool, so every row of
 # the sweep is a superset of the row above it — the curve is one schema growing, not five unrelated ones.
@@ -106,7 +109,7 @@ def build_pair(n: int):
         parsel_ns[name] = wp_field(getter)
 
     return (
-        type("FrostBench", (FrostPage,), frost_ns),
+        type("FrostBench", (FrostPage,), frost_ns, parser=PARSER),
         type("ParselBench", (WebPage,), parsel_ns),
     )
 
@@ -161,8 +164,7 @@ def transient_peak_kb(fn) -> float:
     """Peak TRANSIENT Python allocation during one call, in KB (tracemalloc's high-water mark).
 
     Not RSS and not retention: it says how much the call allocates at once, which is the question for the
-    cardinality boundary (a column materialised and then discarded). What a cold response RETAINS is measured
-    directly instead, by looking at the string web-poet cached."""
+    cardinality boundary (a column materialised and then discarded)."""
     import tracemalloc
 
     fn()  # warm the caches that are not the subject (compiled plans, cssselect translation)
@@ -174,8 +176,8 @@ def transient_peak_kb(fn) -> float:
 
 
 # ------------------------------------------------------------------- the performance boundaries
-# Three shapes where the healthy-path curve above does NOT hold. Only ONE of them is slower than Parsel
-# (the node handoff at scale); the other two are wasted work and a parity cost, which is why they are
+# Shapes where the healthy-path curve above does NOT hold. Only ONE of them is slower than Parsel
+# (the node handoff at scale); the cardinality one is wasted work, which is why they are
 # measured here rather than described — "there is a cliff" and "it costs 1.6x at ten matches" are
 # different claims, and only the second can be checked. See docs/BENCHMARKS.md ("Performance boundaries").
 def _structure_of(value):
@@ -222,8 +224,8 @@ def boundary_cardinality(reps: int, sizes=(220, 2000, 6000)):
     for cards in sizes:
         html = gen_page(cards)
         resp = _resp(html)
-        First = type("FirstCard", (FrostPage,), {"card": field("div.card")})
-        All = type("AllCards", (FrostPage,), {"card": field("div.card", all=True)})
+        First = type("FirstCard", (FrostPage,), {"card": field("div.card")}, parser=PARSER)
+        All = type("AllCards", (FrostPage,), {"card": field("div.card", all=True)}, parser=PARSER)
 
         def parsel_first(html=html):
             return parsel.Selector(body=html, encoding="utf-8").css("div.card").get()
@@ -252,45 +254,6 @@ def boundary_cardinality(reps: int, sizes=(220, 2000, 6000)):
     return rows
 
 
-def boundary_cold_response(reps: int, cards: int = 220):
-    """A response with no charset anywhere: none in `Content-Type`, no BOM, no `<meta>`.
-
-    `FrostPage.frostwork_input()` reads `resp.encoding` so the bytes are scanned with the label Parsel would
-    have decoded with. On such a response web-poet cannot answer from metadata, so `HttpResponse.encoding`
-    falls through to `_body_inferred_encoding()`, which runs `w3lib.html_to_unicode` over the WHOLE body and
-    caches the decoded text on the response — a page-sized string the scan never needed. The metric is
-    therefore what is RETAINED, not the peak of the call: the string outlives it, on the response.
-
-    Also reported: the label itself. Inference answers `cp1252` where Frostwork's own sniffer would default
-    to `utf-8`, so passing the label through is not a missed optimisation — it is the parity decision. Not
-    reading it would decode some pages differently from Parsel, which is a correctness change wearing a
-    performance costume."""
-    body = gen_page(cards)
-    rows = []
-    for label, headers in (
-        ("labelled (charset in Content-Type)", {"Content-Type": "text/html; charset=utf-8"}),
-        ("cold (no charset anywhere)", {}),
-    ):
-        def make():
-            return HttpResponse(
-                url=ResponseUrl(URL),
-                body=HttpResponseBody(body),
-                headers=HttpResponseHeaders(headers),
-            )
-
-        def read():
-            return make().encoding
-
-        r = make()
-        enc = r.encoding
-        retained = len(r._cached_text or "") / 1024.0  # the decode web-poet cached on the response
-        rows.append(
-            (label, timeit(read, reps * 2),
-             f"encoding={enc!r}, body {len(body) // 1024} KB, decoded text retained {retained:.0f} KB")
-        )
-    return rows
-
-
 def boundary_node_processors(reps: int, sizes=(1, 3, 10, 50, 220)):
     """`all=True` with a node-taking processor: every match is re-parsed on its own.
 
@@ -305,7 +268,7 @@ def boundary_node_processors(reps: int, sizes=(1, 3, 10, 50, 220)):
 
     procs = type("Processors", (), {"cards": [count_links]})
     Frost = type("FrostNodes", (FrostPage,),
-                 {"Processors": procs, "cards": field("div.card", all=True).as_node()})
+                 {"Processors": procs, "cards": field("div.card", all=True).as_node()}, parser=PARSER)
 
     def parsel_getter(self):
         return self.css("div.card")
@@ -351,7 +314,8 @@ def boundary_subtree_size(reps: int, sizes=(1, 30, 250)):
         return n
 
     procs = type("Processors", (), {"deep": [depth_of]})
-    Frost = type("FrostDeep", (FrostPage,), {"Processors": procs, "deep": field("div.deep").as_node()})
+    Frost = type("FrostDeep", (FrostPage,), {"Processors": procs, "deep": field("div.deep").as_node()},
+                 parser=PARSER)
 
     def parsel_getter(self):
         return self.css("div.deep")
@@ -378,10 +342,9 @@ def boundary_subtree_size(reps: int, sizes=(1, 30, 250)):
 
 
 def run_boundaries(reps: int) -> None:
-    print(f"  performance boundaries ({reps} reps, median) — one loss, one win, one parity cost\n")
+    print(f"  performance boundaries ({reps} reps, median) — one win, one loss\n")
     for title, rows in (
         ("cardinality reaches the plan: a single-valued schema stops scanning", boundary_cardinality(reps)),
-        ("cold response: reading resp.encoding decodes the whole body", boundary_cold_response(reps)),
         ("node handoff at scale: one subtree parse per match", boundary_node_processors(reps)),
         ("node handoff by subtree SIZE: the parse is the whole subtree", boundary_subtree_size(reps)),
     ):

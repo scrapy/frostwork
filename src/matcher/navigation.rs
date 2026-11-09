@@ -753,17 +753,22 @@ mod tests {
     #[test]
     fn rides_the_same_pass_as_the_fields() {
         let html = page(r#"<title>T</title><base href="/sub/"><meta http-equiv="refresh" content="3;url=x">"#, "<h1>H</h1>");
-        let plan = crate::Plan::compile(&["title::text", "h1::text"], &[]);
         let options = NavOptions { base_url: true, meta_refresh: true, scripting: true };
-        let (flat, _, nav) = plan.extract_with_navigation(html.as_bytes(), None, DOC, options);
-        assert_eq!(flat, vec![vec!["T".to_owned()], vec!["H".to_owned()]]);
-        assert_eq!(nav.base_url.as_deref(), Some("http://h/sub/"));
-        assert_eq!(nav.meta_refresh, Some((3, "http://h/sub/x".into())));
-        // An early-exit plan must not stop before a refresh later in the document.
-        let late = page("<title>T</title>", &(pad() + r#"<meta http-equiv="refresh" content="0;url=/late">"#));
-        let first = crate::Plan::compile_first_only(&["title::text"], &[], &[true]);
-        let (flat, _, nav) = first.extract_with_navigation(late.as_bytes(), None, DOC, options);
-        assert_eq!(flat, vec![vec!["T".to_owned()]]);
-        assert_eq!(nav.meta_refresh, Some((0, "http://h/late".into())));
+        // lxml mode reads navigation in the fields' pass; browser mode in a second, field-less one.
+        for mode in [crate::ParseMode::Lxml, crate::ParseMode::Browser] {
+            let opts = crate::CompileOptions { mode, first_only: &[] };
+            let plan = crate::Plan::compile_with(&["title::text", "h1::text"], &[], opts);
+            let (flat, _, nav) = plan.extract_with_navigation(html.as_bytes(), None, DOC, options);
+            assert_eq!(flat, vec![vec!["T".to_owned()], vec!["H".to_owned()]]);
+            assert_eq!(nav.base_url.as_deref(), Some("http://h/sub/"));
+            assert_eq!(nav.meta_refresh, Some((3, "http://h/sub/x".into())));
+            // An early-exit plan must not stop before a refresh later in the document.
+            let late = page("<title>T</title>", &(pad() + r#"<meta http-equiv="refresh" content="0;url=/late">"#));
+            let opts = crate::CompileOptions { mode, first_only: &[true] };
+            let first = crate::Plan::compile_with(&["title::text"], &[], opts);
+            let (flat, _, nav) = first.extract_with_navigation(late.as_bytes(), None, DOC, options);
+            assert_eq!(flat, vec![vec!["T".to_owned()]]);
+            assert_eq!(nav.meta_refresh, Some((0, "http://h/late".into())));
+        }
     }
 }

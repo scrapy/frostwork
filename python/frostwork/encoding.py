@@ -4,7 +4,7 @@ import codecs
 import encodings
 import sys
 from functools import lru_cache
-from typing import TYPE_CHECKING, Optional, Tuple, Union, cast
+from typing import TYPE_CHECKING, Literal, Optional, Tuple, Union, cast, overload
 
 if TYPE_CHECKING:
     if sys.version_info >= (3, 12):
@@ -26,8 +26,15 @@ __all__ = [
     "declared_encoding",
     "decode",
     "detect_encoding",
+    "EncodingSource",
     "resolve_label",
 ]
+
+EncodingSource = Literal[
+    "bom", "utf16-prefix", "encoding", "content-type", "xml-declaration", "meta", "utf8", "autodetect",
+    "str",
+]
+"""The rank that decided an encoding, as ``detect_encoding(..., explain=True)`` reports it."""
 
 # WHATWG encoding name -> Python codec name, for every encoding of the Encoding Standard.
 _CODEC_NAMES = {
@@ -81,17 +88,61 @@ def codec_name(label: str) -> Optional[str]:
     return None if name is None else _CODEC_NAMES[name]
 
 
+@overload
 def detect_encoding(
-    html: Union[Buffer, str], encoding: Optional[str] = None, *, url: Optional[str] = None
-) -> str:
+    html: Union[Buffer, str],
+    encoding: Optional[str] = None,
+    *,
+    content_type: Optional[str] = None,
+    url: Optional[str] = None,
+    explain: Literal[False] = False,
+) -> str: ...
+
+
+@overload
+def detect_encoding(
+    html: Union[Buffer, str],
+    encoding: Optional[str] = None,
+    *,
+    content_type: Optional[str] = None,
+    url: Optional[str] = None,
+    explain: Literal[True],
+) -> Tuple[str, EncodingSource]: ...
+
+
+@overload
+def detect_encoding(
+    html: Union[Buffer, str],
+    encoding: Optional[str] = None,
+    *,
+    content_type: Optional[str] = None,
+    url: Optional[str] = None,
+    explain: bool = False,
+) -> Union[str, Tuple[str, EncodingSource]]: ...
+
+
+def detect_encoding(
+    html: Union[Buffer, str],
+    encoding: Optional[str] = None,
+    *,
+    content_type: Optional[str] = None,
+    url: Optional[str] = None,
+    explain: bool = False,
+) -> Union[str, Tuple[str, EncodingSource]]:
     """The encoding :func:`frostwork.extract` would scan *html* with, as a WHATWG name.
 
-    That is the first answer of :func:`bom_encoding`, the *encoding* label, :func:`declared_encoding`
-    and :func:`autodetect_encoding`, in that order. A label that names no encoding is ignored, as
-    browsers do. A ``str`` is already-decoded text, so the answer is ``"UTF-8"``. See the Encoding
-    section of docs/COMPATIBILITY.md for how this differs from w3lib.
+    That is the first answer of :func:`bom_encoding`, the *encoding* label, the charset of the raw
+    ``Content-Type`` header *content_type*, :func:`declared_encoding` and :func:`autodetect_encoding`,
+    in that order. A label that names no encoding is ignored, as browsers do. A ``str`` is
+    already-decoded text, so the answer is ``"UTF-8"``. See the Encoding section of
+    docs/COMPATIBILITY.md for how this differs from w3lib.
+
+    With ``explain=True`` it returns ``(name, source)``, where ``source`` names the rank that decided:
+    ``"bom"``, ``"utf16-prefix"``, ``"encoding"``, ``"content-type"``, ``"xml-declaration"``,
+    ``"meta"``, ``"utf8"`` or ``"autodetect"``, or ``"str"`` for already-decoded text.
     """
-    return _detect_encoding(html if isinstance(html, (bytes, str)) else bytes(html), encoding, url=url)
+    body = html if isinstance(html, (bytes, str)) else bytes(html)
+    return _detect_encoding(body, encoding, content_type=content_type, url=url, explain=explain)
 
 
 def bom_encoding(body: Buffer) -> Optional[Tuple[str, int]]:
