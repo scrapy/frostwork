@@ -710,9 +710,10 @@ Resolution order (`src/encoding.rs`):
    head declarations real pages carry, and honoured body declarations no browser honours. Bounding at
    the head is also what makes this free — an unbounded scan measured a flat ~35µs per label-less page,
    one extra pass over the document, and the head bound gives all of it back.
-6. **autodetection**. A document that is valid UTF-8 (a sequence cut off at the end still counts) is
-   windows-1252 when `url=` is `http` or `https`, as Chrome and Firefox read it, and UTF-8 otherwise,
-   including when there is no `url=`, as they read a file. Any other document
+6. **autodetection**. A document that is valid UTF-8 (a sequence cut off at the end still counts) gets
+   the default of its top-level domain when `url=` is `http` or `https`, as Chrome and Firefox read it:
+   windows-1252 for a generic domain, Shift_JIS for `.jp`, windows-1251 for `.ru`. Otherwise it is
+   UTF-8, including when there is no `url=`, as they read a file. Any other document
    gets [chardetng](https://crates.io/crates/chardetng)'s guess, which is what Firefox uses for this
    step. UTF-8 and ISO-2022-JP are excluded from its guesses, as in Firefox, and the top-level domain of
    the response URL, when the caller passes one, weighs the guess as it does there (`.jp` favours
@@ -732,18 +733,26 @@ the integrator contract: what to pass for each input, and what goes wrong otherw
 
 ### Deliberate differences from browsers
 
-Three places where a browser's answer is not simply followed: a choice Frostwork makes where browsers
-have no answer, and two where it does not show what Chrome shows. All are decided, and all are measured
+Four places where a browser's answer is not simply followed: a choice Frostwork makes where browsers
+have no answer, and three where it does not show what Chrome shows. All are decided, and all are measured
 against Chrome 156.
 
 **Unlabelled valid UTF-8 without a URL is UTF-8.** Over http(s), Chrome 156 and Firefox 159 refuse to
-detect UTF-8 and show windows-1252, and so does Frostwork; loaded as a `file:` URL, both read the same
+detect UTF-8 and show the top-level domain's default, and so does Frostwork; loaded as a `file:` URL, both read the same
 bytes as UTF-8, and so does Frostwork (`tools/enc_check.py` asserts all four). Frostwork reads a
 document with no `url=` the way the browsers read a file, since such a document is most often one stored
 on disk; that mapping is Frostwork's choice, as is UTF-8 for a scheme other than `http`, `https` or
 `file`, where the browsers would refuse it. Chrome can also switch encoding partway through a page: on a
 4 MB page whose only declaration came 3 MB in, Chrome 156 decoded the first few hundred text nodes as
 windows-1252 and the rest as UTF-8, while Firefox and Frostwork read it all as UTF-8.
+
+**The default for unlabelled UTF-8 follows Firefox's table.** Chrome 156 and Firefox 159 agree on the
+default for 23 of the 29 top-level domains measured, and Frostwork returns Firefox's answer on the other
+six: windows-1257 for `.lt` and `.lv` (Chrome: windows-1256), windows-1256 for `.eg`, `.ir` and `.sa`
+(Chrome: windows-1257, windows-1257 and windows-1252), and windows-1251 for `.by` (Chrome: windows-1252).
+Firefox's table is chardetng's, the library the next step already uses, and it gives the Baltic domains
+the Baltic encoding and the Arabic ones the Arabic. `tools/enc_cases.py` records both columns in
+`UTF8_TLD_DEFAULTS`.
 
 **Autodetection follows Firefox's detector.** When the bytes are not valid UTF-8 and nothing declares
 an encoding, Frostwork asks chardetng, the detector Firefox runs, with the top-level domain of the
@@ -811,7 +820,7 @@ gated in `tools/enc_check.py`.
 | `<meta charset=x-user-defined>` | label not resolved at all → falls back to the default | **windows-1252** | "get an encoding from a meta element", step 5. Taken literally the label maps every high byte into the private use area (`caf\xe9` → `caf\u{f7e9}`) |
 | BOM-less UTF-16 | not detected | detected from the `<?` prefix (row 2 above) | libxml2 reads these files correctly, so this is parity with the *value* oracle as well as with browsers |
 | a non-UTF-8 document with **no declaration** | decoded as the default (UTF-8), unless the caller passes an `auto_detect_fun`, as Scrapy does | autodetected | WHATWG lets a user agent autodetect after the prescan, and browsers do |
-| a valid UTF-8 document with **no declaration**, from an http(s) URL | UTF-8 | **windows-1252** | measured in Chrome 156 and Firefox 159, which both refuse to detect UTF-8 for a page from the network; asserted in `enc_check.py`'s `UTF8_DETECTION` rows |
+| a valid UTF-8 document with **no declaration**, from an http(s) URL | UTF-8 | **the default of the URL's top-level domain**, windows-1252 for a generic one | measured in Chrome 156 and Firefox 159, which both refuse to detect UTF-8 for a page from the network; asserted in `enc_check.py`'s `UTF8_DETECTION` and `UTF8_TLD_DEFAULTS` rows |
 | `<?xml … encoding=…?>` **not** at offset 0 | honoured (regex search anywhere in the window) | ignored | a `<?` after the start of the document is a bogus comment to a browser and declares nothing |
 
 An XML declaration **at** offset 0 *is* honoured, by both, including its precedence over a later

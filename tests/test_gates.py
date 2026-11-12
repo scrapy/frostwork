@@ -1197,6 +1197,29 @@ def test_utf8_detection_rows_catch_either_regression():
         assert not enc_cases.utf8_detection_failures(row, got, as_browser), name
 
 
+def test_utf8_tld_rows_catch_one_default_for_every_domain():
+    """Seed the rule the table replaced, windows-1252 whatever the top-level domain, into `enc_check`'s
+    row check: it must fail every row whose default is another encoding. The engine's real answers must
+    pass every row, and the table must hold both kinds of row."""
+    import enc_cases
+
+    frostwork = pytest.importorskip("frostwork")
+    page = enc_cases.UTF8_DETECTION[0][1]
+    flat = {"encoding": "windows-1252", "source": "default", "values": [["cafÃ©"]]}
+    caught = 0
+    for row in enc_cases.UTF8_TLD_DEFAULTS:
+        tld, firefox, _chrome = row
+        url = enc_cases.utf8_tld_url(tld)
+        forced = frostwork.extract(page, ["p.c::text"], firefox)[0]
+        enc, source = frostwork.detect_encoding(page, url=url, explain=True)
+        got = {"encoding": enc, "source": source, "values": frostwork.extract(page, ["p.c::text"], url=url)}
+        assert not enc_cases.utf8_tld_failures(row, got, forced), tld
+        if firefox != "windows-1252":
+            assert enc_cases.utf8_tld_failures(row, flat, forced), tld
+            caught += 1
+    assert 0 < caught < len(enc_cases.UTF8_TLD_DEFAULTS)
+
+
 # ------------------------------------------------- web-poet differential (tools/diff_webpoet.py)
 def test_webpoet_gate_flags_a_processor_receiving_a_string():
     """The defect this gate exists for: a zyte processor gated on `isinstance(value, Selector|HtmlElement)`

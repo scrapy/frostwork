@@ -101,8 +101,9 @@ integration that hands Frostwork a response passes these and nothing else:
   w3lib first drops the labels Python has no codec for, such as `x-user-defined`.
 - **`url=`**: the response URL. Without it, autodetection cannot weigh its guess by the top-level domain,
   so a short legacy page from a `.jp` site can be read as IBM866 instead of Shift_JIS. Its scheme also
-  decides how a valid UTF-8 page that declares nothing is read: windows-1252 from an `http` or `https`
-  URL, as Chrome and Firefox read it, and UTF-8 from a `file:` URL or with no URL, as they read a file.
+  decides how a valid UTF-8 page that declares nothing is read: from an `http` or `https` URL, in the
+  default of the top-level domain (windows-1252 for a generic one, Shift_JIS for `.jp`), as Chrome and
+  Firefox read it, and as UTF-8 from a `file:` URL or with no URL, as they read a file.
 - **`encoding=`**: only a label the user forced, which Scrapy and web-poet both keep in the response's
   `_encoding`. Never pass `response.encoding`: it is the framework's own decision, and at this rank it
   overrides the document's declarations and the autodetection, so the browser rules w3lib lacks never run.
@@ -121,7 +122,7 @@ The precedence is the same for every entry point:
 | 3 | `encoding=` | `"encoding"` | a label no codec knows raises `ValueError`, except in `detect_encoding` and `navigation`, which ignore it as a browser does; a real encoding WHATWG lacks, such as `utf-7`, is ignored |
 | 4 | the `charset` parameter of `content_type=` | `"content-type"` | ignored, and never raises, because it is server data |
 | 5 | an XML declaration at offset 0, then `<meta>` in document order | `"xml-declaration"`, `"meta"` | skipped, and the scan continues |
-| 6 | valid UTF-8: windows-1252 with an http(s) `url=`, else UTF-8; anything else: chardetng with the top-level domain of `url=` | `"default"`, `"utf8"`, `"autodetect"` | n/a |
+| 6 | valid UTF-8: the default of the top-level domain of an http(s) `url=` (windows-1252 for a generic one), else UTF-8; anything else: chardetng with that domain | `"default"`, `"utf8"`, `"autodetect"` | n/a |
 
 A forced `encoding=` ranks below a BOM, as it does in a browser. Scrapy and web-poet rank their own
 `_encoding` ahead of the BOM, so on a BOM-marked body with a forced label the framework's `.text` and
@@ -146,6 +147,7 @@ assert frostwork.detect_encoding(body, "windows-1252", content_type="text/html; 
 utf8 = b"<p>caf\xc3\xa9</p>"  # valid UTF-8, declared nowhere
 assert frostwork.extract(utf8, ["p::text"], url="https://example.com/") == [["cafÃ©"]]  # as browsers show it
 assert frostwork.detect_encoding(utf8, url="https://example.com/", explain=True) == ("windows-1252", "default")
+assert frostwork.detect_encoding(utf8, url="https://example.jp/", explain=True) == ("Shift_JIS", "default")
 assert frostwork.extract(utf8, ["p::text"]) == [["café"]]  # no URL: read as browsers read a file
 ```
 

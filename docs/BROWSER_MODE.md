@@ -15,7 +15,8 @@ In short:
 - **Encoding** follows the browser through every entry point, and matches all 48 recorded Chrome
   answers for encoding cases measured as exact bytes and headers. One of them varies between loads in
   Chrome itself, and its record is the most common answer from the deployed site (E3). Valid UTF-8 that
-  declares nothing is windows-1252 when it came over http(s), as Chrome and Firefox read it (E2).
+  declares nothing gets its top-level domain's default when it came over http(s), windows-1252 on a
+  generic domain, as Chrome and Firefox read it (E2).
   Anything else undeclared goes to Firefox's detector, because Chrome's judges whatever network chunk
   first gives it a verdict (E3).
 - **The parse modes** share the tokenizer, the matcher, encoding and value decoding, and differ only in
@@ -55,7 +56,7 @@ bytes arrive, and its record is the deployed site's most common answer (E3).
   | 3 | `encoding=`, the caller's own label | unknown to every codec: raise. A real encoding WHATWG lacks (`utf-7`): ignored, continue |
   | 4 | `content_type=`, its charset parameter | ignored, continue. It is server data, so it never raises |
   | 5 | document declarations: an XML declaration at offset 0, then `<meta>` in document order, in the head at any depth or within the first 1024 bytes of the body | unsupported labels are skipped, and the scan continues |
-  | 6 | autodetection: valid UTF-8 is windows-1252 with an http(s) `url=`, else UTF-8 (E2); anything else is chardetng's guess with the TLD of `url=` (E3) | n/a |
+  | 6 | autodetection: valid UTF-8 is the default of the TLD of an http(s) `url=`, windows-1252 for a generic one, else UTF-8 (E2); anything else is chardetng's guess with the TLD of `url=` (E3) | n/a |
 
   `encoding=` ranks below a BOM, because a BOM-marked document read as anything else is mojibake. Scrapy
   and web-poet rank a forced `_encoding` first, so a forced label on a BOM-marked body is the one shape
@@ -73,25 +74,35 @@ bytes arrive, and its record is the deployed site's most common answer (E3).
 - `diff_webpoet` grades against parsel built from `response.text`, which is w3lib's decision, so its
   generator stays out of the shapes where the two decisions differ.
 
-### E2. Valid UTF-8 from an http(s) URL is windows-1252 (decided 2026-11-07)
+### E2. Valid UTF-8 from an http(s) URL gets its domain's default (decided 2026-11-07, revised 2026-11-12)
 
-Both browsers refuse to detect UTF-8 for a page from the network and keep the locale's default encoding,
-windows-1252 in English locales. Blink's `DetectTextEncoding` refuses its detector's UTF-8 verdict for any
+Both browsers refuse to detect UTF-8 for a page from the network and keep a default encoding instead:
+the legacy encoding of the URL's top-level domain, and windows-1252 for a generic one. Blink's
+`DetectTextEncoding` refuses its detector's UTF-8 verdict for any
 URL that is not a local scheme, and chardetng documents the same policy for Firefox. Measured in Chrome
 156 and Firefox 159: five unlabelled valid UTF-8 pages (Latin, Japanese, Russian, Chinese and emoji
 text) and the lab's `no-declaration` case are windows-1252 over http, and the same bytes loaded as
 `file:` URLs are UTF-8. Frostwork used to read every valid UTF-8 page as UTF-8, and that was the lab's
 `no-declaration` mismatch.
 
-So in rank 6 a valid UTF-8 document (a sequence cut off at the very end still counts) is windows-1252,
+The default follows the domain. Measured in Chrome 156 and Firefox 159 through a proxy answering for
+`http://example.<tld>/`, with French, Japanese and Russian text: `.jp` is Shift_JIS, `.ru` windows-1251,
+`.cn` GBK, `.gr` ISO-8859-7, and `.com`, `.de` and `.uk` windows-1252, whatever the text. The two agree on
+23 of the 29 domains measured. On `.lt` and `.lv` Chrome reads windows-1256 and Firefox windows-1257, on
+`.eg` and `.ir` the reverse, and on `.sa` and `.by` Chrome reads windows-1252 where Firefox reads
+windows-1256 and windows-1251. Frostwork returns Firefox's table: it is chardetng's, which with UTF-8
+denied answers a valid UTF-8 document from the domain alone, so the engine asks it without feeding it the
+document.
+
+So in rank 6 a valid UTF-8 document (a sequence cut off at the very end still counts) gets that default,
 reported as source `"default"`, when `url=` is `http` or `https`, and UTF-8 otherwise. A page with no URL
 is most often one stored on disk, so Frostwork reads it as both browsers read a file. That, and UTF-8 for
 schemes other than `http`, `https` and `file`, which the browsers would refuse, are Frostwork's choices.
-Frostwork fixes the English default rather than reading a locale. There is no switch: a framework that
+Frostwork fixes the English default for a generic domain rather than reading a locale. There is no switch: a framework that
 wants UTF-8 for these pages, as scraping stacks have traditionally read them, overrides the answer in its
 own code. w3lib passes the response URL, so Scrapy's `response.text` follows the browsers unless w3lib
 overrides the answer. `tools/enc_check.py` asserts the http and `file:` answers against both browsers'
-measurements.
+measurements, and each measured domain's default in its `UTF8_TLD_DEFAULTS` rows.
 
 ### E3. Autodetection follows Firefox's detector (decided 2026-11-03, measured again 2026-11-07)
 
@@ -479,14 +490,15 @@ and when it fails. The lxml-mode gates all pin `parser="lxml"`.
    a second whole-document pass.
 5. Browser-mode XPath has lxml's XPath semantics over the browser's tree, so `//svg` still finds SVG.
 6. `encoding=` stays below the BOM, with no BOM-beating override.
-7. Valid UTF-8 from an http(s) URL is windows-1252, as in both browsers (E2), and autodetection of
-   anything else follows Firefox (E3).
+7. Valid UTF-8 from an http(s) URL gets its top-level domain's default, as in both browsers, from
+   Firefox's table where theirs differ (E2), and autodetection of anything else follows Firefox (E3).
 8. Browser mode is the default, and where Chrome and Firefox build different trees it follows Chrome.
 9. The replay builds a tree of the page where a retroactive rule changes an answer, rather than leaving
    those rules as documented divergences, because it is needed for correctness.
 
 Decisions 1 to 8 were taken on 2026-11-03 and decision 9 on 2026-11-04. Decision 7 was revised on
-2026-11-07: until then valid UTF-8 stayed UTF-8 for every URL.
+2026-11-07, until when valid UTF-8 stayed UTF-8 for every URL, and on 2026-11-12, until when its default
+was windows-1252 on every domain.
 
 ## Sources and versions
 

@@ -85,8 +85,9 @@ def detect_encoding(
 ) -> str:
     """The encoding ``extract`` would scan this document with, as a WHATWG name: BOM → BOM-less UTF-16
     prefix → ``encoding`` label → ``content_type`` charset → XML declaration or ``<meta>`` →
-    autodetection: valid UTF-8 is windows-1252 when ``url`` is http(s), as browsers read it, and UTF-8
-    otherwise; anything else is guessed, informed by the top-level domain of ``url``. A label that names
+    autodetection: valid UTF-8 is the default of the top-level domain of ``url`` when ``url`` is http(s)
+    (windows-1252 for a generic one), as browsers read it, and UTF-8 otherwise; anything else is
+    guessed, informed by that domain. A label that names
     no encoding is ignored. A ``str`` is already-decoded text, so the answer is ``"UTF-8"`` without sniffing."""
 @overload
 def detect_encoding(
@@ -113,8 +114,9 @@ def bom_encoding(body: bytes) -> Optional[Tuple[str, int]]:
 def declared_encoding(body: bytes) -> Optional[str]:
     """The encoding the ``<meta>``/XML-declaration prescan finds, or ``None``."""
 def autodetect_encoding(body: bytes, *, url: Optional[str] = ...) -> str:
-    """For valid UTF-8, ``"windows-1252"`` when ``url`` is http(s), else ``"UTF-8"``; for anything else,
-    a guess informed by the top-level domain of ``url``."""
+    """For valid UTF-8, the default of the top-level domain of ``url`` when ``url`` is http(s)
+    (``"windows-1252"`` for a generic one), else ``"UTF-8"``; for anything else, a guess informed by
+    that domain."""
 def navigation(
     html: Union[bytes, str],
     url: str,

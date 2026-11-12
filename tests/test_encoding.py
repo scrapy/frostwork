@@ -172,6 +172,12 @@ def test_autodetect_encoding_reads_the_tld():
     assert autodetect_encoding(b"<p>\x82\xa0</p>") == "IBM866"
     assert autodetect_encoding(b"<p>\x82\xa0</p>", url="https://example.jp/") == "Shift_JIS"
     assert autodetect_encoding(b"<p>\xc3") == "UTF-8"
+    # valid UTF-8 from the network gets the domain's default, whatever its text
+    for page in (b"<p>x</p>", "<p>café</p>".encode(), "<p>日本語</p>".encode()):
+        assert autodetect_encoding(page, url="https://example.jp/") == "Shift_JIS"
+        assert autodetect_encoding(page, url="http://example.ru/") == "windows-1251"
+        assert autodetect_encoding(page, url="http://example.com/") == "windows-1252"
+        assert autodetect_encoding(page, url="file:///example.jp/x.html") == "UTF-8"
 
 
 def test_importing_the_encoding_api_skips_the_page_object_layer():

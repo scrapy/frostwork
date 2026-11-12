@@ -183,7 +183,8 @@ UTF8_DETECTION = [
      "windows-1252", "default", ["cafÃ©"],
      [("windows-1252", ["cafÃ©"], "Chrome 156, top-level http loads (the lab's no-declaration case)"),
       ("windows-1252", ["cafÃ©"], "Firefox 159, top-level http loads")],
-     "both browsers refuse to detect UTF-8 for a page from the network and keep the locale default"),
+     "both browsers refuse to detect UTF-8 for a page from the network and keep a default, which is "
+     "windows-1252 on a generic top-level domain (UTF8_TLD_DEFAULTS has the others)"),
     ("valid UTF-8 from a file: URL is UTF-8",
      _UTF8_PAGE, "file:///tmp/page.html",
      "UTF-8", "utf8", ["café"],
@@ -195,7 +196,52 @@ UTF8_DETECTION = [
      "UTF-8", "utf8", ["café"], [],
      "Frostwork's policy: a page with no URL is read as browsers read a file, the common case being a "
      "page stored on disk"),
+    ("valid UTF-8 from another scheme is UTF-8",
+     _UTF8_PAGE, "ftp://example.jp/page.html",
+     "UTF-8", "utf8", ["café"], [],
+     "Frostwork's policy: only http and https are the network, whatever the top-level domain"),
 ]
+
+# ---- the default a valid UTF-8 page from an http(s) URL gets, by top-level domain -----------------
+# Each row is (top-level domain, Firefox's encoding, Chrome's encoding). Measured in Firefox 159.0.1 and
+# Chrome 156.0.8078.47 as `document.characterSet` of `_UTF8_PAGE`-shaped pages (French, Japanese and
+# Russian text, no label) loaded top-level from `http://example.<tld>/` through a local proxy. Frostwork
+# returns Firefox's column, which is chardetng's table; the rows where Chrome's differs are the
+# browsers' disagreement, listed in docs/COMPATIBILITY.md.
+UTF8_TLD_DEFAULTS = [
+    ("com", "windows-1252", "windows-1252"), ("de", "windows-1252", "windows-1252"),
+    ("fr", "windows-1252", "windows-1252"), ("uk", "windows-1252", "windows-1252"),
+    ("br", "windows-1252", "windows-1252"), ("in", "windows-1252", "windows-1252"),
+    ("jp", "Shift_JIS", "Shift_JIS"), ("cn", "GBK", "GBK"),
+    ("tw", "Big5", "Big5"), ("hk", "Big5", "Big5"), ("kr", "EUC-KR", "EUC-KR"),
+    ("ru", "windows-1251", "windows-1251"), ("ua", "windows-1251", "windows-1251"),
+    ("bg", "windows-1251", "windows-1251"), ("rs", "windows-1251", "windows-1251"),
+    ("gr", "ISO-8859-7", "ISO-8859-7"), ("cz", "windows-1250", "windows-1250"),
+    ("hu", "ISO-8859-2", "ISO-8859-2"), ("pl", "ISO-8859-2", "ISO-8859-2"),
+    ("il", "windows-1255", "windows-1255"), ("th", "windows-874", "windows-874"),
+    ("tr", "windows-1254", "windows-1254"), ("vn", "windows-1258", "windows-1258"),
+    ("lt", "windows-1257", "windows-1256"), ("lv", "windows-1257", "windows-1256"),
+    ("eg", "windows-1256", "windows-1257"), ("ir", "windows-1256", "windows-1257"),
+    ("sa", "windows-1256", "windows-1252"), ("by", "windows-1251", "windows-1252"),
+]
+
+
+def utf8_tld_url(tld):
+    return f"http://example.{tld}/"
+
+
+def utf8_tld_failures(row, got, forced):
+    """What is wrong with one `UTF8_TLD_DEFAULTS` row: `got` is the engine's `{"encoding", "source",
+    "values"}` for `_UTF8_PAGE` at `utf8_tld_url(tld)`, and `forced` its values with Firefox's encoding
+    passed as `encoding=`. An empty list means the row holds."""
+    tld, firefox, _chrome = row
+    out = []
+    if (got["encoding"], got["source"]) != (firefox, "default"):
+        out.append(f".{tld}: Frostwork must read {firefox} from default; got {got['encoding']} from "
+                   f"{got['source']}")
+    if got["values"][0] != forced:
+        out.append(f".{tld}: the values are not the document decoded as {firefox}: {got['values'][0]!r}")
+    return out
 
 
 def utf8_detection_failures(row, got, as_browser):
