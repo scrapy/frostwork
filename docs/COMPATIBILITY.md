@@ -732,18 +732,18 @@ the integrator contract: what to pass for each input, and what goes wrong otherw
 
 ### Deliberate differences from browsers
 
-Three places where Frostwork's encoding is not the one a browser shows. All are decided, and all are
-measured against Chrome 156.
+Three places where a browser's answer is not simply followed: a choice Frostwork makes where browsers
+have no answer, and two where it does not show what Chrome shows. All are decided, and all are measured
+against Chrome 156.
 
 **Unlabelled valid UTF-8 without a URL is UTF-8.** Over http(s), Chrome 156 and Firefox 159 refuse to
 detect UTF-8 and show windows-1252, and so does Frostwork; loaded as a `file:` URL, both read the same
 bytes as UTF-8, and so does Frostwork (`tools/enc_check.py` asserts all four). Frostwork reads a
 document with no `url=` the way the browsers read a file, since such a document is most often one stored
 on disk; that mapping is Frostwork's choice, as is UTF-8 for a scheme other than `http`, `https` or
-`file`, where the browsers would refuse it. Chrome can also
-switch encoding partway through a page: on a 4 MB page whose only declaration came 3 MB in, Chrome 156
-decoded the first few hundred text nodes as windows-1252 and the rest as UTF-8, while Firefox and
-Frostwork read it all as UTF-8.
+`file`, where the browsers would refuse it. Chrome can also switch encoding partway through a page: on a
+4 MB page whose only declaration came 3 MB in, Chrome 156 decoded the first few hundred text nodes as
+windows-1252 and the rest as UTF-8, while Firefox and Frostwork read it all as UTF-8.
 
 **Autodetection follows Firefox's detector.** When the bytes are not valid UTF-8 and nothing declares
 an encoding, Frostwork asks chardetng, the detector Firefox runs, with the top-level domain of the

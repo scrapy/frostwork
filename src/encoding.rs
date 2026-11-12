@@ -552,8 +552,8 @@ fn is_http_url(url: &str) -> bool {
     let Some((scheme, _)) = url.split_once(':') else {
         return false;
     };
-    let scheme: String = scheme.chars().filter(|c| !matches!(c, '\t' | '\n' | '\r')).collect();
-    scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
+    let scheme = scheme.bytes().filter(|b| !matches!(b, b'\t' | b'\n' | b'\r')).map(|b| b.to_ascii_lowercase());
+    scheme.clone().eq(*b"http") || scheme.eq(*b"https")
 }
 
 /// The last label of `url`'s host, lowercased, in the form chardetng accepts: ASCII without periods.

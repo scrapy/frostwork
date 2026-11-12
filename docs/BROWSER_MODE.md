@@ -90,7 +90,7 @@ schemes other than `http`, `https` and `file`, which the browsers would refuse, 
 Frostwork fixes the English default rather than reading a locale. There is no switch: a framework that
 wants UTF-8 for these pages, as scraping stacks have traditionally read them, overrides the answer in its
 own code. w3lib passes the response URL, so Scrapy's `response.text` follows the browsers unless w3lib
-does that. `tools/enc_check.py` asserts the http and `file:` answers against both browsers'
+overrides the answer. `tools/enc_check.py` asserts the http and `file:` answers against both browsers'
 measurements.
 
 ### E3. Autodetection follows Firefox's detector (decided 2026-11-03, measured again 2026-11-07)
@@ -110,8 +110,8 @@ windows-1252, Frostwork's answer, on 42 of 46 loads and windows-874 on 4, so Chr
 answer for these bytes. Firefox 159 reads it as windows-1252 from the lab's server too. Binding CED would
 not reproduce Chrome, because the answer depends on delivery, which the bytes do not record. chardetng
 over the whole document is deterministic, is what Firefox shows, and costs nothing: encoding_rs and
-chardetng are Firefox's own libraries. The URL is
-the only other input to this step, so integrations pass it wherever one exists.
+chardetng are Firefox's own libraries. The URL is the only other input to this step, so integrations pass
+it wherever one exists.
 
 ### E4. NUL and the strip are parse-mode behaviour
 

@@ -203,6 +203,7 @@ def utf8_detection_failures(row, got, as_browser):
     "values"}` and `as_browser[i]` the document decoded with the i-th browser record's encoding. An
     empty list means the row holds."""
     name, _doc, _url, want_enc, want_src, want_vals, browsers, _why = row
+    assert len(as_browser) == len(browsers), name
     out = []
     if (got["encoding"], got["source"], got["values"][0]) != (want_enc, want_src, want_vals):
         out.append(f"{name}: Frostwork must read {want_enc} from {want_src}, giving {want_vals!r}; got "
