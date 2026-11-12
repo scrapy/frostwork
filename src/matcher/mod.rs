@@ -2793,9 +2793,9 @@ impl<'a> Matcher<'a> {
                 }
                 _ => {
                     // descendant: every ancestor that is a provisional subject of this entry qualifies
-                    for a in 0..top {
-                        if self.stack[a].has_subj & bit != 0 {
-                            self.stack[a].has_done |= bit;
+                    for ancestor in &mut self.stack[..top] {
+                        if ancestor.has_subj & bit != 0 {
+                            ancestor.has_done |= bit;
                         }
                     }
                 }

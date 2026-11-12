@@ -489,8 +489,8 @@ fn declared_encoding(py: Python<'_>, body: &[u8]) -> Option<&'static str> {
     py.detach(|| crate::encoding::declaration(body).map(|(enc, _)| enc.name()))
 }
 
-/// The last step of [`detect_encoding`] alone: for valid UTF-8, windows-1252 when `url` is http(s),
-/// else UTF-8; for anything else, chardetng's guess.
+/// The last step of [`detect_encoding`] alone: for valid UTF-8, the default of `url`'s top-level domain
+/// when `url` is http(s), else UTF-8; for anything else, chardetng's guess.
 #[pyfunction]
 #[pyo3(signature = (body, *, url=None))]
 fn autodetect_encoding(py: Python<'_>, body: &[u8], url: Option<&str>) -> &'static str {

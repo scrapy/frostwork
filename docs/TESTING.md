@@ -112,7 +112,9 @@ Resolution cases are split into:
 - named differences where Frostwork must keep the browser/WHATWG answer and w3lib must keep the other one;
 - the `UTF8_DETECTION` rows, which read valid UTF-8 that declares nothing with each kind of `url=`; a
   row carrying recorded browser answers (Chrome and Firefox over http and from `file:`) fails unless
-  Frostwork returns them and each record decodes to its values; and
+  Frostwork returns them and each record decodes to its values;
+- the `UTF8_TLD_DEFAULTS` rows, the default such a page gets from an http URL on each measured top-level
+  domain, as Firefox and Chrome report it; Frostwork must return Firefox's column; and
 - the precedence table, one row per pair of competing inputs (BOM, `encoding=`, `content_type=`, the
   document's declarations), checking the winning encoding and the rank that decided it.
 

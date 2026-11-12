@@ -60,9 +60,11 @@ first public release.
   `Page.extract_response` on a web-poet response now match every recorded Chrome answer, where they
   differed on 21; one case, `body-meta-512k`, varies between loads in Chrome itself, and its record is
   the deployed site's most common answer. A forced encoding is still honoured, below a BOM.
-- **Breaking: a valid UTF-8 page that declares no encoding, from an http(s) URL, is windows-1252**, as
-  Chrome and Firefox read it: both refuse to detect UTF-8 for a page from the network. Without a `url=`,
-  or with another scheme, such a page is still UTF-8, as both browsers read a `file:` page. A page that
+- **Breaking: a valid UTF-8 page that declares no encoding, from an http(s) URL, is read in the default
+  of the URL's top-level domain**: windows-1252 for a generic domain, Shift_JIS for `.jp`, windows-1251
+  for `.ru`. Chrome and Firefox both refuse to detect UTF-8 for a page from the network and keep that
+  default; where their tables differ Frostwork returns Firefox's (docs/COMPATIBILITY.md). Without a
+  `url=`, or with another scheme, such a page is still UTF-8, as both browsers read a `file:` page. A page that
   declares an encoding is unaffected, and so is one that is not valid UTF-8, except that a UTF-8 sequence
   cut off at the very end still counts as valid. `detect_encoding(..., explain=True)` reports the new
   answer's source as `"default"`, so an integration that wants UTF-8 for these pages can tell them apart.
@@ -77,7 +79,7 @@ first public release.
 - `detect_encoding(..., explain=True)` returns `(name, source)`, where `source` names the rank that
   decided: `"bom"`, `"utf16-prefix"`, `"encoding"`, `"content-type"`, `"xml-declaration"`, `"meta"`,
   `"utf8"`, `"default"` or `"autodetect"`, or `"str"` for already-decoded text. `"default"` is the
-  windows-1252 a valid UTF-8 page from an http(s) URL gets.
+  encoding a valid UTF-8 page from an http(s) URL gets.
 - `Plan`, which `FrostPage` calls, now raises `ValueError` on an `encoding=` label no codec knows, as
   `extract` and `Page` already did. `detect_encoding` and `navigation` still ignore one, as a browser
   does.

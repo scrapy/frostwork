@@ -164,10 +164,12 @@ def declared_encoding(body: Buffer) -> Optional[str]:
 
 
 def autodetect_encoding(body: Buffer, *, url: Optional[str] = None) -> str:
-    """The encoding of a page that declares none, as browsers read it. If *body* is valid UTF-8:
-    ``"windows-1252"`` when *url* is http(s), because Chrome and Firefox refuse to detect UTF-8 for a
-    page from the network, else ``"UTF-8"``, as they read a local file. Otherwise the encoding
-    chardetng, Firefox's detector, guesses from the bytes and the top-level domain of *url*."""
+    """The encoding of a page that declares none, as browsers read it. If *body* is valid UTF-8 and
+    *url* is http(s): the default of the URL's top-level domain, ``"windows-1252"`` for a generic one
+    and ``"Shift_JIS"`` for ``.jp``, because Chrome and Firefox refuse to detect UTF-8 for a page from
+    the network. Valid UTF-8 with any other *url*, or none: ``"UTF-8"``, as they read a local file.
+    Otherwise the encoding chardetng, Firefox's detector, guesses from the bytes and the top-level
+    domain of *url*."""
     return _autodetect_encoding(bytes(body), url=url)
 
 

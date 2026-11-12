@@ -12,8 +12,8 @@ ENGINE = [BIN, "--parser", "lxml"]
 from enc_cases import (  # noqa: E402
     BODY_META_CASES, BROWSER_DIFFERENCES, C1_LABELS, DECOY, LABEL_CASES, PRECEDENCE,
     SELS, SHARED_DOC_CASES, SHARED_PRESCAN_CASES, UTF16_BOM, UTF16_BOM_DOC, UTF16_META_LABELS,
-    UTF8_DETECTION, WHATWG_ONLY_BYTES, body_meta_page, c1_probe, label_page, prescan_doc, sweep_docs,
-    utf16_meta_doc, utf8_detection_failures,
+    UTF8_DETECTION, UTF8_TLD_DEFAULTS, WHATWG_ONLY_BYTES, body_meta_page, c1_probe, label_page,
+    prescan_doc, sweep_docs, utf16_meta_doc, utf8_detection_failures, utf8_tld_failures, utf8_tld_url,
 )
 
 
@@ -159,6 +159,18 @@ for row in UTF8_DETECTION:
     print(f"utf8 detection [{name}]: {got['encoding']} from {got['source']}, mine={got['values'][0]} "
           f"-> {'OK' if not row_fails else 'MISMATCH'}")
     print(f"    why: {why}")
+
+# ---- the default for valid UTF-8 over http, by top-level domain: Firefox's measured table ---------
+_page = UTF8_DETECTION[0][1]
+for row in UTF8_TLD_DEFAULTS:
+    tld, firefox, chrome = row
+    got = engine_inputs(_page, ["p.c::text"], None, None, utf8_tld_url(tld))
+    forced = engine_inputs(_page, ["p.c::text"], firefox, None)["values"][0]
+    row_fails = utf8_tld_failures(row, got, forced)
+    fails += [("utf8-tld-default", msg, got, None) for msg in row_fails]
+    note = "" if chrome == firefox else f" (Chrome: {chrome})"
+    print(f"utf8 default [.{tld}]: {got['encoding']} from {got['source']}{note} "
+          f"-> {'OK' if not row_fails else 'MISMATCH'}")
 
 # ---- the PRECEDENCE table: which caller input wins -----------------------------------------------
 for name, doc, enc, ctype, want_enc, want_src, want_vals, why in PRECEDENCE:
