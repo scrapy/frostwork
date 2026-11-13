@@ -91,6 +91,11 @@ first public release.
 - Rust: `EncodingHints`, `EncodingSource`, `resolve_encoding`, `Plan::extract_with`,
   `Plan::extract_with_navigation_hints` and `navigation_with` take the same inputs.
 
+### Packaging and documentation
+
+- The extension builds against PyO3 0.30 instead of 0.29. No binding code changed. Distributions that
+  package PyO3 0.30, such as Fedora, no longer need to patch the requirement.
+
 ## 0.2.2 (2026-11-05)
 
 ### Performance
